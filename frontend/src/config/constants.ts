@@ -1,5 +1,5 @@
 // API基础URL
-export const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+export const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5502/api';
 
 // 文件上传限制大小（单位：字节）
 export const MAX_UPLOAD_FILE_SIZE = 5 * 1024 * 1024; // 5MB

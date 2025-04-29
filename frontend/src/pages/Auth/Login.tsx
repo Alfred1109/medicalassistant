@@ -22,7 +22,7 @@ import {
   Visibility,
   VisibilityOff,
   LockOutlined as LockIcon,
-  PersonOutlined as PersonIcon,
+  Person as PersonIcon,
   Info as InfoIcon,
 } from '@mui/icons-material';
 
@@ -92,17 +92,17 @@ const Login: React.FC = () => {
 
   const handleMockAdminLogin = () => {
     dispatch(mockAdminLogin());
-    navigate('/app/admin');
+    navigate('/app/admin/doctors');
   };
   
   const handleMockDoctorLogin = () => {
     dispatch(mockDoctorLogin());
-    navigate('/app/doctor');
+    navigate('/app/doctor/patients');
   };
   
   const handleMockHealthManagerLogin = () => {
     dispatch(mockHealthManagerLogin());
-    navigate('/app/health-manager');
+    navigate('/app/health-manager/patients');
   };
 
   const handleMockPatientLogin = () => {

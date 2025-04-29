@@ -73,6 +73,9 @@ import RehabProgress from './pages/Assessment/RehabProgress';
 // 训练推荐相关页面
 import ExerciseRecommendations from './pages/Recommendations/ExerciseRecommendations';
 
+// 功能开发演示页面
+import FeatureDemoPage from './pages/Common/FeatureDemoPage';
+
 // Protected Route Component
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Check if user is authenticated
@@ -151,6 +154,9 @@ const routes: RouteObject[] = [
 
       // Dashboard route - 主面板
       { path: 'dashboard', element: <Dashboard /> },
+      
+      // 功能演示页面
+      { path: 'feature-demo', element: <FeatureDemoPage /> },
       
       // Rehabilitation Plans routes
       { path: 'rehab-plans', element: <RehabPlans /> },

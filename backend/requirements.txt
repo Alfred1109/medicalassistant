@@ -26,6 +26,7 @@ requests==2.31.0
 python-dotenv==1.0.0
 typing-extensions==4.13.0
 pytest==7.4.3
+numpy>=1.26.0
 
 # 注意：
 # 1. uuid库不需要单独安装，Python 3已内置

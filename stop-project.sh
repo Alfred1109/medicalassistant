@@ -159,6 +159,10 @@ stop_backend() {
     
     # 查找并终止所有相关后端进程
     local BACKEND_PIDS=$(pgrep -f "python.*app.py" | grep -v $$)
+    local UVICORN_PIDS=$(pgrep -f "uvicorn app.main:app" | grep -v $$)
+
+    # 合并进程ID
+    BACKEND_PIDS="$BACKEND_PIDS $UVICORN_PIDS"
     
     if [ -n "$BACKEND_PIDS" ]; then
         echo -e "${YELLOW}发现额外的后端进程，正在终止...${NC}"

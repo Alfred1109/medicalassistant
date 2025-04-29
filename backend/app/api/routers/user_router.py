@@ -5,7 +5,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserLogin, Token, PermissionAssignment
 from app.services.user_service import UserService
 from app.core.dependencies import get_user_service, get_current_user
-from app.core.permissions import has_permission, Permission, PermissionChecker
+from app.core.permissions import require_permission, Permission, PermissionChecker
 
 router = APIRouter()
 
@@ -72,7 +72,8 @@ async def update_current_user(
 async def get_user(
     user_id: str,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.USER_READ))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.USER_READ))
 ):
     """根据ID获取用户信息(需要权限)"""
     user = await user_service.get_user_by_id(user_id)
@@ -86,7 +87,8 @@ async def list_users(
     skip: int = 0,
     limit: int = 100,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.USER_READ))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.USER_READ))
 ):
     """列出用户(可按角色筛选)"""
     return await user_service.list_users(role, skip, limit)
@@ -95,7 +97,8 @@ async def list_users(
 async def create_user(
     user_data: UserCreate,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.USER_CREATE))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.USER_CREATE))
 ):
     """创建新用户(管理员权限)"""
     return await user_service.create_user(user_data)
@@ -105,7 +108,8 @@ async def update_user(
     user_id: str,
     user_data: UserUpdate,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.USER_UPDATE))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.USER_UPDATE))
 ):
     """更新用户信息(需要权限)"""
     user = await user_service.get_user_by_id(user_id)
@@ -125,7 +129,8 @@ async def update_user(
 async def delete_user(
     user_id: str,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.USER_DELETE))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.USER_DELETE))
 ):
     """删除用户(需要权限)"""
     # 实际上只是停用账号，不真正删除数据
@@ -138,7 +143,8 @@ async def delete_user(
 async def update_user_permissions(
     permission_data: PermissionAssignment,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.USER_UPDATE))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.USER_UPDATE))
 ):
     """更新用户权限(需要管理员权限)"""
     # 检查更新者权限
@@ -162,7 +168,8 @@ async def update_user_permissions(
 async def activate_user(
     user_id: str,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.USER_UPDATE))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.USER_UPDATE))
 ):
     """激活已停用的用户账户(需要管理员权限)"""
     await user_service.activate_user(user_id)
@@ -176,7 +183,8 @@ async def assign_practitioner(
     patient_id: str,
     practitioner_id: str,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.PATIENT_UPDATE))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.PATIENT_UPDATE))
 ):
     """为患者分配医生/健康管理师"""
     result = await user_service.assign_practitioner(patient_id, practitioner_id)
@@ -189,7 +197,8 @@ async def remove_practitioner(
     patient_id: str,
     practitioner_id: str,
     user_service: UserService = Depends(get_user_service),
-    current_user: UserResponse = Depends(has_permission(Permission.PATIENT_UPDATE))
+    current_user: UserResponse = Depends(get_current_user),
+    _: None = Depends(require_permission(Permission.PATIENT_UPDATE))
 ):
     """移除患者的医生/健康管理师关联"""
     result = await user_service.remove_practitioner(patient_id, practitioner_id)

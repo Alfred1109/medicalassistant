@@ -215,6 +215,27 @@ const authSlice = createSlice({
       
       localStorage.setItem('token', mockToken);
       localStorage.setItem('userRole', 'health_manager');
+    },
+    // 添加模拟患者登录
+    mockPatientLogin: (state) => {
+      const mockToken = 'mock-patient-token-123456';
+      const mockUser: User = {
+        id: 'patient1',
+        email: 'patient@example.com',
+        name: '王患者',
+        role: 'patient',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      state.user = mockUser;
+      state.token = mockToken;
+      state.checking = false;
+      state.loading = false;
+      state.error = null;
+      
+      localStorage.setItem('token', mockToken);
+      localStorage.setItem('userRole', 'patient');
     }
   },
   extraReducers: (builder) => {
@@ -286,5 +307,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { logout, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManagerLogin } = authSlice.actions;
+export const { logout, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManagerLogin, mockPatientLogin } = authSlice.actions;
 export default authSlice.reducer; 

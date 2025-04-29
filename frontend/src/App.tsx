@@ -70,18 +70,17 @@ import TagManagement from './pages/Admin/TagManagement';
 import DeviceManagement from './pages/Admin/DeviceManagement';
 import DataVisualization from './pages/Admin/DataVisualization';
 
+// 导入组件
+import FeatureUnderDevelopment from './components/common/FeatureUnderDevelopment';
+
 // 通用的"正在开发中"组件
 const UnderDevelopment = ({ pageName }: { pageName: string }) => (
-  <Container maxWidth="md" sx={{ py: 4 }}>
-    <Paper sx={{ p: 4, textAlign: 'center' }}>
-      <Typography variant="h4" component="h1" gutterBottom>
-        功能开发中
-      </Typography>
-      <Typography variant="h6" color="text.secondary">
-        {pageName} 页面正在开发中，敬请期待！
-      </Typography>
-    </Paper>
-  </Container>
+  <FeatureUnderDevelopment
+    featureName={pageName}
+    description={`${pageName} 页面正在开发中，敬请期待！`}
+    returnPath="/app/dashboard"
+    returnButtonText="返回仪表盘"
+  />
 );
 
 // 使用路由配置的组件

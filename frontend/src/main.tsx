@@ -87,6 +87,7 @@ const PatientStatistics = React.lazy(() => import('./pages/Patient/Statistics'))
 const ConsentDocumentList = React.lazy(() => import('./pages/Patient/ConsentDocumentList'));
 const ConsentDocumentView = React.lazy(() => import('./pages/Patient/ConsentDocumentView'));
 const ConsentTemplateList = React.lazy(() => import('./pages/Patient/ConsentTemplateList'));
+const PatientMainDashboard = React.lazy(() => import('./pages/Patient/PatientMainDashboard'));
 
 // 健康管理师页面
 const HealthManagerDashboard = React.lazy(() => import('./pages/HealthManager/HealthManagerDashboard'));
@@ -165,6 +166,11 @@ class ErrorBoundary extends React.Component<
   }
 
   static getDerivedStateFromError(error: Error) {
+    // 在开发环境下不捕获错误，方便调试
+    if (import.meta.env.DEV) {
+      console.error('开发环境下错误:', error);
+      return { hasError: false, error };
+    }
     return { hasError: true, error };
   }
 
@@ -189,10 +195,21 @@ const SafeComponent = (
 ) => {
   return (
     <ErrorBoundary fallback={<FallbackComponent />}>
-      <React.Suspense fallback={<LoadingFallback />}>
+      <React.Suspense fallback={<LoadingFallback />} >
         <Component />
       </React.Suspense>
     </ErrorBoundary>
+  );
+};
+
+// 直接加载组件（绕过安全检查，用于开发环境中有编译错误但仍需强制显示的组件）
+const ForceLoadComponent = (
+  Component: React.ComponentType
+) => {
+  return (
+    <React.Suspense fallback={<LoadingFallback />}>
+      <Component />
+    </React.Suspense>
   );
 };
 
@@ -299,7 +316,8 @@ const App = () => (
               
               {/* 患者专属路由 */}
               <Route path="patient" element={SafeComponent(PatientDashboard, FallbackPatientDashboard)}>
-                <Route index element={<Navigate to="/app/patient/health-records" replace />} />
+                <Route index element={<Navigate to="/app/patient/main-dashboard" replace />} />
+                <Route path="main-dashboard" element={SafeComponent(PatientMainDashboard, FallbackPatientDashboard)} />
                 <Route path="health-records" element={SafeComponent(PatientHealthRecords, FallbackPatientDashboard)} />
                 <Route path="daily-records" element={SafeComponent(DailyRecords, FallbackPatientDashboard)} />
                 <Route path="devices" element={SafeComponent(DeviceBinding, FallbackPatientDashboard)} />

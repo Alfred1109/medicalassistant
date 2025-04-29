@@ -308,88 +308,6 @@ start_frontend() {
     return 1
 }
 
-# 启动后端服务
-start_backend() {
-    echo -e "\n${BLUE}启动后端服务...${NC}"
-    
-    cd "$BACKEND_DIR" || {
-        echo -e "${RED}错误: 无法进入后端目录 $BACKEND_DIR${NC}"
-        return 1
-    }
-    
-    # 检查Python虚拟环境
-    if [ -d "venv" ]; then
-        echo -e "${YELLOW}激活Python虚拟环境...${NC}"
-        source venv/bin/activate 2>/dev/null || {
-            echo -e "${YELLOW}无法激活虚拟环境，尝试继续...${NC}"
-        }
-    fi
-    
-    # 检查依赖
-    if [ ! -f "requirements.txt" ]; then
-        echo -e "${RED}错误: 未找到requirements.txt文件${NC}"
-        return 1
-    fi
-    
-    # 尝试安装/更新依赖
-    echo -e "${YELLOW}检查后端依赖...${NC}"
-    python3 -m pip install -r requirements.txt -q || {
-        echo -e "${YELLOW}安装依赖过程中出现警告，尝试继续...${NC}"
-    }
-    
-    # 启动后端服务
-    echo -e "${YELLOW}正在启动后端服务(端口5502)...${NC}"
-    if command -v python3.9 &> /dev/null; then
-        PYTHON_CMD="python3.9"
-    elif command -v python3.10 &> /dev/null; then
-        PYTHON_CMD="python3.10"
-    else
-        PYTHON_CMD="python3"
-    fi
-    echo -e "${YELLOW}使用Python解释器: $PYTHON_CMD${NC}"
-    PYTHONPATH="$BACKEND_DIR/venv/lib/python3.12/site-packages:$PYTHONPATH" $PYTHON_CMD -m app.main >> "$BACKEND_LOG" 2>&1 &
-    BACKEND_PID=$!
-    echo $BACKEND_PID > .backend_pid
-    
-    # 等待服务启动
-    echo -e "${YELLOW}等待后端服务启动...${NC}"
-    local max_attempts=30
-    local attempt=0
-    while [ $attempt -lt $max_attempts ]; do
-        if grep -q "Running on http" "$BACKEND_LOG" || grep -q "Application startup complete" "$BACKEND_LOG"; then
-            echo -e "${GREEN}✓ 后端服务已成功启动 (PID: $BACKEND_PID)${NC}"
-            echo -e "${GREEN}✓ 后端API地址: http://localhost:5502/api${NC}"
-            return 0
-        fi
-        
-        # 检查进程是否仍在运行
-        if ! kill -0 $BACKEND_PID 2>/dev/null; then
-            echo -e "${RED}后端服务启动失败，进程已退出${NC}"
-            echo -e "${YELLOW}请检查日志: $BACKEND_LOG${NC}"
-            cat "$BACKEND_LOG" | tail -n 20
-            
-            # 继续启动前端，但返回失败状态
-            cd "$PROJECT_ROOT"
-            echo -e "${YELLOW}尝试启动前端服务...${NC}"
-            start_frontend
-            return 1
-        fi
-        
-        sleep 1
-        attempt=$((attempt + 1))
-        echo -n "."
-    done
-    
-    echo -e "\n${RED}后端服务启动超时${NC}"
-    echo -e "${YELLOW}请检查日志: $BACKEND_LOG${NC}"
-    
-    # 继续启动前端，但返回失败状态
-    cd "$PROJECT_ROOT"
-    echo -e "${YELLOW}尝试启动前端服务...${NC}"
-    start_frontend
-    return 1
-}
-
 # 主流程
 main() {
     # 清理之前的进程
@@ -398,28 +316,18 @@ main() {
     # 启动MongoDB
     start_mongodb
     
-    # 启动后端服务
-    local backend_status=0
-    start_backend || backend_status=1
+    # 启动后端服务（使用独立脚本）
+    echo -e "\n${BLUE}启动后端服务...${NC}"
+    ./start-backend.sh
     
-    # 如果后端启动失败但前端已启动，前端将由start_backend函数自动启动
-    # 如果后端启动成功，则启动前端
-    if [ $backend_status -eq 0 ]; then
-        start_frontend || {
-            echo -e "${RED}前端服务启动失败${NC}"
-            return 1
-        }
-    fi
+    # 启动前端
+    start_frontend
     
     # 所有服务启动完成
     echo -e "\n${GREEN}${BOLD}服务启动完成!${NC}"
     echo -e "${BLUE}=======================================${NC}"
     echo -e "${GREEN}前端地址: ${BOLD}http://localhost:5501${NC}"
-    if [ $backend_status -eq 0 ]; then
-        echo -e "${GREEN}后端API地址: ${BOLD}http://localhost:5502/api${NC}"
-    else
-        echo -e "${RED}后端服务未启动，部分功能可能不可用${NC}"
-    fi
+    echo -e "${GREEN}后端API地址: ${BOLD}http://localhost:5502/api${NC}"
     echo -e "${YELLOW}日志文件:${NC}"
     echo -e "  - 前端日志: $FRONTEND_LOG"
     echo -e "  - 后端日志: $BACKEND_LOG"

@@ -99,13 +99,7 @@ async def get_user_service(
     health_manager_crud: HealthManagerCRUD = Depends(get_health_manager_crud)
 ):
     """获取用户服务"""
-    return UserService(
-        db=db,
-        user_crud=user_crud,
-        doctor_crud=doctor_crud,
-        patient_crud=patient_crud,
-        health_manager_crud=health_manager_crud
-    )
+    return UserService(db=db)
 
 async def get_agent_service(
     db: AsyncIOMotorDatabase = Depends(get_database),
