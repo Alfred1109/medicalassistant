@@ -41,7 +41,12 @@ import CloseIcon from '@mui/icons-material/Close';
 import InfoIcon from '@mui/icons-material/Info';
 import DeleteIcon from '@mui/icons-material/Delete';
 import CircularProgress from '@mui/material/CircularProgress';
+import TimelineIcon from '@mui/icons-material/Timeline';
 import { Link } from 'react-router-dom';
+
+// 导入设备数据展示组件
+import DeviceDataDisplay from '../../components/Device/DeviceDataDisplay';
+import DeviceConnectionTest from '../../components/Device/DeviceConnectionTest';
 
 // 设备类型定义
 interface Device {
@@ -132,6 +137,9 @@ const DeviceBinding: React.FC = () => {
     deviceName: '',
     deviceCode: ''
   });
+  
+  // 添加主标签页状态
+  const [mainTabValue, setMainTabValue] = React.useState(0);
   
   const startScan = () => {
     setScanning(true);
@@ -302,161 +310,224 @@ const DeviceBinding: React.FC = () => {
     setWizardState({...wizardState, [field]: value});
   };
   
+  // 处理主标签页切换
+  const handleMainTabChange = (event: React.SyntheticEvent, newValue: number) => {
+    setMainTabValue(newValue);
+  };
+  
   return (
     <Box>
       <Typography variant="h5" component="h1" gutterBottom>
         设备绑定与管理
       </Typography>
       
-      <Grid container spacing={3}>
-        <Grid item xs={12} md={7}>
-          <Paper sx={{ p: 3, mb: 3 }}>
-            <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-              <Typography variant="h6">已绑定设备</Typography>
-              <Box>
-                <Button 
-                  variant="outlined" 
-                  color="primary" 
-                  onClick={handleOpenWizard}
-                  sx={{ mr: 1 }}
-                >
-                  手动配置
-                </Button>
-                <Button 
-                  variant="contained" 
-                  color="primary" 
-                  startIcon={<AddIcon />}
-                  onClick={startScan}
-                  disabled={scanning}
-                >
-                  添加设备
-                </Button>
+      {/* 添加主标签页切换 */}
+      <Paper sx={{ mb: 3 }}>
+        <Tabs
+          value={mainTabValue}
+          onChange={handleMainTabChange}
+          indicatorColor="primary"
+          textColor="primary"
+          centered
+        >
+          <Tab icon={<DevicesIcon />} iconPosition="start" label="设备管理" />
+          <Tab icon={<TimelineIcon />} iconPosition="start" label="设备数据" />
+        </Tabs>
+      </Paper>
+      
+      {/* 设备管理标签页内容 */}
+      {mainTabValue === 0 && (
+        <Grid container spacing={3}>
+          <Grid item xs={12} md={7}>
+            <Paper sx={{ p: 3, mb: 3 }}>
+              <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+                <Typography variant="h6">已绑定设备</Typography>
+                <Box>
+                  <Button 
+                    variant="outlined" 
+                    color="primary" 
+                    onClick={handleOpenWizard}
+                    sx={{ mr: 1 }}
+                  >
+                    手动配置
+                  </Button>
+                  <Button 
+                    variant="contained" 
+                    color="primary" 
+                    startIcon={<AddIcon />}
+                    onClick={startScan}
+                    disabled={scanning}
+                  >
+                    添加设备
+                  </Button>
+                </Box>
               </Box>
-            </Box>
-            
-            {pairedDevices.length > 0 ? (
-              <List>
-                {pairedDevices.map((device) => (
-                  <React.Fragment key={device.id}>
-                    <ListItem>
-                      <ListItemIcon>
-                        {getDeviceIcon(device.type)}
-                      </ListItemIcon>
-                      <ListItemText 
-                        primary={
-                          <Box display="flex" alignItems="center">
-                            {device.name}
-                            <CheckCircleIcon sx={{ ml: 1, color: 'success.main', fontSize: 16 }} />
-                          </Box>
-                        }
-                        secondary={`最后活动: ${device.lastActive} | 电量: ${device.batteryLevel}%`}
-                      />
-                      <Button 
-                        variant="outlined" 
-                        size="small"
-                        onClick={() => handleOpenDeviceDetail(device)}
-                      >
-                        管理
-                      </Button>
-                    </ListItem>
-                    <Divider />
-                  </React.Fragment>
-                ))}
-              </List>
-            ) : (
-              <Alert severity="info">没有已绑定的设备</Alert>
-            )}
-            
-            {scanning && (
-              <Box textAlign="center" my={3}>
-                <BluetoothSearchingIcon sx={{ fontSize: 40, color: 'primary.main', animation: 'pulse 1.5s infinite' }} />
-                <Typography>正在搜索附近设备...</Typography>
-              </Box>
-            )}
-            
-            {!scanning && availableDevices.length > 0 && (
-              <Box mt={3}>
-                <Typography variant="subtitle1" gutterBottom>
-                  可用设备
-                </Typography>
+              
+              {pairedDevices.length > 0 ? (
                 <List>
-                  {availableDevices.map((device) => (
+                  {pairedDevices.map((device) => (
                     <React.Fragment key={device.id}>
                       <ListItem>
                         <ListItemIcon>
                           {getDeviceIcon(device.type)}
                         </ListItemIcon>
                         <ListItemText 
-                          primary={device.name}
+                          primary={
+                            <Box display="flex" alignItems="center">
+                              {device.name}
+                            </Box>
+                          }
+                          secondary={`最后活动: ${device.lastActive} | 电量: ${device.batteryLevel}%`}
                         />
                         <Button 
                           variant="outlined" 
                           size="small"
-                          onClick={() => pairDevice(device)}
+                          onClick={() => handleOpenDeviceDetail(device)}
                         >
-                          配对
+                          管理
                         </Button>
                       </ListItem>
                       <Divider />
                     </React.Fragment>
                   ))}
                 </List>
+              ) : (
+                <Alert severity="info">没有已绑定的设备</Alert>
+              )}
+              
+              {scanning && (
+                <Box textAlign="center" my={3}>
+                  <BluetoothSearchingIcon sx={{ fontSize: 40, color: 'primary.main', animation: 'pulse 1.5s infinite' }} />
+                  <Typography>正在搜索附近设备...</Typography>
+                </Box>
+              )}
+              
+              {!scanning && availableDevices.length > 0 && (
+                <Box mt={3}>
+                  <Typography variant="subtitle1" gutterBottom>
+                    可用设备
+                  </Typography>
+                  <List>
+                    {availableDevices.map((device) => (
+                      <React.Fragment key={device.id}>
+                        <ListItem>
+                          <ListItemIcon>
+                            {getDeviceIcon(device.type)}
+                          </ListItemIcon>
+                          <ListItemText 
+                            primary={device.name}
+                          />
+                          <Button 
+                            variant="outlined" 
+                            size="small"
+                            onClick={() => pairDevice(device)}
+                          >
+                            配对
+                          </Button>
+                        </ListItem>
+                        <Divider />
+                      </React.Fragment>
+                    ))}
+                  </List>
+                </Box>
+              )}
+            </Paper>
+          </Grid>
+          
+          <Grid item xs={12} md={5}>
+            <Card>
+              <CardMedia
+                component="img"
+                height="200"
+                image="https://via.placeholder.com/400x200?text=康复设备示意图"
+                alt="康复设备示意图"
+              />
+              <CardContent>
+                <Typography gutterBottom variant="h6" component="div">
+                  康复监测设备说明
+                </Typography>
+                <Typography variant="body2" color="text.secondary" paragraph>
+                  我们提供多种智能康复监测设备，帮助您更好地完成康复训练并追踪训练效果。
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  设备类型:
+                </Typography>
+                <List dense>
+                  <ListItem>
+                    <ListItemIcon>
+                      <WatchIcon fontSize="small" />
+                    </ListItemIcon>
+                    <ListItemText 
+                      primary="康复手环"
+                      secondary="记录日常活动和训练数据"
+                    />
+                  </ListItem>
+                  <ListItem>
+                    <ListItemIcon>
+                      <SettingsRemoteIcon fontSize="small" />
+                    </ListItemIcon>
+                    <ListItemText 
+                      primary="康复监测器"
+                      secondary="提供专业的康复训练监测与指导"
+                    />
+                  </ListItem>
+                  <ListItem>
+                    <ListItemIcon>
+                      <SmartphoneIcon fontSize="small" />
+                    </ListItemIcon>
+                    <ListItemText 
+                      primary="手机应用"
+                      secondary="与其他设备配合使用，随时查看康复数据"
+                    />
+                  </ListItem>
+                </List>
+              </CardContent>
+            </Card>
+          </Grid>
+        </Grid>
+      )}
+      
+      {/* 设备数据标签页内容 */}
+      {mainTabValue === 1 && (
+        <Paper sx={{ p: 3 }}>
+          <Typography variant="h6" gutterBottom>设备健康数据</Typography>
+          <Divider sx={{ mb: 3 }} />
+          
+          {pairedDevices.length > 0 ? (
+            <>
+              <DeviceDataDisplay 
+                showChart={true}
+                timeRange="day"
+                onError={(error) => {
+                  setSnackbar({
+                    open: true,
+                    message: `数据加载错误: ${error}`,
+                    severity: 'error'
+                  });
+                }}
+              />
+              
+              <Box mt={4}>
+                <DeviceConnectionTest 
+                  deviceId={pairedDevices[0].id}
+                  deviceType={pairedDevices[0].type}
+                  onComplete={(success, results) => {
+                    setSnackbar({
+                      open: true,
+                      message: success ? '设备测试完成：连接状态良好' : '设备测试完成：发现一些问题',
+                      severity: success ? 'success' : 'warning'
+                    });
+                  }}
+                />
               </Box>
-            )}
-          </Paper>
-        </Grid>
-        
-        <Grid item xs={12} md={5}>
-          <Card>
-            <CardMedia
-              component="img"
-              height="200"
-              image="https://via.placeholder.com/400x200?text=康复设备示意图"
-              alt="康复设备示意图"
-            />
-            <CardContent>
-              <Typography gutterBottom variant="h6" component="div">
-                康复监测设备说明
-              </Typography>
-              <Typography variant="body2" color="text.secondary" paragraph>
-                我们提供多种智能康复监测设备，帮助您更好地完成康复训练并追踪训练效果。
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                设备类型:
-              </Typography>
-              <List dense>
-                <ListItem>
-                  <ListItemIcon>
-                    <WatchIcon fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText 
-                    primary="康复手环"
-                    secondary="记录日常活动和训练数据"
-                  />
-                </ListItem>
-                <ListItem>
-                  <ListItemIcon>
-                    <SettingsRemoteIcon fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText 
-                    primary="康复监测器"
-                    secondary="提供专业的康复训练监测与指导"
-                  />
-                </ListItem>
-                <ListItem>
-                  <ListItemIcon>
-                    <SmartphoneIcon fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText 
-                    primary="手机应用"
-                    secondary="与其他设备配合使用，随时查看康复数据"
-                  />
-                </ListItem>
-              </List>
-            </CardContent>
-          </Card>
-        </Grid>
-      </Grid>
+            </>
+          ) : (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              您还没有绑定任何设备。请先在设备管理标签页中绑定设备，然后查看设备数据。
+            </Alert>
+          )}
+        </Paper>
+      )}
       
       {/* 设备详情对话框 */}
       <Dialog

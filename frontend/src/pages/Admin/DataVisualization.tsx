@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Box,
   Typography,
@@ -13,7 +13,20 @@ import {
   Divider,
   Tabs,
   Tab,
+  Button,
+  CircularProgress
 } from '@mui/material';
+import DownloadIcon from '@mui/icons-material/Download';
+import { 
+  ChartDataType, 
+  TimeRange, 
+  TrendData, 
+  DistributionData, 
+  ComparisonData, 
+  StatsOverview 
+} from '../../types/dataAnalysis';
+import AnalyticsChart from '../../components/Analytics/AnalyticsChart';
+import { analyticsService } from '../../services/analyticsService';
 
 // 模拟图表组件
 const ChartPlaceholder: React.FC<{ title: string; height?: number; type?: string }> = ({ 
@@ -59,21 +72,83 @@ const mockData = {
 };
 
 const DataVisualization: React.FC = () => {
-  const [timeRange, setTimeRange] = React.useState('month');
-  const [dataType, setDataType] = React.useState('patient');
-  const [tabValue, setTabValue] = React.useState(0);
+  // 状态管理
+  const [timeRange, setTimeRange] = useState<TimeRange>('month');
+  const [dataType, setDataType] = useState<ChartDataType>('patient');
+  const [tabValue, setTabValue] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [statsData, setStatsData] = useState<StatsOverview | null>(null);
+  const [trendData, setTrendData] = useState<TrendData[]>([]);
+  const [distributionData, setDistributionData] = useState<DistributionData[]>([]);
+  const [comparisonData, setComparisonData] = useState<ComparisonData[]>([]);
+  const [exportLoading, setExportLoading] = useState(false);
 
-  const handleTimeRangeChange = (event: React.ChangeEvent<{ value: unknown }>) => {
-    setTimeRange(event.target.value as string);
-  };
-
+  // 处理类型变更
   const handleDataTypeChange = (event: React.ChangeEvent<{ value: unknown }>) => {
-    setDataType(event.target.value as string);
+    setDataType(event.target.value as ChartDataType);
   };
 
+  // 处理时间范围变更
+  const handleTimeRangeChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+    setTimeRange(event.target.value as TimeRange);
+  };
+
+  // 处理标签切换
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
   };
+
+  // 导出数据
+  const handleExportData = async (format: 'csv' | 'xlsx' | 'pdf') => {
+    try {
+      setExportLoading(true);
+      const blob = await analyticsService.exportReport(dataType, timeRange, format);
+      
+      // 创建下载链接
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${dataType}_report_${timeRange}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      
+      // 清理
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error) {
+      console.error('导出数据失败:', error);
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
+  // 加载数据
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      // 并行加载多个数据源
+      const [stats, trend, distribution, comparison] = await Promise.all([
+        analyticsService.getStatsOverview(),
+        analyticsService.getTrendData(dataType, timeRange),
+        analyticsService.getDistributionData(dataType, timeRange),
+        analyticsService.getComparisonData(dataType, timeRange, 'lastPeriod')
+      ]);
+      
+      setStatsData(stats);
+      setTrendData(trend);
+      setDistributionData(distribution);
+      setComparisonData(comparison);
+    } catch (error) {
+      console.error('加载数据失败:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 当数据类型或时间范围变化时重新加载数据
+  useEffect(() => {
+    loadData();
+  }, [dataType, timeRange]);
 
   return (
     <Box>
@@ -81,7 +156,7 @@ const DataVisualization: React.FC = () => {
         <Typography variant="h5" component="h1">
           数据可视化
         </Typography>
-        <Box display="flex" gap={2}>
+        <Box display="flex" gap={2} alignItems="center">
           <FormControl variant="outlined" size="small" sx={{ minWidth: 120 }}>
             <InputLabel>数据类型</InputLabel>
             <Select
@@ -95,6 +170,7 @@ const DataVisualization: React.FC = () => {
               <MenuItem value="rehabilitation">康复数据</MenuItem>
             </Select>
           </FormControl>
+          
           <FormControl variant="outlined" size="small" sx={{ minWidth: 120 }}>
             <InputLabel>时间范围</InputLabel>
             <Select
@@ -109,6 +185,16 @@ const DataVisualization: React.FC = () => {
               <MenuItem value="year">年度</MenuItem>
             </Select>
           </FormControl>
+          
+          <Button 
+            variant="outlined" 
+            size="small"
+            startIcon={<DownloadIcon />}
+            onClick={() => handleExportData('xlsx')}
+            disabled={exportLoading}
+          >
+            {exportLoading ? <CircularProgress size={16} /> : '导出'}
+          </Button>
         </Box>
       </Box>
 
@@ -121,14 +207,19 @@ const DataVisualization: React.FC = () => {
                 总患者数
               </Typography>
               <Typography variant="h4" component="div">
-                {mockData.patientCount}
+                {statsData?.patientCount || 0}
               </Typography>
-              <Typography variant="body2" color={mockData.weekPatientChange > 0 ? "success.main" : "error.main"}>
-                {mockData.weekPatientChange > 0 ? "+" : ""}{mockData.weekPatientChange}% 较上周
+              <Typography 
+                variant="body2" 
+                color={(statsData?.weekPatientChange || 0) > 0 ? "success.main" : "error.main"}
+              >
+                {(statsData?.weekPatientChange || 0) > 0 ? "+" : ""}
+                {statsData?.weekPatientChange || 0}% 较上周
               </Typography>
             </CardContent>
           </Card>
         </Grid>
+        
         <Grid item xs={12} sm={6} md={3}>
           <Card>
             <CardContent>
@@ -136,7 +227,7 @@ const DataVisualization: React.FC = () => {
                 总医生数
               </Typography>
               <Typography variant="h4" component="div">
-                {mockData.doctorCount}
+                {statsData?.doctorCount || 0}
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 包含专科医生和康复师
@@ -144,6 +235,7 @@ const DataVisualization: React.FC = () => {
             </CardContent>
           </Card>
         </Grid>
+        
         <Grid item xs={12} sm={6} md={3}>
           <Card>
             <CardContent>
@@ -151,14 +243,15 @@ const DataVisualization: React.FC = () => {
                 设备总数
               </Typography>
               <Typography variant="h4" component="div">
-                {mockData.totalDevices}
+                {statsData?.totalDevices || 0}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                活跃率: {mockData.activeDeviceRate}%
+                活跃率: {statsData?.activeDeviceRate || 0}%
               </Typography>
             </CardContent>
           </Card>
         </Grid>
+        
         <Grid item xs={12} sm={6} md={3}>
           <Card>
             <CardContent>
@@ -166,10 +259,10 @@ const DataVisualization: React.FC = () => {
                 平均训练时长
               </Typography>
               <Typography variant="h4" component="div">
-                {mockData.avgTrainingTime}分钟
+                {statsData?.avgTrainingTime || 0}分钟
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                康复有效率: {mockData.rehabilitationRate}%
+                康复有效率: {statsData?.rehabilitationRate || 0}%
               </Typography>
             </CardContent>
           </Card>
@@ -197,12 +290,18 @@ const DataVisualization: React.FC = () => {
                 {dataType === 'rehabilitation' && '康复效果趋势'}
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <ChartPlaceholder 
-                title={`${timeRange === 'day' ? '今日' : timeRange === 'week' ? '本周' : timeRange === 'month' ? '本月' : timeRange === 'quarter' ? '季度' : '年度'}趋势`} 
-                height={400} 
+              <AnalyticsChart 
+                type="line"
+                data={trendData}
+                height={400}
+                loading={loading}
+                xKey="date"
+                yKeys={["value"]}
+                title={`${timeRange === 'day' ? '今日' : timeRange === 'week' ? '本周' : timeRange === 'month' ? '本月' : timeRange === 'quarter' ? '季度' : '年度'}趋势`}
               />
             </Paper>
           </Grid>
+          
           <Grid item xs={12} md={6}>
             <Paper sx={{ p: 3 }}>
               <Typography variant="h6" gutterBottom>
@@ -212,9 +311,18 @@ const DataVisualization: React.FC = () => {
                 {dataType === 'rehabilitation' && '康复类型分布'}
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <ChartPlaceholder title="分布情况" type="pie" />
+              <AnalyticsChart 
+                type="pie"
+                data={distributionData}
+                height={300}
+                loading={loading}
+                nameKey="name"
+                valueKey="value"
+                title="分布情况"
+              />
             </Paper>
           </Grid>
+          
           <Grid item xs={12} md={6}>
             <Paper sx={{ p: 3 }}>
               <Typography variant="h6" gutterBottom>
@@ -224,7 +332,15 @@ const DataVisualization: React.FC = () => {
                 {dataType === 'rehabilitation' && '康复进度'}
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <ChartPlaceholder title="评分情况" type="bar" />
+              <AnalyticsChart 
+                type="bar"
+                data={trendData.slice(-5)} // 只显示最近5条数据
+                height={300}
+                loading={loading}
+                xKey="date"
+                yKeys={["value"]}
+                title="评分情况"
+              />
             </Paper>
           </Grid>
         </Grid>
@@ -239,23 +355,32 @@ const DataVisualization: React.FC = () => {
                 不同时间段对比
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <ChartPlaceholder 
-                title="时间段对比" 
-                height={400} 
+              <AnalyticsChart 
                 type="bar"
+                data={comparisonData}
+                height={400}
+                loading={loading}
+                xKey="category"
+                yKeys={Object.keys(comparisonData[0] || {}).filter(k => k !== 'category')}
+                title="时间段对比"
               />
             </Paper>
           </Grid>
+          
           <Grid item xs={12}>
             <Paper sx={{ p: 3 }}>
               <Typography variant="h6" gutterBottom>
                 不同类别对比
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <ChartPlaceholder 
-                title="类别对比" 
-                height={400} 
+              <AnalyticsChart 
                 type="bar"
+                data={comparisonData}
+                height={400}
+                loading={loading}
+                xKey="category"
+                yKeys={Object.keys(comparisonData[0] || {}).filter(k => k !== 'category')}
+                title="类别对比"
               />
             </Paper>
           </Grid>
@@ -271,34 +396,56 @@ const DataVisualization: React.FC = () => {
                 地域分布
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <ChartPlaceholder 
-                title="地域分布图" 
-                height={350} 
+              <AnalyticsChart 
+                type="pie"
+                data={[
+                  { name: '北京', value: 25, color: '#8884d8' },
+                  { name: '上海', value: 20, color: '#82ca9d' },
+                  { name: '广州', value: 18, color: '#ffc658' },
+                  { name: '深圳', value: 15, color: '#ff8042' },
+                  { name: '其他', value: 22, color: '#0088FE' }
+                ]}
+                height={350}
+                loading={loading}
+                nameKey="name"
+                valueKey="value"
+                title="地域分布图"
               />
             </Paper>
           </Grid>
+          
           <Grid item xs={12} md={6}>
             <Paper sx={{ p: 3 }}>
               <Typography variant="h6" gutterBottom>
                 类别分布
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <ChartPlaceholder 
-                title="类别分布图" 
-                height={350}
+              <AnalyticsChart 
                 type="pie"
+                data={distributionData}
+                height={350}
+                loading={loading}
+                nameKey="name"
+                valueKey="value"
+                title="类别分布图"
               />
             </Paper>
           </Grid>
+          
           <Grid item xs={12}>
             <Paper sx={{ p: 3 }}>
               <Typography variant="h6" gutterBottom>
-                热力图分析
+                数据趋势分析
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <ChartPlaceholder 
-                title="使用热力图" 
+              <AnalyticsChart 
+                type="area"
+                data={trendData}
                 height={350}
+                loading={loading}
+                xKey="date"
+                yKeys={["value"]}
+                title="数据趋势图"
               />
             </Paper>
           </Grid>

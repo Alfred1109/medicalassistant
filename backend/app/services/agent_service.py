@@ -266,59 +266,137 @@ class AgentService:
     
     def _build_rehab_plan_prompt(self, patient_data: Dict[str, Any]) -> str:
         """构建用于生成康复计划的提示词"""
+        # 提取基础数据
         condition = patient_data.get("condition", "")
         goal = patient_data.get("goal", "")
+        patient_name = patient_data.get("patient_name", "")
         
-        prompt = f"""作为一名专业的康复医学专家，请为以下患者制定一份详细的康复计划。
+        # 提取患者历史数据（如果有）
+        patient_id = patient_data.get("patient_id", "")
+        medical_history = patient_data.get("medical_history", "")
+        age = patient_data.get("age", "")
+        gender = patient_data.get("gender", "")
+        physical_condition = patient_data.get("physical_condition", "")
         
-患者情况：
+        # 提取患者评估数据（如果有）
+        latest_assessment = patient_data.get("latest_assessment", {})
+        assessment_text = ""
+        if latest_assessment:
+            assessment_text = f"""
+患者最新评估数据:
+- 评估日期: {latest_assessment.get('date', '')}
+- 关节活动度: {self._format_assessment_value(latest_assessment.get('range_of_motion', {}))}
+- 肌肉力量: {self._format_assessment_value(latest_assessment.get('muscle_strength', {}))}
+- 疼痛水平: {self._format_assessment_value(latest_assessment.get('pain_level', {}))}
+- 功能状态: {self._format_assessment_value(latest_assessment.get('functional_status', {}))}
+"""
+        
+        # 构建提示词
+        prompt = f"""作为一名专业的康复医学专家，请为以下患者制定一份详细且个性化的康复计划。请在方案中应用循证医学原则，确保计划的安全性和有效性。
+
+患者信息:
+- 姓名: {patient_name}
+- 年龄: {age}
+- 性别: {gender}
 - 康复需求/诊断: {condition}
 - 康复目标: {goal}
+- 身体状况: {physical_condition}
+- 医疗历史: {medical_history}
+{assessment_text}
 
-请提供一份完整的康复计划，包括以下内容：
-1. 计划名称
-2. 计划描述（康复目标和预期效果）
-3. 具体的康复运动列表（至少5个），每个运动包括：
-   - 运动名称
-   - 详细描述
-   - 身体部位
+请提供一份完整的康复计划，包括以下内容:
+1. 计划名称: 应反映康复方向和主要目标
+2. 计划描述: 提供详细的康复目标和预期效果
+3. 分阶段计划: 将康复计划分为初始期、进步期和维持期三个阶段
+4. 具体的康复运动列表（至少6-8个），每个运动应包括:
+   - 运动名称（简洁明了）
+   - 详细描述（目的、原理）
+   - 针对的身体部位
    - 难度级别（简单/中等/困难）
    - 持续时间（分钟）
-   - 重复次数
-   - 组数
-   - 执行指南（步骤说明）
-   - 禁忌症
+   - 重复次数和组数（明确指导）
+   - 执行指南（详细步骤说明）
+   - 注意事项和技巧
    - 预期益处
-4. 建议频率（每周几次）
-5. 总体康复周期（几周）
-6. 注意事项
+   - 可能的调整方案（如何简化或增加难度）
+5. 运动进阶建议: 当患者达到特定标准时如何调整运动难度
+6. 总体康复周期建议: 并解释为何推荐此周期
+7. 进度追踪方法: 如何评估康复效果
+8. 预防措施和注意事项: 针对患者特定情况的警示和建议
 
-以JSON格式返回，确保专业性、安全性和个性化。
+请以专业的医学术语结合通俗易懂的解释，使计划既专业又易于患者理解和执行。所有建议必须基于循证医学和最新康复指南。
 
-JSON结构示例:
-{{
+以JSON格式返回，确保专业性、安全性和个性化。返回格式示例:
+
+{
   "name": "计划名称",
-  "description": "计划描述",
-  "duration_weeks": 8,
-  "frequency": "每周3-5次",
+  "description": "计划详细描述",
+  "phases": [
+    {
+      "name": "初始期",
+      "duration": "2周",
+      "focus": "适应与基础能力建立",
+      "description": "阶段详细描述..."
+    },
+    {
+      "name": "进步期",
+      "duration": "4周",
+      "focus": "能力提升",
+      "description": "阶段详细描述..."
+    },
+    {
+      "name": "维持期",
+      "duration": "持续",
+      "focus": "功能维持与日常融合",
+      "description": "阶段详细描述..."
+    }
+  ],
+  "duration_weeks": 12,
+  "frequency": "初始每周3次，进步期每周4-5次",
   "exercises": [
-    {{
+    {
       "name": "运动名称",
-      "description": "运动描述",
-      "body_part": "颈部",
-      "difficulty": "简单",
+      "description": "运动详细描述",
+      "body_part": "目标部位",
+      "difficulty": "难度级别",
       "duration_minutes": 5,
       "repetitions": 10,
       "sets": 3,
       "instructions": ["步骤1", "步骤2", "步骤3"],
-      "contraindications": ["禁忌症1", "禁忌症2"],
-      "benefits": ["好处1", "好处2"]
-    }}
+      "precautions": ["注意事项1", "注意事项2"],
+      "benefits": ["预期益处1", "预期益处2"],
+      "adjustments": {
+        "easier": "如何简化",
+        "harder": "如何增加难度"
+      },
+      "progression_criteria": "何时进阶此运动的标准"
+    }
   ],
-  "notes": "任何其他说明或建议"
-}}
+  "progress_tracking": {
+    "metrics": ["追踪指标1", "追踪指标2"],
+    "methods": ["追踪方法1", "追踪方法2"],
+    "milestones": ["里程碑1", "里程碑2"]
+  },
+  "precautions": ["总体注意事项1", "总体注意事项2"],
+  "notes": "其他重要信息和建议"
+}
 """
         return prompt
+    
+    def _format_assessment_value(self, assessment_dict: Dict[str, Any]) -> str:
+        """将评估数据格式化为文本描述"""
+        if not assessment_dict:
+            return "无数据"
+            
+        # 提取主要关键点（最多3个）
+        key_points = []
+        for key, value in assessment_dict.items():
+            if len(key_points) >= 3:
+                break
+            if isinstance(value, (int, float)):
+                key_points.append(f"{key}: {value}")
+                
+        return ", ".join(key_points) if key_points else "有评估数据"
         
     async def _call_llm(self, prompt: str) -> str:
         """调用LLM API获取响应"""
@@ -471,12 +549,45 @@ JSON结构示例:
             plan_data["condition"] = patient_data.get("condition", "")
             plan_data["goal"] = patient_data.get("goal", "")
             
+            # 确保phases字段存在
+            if "phases" not in plan_data:
+                plan_data["phases"] = [
+                    {
+                        "name": "初始期",
+                        "duration": "2周",
+                        "focus": "适应与基础能力建立",
+                        "description": "初步适应康复训练，建立基础能力"
+                    },
+                    {
+                        "name": "进步期",
+                        "duration": "4周",
+                        "focus": "能力提升",
+                        "description": "提升康复训练强度和复杂度，增强能力"
+                    },
+                    {
+                        "name": "维持期",
+                        "duration": "持续",
+                        "focus": "功能维持与日常融合",
+                        "description": "将康复训练融入日常生活，维持并进一步提升功能"
+                    }
+                ]
+            
+            # 确保progress_tracking字段存在
+            if "progress_tracking" not in plan_data:
+                plan_data["progress_tracking"] = {
+                    "metrics": ["症状改善", "功能恢复", "生活质量提升"],
+                    "methods": ["定期评估", "日志记录", "功能测试"],
+                    "milestones": ["初始期完成", "关键功能恢复", "回归日常活动"]
+                }
+            
             # 添加元数据
             plan_data["metadata"] = {
                 "generated_by": "llm",
                 "generation_timestamp": datetime.utcnow().isoformat(),
                 "is_approved": False,  # 初始状态为未审核
-                "approval_history": []
+                "approval_history": [],
+                "version": 1,  # 计划版本号
+                "last_updated": datetime.utcnow().isoformat()
             }
             
             # 转换运动为康复计划所需格式
@@ -491,12 +602,30 @@ JSON结构示例:
                     "repetitions": ex.get("repetitions", 10),
                     "sets": ex.get("sets", 3),
                     "instructions": ex.get("instructions", []),
-                    "contraindications": ex.get("contraindications", []),
+                    "precautions": ex.get("precautions", []),
+                    "contraindications": ex.get("contraindications", []),  # 兼容旧格式
                     "benefits": ex.get("benefits", []),
+                    "adjustments": ex.get("adjustments", {"easier": "", "harder": ""}),
+                    "progression_criteria": ex.get("progression_criteria", ""),
+                    "phase": ex.get("phase", "初始期"),  # 运动所属阶段
+                    "status": "active"  # 运动状态：active, completed, skipped
                 }
                 exercises.append(exercise)
                 
             plan_data["exercises"] = exercises
+            
+            # 添加计划执行状态
+            plan_data["execution_status"] = {
+                "current_phase": "初始期",
+                "current_week": 1,
+                "adherence_rate": 0,  # 计划坚持率(0-100)
+                "completed_exercises": 0,
+                "total_exercises": len(exercises) * 3,  # 假设每个运动每周进行3次
+                "last_updated": datetime.utcnow().isoformat()
+            }
+            
+            # 添加计划调整历史
+            plan_data["adjustment_history"] = []
             
             return plan_data
         except Exception as e:
@@ -539,4 +668,172 @@ JSON结构示例:
             return plan
         except Exception as e:
             print(f"Error approving plan: {str(e)}")
-            return None 
+            return None
+        
+    async def generate_assessment_analysis(self, assessment_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """生成康复评估分析与建议"""
+        try:
+            # 构建提示词
+            prompt = self._build_assessment_analysis_prompt(assessment_data)
+            
+            # 调用LLM
+            llm_response = await self._call_llm(prompt)
+            
+            # 解析LLM响应
+            parsed_analysis = self._parse_assessment_analysis_response(llm_response)
+            
+            # 记录生成过程
+            await self.db.llm_generations.insert_one({
+                "type": "assessment_analysis",
+                "assessment_data": assessment_data,
+                "prompt": prompt,
+                "response": llm_response,
+                "parsed_result": parsed_analysis,
+                "timestamp": datetime.utcnow()
+            })
+            
+            return parsed_analysis
+        except Exception as e:
+            print(f"Error generating assessment analysis: {str(e)}")
+            return None
+    
+    def _build_assessment_analysis_prompt(self, assessment_data: Dict[str, Any]) -> str:
+        """构建用于生成康复评估分析的提示词"""
+        current = assessment_data.get("current_assessment", {})
+        previous = assessment_data.get("previous_assessment", {})
+        differences = assessment_data.get("differences", {})
+        
+        # 提取患者基本信息
+        patient_id = assessment_data.get("patient_id", "unknown")
+        
+        # 提取评估日期
+        current_date = current.get("created_at", "unknown date")
+        if isinstance(current_date, datetime):
+            current_date = current_date.strftime("%Y-%m-%d")
+            
+        previous_date = "无" if not previous else previous.get("created_at", "unknown date")
+        if isinstance(previous_date, datetime):
+            previous_date = previous_date.strftime("%Y-%m-%d")
+        
+        # 提取当前评分
+        current_scores = current.get("scores", {})
+        overall_score = current_scores.get("overall", 0)
+        
+        # 提取差异数据
+        score_diff = differences.get("scores", {}) if previous else {"overall": 0, "percent_change": 0}
+        
+        # 构建提示词
+        prompt = f"""作为一名专业的康复医学专家，请分析以下康复评估结果，并提供专业的解释和建议。
+
+患者信息：
+- 患者ID: {patient_id}
+- 当前评估日期: {current_date}
+- 上次评估日期: {previous_date}
+
+评估得分：
+- 总体评分: {overall_score}/100
+- 与上次相比变化: {score_diff.get("overall", 0)} 分 ({score_diff.get("percent_change", 0):.1f}%)
+
+详细评估数据：
+"""
+        
+        # 添加关节活动度数据
+        if "range_of_motion" in current:
+            prompt += "关节活动度:\n"
+            for joint, value in current["range_of_motion"].items():
+                diff_text = ""
+                if previous and "range_of_motion" in previous and joint in previous["range_of_motion"]:
+                    diff = value - previous["range_of_motion"][joint]
+                    diff_text = f"(变化: {diff:+.1f})"
+                prompt += f"- {joint}: {value} {diff_text}\n"
+            
+        # 添加肌肉力量数据
+        if "muscle_strength" in current:
+            prompt += "\n肌肉力量(0-5分):\n"
+            for muscle, value in current["muscle_strength"].items():
+                diff_text = ""
+                if previous and "muscle_strength" in previous and muscle in previous["muscle_strength"]:
+                    diff = value - previous["muscle_strength"][muscle]
+                    diff_text = f"(变化: {diff:+.1f})"
+                prompt += f"- {muscle}: {value} {diff_text}\n"
+            
+        # 添加疼痛水平数据
+        if "pain_level" in current:
+            prompt += "\n疼痛水平(0-10分, 0为无痛):\n"
+            for location, value in current["pain_level"].items():
+                diff_text = ""
+                if previous and "pain_level" in previous and location in previous["pain_level"]:
+                    diff = value - previous["pain_level"][location]
+                    trend = "减轻" if diff < 0 else "加重" if diff > 0 else "不变"
+                    diff_text = f"(变化: {diff:+.1f}, {trend})"
+                prompt += f"- {location}: {value} {diff_text}\n"
+            
+        # 添加功能状态数据
+        if "functional_status" in current:
+            prompt += "\n功能状态(0-100分):\n"
+            for function, value in current["functional_status"].items():
+                diff_text = ""
+                if previous and "functional_status" in previous and function in previous["functional_status"]:
+                    diff = value - previous["functional_status"][function]
+                    diff_text = f"(变化: {diff:+.1f})"
+                prompt += f"- {function}: {value} {diff_text}\n"
+        
+        # 添加备注
+        if "notes" in current:
+            prompt += f"\n评估备注:\n{current['notes']}\n"
+        
+        prompt += """
+请提供以下内容:
+1. 评估结果总体解释 - 简要解释患者当前康复状态
+2. 进展分析 - 与上次评估相比的进展或退步情况，重点关注变化明显的指标
+3. 康复建议 - 针对评估结果提出3-5条具体的康复建议
+4. 注意事项 - 患者需要注意的问题或潜在风险
+5. 预期目标 - 下一阶段的合理康复目标
+
+以JSON格式返回，结构如下:
+{
+  "summary": "总体评估解释",
+  "progress_analysis": "进展分析",
+  "recommendations": ["建议1", "建议2", "建议3", ...],
+  "precautions": ["注意事项1", "注意事项2", ...],
+  "next_goals": ["目标1", "目标2", ...]
+}
+"""
+        return prompt
+    
+    def _parse_assessment_analysis_response(self, llm_response: str) -> Dict[str, Any]:
+        """解析LLM对康复评估分析的响应"""
+        try:
+            # 解析JSON响应
+            analysis_data = json.loads(llm_response)
+            
+            # 确保所有必要字段都存在
+            required_fields = ["summary", "progress_analysis", "recommendations", "precautions", "next_goals"]
+            for field in required_fields:
+                if field not in analysis_data:
+                    analysis_data[field] = []
+                    if field in ["summary", "progress_analysis"]:
+                        analysis_data[field] = "无数据"
+            
+            # 添加元数据
+            analysis_data["metadata"] = {
+                "generated_by": "llm",
+                "generation_timestamp": datetime.utcnow().isoformat()
+            }
+            
+            return analysis_data
+        except Exception as e:
+            print(f"Error parsing assessment analysis LLM response: {str(e)}")
+            # 返回一个基本分析以防解析失败
+            return {
+                "summary": "系统无法解析评估结果，请咨询医生获取专业解释。",
+                "progress_analysis": "数据解析错误，无法提供准确分析。",
+                "recommendations": ["请咨询您的医生获取康复建议"],
+                "precautions": ["在获得专业指导前，请遵循之前的康复方案"],
+                "next_goals": ["尽快与康复医师沟通，制定合适的康复目标"],
+                "metadata": {
+                    "error": True,
+                    "message": str(e),
+                    "generation_timestamp": datetime.utcnow().isoformat()
+                }
+            } 

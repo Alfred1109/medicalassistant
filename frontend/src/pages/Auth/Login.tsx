@@ -73,7 +73,7 @@ const Login: React.FC = () => {
         navigate('/app/health-manager');
         break;
       case 'patient':
-        navigate('/app/patient');
+        navigate('/app/patient/main-dashboard');
         break;
       default:
         // 默认跳转到通用仪表板
@@ -107,7 +107,7 @@ const Login: React.FC = () => {
 
   const handleMockPatientLogin = () => {
     dispatch(mockPatientLogin());
-    navigate('/app/patient');
+    navigate('/app/patient/main-dashboard');
   };
 
   return (
