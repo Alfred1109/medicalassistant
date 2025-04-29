@@ -31,8 +31,8 @@ import { login, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManag
 
 // 默认用户信息
 const DEFAULT_CREDENTIALS = {
-  email: 'admin@example.com',
-  password: 'admin123',
+  email: 'demo@example.com',
+  password: 'password123',
 };
 
 const Login: React.FC = () => {
@@ -40,10 +40,7 @@ const Login: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
   const { loading, error } = useSelector((state: RootState) => state.auth);
 
-  const [formData, setFormData] = useState({
-    email: '',
-    password: '',
-  });
+  const [formData, setFormData] = useState(DEFAULT_CREDENTIALS);
   const [showPassword, setShowPassword] = useState(false);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -55,10 +52,32 @@ const Login: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await dispatch(login(formData)).unwrap();
-      navigate('/dashboard');
+      const result = await dispatch(login(formData)).unwrap();
+      // 根据用户角色跳转到相应的页面
+      redirectBasedOnRole(result.user.role);
     } catch (err) {
       // Error is handled by the reducer
+    }
+  };
+
+  // 根据用户角色进行跳转
+  const redirectBasedOnRole = (role: string) => {
+    switch (role) {
+      case 'admin':
+        navigate('/app/admin');
+        break;
+      case 'doctor':
+        navigate('/app/doctor');
+        break;
+      case 'health_manager':
+        navigate('/app/health-manager');
+        break;
+      case 'patient':
+        navigate('/app/patient');
+        break;
+      default:
+        // 默认跳转到通用仪表板
+        navigate('/app/dashboard');
     }
   };
 
@@ -73,14 +92,17 @@ const Login: React.FC = () => {
 
   const handleMockAdminLogin = () => {
     dispatch(mockAdminLogin());
+    navigate('/app/admin');
   };
   
   const handleMockDoctorLogin = () => {
     dispatch(mockDoctorLogin());
+    navigate('/app/doctor');
   };
   
   const handleMockHealthManagerLogin = () => {
     dispatch(mockHealthManagerLogin());
+    navigate('/app/patient'); // 改为患者角色，因为我们希望测试患者视图
   };
 
   return (

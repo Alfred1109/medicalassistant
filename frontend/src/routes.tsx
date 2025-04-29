@@ -113,10 +113,10 @@ const RoleRoute: React.FC<{ children: React.ReactNode, allowedRoles: string[] }>
 };
 
 const routes: RouteObject[] = [
-  // 主入口页面 - 无需验证，直接访问
+  // 主入口页面 - 重定向到登录页面
   {
     path: '/',
-    element: <IndexPage />,
+    element: <Navigate to="/auth/login" replace />,
     index: true,
   },
 
