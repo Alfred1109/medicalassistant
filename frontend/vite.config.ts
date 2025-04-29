@@ -18,7 +18,11 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    include: ['@emotion/react', '@emotion/styled', '@mui/material'],
+    include: [
+      '@emotion/react', 
+      '@emotion/styled', 
+      '@mui/material'
+    ],
     esbuildOptions: {
       // Node.js global to browser globalThis
       define: {

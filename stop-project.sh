@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 医疗康复助手 - 项目停止脚本
-# 此脚本用于停止前端和后端服务
+# 医疗康复助手 - 项目停止脚本 (优化版)
+# 此脚本用于自动停止前端、后端和MongoDB服务
 # =========================================================
 
 # 显示彩色输出
@@ -21,6 +21,7 @@ PROJECT_ROOT=$(pwd)
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 LOGS_DIR="$PROJECT_ROOT/logs"
+DATA_DIR="$PROJECT_ROOT/data"
 
 # 检查操作系统类型
 OS_TYPE=$(uname)
@@ -66,13 +67,7 @@ stop_frontend() {
     fi
     
     # 查找并终止所有相关前端进程
-    if [ "$OS_TYPE" == "Darwin" ]; then
-        # macOS
-        FRONTEND_PIDS=$(pgrep -f "node.*vite" | grep -v $$)
-    else
-        # Linux
-        FRONTEND_PIDS=$(pgrep -f "node.*vite" | grep -v $$)
-    fi
+    local FRONTEND_PIDS=$(pgrep -f "node.*vite" | grep -v $$)
     
     if [ -n "$FRONTEND_PIDS" ]; then
         echo -e "${YELLOW}发现额外的前端进程，正在终止...${NC}"
@@ -90,13 +85,33 @@ stop_frontend() {
     # 确认端口释放
     if [ "$OS_TYPE" == "Darwin" ]; then
         if lsof -i :5501 | grep -q LISTEN; then
-            echo -e "${RED}警告: 端口5501仍被占用${NC}"
+            echo -e "${YELLOW}端口5501仍被占用，尝试强制释放...${NC}"
+            local pid=$(lsof -i :5501 | grep LISTEN | awk '{print $2}' | head -n 1)
+            if [ -n "$pid" ]; then
+                kill -9 $pid 2>/dev/null
+                sleep 1
+                if ! lsof -i :5501 | grep -q LISTEN; then
+                    echo -e "${GREEN}✓ 端口5501已释放${NC}"
+                else
+                    echo -e "${RED}警告: 无法释放端口5501${NC}"
+                fi
+            fi
         else
             echo -e "${GREEN}✓ 端口5501已释放${NC}"
         fi
     else
         if netstat -tuln 2>/dev/null | grep -q ":5501 "; then
-            echo -e "${RED}警告: 端口5501仍被占用${NC}"
+            echo -e "${YELLOW}端口5501仍被占用，尝试强制释放...${NC}"
+            local pid=$(netstat -tulnp 2>/dev/null | grep ":5501 " | awk '{print $7}' | cut -d'/' -f1 | head -n 1)
+            if [ -n "$pid" ]; then
+                kill -9 $pid 2>/dev/null
+                sleep 1
+                if ! netstat -tuln 2>/dev/null | grep -q ":5501 "; then
+                    echo -e "${GREEN}✓ 端口5501已释放${NC}"
+                else
+                    echo -e "${RED}警告: 无法释放端口5501${NC}"
+                fi
+            fi
         else
             echo -e "${GREEN}✓ 端口5501已释放${NC}"
         fi
@@ -143,13 +158,7 @@ stop_backend() {
     fi
     
     # 查找并终止所有相关后端进程
-    if [ "$OS_TYPE" == "Darwin" ]; then
-        # macOS
-        BACKEND_PIDS=$(pgrep -f "python.*app.py" | grep -v $$)
-    else
-        # Linux
-        BACKEND_PIDS=$(pgrep -f "python.*app.py" | grep -v $$)
-    fi
+    local BACKEND_PIDS=$(pgrep -f "python.*app.py" | grep -v $$)
     
     if [ -n "$BACKEND_PIDS" ]; then
         echo -e "${YELLOW}发现额外的后端进程，正在终止...${NC}"
@@ -167,100 +176,103 @@ stop_backend() {
     # 确认端口释放
     if [ "$OS_TYPE" == "Darwin" ]; then
         if lsof -i :5502 | grep -q LISTEN; then
-            echo -e "${RED}警告: 端口5502仍被占用${NC}"
+            echo -e "${YELLOW}端口5502仍被占用，尝试强制释放...${NC}"
+            local pid=$(lsof -i :5502 | grep LISTEN | awk '{print $2}' | head -n 1)
+            if [ -n "$pid" ]; then
+                kill -9 $pid 2>/dev/null
+                sleep 1
+                if ! lsof -i :5502 | grep -q LISTEN; then
+                    echo -e "${GREEN}✓ 端口5502已释放${NC}"
+                else
+                    echo -e "${RED}警告: 无法释放端口5502${NC}"
+                fi
+            fi
         else
             echo -e "${GREEN}✓ 端口5502已释放${NC}"
         fi
     else
         if netstat -tuln 2>/dev/null | grep -q ":5502 "; then
-            echo -e "${RED}警告: 端口5502仍被占用${NC}"
+            echo -e "${YELLOW}端口5502仍被占用，尝试强制释放...${NC}"
+            local pid=$(netstat -tulnp 2>/dev/null | grep ":5502 " | awk '{print $7}' | cut -d'/' -f1 | head -n 1)
+            if [ -n "$pid" ]; then
+                kill -9 $pid 2>/dev/null
+                sleep 1
+                if ! netstat -tuln 2>/dev/null | grep -q ":5502 "; then
+                    echo -e "${GREEN}✓ 端口5502已释放${NC}"
+                else
+                    echo -e "${RED}警告: 无法释放端口5502${NC}"
+                fi
+            fi
         else
             echo -e "${GREEN}✓ 端口5502已释放${NC}"
         fi
     fi
 }
 
-# 停止MongoDB服务（可选）
+# 停止MongoDB服务（可选，但默认停止）
 stop_mongodb() {
-    echo -e "\n${BLUE}是否停止MongoDB服务? (y/n) ${NC}"
-    read -r stop_mongo
+    echo -e "\n${BLUE}检查并停止MongoDB服务...${NC}"
     
-    if [ "$stop_mongo" == "y" ] || [ "$stop_mongo" == "Y" ]; then
-        echo -e "${YELLOW}尝试停止MongoDB服务...${NC}"
-        
-        if [ "$OS_TYPE" == "Darwin" ]; then
-            # macOS
-            if brew services list | grep mongodb-community | grep -q started; then
-                echo -e "${YELLOW}正在停止MongoDB服务...${NC}"
-                brew services stop mongodb-community
-                if brew services list | grep mongodb-community | grep -q stopped; then
-                    echo -e "${GREEN}✓ MongoDB服务已停止${NC}"
-                else
-                    echo -e "${RED}MongoDB服务停止失败${NC}"
-                fi
-            else
-                echo -e "${YELLOW}未检测到通过Homebrew启动的MongoDB服务${NC}"
-                
-                # 检查直接启动的MongoDB进程
-                MONGO_PIDS=$(pgrep mongod)
-                if [ -n "$MONGO_PIDS" ]; then
-                    echo -e "${YELLOW}发现MongoDB进程，尝试停止...${NC}"
-                    for pid in $MONGO_PIDS; do
-                        echo -e "终止MongoDB进程: $pid"
-                        kill -15 $pid 2>/dev/null
-                        sleep 1
-                        kill -9 $pid 2>/dev/null
-                    done
-                    
-                    # 验证进程已终止
-                    if pgrep mongod > /dev/null; then
-                        echo -e "${RED}MongoDB进程停止失败${NC}"
-                    else
-                        echo -e "${GREEN}✓ MongoDB进程已停止${NC}"
-                    fi
-                else
-                    echo -e "${GREEN}✓ 未检测到运行中的MongoDB进程${NC}"
-                fi
-            fi
-        else
-            # Linux
-            if command -v systemctl &> /dev/null; then
-                if systemctl is-active --quiet mongod; then
-                    echo -e "${YELLOW}正在停止MongoDB系统服务...${NC}"
-                    sudo systemctl stop mongod
-                    if ! systemctl is-active --quiet mongod; then
-                        echo -e "${GREEN}✓ MongoDB系统服务已停止${NC}"
-                    else
-                        echo -e "${RED}MongoDB系统服务停止失败${NC}"
-                    fi
-                else
-                    echo -e "${YELLOW}MongoDB系统服务未运行${NC}"
-                fi
-            else
-                # 检查直接启动的MongoDB进程
-                MONGO_PIDS=$(pgrep mongod)
-                if [ -n "$MONGO_PIDS" ]; then
-                    echo -e "${YELLOW}发现MongoDB进程，尝试停止...${NC}"
-                    for pid in $MONGO_PIDS; do
-                        echo -e "终止MongoDB进程: $pid"
-                        kill -15 $pid 2>/dev/null
-                        sleep 1
-                        kill -9 $pid 2>/dev/null
-                    done
-                    
-                    # 验证进程已终止
-                    if pgrep mongod > /dev/null; then
-                        echo -e "${RED}MongoDB进程停止失败${NC}"
-                    else
-                        echo -e "${GREEN}✓ MongoDB进程已停止${NC}"
-                    fi
-                else
-                    echo -e "${GREEN}✓ 未检测到运行中的MongoDB进程${NC}"
-                fi
+    # 检查MongoDB是否在运行
+    if ! pgrep mongod > /dev/null; then
+        echo -e "${GREEN}✓ MongoDB服务未运行${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}发现MongoDB进程，开始停止...${NC}"
+    
+    local mongodb_stopped=false
+    
+    if [ "$OS_TYPE" == "Darwin" ]; then
+        # macOS
+        if command -v brew &> /dev/null && brew services list | grep mongodb-community | grep -q started; then
+            echo -e "${YELLOW}通过Homebrew停止MongoDB...${NC}"
+            brew services stop mongodb-community
+            sleep 2
+            if ! pgrep mongod > /dev/null; then
+                mongodb_stopped=true
+                echo -e "${GREEN}✓ MongoDB服务已通过Homebrew成功停止${NC}"
             fi
         fi
     else
-        echo -e "${YELLOW}已跳过MongoDB服务停止${NC}"
+        # Linux
+        if command -v systemctl &> /dev/null && systemctl is-active --quiet mongod; then
+            echo -e "${YELLOW}通过systemd停止MongoDB...${NC}"
+            sudo systemctl stop mongod
+            sleep 2
+            if ! systemctl is-active --quiet mongod; then
+                mongodb_stopped=true
+                echo -e "${GREEN}✓ MongoDB服务已通过systemd成功停止${NC}"
+            fi
+        fi
+    fi
+    
+    # 如果通过服务管理器停止失败，尝试直接终止进程
+    if [ "$mongodb_stopped" = false ]; then
+        # 检查直接启动的MongoDB进程
+        local MONGO_PIDS=$(pgrep mongod)
+        if [ -n "$MONGO_PIDS" ]; then
+            echo -e "${YELLOW}尝试直接停止MongoDB进程...${NC}"
+            for pid in $MONGO_PIDS; do
+                echo -e "终止MongoDB进程: $pid"
+                kill -15 $pid 2>/dev/null
+                sleep 1
+                if kill -0 $pid 2>/dev/null; then
+                    echo -e "${YELLOW}进程未响应，强制终止...${NC}"
+                    kill -9 $pid 2>/dev/null
+                fi
+            done
+            
+            # 验证进程已终止
+            sleep 1
+            if ! pgrep mongod > /dev/null; then
+                echo -e "${GREEN}✓ MongoDB进程已成功停止${NC}"
+            else
+                echo -e "${RED}警告: 部分MongoDB进程可能未能停止${NC}"
+            fi
+        else
+            echo -e "${GREEN}✓ 未检测到运行中的MongoDB进程${NC}"
+        fi
     fi
 }
 
@@ -301,7 +313,7 @@ main() {
     # 停止后端服务
     stop_backend
     
-    # 询问是否停止MongoDB
+    # 停止MongoDB（默认自动停止，不再询问）
     stop_mongodb
     
     # 清理PID文件

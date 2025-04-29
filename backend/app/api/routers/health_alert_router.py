@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Path, status
 from fastapi.responses import JSONResponse
 
 from app.services.health_alert_service import HealthAlertService
-from app.dependencies import get_current_user, get_health_alert_service
+from app.core.dependencies import get_current_user, get_health_alert_service
 from app.models.health_data_threshold import HealthDataThreshold, HealthDataAlert
 from app.schemas.health_data_threshold import (
     ThresholdCreate, ThresholdResponse, ThresholdUpdate,

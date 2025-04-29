@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 医疗康复助手 - 项目启动脚本
-# 此脚本用于启动前端和后端服务
+# 医疗康复助手 - 项目启动脚本 (优化版)
+# 此脚本用于自动启动前端和后端服务，以及必要的依赖服务
 # =========================================================
 
 # 显示彩色输出
@@ -20,9 +20,11 @@ PROJECT_ROOT=$(pwd)
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 LOGS_DIR="$PROJECT_ROOT/logs"
+DATA_DIR="$PROJECT_ROOT/data"
 
 # 创建日志目录
 mkdir -p "$LOGS_DIR"
+mkdir -p "$DATA_DIR"
 FRONTEND_LOG="$LOGS_DIR/frontend.log"
 BACKEND_LOG="$LOGS_DIR/backend.log"
 MONGODB_LOG="$LOGS_DIR/mongodb.log"
@@ -61,147 +63,190 @@ if [ "$OS_TYPE" == "Darwin" ]; then
     check_prerequisite brew
 fi
 
-# 检查MongoDB服务
-check_mongodb() {
-    echo -e "\n${BLUE}检查MongoDB服务...${NC}"
+# 自动启动MongoDB服务
+start_mongodb() {
+    echo -e "\n${BLUE}检查并启动MongoDB服务...${NC}"
+    
+    # 检查MongoDB是否已在运行
+    if pgrep mongod > /dev/null; then
+        echo -e "${GREEN}✓ 发现运行中的MongoDB进程${NC}"
+        return 0
+    fi
+    
+    # MongoDB未运行，尝试启动
+    echo -e "${YELLOW}未检测到运行中的MongoDB进程，尝试启动...${NC}"
+    
     if [ "$OS_TYPE" == "Darwin" ]; then
-        # macOS
-        if brew services list | grep -q mongodb-community; then
-            if brew services list | grep mongodb-community | grep -q started; then
-                echo -e "${GREEN}✓ MongoDB服务正在运行${NC}"
-                return 0
-            else
-                echo -e "${YELLOW}MongoDB服务未运行，尝试启动...${NC}"
-                brew services start mongodb-community >> "$MONGODB_LOG" 2>&1
-                sleep 3
-                if brew services list | grep mongodb-community | grep -q started; then
-                    echo -e "${GREEN}✓ MongoDB服务已成功启动${NC}"
-                    return 0
-                else
-                    echo -e "${RED}MongoDB服务启动失败${NC}"
-                    echo -e "${YELLOW}请尝试运行 mongodb-fix.sh 脚本修复问题${NC}"
-                    return 1
-                fi
-            fi
-        else
-            echo -e "${YELLOW}未检测到通过Homebrew安装的MongoDB${NC}"
+        # macOS - 尝试通过Homebrew启动
+        if command -v brew &> /dev/null && brew services list | grep -q mongodb-community; then
+            echo -e "${YELLOW}通过Homebrew启动MongoDB...${NC}"
+            brew services start mongodb-community >> "$MONGODB_LOG" 2>&1
+            sleep 2
             if pgrep mongod > /dev/null; then
-                echo -e "${GREEN}✓ 发现运行中的MongoDB进程${NC}"
+                echo -e "${GREEN}✓ MongoDB服务已通过Homebrew成功启动${NC}"
                 return 0
-            else
-                echo -e "${RED}未检测到运行中的MongoDB进程${NC}"
-                echo -e "${YELLOW}请安装MongoDB或确保MongoDB服务已启动${NC}"
-                return 1
             fi
         fi
+        
+        # 如果Homebrew启动失败或者没有通过Homebrew安装，尝试直接启动
+        echo -e "${YELLOW}尝试直接启动MongoDB...${NC}"
+        mongod --dbpath="$DATA_DIR" --fork --logpath="$MONGODB_LOG" >> "$MONGODB_LOG" 2>&1
+        sleep 2
+        if pgrep mongod > /dev/null; then
+            echo -e "${GREEN}✓ MongoDB服务已成功启动${NC}"
+            return 0
+        fi
     else
-        # Linux
+        # Linux - 尝试通过systemd启动
         if command -v systemctl &> /dev/null; then
-            if systemctl is-active --quiet mongod; then
-                echo -e "${GREEN}✓ MongoDB服务正在运行${NC}"
+            echo -e "${YELLOW}通过systemd启动MongoDB...${NC}"
+            sudo systemctl start mongod >> "$MONGODB_LOG" 2>&1
+            sleep 2
+            if systemctl is-active --quiet mongod || pgrep mongod > /dev/null; then
+                echo -e "${GREEN}✓ MongoDB服务已通过systemd成功启动${NC}"
                 return 0
-            else
-                echo -e "${YELLOW}MongoDB服务未运行，尝试启动...${NC}"
-                sudo systemctl start mongod >> "$MONGODB_LOG" 2>&1
-                sleep 3
-                if systemctl is-active --quiet mongod; then
-                    echo -e "${GREEN}✓ MongoDB服务已成功启动${NC}"
-                    return 0
-                else
-                    echo -e "${RED}MongoDB服务启动失败${NC}"
-                    echo -e "${YELLOW}请尝试运行 mongodb-fix.sh 脚本修复问题${NC}"
-                    return 1
-                fi
-            fi
-        else
-            if pgrep mongod > /dev/null; then
-                echo -e "${GREEN}✓ 发现运行中的MongoDB进程${NC}"
-                return 0
-            else
-                echo -e "${RED}未检测到运行中的MongoDB进程${NC}"
-                echo -e "${YELLOW}请安装MongoDB或确保MongoDB服务已启动${NC}"
-                return 1
             fi
         fi
-    fi
-}
-
-# 检查端口占用
-check_port() {
-    local port=$1
-    local service=$2
-    
-    # 检查端口是否被占用
-    if [ "$OS_TYPE" == "Darwin" ]; then
-        # macOS
-        if lsof -i :$port | grep -q LISTEN; then
-            local pid=$(lsof -i :$port | grep LISTEN | awk '{print $2}' | head -n 1)
-            local pname=$(ps -p $pid -o comm= 2>/dev/null || echo "未知进程")
-            echo -e "${RED}错误: 端口 $port 已被进程 $pid ($pname) 占用${NC}"
-            echo -e "${YELLOW}请停止该进程或修改 $service 服务的端口配置${NC}"
-            return 1
-        fi
-    else
-        # Linux
-        if netstat -tuln | grep -q ":$port "; then
-            local pid=$(netstat -tulnp 2>/dev/null | grep ":$port " | awk '{print $7}' | cut -d'/' -f1 | head -n 1)
-            local pname=$(ps -p $pid -o comm= 2>/dev/null || echo "未知进程")
-            echo -e "${RED}错误: 端口 $port 已被进程 $pid ($pname) 占用${NC}"
-            echo -e "${YELLOW}请停止该进程或修改 $service 服务的端口配置${NC}"
-            return 1
+        
+        # 如果systemd启动失败，尝试直接启动
+        echo -e "${YELLOW}尝试直接启动MongoDB...${NC}"
+        mongod --dbpath="$DATA_DIR" --fork --logpath="$MONGODB_LOG" >> "$MONGODB_LOG" 2>&1
+        sleep 2
+        if pgrep mongod > /dev/null; then
+            echo -e "${GREEN}✓ MongoDB服务已成功启动${NC}"
+            return 0
         fi
     fi
     
-    return 0
+    # 所有尝试都失败了
+    echo -e "${RED}无法启动MongoDB服务${NC}"
+    echo -e "${RED}项目部分功能可能无法使用${NC}"
+    echo -e "${YELLOW}将继续启动前端和后端服务...${NC}"
+    return 1
 }
 
 # 清理之前的项目进程
 cleanup_processes() {
     echo -e "\n${BLUE}清理之前的项目进程...${NC}"
     
-    # 如果存在stop-project.sh脚本，则执行它
-    if [ -f "$PROJECT_ROOT/stop-project.sh" ]; then
-        echo -e "${YELLOW}执行stop-project.sh脚本...${NC}"
-        bash "$PROJECT_ROOT/stop-project.sh"
-        sleep 2
+    # 手动清理进程的逻辑
+    local FRONTEND_PIDS=$(pgrep -f "node.*vite" | grep -v $$)
+    local BACKEND_PIDS=$(pgrep -f "python.*app.py" | grep -v $$)
+    
+    if [ -n "$FRONTEND_PIDS" ]; then
+        echo -e "${YELLOW}发现前端进程，正在终止...${NC}"
+        for pid in $FRONTEND_PIDS; do
+            echo -e "终止前端进程: $pid"
+            kill -15 $pid 2>/dev/null || kill -9 $pid 2>/dev/null
+        done
     else
-        echo -e "${YELLOW}未找到stop-project.sh脚本，尝试手动清理进程...${NC}"
-        # 手动清理进程的逻辑
-        if [ "$OS_TYPE" == "Darwin" ]; then
-            # macOS
-            FRONTEND_PIDS=$(pgrep -f "node.*vite" | grep -v $$)
-            BACKEND_PIDS=$(pgrep -f "python.*app.py" | grep -v $$)
-        else
-            # Linux
-            FRONTEND_PIDS=$(pgrep -f "node.*vite" | grep -v $$)
-            BACKEND_PIDS=$(pgrep -f "python.*app.py" | grep -v $$)
-        fi
-        
-        if [ -n "$FRONTEND_PIDS" ]; then
-            echo -e "${YELLOW}发现前端进程，正在终止...${NC}"
-            for pid in $FRONTEND_PIDS; do
-                echo -e "终止前端进程: $pid"
-                kill -15 $pid 2>/dev/null || kill -9 $pid 2>/dev/null
-            done
-        fi
-        
-        if [ -n "$BACKEND_PIDS" ]; then
-            echo -e "${YELLOW}发现后端进程，正在终止...${NC}"
-            for pid in $BACKEND_PIDS; do
-                echo -e "终止后端进程: $pid"
-                kill -15 $pid 2>/dev/null || kill -9 $pid 2>/dev/null
-            done
-        fi
-        
-        sleep 2
+        echo -e "${GREEN}✓ 未发现其他前端进程${NC}"
     fi
+    
+    if [ -n "$BACKEND_PIDS" ]; then
+        echo -e "${YELLOW}发现后端进程，正在终止...${NC}"
+        for pid in $BACKEND_PIDS; do
+            echo -e "终止后端进程: $pid"
+            kill -15 $pid 2>/dev/null || kill -9 $pid 2>/dev/null
+        done
+    else
+        echo -e "${GREEN}✓ 未发现其他后端进程${NC}"
+    fi
+    
+    # 清理PID文件
+    [ -f .frontend_pid ] && rm .frontend_pid
+    [ -f .backend_pid ] && rm .backend_pid
+    
+    # 等待进程结束
+    sleep 2
     
     # 检查端口占用
     echo -e "\n${BLUE}检查端口占用情况...${NC}"
-    check_port 5501 "前端" || return 1
-    check_port 5502 "后端" || return 1
+    local port_5501_free=true
+    local port_5502_free=true
     
-    echo -e "${GREEN}✓ 端口检查通过${NC}"
+    # 检查前端端口
+    if [ "$OS_TYPE" == "Darwin" ]; then
+        if lsof -i :5501 | grep -q LISTEN; then
+            port_5501_free=false
+            local pid=$(lsof -i :5501 | grep LISTEN | awk '{print $2}' | head -n 1)
+            local pname=$(ps -p $pid -o comm= 2>/dev/null || echo "未知进程")
+            echo -e "${YELLOW}端口5501被进程 $pid ($pname) 占用，尝试强制终止...${NC}"
+            kill -9 $pid 2>/dev/null
+            sleep 1
+            if ! lsof -i :5501 | grep -q LISTEN; then
+                port_5501_free=true
+                echo -e "${GREEN}✓ 端口5501已释放${NC}"
+            else
+                echo -e "${RED}无法释放端口5501${NC}"
+            fi
+        else
+            echo -e "${GREEN}✓ 端口5501可用${NC}"
+        fi
+        
+        # 检查后端端口
+        if lsof -i :5502 | grep -q LISTEN; then
+            port_5502_free=false
+            local pid=$(lsof -i :5502 | grep LISTEN | awk '{print $2}' | head -n 1)
+            local pname=$(ps -p $pid -o comm= 2>/dev/null || echo "未知进程")
+            echo -e "${YELLOW}端口5502被进程 $pid ($pname) 占用，尝试强制终止...${NC}"
+            kill -9 $pid 2>/dev/null
+            sleep 1
+            if ! lsof -i :5502 | grep -q LISTEN; then
+                port_5502_free=true
+                echo -e "${GREEN}✓ 端口5502已释放${NC}"
+            else
+                echo -e "${RED}无法释放端口5502${NC}"
+            fi
+        else
+            echo -e "${GREEN}✓ 端口5502可用${NC}"
+        fi
+    else
+        # Linux
+        if netstat -tuln | grep -q ":5501 "; then
+            port_5501_free=false
+            local pid=$(netstat -tulnp 2>/dev/null | grep ":5501 " | awk '{print $7}' | cut -d'/' -f1 | head -n 1)
+            local pname=$(ps -p $pid -o comm= 2>/dev/null || echo "未知进程")
+            echo -e "${YELLOW}端口5501被进程 $pid ($pname) 占用，尝试强制终止...${NC}"
+            kill -9 $pid 2>/dev/null
+            sleep 1
+            if ! netstat -tuln | grep -q ":5501 "; then
+                port_5501_free=true
+                echo -e "${GREEN}✓ 端口5501已释放${NC}"
+            else
+                echo -e "${RED}无法释放端口5501${NC}"
+            fi
+        else
+            echo -e "${GREEN}✓ 端口5501可用${NC}"
+        fi
+        
+        # 检查后端端口
+        if netstat -tuln | grep -q ":5502 "; then
+            port_5502_free=false
+            local pid=$(netstat -tulnp 2>/dev/null | grep ":5502 " | awk '{print $7}' | cut -d'/' -f1 | head -n 1)
+            local pname=$(ps -p $pid -o comm= 2>/dev/null || echo "未知进程")
+            echo -e "${YELLOW}端口5502被进程 $pid ($pname) 占用，尝试强制终止...${NC}"
+            kill -9 $pid 2>/dev/null
+            sleep 1
+            if ! netstat -tuln | grep -q ":5502 "; then
+                port_5502_free=true
+                echo -e "${GREEN}✓ 端口5502已释放${NC}"
+            else
+                echo -e "${RED}无法释放端口5502${NC}"
+            fi
+        else
+            echo -e "${GREEN}✓ 端口5502可用${NC}"
+        fi
+    fi
+    
+    # 如果端口仍然被占用，返回失败
+    if [ "$port_5501_free" = false ] || [ "$port_5502_free" = false ]; then
+        echo -e "${RED}无法释放所需端口，启动可能失败${NC}"
+        echo -e "${YELLOW}将尝试继续启动服务...${NC}"
+    else
+        echo -e "${GREEN}✓ 所有必要端口检查通过${NC}"
+    fi
+    
     return 0
 }
 
@@ -220,7 +265,7 @@ start_frontend() {
         npm install --legacy-peer-deps >> "$FRONTEND_LOG" 2>&1
         if [ $? -ne 0 ]; then
             echo -e "${RED}前端依赖安装失败，请检查日志: $FRONTEND_LOG${NC}"
-            return 1
+            echo -e "${YELLOW}尝试继续启动...${NC}"
         fi
     fi
     
@@ -276,7 +321,7 @@ start_backend() {
     if [ -d "venv" ]; then
         echo -e "${YELLOW}激活Python虚拟环境...${NC}"
         source venv/bin/activate 2>/dev/null || {
-            echo -e "${RED}无法激活虚拟环境，尝试继续...${NC}"
+            echo -e "${YELLOW}无法激活虚拟环境，尝试继续...${NC}"
         }
     fi
     
@@ -285,6 +330,12 @@ start_backend() {
         echo -e "${RED}错误: 未找到requirements.txt文件${NC}"
         return 1
     fi
+    
+    # 尝试安装/更新依赖
+    echo -e "${YELLOW}检查后端依赖...${NC}"
+    python3 -m pip install -r requirements.txt -q || {
+        echo -e "${YELLOW}安装依赖过程中出现警告，尝试继续...${NC}"
+    }
     
     # 启动后端服务
     echo -e "${YELLOW}正在启动后端服务(端口5502)...${NC}"
@@ -297,7 +348,7 @@ start_backend() {
     local max_attempts=30
     local attempt=0
     while [ $attempt -lt $max_attempts ]; do
-        if grep -q "Running on http" "$BACKEND_LOG"; then
+        if grep -q "Running on http" "$BACKEND_LOG" || grep -q "Application startup complete" "$BACKEND_LOG"; then
             echo -e "${GREEN}✓ 后端服务已成功启动 (PID: $BACKEND_PID)${NC}"
             echo -e "${GREEN}✓ 后端API地址: http://localhost:5502/api${NC}"
             return 0
@@ -308,6 +359,11 @@ start_backend() {
             echo -e "${RED}后端服务启动失败，进程已退出${NC}"
             echo -e "${YELLOW}请检查日志: $BACKEND_LOG${NC}"
             cat "$BACKEND_LOG" | tail -n 20
+            
+            # 继续启动前端，但返回失败状态
+            cd "$PROJECT_ROOT"
+            echo -e "${YELLOW}尝试启动前端服务...${NC}"
+            start_frontend
             return 1
         fi
         
@@ -318,63 +374,54 @@ start_backend() {
     
     echo -e "\n${RED}后端服务启动超时${NC}"
     echo -e "${YELLOW}请检查日志: $BACKEND_LOG${NC}"
+    
+    # 继续启动前端，但返回失败状态
+    cd "$PROJECT_ROOT"
+    echo -e "${YELLOW}尝试启动前端服务...${NC}"
+    start_frontend
     return 1
 }
 
 # 主流程
 main() {
-    # 检查MongoDB
-    check_mongodb || {
-        echo -e "${YELLOW}是否继续启动项目? (y/n) ${NC}"
-        read -r continue_without_mongo
-        if [ "$continue_without_mongo" != "y" ] && [ "$continue_without_mongo" != "Y" ]; then
-            echo -e "${RED}项目启动已取消${NC}"
-            exit 1
-        fi
-        echo -e "${YELLOW}警告: 在没有MongoDB的情况下继续启动项目，部分功能可能不可用${NC}"
-    }
-    
     # 清理之前的进程
-    cleanup_processes || {
-        echo -e "${YELLOW}是否忽略端口占用问题并继续? (y/n) ${NC}"
-        read -r ignore_port_issues
-        if [ "$ignore_port_issues" != "y" ] && [ "$ignore_port_issues" != "Y" ]; then
-            echo -e "${RED}项目启动已取消${NC}"
-            exit 1
-        fi
-        echo -e "${YELLOW}警告: 忽略端口占用问题继续启动，可能导致服务异常${NC}"
-    }
+    cleanup_processes
+    
+    # 启动MongoDB
+    start_mongodb
     
     # 启动后端服务
-    start_backend || {
-        echo -e "${RED}后端服务启动失败${NC}"
-        echo -e "${YELLOW}是否继续启动前端? (y/n) ${NC}"
-        read -r continue_without_backend
-        if [ "$continue_without_backend" != "y" ] && [ "$continue_without_backend" != "Y" ]; then
-            echo -e "${RED}项目启动已取消${NC}"
-            exit 1
-        fi
-    }
+    local backend_status=0
+    start_backend || backend_status=1
     
-    # 启动前端服务
-    start_frontend || {
-        echo -e "${RED}前端服务启动失败${NC}"
-        exit 1
-    }
+    # 如果后端启动失败但前端已启动，前端将由start_backend函数自动启动
+    # 如果后端启动成功，则启动前端
+    if [ $backend_status -eq 0 ]; then
+        start_frontend || {
+            echo -e "${RED}前端服务启动失败${NC}"
+            return 1
+        }
+    fi
     
     # 所有服务启动完成
-    echo -e "\n${GREEN}${BOLD}所有服务已启动完成!${NC}"
+    echo -e "\n${GREEN}${BOLD}服务启动完成!${NC}"
     echo -e "${BLUE}=======================================${NC}"
     echo -e "${GREEN}前端地址: ${BOLD}http://localhost:5501${NC}"
-    echo -e "${GREEN}后端API地址: ${BOLD}http://localhost:5502/api${NC}"
+    if [ $backend_status -eq 0 ]; then
+        echo -e "${GREEN}后端API地址: ${BOLD}http://localhost:5502/api${NC}"
+    else
+        echo -e "${RED}后端服务未启动，部分功能可能不可用${NC}"
+    fi
     echo -e "${YELLOW}日志文件:${NC}"
     echo -e "  - 前端日志: $FRONTEND_LOG"
     echo -e "  - 后端日志: $BACKEND_LOG"
+    echo -e "  - MongoDB日志: $MONGODB_LOG"
     echo -e "${YELLOW}提示: 使用 stop-project.sh 脚本停止所有服务${NC}"
     echo -e "${BLUE}=======================================${NC}"
     
     # 返回项目根目录
     cd "$PROJECT_ROOT"
+    return 0
 }
 
 # 执行主函数

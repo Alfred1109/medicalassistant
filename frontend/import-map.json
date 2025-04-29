@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "@emotion/react": "./node_modules/@emotion/react/dist/emotion-react.browser.esm.js",
+    "@emotion/styled": "./node_modules/@emotion/styled/dist/emotion-styled.browser.esm.js",
+    "@mui/material": "./node_modules/@mui/material/index.js",
+    "@mui/icons-material": "./node_modules/@mui/icons-material/index.js"
+  }
+} 
