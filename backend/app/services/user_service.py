@@ -6,11 +6,13 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson.objectid import ObjectId
 import bcrypt
 import logging
+from fastapi import HTTPException, status, Request
 
 from app.core.config import settings
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, Token, PermissionAssignment
 from app.core.permissions import ROLE_PERMISSIONS, Permission
 from app.db.mongodb import get_database
+from app.services.audit_log_service import AuditLogService
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,7 @@ class UserService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.collection = db.users
+        self.audit_service = AuditLogService(db)
         # 初始化时不能在同步函数中调用异步方法，需要在外部调用
         
     async def initialize(self):
@@ -137,12 +140,29 @@ class UserService:
         
         return await self.get_user_by_id(user_id)
     
-    async def update_user_permissions(self, user_id: str, permissions: List[str]) -> Optional[UserResponse]:
-        """更新用户权限"""
+    async def update_user_permissions(
+        self, 
+        user_id: str, 
+        permissions: List[str], 
+        operator_id: str,
+        request: Optional[Request] = None
+    ) -> Optional[UserResponse]:
+        """
+        更新用户权限
+        
+        参数:
+        - user_id: 目标用户ID
+        - permissions: 要设置的权限列表
+        - operator_id: 执行操作的用户ID
+        - request: HTTP请求对象（可选，用于获取IP地址）
+        """
         # 获取当前用户
         user = await self.collection.find_one({"_id": ObjectId(user_id)})
         if not user:
             return None
+        
+        # 获取原有的用户自定义权限
+        current_permissions = user.get("permissions", [])
         
         # 获取角色默认权限
         role = user.get("role", "patient")
@@ -150,6 +170,10 @@ class UserService:
         
         # 合并默认权限和自定义权限
         all_permissions = list(set(default_permissions + permissions))
+        
+        # 计算新增和移除的权限
+        added_permissions = [p for p in permissions if p not in current_permissions]
+        removed_permissions = [p for p in current_permissions if p not in permissions]
         
         # 更新用户权限
         await self.collection.update_one(
@@ -161,6 +185,44 @@ class UserService:
                 }
             }
         )
+        
+        # 获取IP地址
+        ip_address = None
+        if request and hasattr(request, 'client') and request.client:
+            ip_address = request.client.host
+        
+        # 记录审计日志-权限变更
+        try:
+            # 记录权限添加操作
+            for permission in added_permissions:
+                await self.audit_service.log_permission_change(
+                    user_id=operator_id,
+                    target_user_id=user_id,
+                    permission=permission,
+                    action="grant",
+                    ip_address=ip_address,
+                    details={
+                        "role": role,
+                        "operation": "grant_permission"
+                    }
+                )
+            
+            # 记录权限移除操作
+            for permission in removed_permissions:
+                await self.audit_service.log_permission_change(
+                    user_id=operator_id,
+                    target_user_id=user_id,
+                    permission=permission,
+                    action="revoke",
+                    ip_address=ip_address,
+                    details={
+                        "role": role,
+                        "operation": "revoke_permission"
+                    }
+                )
+        except Exception as e:
+            # 记录日志错误但不影响业务流程
+            logger.error(f"Failed to create audit log for permission update: {str(e)}")
         
         return await self.get_user_by_id(user_id)
     

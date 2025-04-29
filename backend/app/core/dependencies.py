@@ -1,10 +1,7 @@
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.config import settings
 from app.db.mongodb import get_database
 from app.db.crud_services import (
     get_crud_services, UserCRUD, DoctorCRUD, PatientCRUD, HealthManagerCRUD,
@@ -15,13 +12,11 @@ from app.db.crud_services import (
 from app.services.user_service import UserService
 from app.services.agent_service import AgentService
 from app.services.rehabilitation_service import RehabilitationService
-from app.schemas.user import UserResponse, TokenData
+from app.schemas.user import UserResponse
 from app.core.permissions import PermissionChecker, Permission
 from app.services.health_record_service import HealthRecordService
 from app.services.health_alert_service import HealthAlertService
-
-# OAuth2 password bearer for token validation
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/users/login")
+from app.core.auth import get_current_user, get_current_active_user
 
 # CRUD服务依赖
 async def get_crud(db: AsyncIOMotorDatabase = Depends(get_database)):
@@ -133,43 +128,6 @@ async def get_rehabilitation_service(
         progress_crud=progress_crud
     )
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    user_service: UserService = Depends(get_user_service)
-) -> UserResponse:
-    """解析JWT令牌并返回当前登录用户"""
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="无效的认证凭据",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
-    try:
-        # 解码JWT令牌
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        user_id: str = payload.get("sub")
-        
-        if user_id is None:
-            raise credentials_exception
-            
-        token_data = TokenData(user_id=user_id)
-    except JWTError:
-        raise credentials_exception
-        
-    # 获取用户信息
-    user = await user_service.get_user_by_id(token_data.user_id)
-    if user is None:
-        raise credentials_exception
-    
-    # 检查用户是否已激活
-    if not getattr(user, "is_active", True):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="账户已被停用"
-        )
-        
-    return user
-
 # 权限检查依赖
 def check_permission(permission: str):
     """检查用户是否具有特定权限"""
@@ -206,13 +164,14 @@ def check_all_permissions(permissions: List[str]):
         return current_user
     return dependency
 
+# 角色检查依赖
 def is_admin():
     """检查用户是否为管理员"""
     async def dependency(current_user: UserResponse = Depends(get_current_user)):
         if current_user.role != "admin":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="此操作需要管理员权限"
+                detail="需要管理员权限"
             )
         return current_user
     return dependency
@@ -223,7 +182,7 @@ def is_doctor():
         if current_user.role != "doctor":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="此操作需要医生权限"
+                detail="需要医生权限"
             )
         return current_user
     return dependency
@@ -234,7 +193,7 @@ def is_health_manager():
         if current_user.role != "health_manager":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="此操作需要健康管理师权限"
+                detail="需要健康管理师权限"
             )
         return current_user
     return dependency
@@ -245,32 +204,27 @@ def is_patient():
         if current_user.role != "patient":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="此操作需要患者权限"
+                detail="需要患者权限"
             )
         return current_user
     return dependency
 
 def is_medical_staff():
-    """检查用户是否为医疗人员（医生或健康管理师）"""
+    """检查用户是否为医疗人员(医生或健康管理师)"""
     async def dependency(current_user: UserResponse = Depends(get_current_user)):
         if current_user.role not in ["doctor", "health_manager"]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="此操作需要医疗人员权限"
+                detail="需要医疗人员(医生或健康管理师)权限"
             )
         return current_user
     return dependency
 
-# 健康档案相关依赖
-from app.services.health_record_service import HealthRecordService
-
-# 获取健康档案服务
+# 服务依赖
 async def get_health_record_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> HealthRecordService:
     """获取健康记录服务"""
     return HealthRecordService(db=db)
 
 async def get_health_alert_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> HealthAlertService:
     """获取健康预警服务"""
-    service = HealthAlertService(db=db)
-    await service.initialize()  # 初始化服务，创建索引
-    return service 
+    return HealthAlertService(db=db)

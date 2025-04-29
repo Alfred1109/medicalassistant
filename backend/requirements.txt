@@ -1,21 +1,32 @@
+# Web框架相关
 fastapi==0.104.1
 uvicorn==0.24.0
-motor==3.2.0
 pydantic==2.4.2
 pydantic-settings==2.0.3
-python-jose==3.3.0
-passlib==1.7.4
 python-multipart==0.0.6
 email-validator==2.0.0
-python-dotenv==1.0.0
-bcrypt==4.0.1
-pytest==7.4.3
 httpx==0.25.0
-# aiohttp==3.8.6  # Removed due to compatibility issues with Python 3.12
+
+# 数据库相关
+motor==3.2.0
+pymongo[srv]==4.6.0
+# 注意：不要单独安装bson包，它已包含在pymongo中
+
+# 认证和安全
+python-jose==3.3.0
+passlib==1.7.4
+bcrypt==4.0.1
+
+# AI和外部服务集成
 openai==1.2.4
-anthropic>=0.49.0
-pymongo==4.6.0
+anthropic==0.50.0
 requests==2.31.0
-typing-extensions>=4.8.0
-bson>=0.5.10
-uuid>=1.30
+
+# 工具和辅助库
+python-dotenv==1.0.0
+typing-extensions==4.13.0
+pytest==7.4.3
+
+# 注意：
+# 1. uuid库不需要单独安装，Python 3已内置
+# 2. bson库不需要单独安装，已包含在pymongo中

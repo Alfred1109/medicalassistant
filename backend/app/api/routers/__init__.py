@@ -10,4 +10,5 @@ from app.api.routers.health_alert_router import router as health_alert_router
 from app.api.routers.auth_router import router as auth_router
 from app.api.routers.health_record_router import router as health_record_router
 from app.api.routers.device_router import router as device_router  # 设备路由器
-from app.api.routers.device_analysis_router import router as device_analysis_router  # 设备分析路由器 
+from app.api.routers.device_analysis_router import router as device_analysis_router  # 设备分析路由器
+from app.api.routers.audit_log_router import router as audit_log_router  # 审计日志路由器 

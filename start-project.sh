@@ -339,7 +339,15 @@ start_backend() {
     
     # 启动后端服务
     echo -e "${YELLOW}正在启动后端服务(端口5502)...${NC}"
-    python3 -m app.main >> "$BACKEND_LOG" 2>&1 &
+    if command -v python3.9 &> /dev/null; then
+        PYTHON_CMD="python3.9"
+    elif command -v python3.10 &> /dev/null; then
+        PYTHON_CMD="python3.10"
+    else
+        PYTHON_CMD="python3"
+    fi
+    echo -e "${YELLOW}使用Python解释器: $PYTHON_CMD${NC}"
+    PYTHONPATH="$BACKEND_DIR/venv/lib/python3.12/site-packages:$PYTHONPATH" $PYTHON_CMD -m app.main >> "$BACKEND_LOG" 2>&1 &
     BACKEND_PID=$!
     echo $BACKEND_PID > .backend_pid
     

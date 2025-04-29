@@ -3,10 +3,17 @@
 实现基于角色的权限控制和细粒度权限管理
 """
 from typing import Dict, List, Set, Optional, Callable, Any
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from functools import wraps
+import logging
+from datetime import datetime
 
 from app.schemas.user import UserResponse
+from app.services.audit_log_service import AuditLogService
+from app.core.auth import get_current_active_user
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 # 定义系统权限
 class Permission:
@@ -75,6 +82,10 @@ class Permission:
     AGENT_UPDATE = "agent:update"
     AGENT_DELETE = "agent:delete"
     AGENT_EXECUTE = "agent:execute"
+    
+    # 审计权限
+    AUDIT_LOG_READ = "audit_log:read"
+    AUDIT_LOG_EXPORT = "audit_log:export"
 
 
 # 基于角色的默认权限
@@ -125,55 +136,56 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         Permission.VIEW_ANY_HEALTH_RECORD,
         Permission.MANAGE_FOLLOW_UP,
         Permission.CREATE_LAB_RESULT,
+        Permission.AUDIT_LOG_READ,
+        Permission.AUDIT_LOG_EXPORT,
     ],
     "doctor": [
-        # 医生权限
-        Permission.USER_READ,
         Permission.PATIENT_READ,
-        Permission.PATIENT_UPDATE,
-        Permission.REHAB_PLAN_CREATE,
-        Permission.REHAB_PLAN_READ,
-        Permission.REHAB_PLAN_UPDATE,
-        Permission.REHAB_PLAN_APPROVE,
-        Permission.HEALTH_RECORD_CREATE,
         Permission.HEALTH_RECORD_READ,
+        Permission.HEALTH_RECORD_CREATE,
         Permission.HEALTH_RECORD_UPDATE,
-        Permission.VIEW_ANY_HEALTH_RECORD,
-        Permission.MANAGE_FOLLOW_UP,
-        Permission.CREATE_LAB_RESULT,
-        Permission.DEVICE_READ,
+        Permission.REHAB_PLAN_READ,
+        Permission.REHAB_PLAN_CREATE,
+        Permission.REHAB_PLAN_UPDATE,
         Permission.DEVICE_DATA_READ,
         Permission.AGENT_READ,
         Permission.AGENT_EXECUTE,
+        Permission.MANAGE_FOLLOW_UP,
+        Permission.CREATE_LAB_RESULT,
     ],
     "health_manager": [
-        # 健康管理师权限
-        Permission.USER_READ,
         Permission.PATIENT_READ,
-        Permission.PATIENT_UPDATE,
-        Permission.REHAB_PLAN_READ,
-        Permission.REHAB_PLAN_UPDATE,
-        Permission.HEALTH_RECORD_CREATE,
         Permission.HEALTH_RECORD_READ,
-        Permission.HEALTH_RECORD_UPDATE,
-        Permission.VIEW_ANY_HEALTH_RECORD,
-        Permission.MANAGE_FOLLOW_UP,
-        Permission.DEVICE_READ,
+        Permission.HEALTH_RECORD_CREATE,
         Permission.DEVICE_DATA_READ,
         Permission.AGENT_READ,
         Permission.AGENT_EXECUTE,
     ],
     "patient": [
-        # 患者权限
-        Permission.USER_READ,
-        Permission.REHAB_PLAN_READ,
+        # 患者只能查看自己的信息
         Permission.HEALTH_RECORD_READ,
-        Permission.DEVICE_READ,
-        Permission.DEVICE_DATA_READ,
         Permission.AGENT_READ,
         Permission.AGENT_EXECUTE,
-    ],
+        Permission.DEVICE_DATA_READ,
+    ]
 }
+
+# 定义需要记录审计日志的关键权限
+AUDITED_PERMISSIONS = [
+    Permission.SYSTEM_ADMIN,
+    Permission.USER_CREATE,
+    Permission.USER_DELETE,
+    Permission.DOCTOR_CREATE,
+    Permission.DOCTOR_DELETE,
+    Permission.HEALTH_MANAGER_CREATE,
+    Permission.HEALTH_MANAGER_DELETE,
+    Permission.VIEW_ANY_HEALTH_RECORD,
+    Permission.ORGANIZATION_CREATE,
+    Permission.ORGANIZATION_DELETE,
+    Permission.AUDIT_LOG_READ,
+    Permission.AUDIT_LOG_EXPORT,
+]
+
 
 class PermissionChecker:
     """
@@ -204,132 +216,120 @@ class PermissionChecker:
         #     return True
             
         return False
-        
+
     @staticmethod
-    def require_permission(permission: str):
+    async def check_permission_with_audit(
+        user: UserResponse, 
+        permission: str, 
+        resource_id: Optional[str] = None,
+        db = None,
+        request: Optional[Request] = None,
+        details: Optional[Dict[str, Any]] = None
+    ) -> bool:
         """
-        权限要求装饰器
-        用于API端点，要求用户具有特定权限
-        """
-        def decorator(func: Callable) -> Callable:
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                # 获取当前用户
-                current_user = kwargs.get("current_user")
-                if not current_user:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="需要认证",
-                    )
-                
-                # 检查权限
-                if not PermissionChecker.has_permission(current_user, permission):
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"权限不足: 需要 {permission} 权限",
-                    )
-                    
-                return await func(*args, **kwargs)
-            return wrapper
-        return decorator
+        检查用户是否具有特定权限，并记录审计日志
         
-    @staticmethod
-    def require_any_permission(permissions: List[str]):
-        """
-        要求用户具有任意一个列出的权限
-        """
-        def decorator(func: Callable) -> Callable:
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                # 获取当前用户
-                current_user = kwargs.get("current_user")
-                if not current_user:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="需要认证",
-                    )
-                
-                # 检查是否有任一权限
-                has_any = any(PermissionChecker.has_permission(current_user, perm) for perm in permissions)
-                if not has_any:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"权限不足: 需要以下权限之一: {', '.join(permissions)}",
-                    )
-                    
-                return await func(*args, **kwargs)
-            return wrapper
-        return decorator
+        参数:
+        - user: 当前用户
+        - permission: 要检查的权限
+        - resource_id: 资源ID（可选）
+        - db: 数据库连接（可选，如果需要记录审计日志）
+        - request: HTTP请求对象（可选，用于获取IP地址）
+        - details: 额外的详细信息（可选）
         
-    @staticmethod
-    def require_all_permissions(permissions: List[str]):
+        返回:
+        - bool: 是否具有权限
         """
-        要求用户具有所有列出的权限
-        """
-        def decorator(func: Callable) -> Callable:
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                # 获取当前用户
-                current_user = kwargs.get("current_user")
-                if not current_user:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="需要认证",
-                    )
+        has_permission = PermissionChecker.has_permission(user, permission)
+        
+        # 记录审计日志（仅针对重要权限或权限检查失败的情况）
+        if db and (not has_permission or permission in AUDITED_PERMISSIONS):
+            try:
+                # 获取IP地址
+                ip_address = None
+                if request and hasattr(request, 'client') and request.client:
+                    ip_address = request.client.host
                 
-                # 检查是否有所有权限
-                missing_perms = [perm for perm in permissions if not PermissionChecker.has_permission(current_user, perm)]
-                if missing_perms:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"权限不足: 缺少以下权限: {', '.join(missing_perms)}",
-                    )
-                    
-                return await func(*args, **kwargs)
-            return wrapper
-        return decorator
+                # 创建审计日志服务
+                audit_service = AuditLogService(db)
+                
+                # 记录权限检查日志
+                await audit_service.log_permission_check(
+                    user_id=user.id,
+                    permission=permission,
+                    resource_id=resource_id,
+                    is_granted=has_permission,
+                    ip_address=ip_address,
+                    details=details
+                )
+            except Exception as e:
+                # 记录日志错误，但不影响权限检查结果
+                logger.error(f"Failed to create audit log: {str(e)}")
+        
+        return has_permission
 
 
-# FastAPI依赖项，用于检查特定权限
-def has_permission(permission: str):
+# 权限依赖函数，使用方式：
+# @router.get("/endpoint")
+# async def endpoint(current_user: User = Depends(get_current_user),
+#                   _: None = Depends(require_permission(Permission.SOME_PERMISSION))):
+def require_permission(permission: str, resource_id: Optional[str] = None):
     """
-    检查用户是否具有特定权限的依赖项
+    创建权限检查的依赖函数
+    
+    参数:
+    - permission: 要检查的权限
+    - resource_id: 资源ID（可选）
+    
+    用法示例:
+    @router.get("/users")
+    async def get_users(
+        current_user: User = Depends(get_current_user),
+        _: None = Depends(require_permission(Permission.USER_READ))
+    ):
+        # 如果用户没有权限，会抛出HTTPException
+        # 实现代码...
     """
-    async def dependency(current_user: UserResponse):
-        if not PermissionChecker.has_permission(current_user, permission):
+    
+    async def check_permission(
+        current_user: UserResponse = Depends(get_current_active_user),
+        request: Request = None,
+        db = None
+    ):
+        # 使用带审计功能的权限检查
+        has_permission = await PermissionChecker.check_permission_with_audit(
+            user=current_user,
+            permission=permission,
+            resource_id=resource_id,
+            db=db,
+            request=request,
+            details={"endpoint": request.url.path if request else None}
+        )
+        
+        if not has_permission:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"权限不足: 需要 {permission} 权限",
+                detail=f"您没有执行此操作的权限：{permission}"
             )
-        return current_user
-    return dependency
+    
+    return check_permission
 
 
-def has_any_permission(permissions: List[str]):
-    """
-    检查用户是否具有任一权限的依赖项
-    """
-    async def dependency(current_user: UserResponse):
-        has_any = any(PermissionChecker.has_permission(current_user, perm) for perm in permissions)
-        if not has_any:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"权限不足: 需要以下权限之一: {', '.join(permissions)}",
-            )
-        return current_user
-    return dependency
-
-
-def has_all_permissions(permissions: List[str]):
-    """
-    检查用户是否具有所有权限的依赖项
-    """
-    async def dependency(current_user: UserResponse):
-        missing_perms = [perm for perm in permissions if not PermissionChecker.has_permission(current_user, perm)]
-        if missing_perms:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"权限不足: 缺少以下权限: {', '.join(missing_perms)}",
-            )
-        return current_user
-    return dependency 
+# 获取当前用户的所有权限
+def get_user_permissions(user: UserResponse) -> Set[str]:
+    """获取用户所有的权限"""
+    # 获取角色默认权限
+    permissions = set(ROLE_PERMISSIONS.get(user.role, []))
+    
+    # 如果是管理员，拥有所有权限
+    if user.role == "admin":
+        # 将所有权限类型添加到结果中
+        for attr in dir(Permission):
+            if not attr.startswith('_'):
+                permissions.add(getattr(Permission, attr))
+    
+    # 将来可以从用户对象中获取自定义权限
+    # if hasattr(user, 'permissions'):
+    #     permissions.update(user.permissions)
+    
+    return permissions 

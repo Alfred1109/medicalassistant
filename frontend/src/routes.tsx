@@ -64,6 +64,7 @@ import OrganizationManagement from './pages/Admin/OrganizationManagement';
 import TagManagement from './pages/Admin/TagManagement';
 import DeviceManagement from './pages/Admin/DeviceManagement';
 import DataVisualization from './pages/Admin/DataVisualization';
+import AuditLogList from './components/Admin/AuditLogList';
 
 // 康复评估相关页面
 import RehabAssessment from './pages/Assessment/RehabAssessment';
@@ -253,6 +254,7 @@ const routes: RouteObject[] = [
           { path: 'tags', element: <TagManagement /> },
           { path: 'devices', element: <DeviceManagement /> },
           { path: 'visualization', element: <DataVisualization /> },
+          { path: 'audit-logs', element: <AuditLogList /> },
         ]
       },
     ],
