@@ -17,14 +17,14 @@ import TimelineIcon from '@mui/icons-material/Timeline';
 import TuneIcon from '@mui/icons-material/Tune';
 
 const menuItems = [
-  { name: '患者管理', path: '/health-manager/patients', icon: <PersonIcon /> },
-  { name: '健康档案', path: '/health-manager/health-records', icon: <FolderIcon /> },
-  { name: '健康数据时间线', path: '/health-manager/health-data-timeline', icon: <TimelineIcon /> },
-  { name: '健康数据阈值', path: '/health-manager/thresholds', icon: <TuneIcon /> },
-  { name: '随访管理', path: '/health-manager/follow-ups', icon: <EventNoteIcon /> },
-  { name: '数据监测', path: '/health-manager/monitoring', icon: <MonitorHeartIcon /> },
-  { name: '医患沟通', path: '/health-manager/communications', icon: <ChatIcon /> },
-  { name: '数据统计', path: '/health-manager/statistics', icon: <QueryStatsIcon /> },
+  { name: '患者管理', path: '/app/health-manager/patients', icon: <PersonIcon /> },
+  { name: '健康档案', path: '/app/health-manager/health-records', icon: <FolderIcon /> },
+  { name: '健康数据时间线', path: '/app/health-manager/health-data-timeline', icon: <TimelineIcon /> },
+  { name: '健康数据阈值', path: '/app/health-manager/thresholds', icon: <TuneIcon /> },
+  { name: '随访管理', path: '/app/health-manager/follow-ups', icon: <EventNoteIcon /> },
+  { name: '数据监测', path: '/app/health-manager/monitoring', icon: <MonitorHeartIcon /> },
+  { name: '医患沟通', path: '/app/health-manager/communications', icon: <ChatIcon /> },
+  { name: '数据统计', path: '/app/health-manager/statistics', icon: <QueryStatsIcon /> },
 ];
 
 const SideMenu: React.FC = () => {

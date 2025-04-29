@@ -14,11 +14,11 @@ import ChatIcon from '@mui/icons-material/Chat';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
 
 const menuItems = [
-  { name: '健康档案', path: '/patient/health-records', icon: <FolderIcon /> },
-  { name: '日常记录', path: '/patient/daily-records', icon: <EventNoteIcon /> },
-  { name: '设备绑定', path: '/patient/devices', icon: <DevicesIcon /> },
-  { name: '医患沟通', path: '/patient/communications', icon: <ChatIcon /> },
-  { name: '数据统计', path: '/patient/statistics', icon: <QueryStatsIcon /> },
+  { name: '健康档案', path: '/app/patient/health-records', icon: <FolderIcon /> },
+  { name: '日常记录', path: '/app/patient/daily-records', icon: <EventNoteIcon /> },
+  { name: '设备绑定', path: '/app/patient/devices', icon: <DevicesIcon /> },
+  { name: '医患沟通', path: '/app/patient/communications', icon: <ChatIcon /> },
+  { name: '数据统计', path: '/app/patient/statistics', icon: <QueryStatsIcon /> },
 ];
 
 const SideMenu: React.FC = () => {

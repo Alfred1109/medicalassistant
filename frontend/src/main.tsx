@@ -203,7 +203,23 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   
   if (!isAuthenticated) {
     // 如果未认证，重定向到登录页面
-    return <Navigate to="/auth" replace />;
+    return <Navigate to="/auth/login" replace />;
+  }
+  
+  return <>{children}</>;
+};
+
+// 角色路由守卫组件
+const RoleRoute = ({ children, allowedRoles }: { children: React.ReactNode, allowedRoles: string[] }) => {
+  const userRole = localStorage.getItem('userRole');
+  const isAuthenticated = localStorage.getItem('token') !== null;
+  
+  if (!isAuthenticated) {
+    return <Navigate to="/auth/login" replace />;
+  }
+  
+  if (!userRole || !allowedRoles.includes(userRole)) {
+    return <Navigate to="/app/dashboard" replace />;
   }
   
   return <>{children}</>;
@@ -217,8 +233,8 @@ const App = () => (
       <BrowserRouter>
         <ErrorBoundary fallback={<FallbackIndexPage />}>
           <Routes>
-            {/* 首页 */}
-            <Route path="/" element={<IndexPage />} />
+            {/* 首页重定向到登录页面 */}
+            <Route path="/" element={<Navigate to="/auth/login" replace />} />
             
             {/* 认证路由 */}
             <Route path="/auth" element={SafeComponent(AuthPage, FallbackAuthPage)}>

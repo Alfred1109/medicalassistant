@@ -4,11 +4,11 @@ import {
   Box,
   List,
   ListItem,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
   Paper,
 } from '@mui/material';
+import ListItemButton from '@mui/material/ListItemButton';
+import ListItemIcon from '@mui/material/ListItemIcon';
+import ListItemText from '@mui/material/ListItemText';
 import PersonIcon from '@mui/icons-material/Person';
 import FolderIcon from '@mui/icons-material/Folder';
 import MonitorHeartIcon from '@mui/icons-material/MonitorHeart';
@@ -18,13 +18,13 @@ import ChatIcon from '@mui/icons-material/Chat';
 import DescriptionIcon from '@mui/icons-material/Description';
 
 const menuItems = [
-  { name: '患者管理', path: '/doctor/patients', icon: <PersonIcon /> },
-  { name: '健康档案', path: '/doctor/health-records', icon: <FolderIcon /> },
-  { name: '随访管理', path: '/doctor/follow-ups', icon: <EventNoteIcon /> },
-  { name: '数据监测', path: '/doctor/monitoring', icon: <MonitorHeartIcon /> },
-  { name: '医患沟通', path: '/doctor/communications', icon: <ChatIcon /> },
-  { name: '数据统计', path: '/doctor/statistics', icon: <QueryStatsIcon /> },
-  { name: '知情同意', path: '/doctor/informed-consent', icon: <DescriptionIcon /> },
+  { name: '患者管理', path: '/app/doctor/patients', icon: <PersonIcon /> },
+  { name: '健康档案', path: '/app/doctor/health-records', icon: <FolderIcon /> },
+  { name: '随访管理', path: '/app/doctor/follow-ups', icon: <EventNoteIcon /> },
+  { name: '数据监测', path: '/app/doctor/monitoring', icon: <MonitorHeartIcon /> },
+  { name: '医患沟通', path: '/app/doctor/communications', icon: <ChatIcon /> },
+  { name: '数据统计', path: '/app/doctor/statistics', icon: <QueryStatsIcon /> },
+  { name: '知情同意', path: '/app/doctor/informed-consent', icon: <DescriptionIcon /> },
 ];
 
 const SideMenu: React.FC = () => {

@@ -16,13 +16,13 @@ import DevicesIcon from '@mui/icons-material/Devices';
 import InsightsIcon from '@mui/icons-material/Insights';
 
 const menuItems = [
-  { name: '医生管理', path: '/admin/doctors', icon: <LocalHospitalIcon /> },
-  { name: '患者管理', path: '/admin/patients', icon: <PeopleIcon /> },
-  { name: '健管师管理', path: '/admin/health-managers', icon: <HealthAndSafetyIcon /> },
-  { name: '组织机构', path: '/admin/organizations', icon: <BusinessIcon /> },
-  { name: '标签管理', path: '/admin/tags', icon: <LabelIcon /> },
-  { name: '设备查看', path: '/admin/devices', icon: <DevicesIcon /> },
-  { name: '数据可视化', path: '/admin/visualization', icon: <InsightsIcon /> },
+  { name: '医生管理', path: '/app/admin/doctors', icon: <LocalHospitalIcon /> },
+  { name: '患者管理', path: '/app/admin/patients', icon: <PeopleIcon /> },
+  { name: '健管师管理', path: '/app/admin/health-managers', icon: <HealthAndSafetyIcon /> },
+  { name: '组织机构', path: '/app/admin/organizations', icon: <BusinessIcon /> },
+  { name: '标签管理', path: '/app/admin/tags', icon: <LabelIcon /> },
+  { name: '设备查看', path: '/app/admin/devices', icon: <DevicesIcon /> },
+  { name: '数据可视化', path: '/app/admin/visualization', icon: <InsightsIcon /> },
 ];
 
 const SideMenu: React.FC = () => {
