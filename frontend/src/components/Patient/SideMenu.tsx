@@ -12,8 +12,10 @@ import EventNoteIcon from '@mui/icons-material/EventNote';
 import DevicesIcon from '@mui/icons-material/Devices';
 import ChatIcon from '@mui/icons-material/Chat';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
+import DashboardIcon from '@mui/icons-material/Dashboard';
 
 const menuItems = [
+  { name: '主面板', path: '/app/patient/main-dashboard', icon: <DashboardIcon /> },
   { name: '健康档案', path: '/app/patient/health-records', icon: <FolderIcon /> },
   { name: '日常记录', path: '/app/patient/daily-records', icon: <EventNoteIcon /> },
   { name: '设备绑定', path: '/app/patient/devices', icon: <DevicesIcon /> },

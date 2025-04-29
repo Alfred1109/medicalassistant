@@ -9,12 +9,12 @@ import Layout from './components/Layout/Layout';
 import IndexPage from './pages/IndexPage';
 
 // Auth Pages
-import AuthPage from './pages/Auth/AuthPage';
+import AuthPage from './pages/AuthPage';
 import Login from './pages/Auth/Login';
 import Register from './pages/Auth/Register';
 
 // App Pages
-import Dashboard from './pages/Dashboard/Dashboard';
+import Dashboard from './pages/Dashboard';
 import RehabPlans from './pages/RehabPlan/RehabPlans';
 import RehabPlanDetail from './pages/RehabPlan/RehabPlanDetail';
 import RehabPlanForm from './pages/RehabPlan/RehabPlanForm';
@@ -44,6 +44,7 @@ import HealthDataTimelinePage from './pages/HealthManager/HealthDataTimelinePage
 import HealthThresholdPage from './pages/HealthManager/HealthThresholdPage';
 
 import PatientDashboard from './pages/Patient/PatientDashboard';
+import PatientMainDashboard from './pages/Patient/PatientMainDashboard';
 import PatientHealthRecords from './pages/Patient/HealthRecords';
 import DailyRecords from './pages/Patient/DailyRecords';
 import DeviceBinding from './pages/Patient/DeviceBinding';
@@ -144,6 +145,9 @@ const routes: RouteObject[] = [
       </ProtectedRoute>
     ),
     children: [
+      // 首页/导航页面
+      { index: true, element: <IndexPage /> },
+
       // Dashboard route - 主面板
       { path: 'dashboard', element: <Dashboard /> },
       
@@ -221,7 +225,8 @@ const routes: RouteObject[] = [
         path: 'patient',
         element: <RoleRoute allowedRoles={['patient']}><PatientDashboard /></RoleRoute>,
         children: [
-          { index: true, element: <Navigate to="/app/patient/health-records" replace /> },
+          { index: true, element: <Navigate to="/app/patient/main-dashboard" replace /> },
+          { path: 'main-dashboard', element: <PatientMainDashboard /> },
           { path: 'health-records', element: <PatientHealthRecords /> },
           { path: 'daily-records', element: <DailyRecords /> },
           { path: 'devices', element: <DeviceBinding /> },

@@ -27,7 +27,7 @@ import {
 } from '@mui/icons-material';
 
 import { AppDispatch, RootState } from '../../store';
-import { login, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManagerLogin } from '../../store/slices/authSlice';
+import { login, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManagerLogin, mockPatientLogin } from '../../store/slices/authSlice';
 
 // 默认用户信息
 const DEFAULT_CREDENTIALS = {
@@ -102,7 +102,12 @@ const Login: React.FC = () => {
   
   const handleMockHealthManagerLogin = () => {
     dispatch(mockHealthManagerLogin());
-    navigate('/app/patient'); // 改为患者角色，因为我们希望测试患者视图
+    navigate('/app/health-manager');
+  };
+
+  const handleMockPatientLogin = () => {
+    dispatch(mockPatientLogin());
+    navigate('/app/patient');
   };
 
   return (
@@ -262,6 +267,14 @@ const Login: React.FC = () => {
             onClick={handleMockHealthManagerLogin}
           >
             以健康管理师身份登录
+          </Button>
+          <Button 
+            variant="outlined" 
+            color="success" 
+            fullWidth
+            onClick={handleMockPatientLogin}
+          >
+            以患者身份登录
           </Button>
         </Box>
       </Box>
