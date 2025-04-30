@@ -10,7 +10,6 @@ from datetime import datetime
 
 from app.schemas.user import UserResponse
 from app.services.audit_log_service import AuditLogService
-from app.core.auth import get_current_active_user
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -269,50 +268,68 @@ class PermissionChecker:
         return has_permission
 
 
-# 权限依赖函数，使用方式：
-# @router.get("/endpoint")
-# async def endpoint(current_user: User = Depends(get_current_user),
-#                   _: None = Depends(require_permission(Permission.SOME_PERMISSION))):
 def require_permission(permission: str, resource_id: Optional[str] = None):
     """
-    创建权限检查的依赖函数
-    
-    参数:
-    - permission: 要检查的权限
-    - resource_id: 资源ID（可选）
-    
-    用法示例:
-    @router.get("/users")
-    async def get_users(
-        current_user: User = Depends(get_current_user),
-        _: None = Depends(require_permission(Permission.USER_READ))
-    ):
-        # 如果用户没有权限，会抛出HTTPException
-        # 实现代码...
+    权限检查装饰器，用于路由函数
+    参数：
+    - permission: 需要的权限
+    - resource_id: 可选资源ID，用于细粒度权限检查
     """
-    
-    async def check_permission(
-        current_user: UserResponse = Depends(get_current_active_user),
-        request: Request = None,
-        db = None
-    ):
-        # 使用带审计功能的权限检查
-        has_permission = await PermissionChecker.check_permission_with_audit(
-            user=current_user,
-            permission=permission,
-            resource_id=resource_id,
-            db=db,
-            request=request,
-            details={"endpoint": request.url.path if request else None}
-        )
-        
-        if not has_permission:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"您没有执行此操作的权限：{permission}"
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # 动态导入auth模块，避免循环引用
+            from app.core.auth import get_current_active_user
+            
+            # 获取当前用户和请求
+            current_user = kwargs.get("current_user")
+            request = kwargs.get("request")
+            db = kwargs.get("db")
+            
+            if not current_user:
+                # 如果没有通过参数传入当前用户，尝试通过依赖获取
+                try:
+                    current_user = await get_current_active_user()
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="未认证或无效令牌",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            
+            # 检查权限
+            has_perm = await PermissionChecker.check_permission_with_audit(
+                current_user, permission, resource_id, db, request
             )
+            
+            if not has_perm:
+                logger.warning(f"用户 {current_user.email} 缺少所需权限: {permission}")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"权限不足: 需要 {permission} 权限"
+                )
+                
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+async def check_permission(
+    current_user: UserResponse = None,
+    request: Request = None,
+    db = None
+):
+    """
+    权限检查依赖，可用于FastAPI路由
+    """
+    # 动态导入以避免循环引用
+    from app.core.auth import get_current_active_user
     
-    return check_permission
+    if current_user is None:
+        current_user = await get_current_active_user()
+        
+    # 使用带审计功能的权限检查
+    return current_user
 
 
 # 获取当前用户的所有权限

@@ -266,6 +266,8 @@ class UserService:
         """
         获取医生列表，支持按状态和科室筛选
         """
+        logging.info(f"获取医生列表: status={status}, department={department}, skip={skip}, limit={limit}")
+        
         # 基础查询：角色为医生
         query = {"role": "doctor"}
         
@@ -276,12 +278,21 @@ class UserService:
         if department:
             query["department"] = department
         
+        logging.info(f"医生查询条件: {query}")
+        
         # 执行查询
         doctor_docs = await self.db.users.find(query).skip(skip).limit(limit).to_list(length=limit)
+        
+        logging.info(f"查询到 {len(doctor_docs)} 条医生记录")
+        if len(doctor_docs) > 0:
+            logging.debug(f"第一条医生记录: {doctor_docs[0]}")
         
         # 转换为前端需要的格式
         doctors = []
         for doc in doctor_docs:
+            # 获取元数据信息，确保即使不存在也返回空字典
+            metadata = doc.get("metadata", {}) or {}
+            
             doctor = {
                 "id": str(doc["_id"]),
                 "name": doc.get("name", ""),
@@ -290,13 +301,17 @@ class UserService:
                 "title": doc.get("professional_title", ""),
                 "specialty": doc.get("specialty", ""),
                 "email": doc.get("email", ""),
-                "phone": doc.get("metadata", {}).get("phone", ""),
-                "patients": doc.get("metadata", {}).get("patients_count", 0),
-                "status": doc.get("metadata", {}).get("status", "在职"),
-                "joinDate": doc.get("metadata", {}).get("join_date", ""),
-                "certifications": doc.get("metadata", {}).get("certifications", []),
+                "phone": metadata.get("phone", ""),
+                "patients": metadata.get("patients_count", 0),
+                "status": metadata.get("status", "在职"),
+                "joinDate": metadata.get("join_date", ""),
+                "certifications": metadata.get("certifications", []),
             }
             doctors.append(doctor)
+        
+        logging.info(f"返回 {len(doctors)} 条格式化医生数据")
+        if len(doctors) > 0:
+            logging.debug(f"第一条格式化医生数据: {doctors[0]}")
         
         return doctors
     

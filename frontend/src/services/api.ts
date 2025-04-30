@@ -2,7 +2,8 @@ import axios from 'axios';
 
 // Create axios instance with base URL and default headers
 const api = axios.create({
-  baseURL: `${import.meta.env.VITE_API_URL}/api`,
+  // 直接使用硬编码URL，避免环境变量可能导致的问题
+  baseURL: 'http://localhost:5502/api',
   headers: {
     'Content-Type': 'application/json',
   },
@@ -12,9 +13,11 @@ const api = axios.create({
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token');
+    console.log('发送请求，当前token:', token);
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    console.log('发送API请求:', config.method?.toUpperCase(), config.url, config);
     return config;
   },
   (error) => Promise.reject(error)
@@ -152,7 +155,39 @@ const apiService = {
   configureDevice: (deviceId, configData) => api.put(`/devices/${deviceId}/config`, configData),
   
   // 管理员服务
-  getDoctors: (params) => api.get('/admin/doctors', { params }),
+  getDoctors: (params) => {
+    console.log('调用getDoctors API, 参数:', params);
+    
+    // 检查token是否存在
+    const token = localStorage.getItem('token');
+    if (!token) {
+      console.error('getDoctors API错误: 没有登录凭证，请先登录');
+      return Promise.reject(new Error('未登录，请先登录系统'));
+    }
+    
+    return api.get('/admin/doctors', { params })
+      .then(response => {
+        console.log('getDoctors API响应:', response);
+        return response;
+      })
+      .catch(error => {
+        console.error('getDoctors API错误:', error);
+        
+        // 如果是401错误，可能是token过期，引导用户重新登录
+        if (error.response && error.response.status === 401) {
+          // 清除登录信息
+          localStorage.removeItem('token');
+          localStorage.removeItem('userRole');
+          
+          // 如果不在登录页，跳转到登录页
+          if (!window.location.pathname.includes('/auth')) {
+            window.location.href = '/auth';
+          }
+        }
+        
+        throw error;
+      });
+  },
   createDoctor: (doctorData) => api.post('/admin/doctors', doctorData),
   updateDoctor: (doctorId, doctorData) => api.put(`/admin/doctors/${doctorId}`, doctorData),
   deleteDoctor: (doctorId) => api.delete(`/admin/doctors/${doctorId}`),

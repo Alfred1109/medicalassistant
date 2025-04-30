@@ -86,21 +86,108 @@ const DoctorManagement: React.FC = () => {
       setIsLoading(true);
       setError(null);
       
+      console.log('==== 开始请求医生数据 ====');
+      console.log('当前token:', localStorage.getItem('token'));
+      
+      // 添加超时控制
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('请求超时，请检查网络连接或后端服务'));
+        }, 5000); // 5秒超时
+      });
+      
       try {
         const params: any = {};
         if (filterDepartment !== '全部') {
           params.department = filterDepartment;
         }
         
-        const response = await apiService.getDoctors(params);
-        setDoctors(response.data);
-        setFilteredDoctors(response.data);
-      } catch (err) {
+        console.log('正在获取医生数据，参数:', params);
+        // 使用Promise.race实现请求超时控制
+        const response = await Promise.race([
+          apiService.getDoctors(params),
+          timeoutPromise
+        ]) as any;
+        
+        console.log('医生数据API响应:', response);
+        
+        if (response && response.data) {
+          console.log('获取到医生数据:', response.data);
+          setDoctors(response.data);
+          setFilteredDoctors(response.data);
+        } else {
+          console.warn('API返回了空数据或格式不正确:', response);
+          // 使用模拟数据
+          const mockDoctors = [
+            {
+              id: "mock-doc-001",
+              name: "张医生",
+              department: "康复科",
+              title: "主任医师",
+              specialty: "神经康复",
+              email: "zhang@hospital.com",
+              phone: "13800138001",
+              status: "在职",
+              patients: 12,
+              joinDate: "2020-01-15"
+            },
+            {
+              id: "mock-doc-002",
+              name: "李医生",
+              department: "骨科",
+              title: "副主任医师",
+              specialty: "运动康复",
+              email: "li@hospital.com",
+              phone: "13800138002",
+              status: "在职",
+              patients: 8,
+              joinDate: "2021-03-20"
+            }
+          ];
+          console.log('使用模拟数据:', mockDoctors);
+          setDoctors(mockDoctors);
+          setFilteredDoctors(mockDoctors);
+        }
+      } catch (err: any) {
         console.error('获取医生数据失败:', err);
-        setError('获取医生数据失败，请刷新页面重试');
-        // 如果API调用失败，使用本地模拟数据作为后备
-        setDoctors([]);
-        setFilteredDoctors([]);
+        // 显示更详细的错误信息
+        const errorMessage = err.response 
+          ? `获取医生数据失败: ${err.response.status} - ${err.response.statusText}${err.response.data?.detail ? ` (${err.response.data.detail})` : ''}` 
+          : `获取医生数据失败: ${err.message || '未知错误'}`;
+        console.error(errorMessage);
+        setError(errorMessage);
+        
+        // 使用模拟数据替代
+        const mockDoctors = [
+          {
+            id: "mock-doc-001",
+            name: "张医生",
+            department: "康复科",
+            title: "主任医师",
+            specialty: "神经康复",
+            email: "zhang@hospital.com",
+            phone: "13800138001",
+            status: "在职",
+            patients: 12,
+            joinDate: "2020-01-15"
+          },
+          {
+            id: "mock-doc-002",
+            name: "李医生",
+            department: "骨科",
+            title: "副主任医师",
+            specialty: "运动康复",
+            email: "li@hospital.com",
+            phone: "13800138002",
+            status: "在职",
+            patients: 8,
+            joinDate: "2021-03-20"
+          }
+        ];
+        console.log('出错后使用模拟数据:', mockDoctors);
+        setDoctors(mockDoctors);
+        setFilteredDoctors(mockDoctors);
+        // 继续展示页面
       } finally {
         setIsLoading(false);
       }

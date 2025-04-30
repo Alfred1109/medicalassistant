@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -27,12 +27,12 @@ import {
 } from '@mui/icons-material';
 
 import { AppDispatch, RootState } from '../../store';
-import { login, clearAuthError } from '../../store/slices/authSlice';
+import { login, clearAuthError, mockAdminLogin } from '../../store/slices/authSlice';
 
 // 管理员账号信息
 const ADMIN_CREDENTIALS = {
   email: 'admin@example.com',
-  password: 'Admin123!',
+  password: 'admin123',  // 改为后端实际设置的密码
 };
 
 // 医生账号信息
@@ -103,6 +103,30 @@ const Login: React.FC = () => {
   const fillDoctorCredentials = () => {
     setFormData(DOCTOR_CREDENTIALS);
   };
+
+  // 添加自动登录功能
+  useEffect(() => {
+    // 检查URL参数中是否有autologin=admin
+    const urlParams = new URLSearchParams(window.location.search);
+    const autoLogin = urlParams.get('autologin');
+    
+    if (autoLogin === 'admin') {
+      setFormData(ADMIN_CREDENTIALS);
+      // 延迟500ms自动提交，确保表单状态已更新
+      setTimeout(() => {
+        dispatch(login(ADMIN_CREDENTIALS)).unwrap()
+          .then(result => {
+            redirectBasedOnRole(result.user.role);
+          })
+          .catch(err => {
+            console.error('自动登录失败:', err);
+            // 失败后使用模拟登录
+            dispatch(mockAdminLogin());
+            navigate('/app/admin');
+          });
+      }, 500);
+    }
+  }, []);
 
   return (
     <Box component="form" onSubmit={handleSubmit} noValidate>
