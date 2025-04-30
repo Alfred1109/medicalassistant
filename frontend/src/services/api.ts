@@ -150,6 +150,12 @@ const apiService = {
   getDeviceStatus: (deviceId) => api.get(`/devices/${deviceId}/status`),
   // 配置设备
   configureDevice: (deviceId, configData) => api.put(`/devices/${deviceId}/config`, configData),
+  
+  // 管理员服务
+  getDoctors: (params) => api.get('/admin/doctors', { params }),
+  createDoctor: (doctorData) => api.post('/admin/doctors', doctorData),
+  updateDoctor: (doctorId, doctorData) => api.put(`/admin/doctors/${doctorId}`, doctorData),
+  deleteDoctor: (doctorId) => api.delete(`/admin/doctors/${doctorId}`),
 };
 
 export { apiService };

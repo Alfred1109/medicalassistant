@@ -96,7 +96,8 @@ const HealthThresholdPage = React.lazy(() => import('./pages/HealthManager/Healt
 
 // 管理员页面
 const AdminDashboard = React.lazy(() => import('./pages/Admin/AdminDashboard'));
-const DoctorManagement = React.lazy(() => import('./pages/Admin/DoctorManagement'));
+// 移除懒加载，直接导入DoctorManagement以解决加载问题
+import DoctorManagement from './pages/Admin/DoctorManagement';
 const AdminPatientManagement = React.lazy(() => import('./pages/Admin/PatientManagement'));
 const HealthManagerManagement = React.lazy(() => import('./pages/Admin/HealthManagerManagement'));
 const OrganizationManagement = React.lazy(() => import('./pages/Admin/OrganizationManagement'));
@@ -345,10 +346,14 @@ const App = () => (
                 <Route path="documents/templates" element={SafeComponent(ConsentTemplateList, FallbackHealthManagerDashboard)} />
               </Route>
               
-              {/* 管理员专属路由 */}
-              <Route path="admin" element={SafeComponent(AdminDashboard, FallbackAdminDashboard)}>
+              {/* 管理员面板 */}
+              <Route path="admin" element={
+                <RoleRoute allowedRoles={['admin']}>
+                  <AdminDashboard />
+                </RoleRoute>
+              }>
                 <Route index element={<Navigate to="/app/admin/doctors" replace />} />
-                <Route path="doctors" element={SafeComponent(DoctorManagement, FallbackAdminDashboard)} />
+                <Route path="doctors" element={<DoctorManagement />} />
                 <Route path="patients" element={SafeComponent(AdminPatientManagement, FallbackAdminDashboard)} />
                 <Route path="health-managers" element={SafeComponent(HealthManagerManagement, FallbackAdminDashboard)} />
                 <Route path="organizations" element={SafeComponent(OrganizationManagement, FallbackAdminDashboard)} />

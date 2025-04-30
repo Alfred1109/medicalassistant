@@ -21,6 +21,7 @@ FRONTEND_DIR="$PROJECT_ROOT/frontend"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 LOGS_DIR="$PROJECT_ROOT/logs"
 DATA_DIR="$PROJECT_ROOT/data"
+VENV_DIR="$BACKEND_DIR/venv"
 
 # 创建日志目录
 mkdir -p "$LOGS_DIR"
@@ -132,6 +133,7 @@ cleanup_processes() {
     # 手动清理进程的逻辑
     local FRONTEND_PIDS=$(pgrep -f "node.*vite" | grep -v $$)
     local BACKEND_PIDS=$(pgrep -f "python.*app.py" | grep -v $$)
+    local UVICORN_PIDS=$(pgrep -f "uvicorn.*app:app" | grep -v $$)
     
     if [ -n "$FRONTEND_PIDS" ]; then
         echo -e "${YELLOW}发现前端进程，正在终止...${NC}"
@@ -143,9 +145,9 @@ cleanup_processes() {
         echo -e "${GREEN}✓ 未发现其他前端进程${NC}"
     fi
     
-    if [ -n "$BACKEND_PIDS" ]; then
+    if [ -n "$BACKEND_PIDS" ] || [ -n "$UVICORN_PIDS" ]; then
         echo -e "${YELLOW}发现后端进程，正在终止...${NC}"
-        for pid in $BACKEND_PIDS; do
+        for pid in $BACKEND_PIDS $UVICORN_PIDS; do
             echo -e "终止后端进程: $pid"
             kill -15 $pid 2>/dev/null || kill -9 $pid 2>/dev/null
         done
@@ -155,7 +157,7 @@ cleanup_processes() {
     
     # 清理PID文件
     [ -f .frontend_pid ] && rm .frontend_pid
-    [ -f .backend_pid ] && rm .backend_pid
+    [ -f "$BACKEND_DIR/.backend_pid" ] && rm "$BACKEND_DIR/.backend_pid"
     
     # 等待进程结束
     sleep 2
@@ -308,6 +310,110 @@ start_frontend() {
     return 1
 }
 
+# 启动后端服务
+start_backend() {
+    echo -e "\n${BLUE}启动后端服务...${NC}"
+    
+    # 进入后端目录
+    cd "$BACKEND_DIR" || {
+        echo -e "${RED}错误: 无法进入后端目录 $BACKEND_DIR${NC}"
+        return 1
+    }
+    
+    # 检查并激活虚拟环境
+    echo -e "${BLUE}检查虚拟环境...${NC}"
+    if [ ! -d "$VENV_DIR" ]; then
+        echo -e "${YELLOW}虚拟环境不存在，创建新的虚拟环境...${NC}"
+        python3 -m venv "$VENV_DIR"
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}创建虚拟环境失败${NC}"
+            return 1
+        fi
+    fi
+    
+    # 激活虚拟环境
+    echo -e "${BLUE}激活虚拟环境...${NC}"
+    if [ -f "$VENV_DIR/bin/activate" ]; then
+        source "$VENV_DIR/bin/activate"
+    else
+        echo -e "${RED}无法找到虚拟环境激活脚本${NC}"
+        return 1
+    fi
+    
+    # 检查虚拟环境是否成功激活
+    if [ -z "$VIRTUAL_ENV" ]; then
+        echo -e "${RED}虚拟环境激活失败${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ 虚拟环境已激活${NC}"
+    
+    # 安装依赖
+    echo -e "${BLUE}检查并安装依赖...${NC}"
+    
+    # 升级pip
+    echo -e "${YELLOW}升级pip...${NC}"
+    pip install --upgrade pip > /dev/null 2>&1
+    
+    # 检查requirements.txt是否存在
+    if [ ! -f "requirements.txt" ]; then
+        echo -e "${RED}缺少requirements.txt文件${NC}"
+        return 1
+    fi
+    
+    # 安装依赖
+    echo -e "${YELLOW}安装项目依赖...${NC}"
+    pip install -r requirements.txt > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}依赖安装失败${NC}"
+        echo -e "${YELLOW}尝试修复依赖冲突...${NC}"
+        
+        # 特别处理bson和pymongo的版本冲突
+        pip uninstall -y bson pymongo > /dev/null 2>&1
+        pip install pymongo==4.5.0 > /dev/null 2>&1
+        
+        # 再次尝试安装所有依赖
+        pip install -r requirements.txt > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}依赖安装仍然失败，但将继续尝试启动服务...${NC}"
+        fi
+    fi
+    echo -e "${GREEN}✓ 依赖安装完成${NC}"
+    
+    # 删除旧的PID文件(如果存在)
+    if [ -f ".backend_pid" ]; then
+        rm -f ".backend_pid"
+    fi
+    
+    # 启动服务
+    echo -e "${YELLOW}启动FastAPI应用(端口5502)...${NC}"
+    python -m uvicorn app.main:app --host 0.0.0.0 --port 5502 --reload > "$BACKEND_LOG" 2>&1 &
+    
+    # 保存PID
+    BACKEND_PID=$!
+    echo $BACKEND_PID > .backend_pid
+    
+    # 等待服务启动
+    echo -e "${YELLOW}等待后端服务启动...${NC}"
+    sleep 3
+    
+    # 检查服务是否成功启动
+    if kill -0 $BACKEND_PID 2>/dev/null; then
+        echo -e "${GREEN}✓ 后端服务已成功启动 (PID: $BACKEND_PID)${NC}"
+        echo -e "${GREEN}✓ 后端API地址: http://localhost:5502/api${NC}"
+        
+        # 回到项目根目录
+        cd "$PROJECT_ROOT"
+        return 0
+    else
+        echo -e "${RED}后端服务启动失败${NC}"
+        echo -e "${YELLOW}请检查日志: $BACKEND_LOG${NC}"
+        
+        # 回到项目根目录
+        cd "$PROJECT_ROOT"
+        return 1
+    fi
+}
+
 # 主流程
 main() {
     # 清理之前的进程
@@ -316,9 +422,8 @@ main() {
     # 启动MongoDB
     start_mongodb
     
-    # 启动后端服务（使用独立脚本）
-    echo -e "\n${BLUE}启动后端服务...${NC}"
-    ./start-backend.sh
+    # 启动后端服务
+    start_backend
     
     # 启动前端
     start_frontend

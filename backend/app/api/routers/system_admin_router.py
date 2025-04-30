@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List, Optional
 from app.schemas.user import UserResponse
 from app.core.dependencies import get_current_user
+from app.services.user_service import UserService
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from app.core.dependencies import get_db
 
 router = APIRouter()
 
@@ -12,13 +15,19 @@ router = APIRouter()
 async def get_doctors(
     status: Optional[str] = None,
     department: Optional[str] = None,
-    current_user: UserResponse = Depends(get_current_user)
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     """获取医生列表"""
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return []
+    
+    # 调用服务层获取医生列表
+    user_service = UserService(db)
+    doctors = await user_service.get_doctors(status=status, department=department, skip=skip, limit=limit)
+    return doctors
 
 @router.post("/doctors", status_code=status.HTTP_201_CREATED)
 async def create_doctor(

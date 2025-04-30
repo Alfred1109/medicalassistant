@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Box,
   Typography,
@@ -25,6 +25,7 @@ import {
   Tabs,
   Tab,
   Stack,
+  CircularProgress
 } from '@mui/material';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -47,80 +48,7 @@ import WorkIcon from '@mui/icons-material/Work';
 import EventIcon from '@mui/icons-material/Event';
 import ArrowForwardIosIcon from '@mui/icons-material/ArrowForwardIos';
 import PeopleIcon from '@mui/icons-material/People';
-
-// 模拟数据
-const mockDoctors = [
-  {
-    id: '1',
-    name: '王医生',
-    avatar: '',
-    department: '骨科',
-    title: '主任医师',
-    specialty: '脊柱外科',
-    email: 'wang@hospital.com',
-    phone: '13800138001',
-    patients: 45,
-    status: '在职',
-    joinDate: '2015-05-10',
-    certifications: ['医师资格证', '医师执业证', '专科医师证书'],
-  },
-  {
-    id: '2',
-    name: '李医生',
-    avatar: '',
-    department: '神经内科',
-    title: '副主任医师',
-    specialty: '神经康复',
-    email: 'li@hospital.com',
-    phone: '13800138002',
-    patients: 38,
-    status: '在职',
-    joinDate: '2017-03-15',
-    certifications: ['医师资格证', '医师执业证'],
-  },
-  {
-    id: '3',
-    name: '赵医生',
-    avatar: '',
-    department: '康复科',
-    title: '主治医师',
-    specialty: '运动康复',
-    email: 'zhao@hospital.com',
-    phone: '13800138003',
-    patients: 30,
-    status: '在职',
-    joinDate: '2018-09-01',
-    certifications: ['医师资格证', '医师执业证', '康复治疗师证书'],
-  },
-  {
-    id: '4',
-    name: '钱医生',
-    avatar: '',
-    department: '内科',
-    title: '副主任医师',
-    specialty: '心脏康复',
-    email: 'qian@hospital.com',
-    phone: '13800138004',
-    patients: 42,
-    status: '休假',
-    joinDate: '2016-07-20',
-    certifications: ['医师资格证', '医师执业证', '心脏康复专科证书'],
-  },
-  {
-    id: '5',
-    name: '孙医生',
-    avatar: '',
-    department: '康复科',
-    title: '主治医师',
-    specialty: '神经康复',
-    email: 'sun@hospital.com',
-    phone: '13800138005',
-    patients: 35,
-    status: '在职',
-    joinDate: '2019-02-10',
-    certifications: ['医师资格证', '医师执业证'],
-  },
-];
+import { apiService } from '../../services/api';
 
 // 模拟部门数据
 const departments = [
@@ -138,45 +66,71 @@ const departments = [
 const titles = ['全部', '主任医师', '副主任医师', '主治医师', '住院医师'];
 
 const DoctorManagement: React.FC = () => {
-  const [doctors, setDoctors] = React.useState(mockDoctors);
-  const [filteredDoctors, setFilteredDoctors] = React.useState(mockDoctors);
-  const [searchTerm, setSearchTerm] = React.useState('');
-  const [openDialog, setOpenDialog] = React.useState(false);
-  const [selectedDoctor, setSelectedDoctor] = React.useState<any>(null);
-  const [filterDepartment, setFilterDepartment] = React.useState('全部');
-  const [filterTitle, setFilterTitle] = React.useState('全部');
-  const [detailDialogOpen, setDetailDialogOpen] = React.useState(false);
-  const [viewMode, setViewMode] = React.useState<'list' | 'card'>('list');
-  const [tabValue, setTabValue] = React.useState(0);
+  // 状态管理
+  const [isLoading, setIsLoading] = useState(true);
+  const [doctors, setDoctors] = useState<any[]>([]);
+  const [filteredDoctors, setFilteredDoctors] = useState<any[]>([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [openDialog, setOpenDialog] = useState(false);
+  const [selectedDoctor, setSelectedDoctor] = useState<any>(null);
+  const [filterDepartment, setFilterDepartment] = useState('全部');
+  const [filterTitle, setFilterTitle] = useState('全部');
+  const [detailDialogOpen, setDetailDialogOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<'list' | 'card'>('list');
+  const [tabValue, setTabValue] = useState(0);
+  const [error, setError] = useState<string | null>(null);
 
-  React.useEffect(() => {
-    filterDoctors();
-  }, [searchTerm, filterDepartment, filterTitle]);
+  // 从API加载医生数据
+  useEffect(() => {
+    const fetchDoctors = async () => {
+      setIsLoading(true);
+      setError(null);
+      
+      try {
+        const params: any = {};
+        if (filterDepartment !== '全部') {
+          params.department = filterDepartment;
+        }
+        
+        const response = await apiService.getDoctors(params);
+        setDoctors(response.data);
+        setFilteredDoctors(response.data);
+      } catch (err) {
+        console.error('获取医生数据失败:', err);
+        setError('获取医生数据失败，请刷新页面重试');
+        // 如果API调用失败，使用本地模拟数据作为后备
+        setDoctors([]);
+        setFilteredDoctors([]);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    
+    fetchDoctors();
+  }, [filterDepartment]); // 当部门筛选条件变更时重新加载
 
-  const filterDoctors = () => {
-    let filtered = mockDoctors;
-    
-    // 根据部门筛选
-    if (filterDepartment !== '全部') {
-      filtered = filtered.filter(doctor => doctor.department === filterDepartment);
+  // 本地筛选（仅当API已返回数据后）
+  useEffect(() => {
+    if (doctors.length > 0) {
+      let filtered = [...doctors];
+      
+      // 根据职称筛选
+      if (filterTitle !== '全部') {
+        filtered = filtered.filter(doctor => doctor.title === filterTitle);
+      }
+      
+      // 根据搜索词筛选
+      if (searchTerm) {
+        filtered = filtered.filter(doctor => 
+          doctor.name.includes(searchTerm) || 
+          doctor.department?.includes(searchTerm) ||
+          doctor.specialty?.includes(searchTerm)
+        );
+      }
+      
+      setFilteredDoctors(filtered);
     }
-    
-    // 根据职称筛选
-    if (filterTitle !== '全部') {
-      filtered = filtered.filter(doctor => doctor.title === filterTitle);
-    }
-    
-    // 根据搜索词筛选
-    if (searchTerm) {
-      filtered = filtered.filter(doctor => 
-        doctor.name.includes(searchTerm) || 
-        doctor.department.includes(searchTerm) ||
-        doctor.specialty.includes(searchTerm)
-      );
-    }
-    
-    setFilteredDoctors(filtered);
-  };
+  }, [searchTerm, filterTitle, doctors]);
 
   const handleSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     setSearchTerm(event.target.value);
@@ -237,6 +191,29 @@ const DoctorManagement: React.FC = () => {
         return 'default';
     }
   };
+
+  // 如果仍在加载中，显示加载状态
+  if (isLoading) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" height="300px">
+        <CircularProgress />
+        <Typography variant="body1" sx={{ ml: 2 }}>
+          医生数据加载中...
+        </Typography>
+      </Box>
+    );
+  }
+  
+  // 如果发生错误
+  if (error) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" height="300px">
+        <Typography color="error" variant="body1">
+          {error}
+        </Typography>
+      </Box>
+    );
+  }
 
   return (
     <Box>

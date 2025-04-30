@@ -27,12 +27,18 @@ import {
 } from '@mui/icons-material';
 
 import { AppDispatch, RootState } from '../../store';
-import { login, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManagerLogin, mockPatientLogin } from '../../store/slices/authSlice';
+import { login, clearAuthError } from '../../store/slices/authSlice';
 
-// 默认用户信息
-const DEFAULT_CREDENTIALS = {
-  email: 'demo@example.com',
-  password: 'password123',
+// 管理员账号信息
+const ADMIN_CREDENTIALS = {
+  email: 'admin@example.com',
+  password: 'Admin123!',
+};
+
+// 医生账号信息
+const DOCTOR_CREDENTIALS = {
+  email: 'doctor@example.com',
+  password: 'Doctor123!',
 };
 
 const Login: React.FC = () => {
@@ -40,7 +46,10 @@ const Login: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
   const { loading, error } = useSelector((state: RootState) => state.auth);
 
-  const [formData, setFormData] = useState(DEFAULT_CREDENTIALS);
+  const [formData, setFormData] = useState({
+    email: '',
+    password: '',
+  });
   const [showPassword, setShowPassword] = useState(false);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -85,29 +94,14 @@ const Login: React.FC = () => {
     setShowPassword(!showPassword);
   };
 
-  // 填充默认账号
-  const fillDefaultCredentials = () => {
-    setFormData(DEFAULT_CREDENTIALS);
+  // 填充管理员账号
+  const fillAdminCredentials = () => {
+    setFormData(ADMIN_CREDENTIALS);
   };
 
-  const handleMockAdminLogin = () => {
-    dispatch(mockAdminLogin());
-    navigate('/app/admin/doctors');
-  };
-  
-  const handleMockDoctorLogin = () => {
-    dispatch(mockDoctorLogin());
-    navigate('/app/doctor/patients');
-  };
-  
-  const handleMockHealthManagerLogin = () => {
-    dispatch(mockHealthManagerLogin());
-    navigate('/app/health-manager/patients');
-  };
-
-  const handleMockPatientLogin = () => {
-    dispatch(mockPatientLogin());
-    navigate('/app/patient/main-dashboard');
+  // 填充医生账号
+  const fillDoctorCredentials = () => {
+    setFormData(DOCTOR_CREDENTIALS);
   };
 
   return (
@@ -127,7 +121,7 @@ const Login: React.FC = () => {
         </Alert>
       )}
 
-      {/* 默认账号提示 */}
+      {/* 账号提示 */}
       <Paper 
         variant="outlined" 
         sx={{ 
@@ -137,25 +131,53 @@ const Login: React.FC = () => {
           borderColor: '#c2d6ff'
         }}
       >
-        <Box display="flex" alignItems="center">
-          <InfoIcon color="primary" sx={{ mr: 1 }} />
-          <Box>
+        <Box display="flex" flexDirection="column" gap={1}>
+          <Box display="flex" alignItems="center">
+            <InfoIcon color="primary" sx={{ mr: 1 }} />
             <Typography variant="body2" fontWeight="medium" color="primary.main">
-              测试账号信息
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              邮箱: {DEFAULT_CREDENTIALS.email} <br />
-              密码: {DEFAULT_CREDENTIALS.password}
+              系统账号
             </Typography>
           </Box>
-          <Button 
-            size="small" 
-            variant="outlined" 
-            sx={{ ml: 'auto' }}
-            onClick={fillDefaultCredentials}
-          >
-            自动填充
-          </Button>
+          
+          <Box sx={{ mt: 1 }}>
+            <Typography variant="subtitle2" color="text.primary">
+              管理员账号:
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              邮箱: {ADMIN_CREDENTIALS.email} <br />
+              密码: {ADMIN_CREDENTIALS.password}
+            </Typography>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              color="primary"
+              sx={{ mt: 1 }}
+              onClick={fillAdminCredentials}
+            >
+              使用管理员账号
+            </Button>
+          </Box>
+          
+          <Divider sx={{ my: 1 }} />
+          
+          <Box>
+            <Typography variant="subtitle2" color="text.primary">
+              医生账号:
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              邮箱: {DOCTOR_CREDENTIALS.email} <br />
+              密码: {DOCTOR_CREDENTIALS.password}
+            </Typography>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              color="secondary"
+              sx={{ mt: 1 }}
+              onClick={fillDoctorCredentials}
+            >
+              使用医生账号
+            </Button>
+          </Box>
         </Box>
       </Paper>
 
@@ -235,48 +257,6 @@ const Login: React.FC = () => {
             注册
           </Link>
         </Typography>
-      </Box>
-
-      <Box mt={3}>
-        <Divider>
-          <Typography variant="body2" color="text.secondary">
-            快速模拟登录
-          </Typography>
-        </Divider>
-        <Box mt={2} display="flex" flexDirection="column" gap={1}>
-          <Button 
-            variant="outlined" 
-            color="primary" 
-            fullWidth
-            onClick={handleMockAdminLogin}
-          >
-            以管理员身份登录
-          </Button>
-          <Button 
-            variant="outlined" 
-            color="secondary" 
-            fullWidth
-            onClick={handleMockDoctorLogin}
-          >
-            以医生身份登录
-          </Button>
-          <Button 
-            variant="outlined" 
-            color="info" 
-            fullWidth
-            onClick={handleMockHealthManagerLogin}
-          >
-            以健康管理师身份登录
-          </Button>
-          <Button 
-            variant="outlined" 
-            color="success" 
-            fullWidth
-            onClick={handleMockPatientLogin}
-          >
-            以患者身份登录
-          </Button>
-        </Box>
       </Box>
     </Box>
   );

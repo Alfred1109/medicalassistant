@@ -251,17 +251,54 @@ class UserService:
         
     async def list_users(self, role: Optional[str] = None, skip: int = 0, limit: int = 100) -> List[UserResponse]:
         """List users with optional filtering by role"""
-        filter_query = {}
+        query = {}
         if role:
-            filter_query["role"] = role
+            query["role"] = role
         
-        cursor = self.collection.find(filter_query).skip(skip).limit(limit)
-        users = []
+        users = await self.db.users.find(query).skip(skip).limit(limit).to_list(length=limit)
+        return [self._user_doc_to_response(user) for user in users]
         
-        async for user in cursor:
-            users.append(self._map_user_to_schema(user))
+    async def get_doctors(self, 
+                          status: Optional[str] = None, 
+                          department: Optional[str] = None, 
+                          skip: int = 0, 
+                          limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        获取医生列表，支持按状态和科室筛选
+        """
+        # 基础查询：角色为医生
+        query = {"role": "doctor"}
         
-        return users
+        # 添加筛选条件
+        if status:
+            query["metadata.status"] = status
+        
+        if department:
+            query["department"] = department
+        
+        # 执行查询
+        doctor_docs = await self.db.users.find(query).skip(skip).limit(limit).to_list(length=limit)
+        
+        # 转换为前端需要的格式
+        doctors = []
+        for doc in doctor_docs:
+            doctor = {
+                "id": str(doc["_id"]),
+                "name": doc.get("name", ""),
+                "avatar": "",  # 默认空，将来可以扩展
+                "department": doc.get("department", ""),
+                "title": doc.get("professional_title", ""),
+                "specialty": doc.get("specialty", ""),
+                "email": doc.get("email", ""),
+                "phone": doc.get("metadata", {}).get("phone", ""),
+                "patients": doc.get("metadata", {}).get("patients_count", 0),
+                "status": doc.get("metadata", {}).get("status", "在职"),
+                "joinDate": doc.get("metadata", {}).get("join_date", ""),
+                "certifications": doc.get("metadata", {}).get("certifications", []),
+            }
+            doctors.append(doctor)
+        
+        return doctors
     
     async def deactivate_user(self, user_id: str) -> bool:
         """停用用户账户"""

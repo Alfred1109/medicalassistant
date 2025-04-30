@@ -1,55 +1,117 @@
 import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import Box from '@mui/material/Box';
-import List from '@mui/material/List';
-import ListItem from '@mui/material/ListItem';
-import ListItemButton from '@mui/material/ListItemButton';
-import ListItemIcon from '@mui/material/ListItemIcon';
-import ListItemText from '@mui/material/ListItemText';
-import Paper from '@mui/material/Paper';
-import PeopleIcon from '@mui/icons-material/People';
-import LocalHospitalIcon from '@mui/icons-material/LocalHospital';
-import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
-import BusinessIcon from '@mui/icons-material/Business';
-import LabelIcon from '@mui/icons-material/Label';
-import DevicesIcon from '@mui/icons-material/Devices';
-import InsightsIcon from '@mui/icons-material/Insights';
+import {
+  Box,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
+  Divider,
+  Typography,
+  Paper
+} from '@mui/material';
+import {
+  PeopleAlt as PeopleIcon,
+  Person as PersonIcon,
+  HealthAndSafety as HealthIcon,
+  Business as BusinessIcon,
+  Label as TagIcon,
+  Devices as DevicesIcon,
+  Insights as InsightsIcon,
+  History as HistoryIcon
+} from '@mui/icons-material';
 
+// 导航菜单项
 const menuItems = [
-  { name: '医生管理', path: '/app/admin/doctors', icon: <LocalHospitalIcon /> },
-  { name: '患者管理', path: '/app/admin/patients', icon: <PeopleIcon /> },
-  { name: '健管师管理', path: '/app/admin/health-managers', icon: <HealthAndSafetyIcon /> },
-  { name: '组织机构', path: '/app/admin/organizations', icon: <BusinessIcon /> },
-  { name: '标签管理', path: '/app/admin/tags', icon: <LabelIcon /> },
-  { name: '设备查看', path: '/app/admin/devices', icon: <DevicesIcon /> },
-  { name: '数据可视化', path: '/app/admin/visualization', icon: <InsightsIcon /> },
+  { 
+    id: 'doctors', 
+    label: '医生管理', 
+    icon: <PeopleIcon />, 
+    path: '/app/admin/doctors' 
+  },
+  { 
+    id: 'patients', 
+    label: '患者管理', 
+    icon: <PersonIcon />, 
+    path: '/app/admin/patients' 
+  },
+  { 
+    id: 'health-managers', 
+    label: '健康管理师', 
+    icon: <HealthIcon />, 
+    path: '/app/admin/health-managers' 
+  },
+  { 
+    id: 'organizations', 
+    label: '机构管理', 
+    icon: <BusinessIcon />, 
+    path: '/app/admin/organizations' 
+  },
+  { 
+    id: 'tags', 
+    label: '标签管理', 
+    icon: <TagIcon />, 
+    path: '/app/admin/tags' 
+  },
+  { 
+    id: 'devices', 
+    label: '设备管理', 
+    icon: <DevicesIcon />, 
+    path: '/app/admin/devices' 
+  },
+  { 
+    id: 'visualization', 
+    label: '数据可视化', 
+    icon: <InsightsIcon />, 
+    path: '/app/admin/visualization' 
+  },
+  { 
+    id: 'audit-logs', 
+    label: '审计日志', 
+    icon: <HistoryIcon />, 
+    path: '/app/admin/audit-logs' 
+  }
 ];
 
 const SideMenu: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  
-  const handleMenuClick = (path: string) => {
-    navigate(path);
-  };
-  
+
   return (
-    <Paper elevation={1} sx={{ height: '100%' }}>
-      <Box sx={{ width: '100%', bgcolor: 'background.paper' }}>
-        <List component="nav" aria-label="admin menu">
-          {menuItems.map((item) => (
-            <ListItem key={item.path} disablePadding>
-              <ListItemButton
-                selected={location.pathname.startsWith(item.path)}
-                onClick={() => handleMenuClick(item.path)}
-              >
-                <ListItemIcon>{item.icon}</ListItemIcon>
-                <ListItemText primary={item.name} />
-              </ListItemButton>
-            </ListItem>
-          ))}
-        </List>
+    <Paper 
+      elevation={0} 
+      sx={{ 
+        height: '100%',
+        borderRadius: 0,
+      }}
+    >
+      <Box p={2}>
+        <Typography variant="subtitle1" fontWeight="medium" color="text.secondary">
+          系统管理
+        </Typography>
       </Box>
+      <Divider />
+      <List>
+        {menuItems.map((item) => (
+          <ListItem key={item.id} disablePadding>
+            <ListItemButton
+              selected={location.pathname === item.path}
+              onClick={() => navigate(item.path)}
+              sx={{
+                '&.Mui-selected': {
+                  backgroundColor: 'rgba(25, 118, 210, 0.08)',
+                }
+              }}
+            >
+              <ListItemIcon>
+                {item.icon}
+              </ListItemIcon>
+              <ListItemText primary={item.label} />
+            </ListItemButton>
+          </ListItem>
+        ))}
+      </List>
     </Paper>
   );
 };
