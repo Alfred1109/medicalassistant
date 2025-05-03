@@ -169,7 +169,28 @@ export const apiService = {
     
     deleteDoctor: (doctorId: string): Promise<AxiosResponse<any>> => 
       api.delete(`/admin/doctors/${doctorId}`),
-  }
+  },
+  
+  // 患者相关接口
+  patient: {
+    getDailyRecords: (startDate?: string, endDate?: string): Promise<AxiosResponse<any[]>> => 
+      api.get('/patients/daily-records', { params: { start_date: startDate, end_date: endDate } }),
+    
+    createDailyRecord: (recordData: any): Promise<AxiosResponse<any>> => 
+      api.post('/patients/daily-records', recordData),
+    
+    updateDailyRecord: (recordId: string, recordData: any): Promise<AxiosResponse<any>> => 
+      api.put(`/patients/daily-records/${recordId}`, recordData),
+    
+    deleteDailyRecord: (recordId: string): Promise<AxiosResponse<any>> => 
+      api.delete(`/patients/daily-records/${recordId}`),
+    
+    getDashboardData: (): Promise<AxiosResponse<any>> => 
+      api.get('/patients/dashboard-data'),
+    
+    getHealthMetrics: (): Promise<AxiosResponse<any[]>> => 
+      api.get('/patients/health-metrics'),
+  },
 };
 
 export default api; 

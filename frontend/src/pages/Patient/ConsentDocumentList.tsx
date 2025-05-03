@@ -302,7 +302,7 @@ const ConsentDocumentList: React.FC = () => {
           <Box sx={{ flexGrow: 1 }} />
           <Button 
             variant="outlined"
-            onClick={() => navigate('/patient/documents/templates')}
+            onClick={() => navigate('/app/patient/documents/templates')}
           >
             浏览文档模板
           </Button>
