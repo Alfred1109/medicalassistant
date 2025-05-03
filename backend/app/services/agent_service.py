@@ -496,43 +496,34 @@ class AgentService:
                         ],
                         "contraindications": ["急性膝关节损伤"],
                         "benefits": ["增强股四头肌", "改善膝关节稳定性"]
-                    },
-                    {
-                        "name": "平衡训练",
-                        "description": "提高身体平衡能力和协调性",
-                        "body_part": "全身",
-                        "difficulty": "中等",
-                        "duration_minutes": 5,
-                        "repetitions": 0,
-                        "sets": 0,
-                        "instructions": [
-                            "站立，双脚与肩同宽",
-                            "闭上眼睛，保持平衡30秒",
-                            "睁开眼睛休息",
-                            "重复3-5次"
-                        ],
-                        "contraindications": ["严重平衡障碍", "眩晕症状"],
-                        "benefits": ["提高平衡能力", "预防跌倒"]
-                    },
-                    {
-                        "name": "深呼吸练习",
-                        "description": "促进放松，改善肺功能",
-                        "body_part": "呼吸系统",
-                        "difficulty": "简单",
-                        "duration_minutes": 5,
-                        "repetitions": 10,
-                        "sets": 1,
-                        "instructions": [
-                            "舒适坐姿或平躺",
-                            "通过鼻子慢慢吸气，数4秒",
-                            "屏住呼吸2秒",
-                            "通过嘴巴慢慢呼气，数6秒"
-                        ],
-                        "contraindications": [],
-                        "benefits": ["减轻焦虑", "改善肺功能", "促进放松"]
                     }
                 ],
-                "notes": "请确保在开始任何运动前进行适当的热身，如感到不适应立即停止。逐渐增加强度和持续时间，而不是一次性增加太多。"
+                "notes": "请确保在开始任何运动前进行适当的热身，如感到不适应立即停止。逐渐增加强度和持续时间，而不是一次性增加太多。",
+                "phases": [
+                    {
+                        "name": "初始期",
+                        "duration": "2周",
+                        "focus": "适应与基础能力建立",
+                        "description": "初步适应康复训练，建立基础能力"
+                    },
+                    {
+                        "name": "进步期",
+                        "duration": "4周",
+                        "focus": "能力提升",
+                        "description": "提升康复训练强度和复杂度，增强能力"
+                    },
+                    {
+                        "name": "维持期",
+                        "duration": "持续",
+                        "focus": "功能维持与日常融合",
+                        "description": "将康复训练融入日常生活，维持并进一步提升功能"
+                    }
+                ],
+                "progress_tracking": {
+                    "metrics": ["症状改善", "功能恢复", "生活质量提升"],
+                    "methods": ["定期评估", "日志记录", "功能测试"],
+                    "milestones": ["初始期完成", "关键功能恢复", "回归日常活动"]
+                }
             }
             
             return json.dumps(mock_response, ensure_ascii=False)
