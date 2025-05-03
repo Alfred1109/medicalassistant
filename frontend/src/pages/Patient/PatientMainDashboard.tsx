@@ -1,4 +1,5 @@
 import React from 'react';
+import axios from 'axios';
 import { 
   Box, 
   Typography, 
@@ -18,7 +19,8 @@ import {
   Chip,
   IconButton,
   LinearProgress,
-  Stack
+  Stack,
+  CircularProgress
 } from '@mui/material';
 
 // 图标可能需要根据实际项目调整导入方式
@@ -53,13 +55,6 @@ const todoItems = [
   { id: 4, title: '睡眠日记', description: '记录昨晚睡眠情况', due: '今天', completed: false, important: false },
 ];
 
-// 模拟医生通知
-const doctorNotifications = [
-  { id: 1, title: '康复计划已更新', doctor: '张医生', time: '今天 09:30', read: false },
-  { id: 2, title: '下周随访预约提醒', doctor: '李医师', time: '昨天 14:45', read: true },
-  { id: 3, title: '新的健康建议', doctor: '王医生', time: '2天前', read: true },
-];
-
 // 模拟康复进度
 const rehabProgress = {
   plan: '下肢功能恢复计划',
@@ -72,6 +67,15 @@ const rehabProgress = {
     { name: '力量训练', completed: false },
   ]
 };
+
+// 定义通知数据类型
+interface Notification {
+  id: string;
+  title: string;
+  sender_name: string;
+  time: string;
+  read: boolean;
+}
 
 // 获取状态颜色
 const getStatusColor = (status: string) => {
@@ -86,9 +90,81 @@ const getStatusColor = (status: string) => {
 
 const PatientMainDashboard: React.FC = () => {
   const [loading, setLoading] = React.useState(true);
+  const [notifications, setNotifications] = React.useState<Notification[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = React.useState(true);
   
-  // 模拟数据加载
+  // 加载通知数据
   React.useEffect(() => {
+    // 获取通知
+    const fetchNotifications = async () => {
+      try {
+        setNotificationsLoading(true);
+        console.log('开始获取通知数据...');
+        
+        // 获取认证令牌
+        const token = localStorage.getItem('token');
+        if (!token) {
+          console.error('认证令牌不存在，无法获取通知数据');
+          setNotificationsLoading(false);
+          return;
+        }
+        
+        // 从API获取通知数据
+        const response = await axios.get('http://localhost:5502/api/notifications?limit=5', {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        
+        console.log('通知数据API响应:', response.data);
+        
+        if (response.data) {
+          // 转换时间格式为更友好的显示形式
+          const notificationsWithFormattedTime = response.data.map((notification: any) => {
+            const date = new Date(notification.time);
+            const now = new Date();
+            const diffInDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
+            
+            let formattedTime;
+            if (diffInDays === 0) {
+              formattedTime = '今天 ' + date.getHours().toString().padStart(2, '0') + ':' + 
+                date.getMinutes().toString().padStart(2, '0');
+            } else if (diffInDays === 1) {
+              formattedTime = '昨天 ' + date.getHours().toString().padStart(2, '0') + ':' + 
+                date.getMinutes().toString().padStart(2, '0');
+            } else if (diffInDays < 7) {
+              formattedTime = diffInDays + '天前';
+            } else {
+              formattedTime = date.getFullYear() + '-' + 
+                (date.getMonth() + 1).toString().padStart(2, '0') + '-' + 
+                date.getDate().toString().padStart(2, '0');
+            }
+            
+            return {
+              ...notification,
+              time: formattedTime
+            };
+          });
+          
+          console.log('转换后的通知数据:', notificationsWithFormattedTime);
+          setNotifications(notificationsWithFormattedTime);
+        } else {
+          // 如果API返回为空，使用空数组
+          console.log('API返回数据为空');
+          setNotifications([]);
+        }
+      } catch (error) {
+        console.error('获取通知失败:', error);
+        // 发生错误时设置为空数组
+        setNotifications([]);
+      } finally {
+        setNotificationsLoading(false);
+      }
+    };
+    
+    fetchNotifications();
+    
+    // 基础信息加载
     const timer = setTimeout(() => {
       setLoading(false);
     }, 1000);
@@ -243,41 +319,77 @@ const PatientMainDashboard: React.FC = () => {
               </IconButton>
             </Box>
             
-            <List sx={{ width: '100%' }}>
-              {doctorNotifications.map((notification, index) => (
-                <React.Fragment key={notification.id}>
-                  <ListItem
-                    sx={{
-                      backgroundColor: notification.read ? 'transparent' : 'rgba(25, 118, 210, 0.08)',
-                      borderRadius: 1,
-                    }}
-                  >
-                    <ListItemAvatar>
-                      <Avatar sx={{ bgcolor: notification.read ? 'grey.300' : 'primary.main' }}>
-                        <DoctorIcon />
-                      </Avatar>
-                    </ListItemAvatar>
-                    <ListItemText
-                      primary={
-                        <Typography variant="body1" component="span">
-                          {notification.title}
-                          {!notification.read && (
-                            <Chip
-                              label="新"
-                              size="small"
-                              color="error"
-                              sx={{ ml: 1, height: 20 }}
-                            />
-                          )}
-                        </Typography>
-                      }
-                      secondary={`${notification.doctor} · ${notification.time}`}
-                    />
-                  </ListItem>
-                  {index < doctorNotifications.length - 1 && <Divider component="li" variant="inset" />}
-                </React.Fragment>
-              ))}
-            </List>
+            {notificationsLoading ? (
+              <Box display="flex" justifyContent="center" alignItems="center" py={4}>
+                <CircularProgress size={24} sx={{ mr: 1 }} />
+                <Typography variant="body2" color="text.secondary">
+                  加载通知中...
+                </Typography>
+              </Box>
+            ) : notifications.length > 0 ? (
+              <List sx={{ width: '100%' }}>
+                {notifications.map((notification, index) => (
+                  <React.Fragment key={notification.id}>
+                    <ListItem
+                      alignItems="flex-start"
+                      sx={{
+                        bgcolor: notification.read ? 'transparent' : 'rgba(0, 128, 255, 0.05)',
+                        py: 1,
+                      }}
+                    >
+                      <ListItemAvatar>
+                        <Avatar sx={{ bgcolor: 'primary.main' }}>
+                          <DoctorIcon />
+                        </Avatar>
+                      </ListItemAvatar>
+                      <ListItemText
+                        primary={
+                          <Box display="flex" justifyContent="space-between">
+                            <Typography variant="subtitle2" component="span">
+                              {notification.title}
+                              {!notification.read && (
+                                <Chip
+                                  label="新"
+                                  size="small"
+                                  color="primary"
+                                  sx={{ ml: 1, height: 16, '& .MuiChip-label': { px: 0.5, py: 0 } }}
+                                />
+                              )}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {notification.time}
+                            </Typography>
+                          </Box>
+                        }
+                        secondary={
+                          <Typography variant="body2" color="text.secondary">
+                            {notification.sender_name}
+                          </Typography>
+                        }
+                      />
+                    </ListItem>
+                    {index < notifications.length - 1 && <Divider component="li" variant="inset" />}
+                  </React.Fragment>
+                ))}
+              </List>
+            ) : (
+              <Box textAlign="center" py={4}>
+                <Typography variant="body2" color="text.secondary">
+                  暂无通知
+                </Typography>
+              </Box>
+            )}
+            
+            <Box textAlign="center" mt={2}>
+              <Button 
+                variant="outlined"
+                size="small"
+                component={Link}
+                to="/app/patient/communications"
+              >
+                查看全部通知
+              </Button>
+            </Box>
           </Paper>
           
           {/* 康复进度 */}

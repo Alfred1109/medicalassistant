@@ -5,6 +5,7 @@
 from datetime import datetime
 from bson import ObjectId
 from typing import Dict, List, Optional, Any
+from pydantic import BaseModel, Field
 
 class Exercise:
     """锻炼/康复动作模型"""
@@ -239,4 +240,35 @@ class ProgressRecord:
     
     def to_dict(self):
         """将进度记录对象转换为字典，用于API响应"""
-        return self.__dict__.copy() 
+        return self.__dict__.copy()
+
+
+# 康复进度模型
+class RehabProgress(BaseModel):
+    id: str = Field(default_factory=lambda: str(ObjectId()))
+    plan: str  # 康复计划名称
+    progress: int  # 进度百分比 0-100
+    next_session: str  # 下次康复时间描述
+    user_id: str  # 患者ID
+    doctor_id: Optional[str] = None  # 医生ID
+    exercises: List[Dict[str, Any]]  # 训练项目列表
+    timestamp: datetime = Field(default_factory=datetime.now)
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": "60d21b4967d0d8992e610c85",
+                "plan": "下肢功能恢复计划",
+                "progress": 65,
+                "next_session": "明天 15:00",
+                "user_id": "60d21b4967d0d8992e610c83",
+                "doctor_id": "60d21b4967d0d8992e610c82",
+                "exercises": [
+                    { "name": "下肢伸展", "completed": True },
+                    { "name": "平衡训练", "completed": True },
+                    { "name": "步态训练", "completed": False },
+                    { "name": "力量训练", "completed": False }
+                ],
+                "timestamp": "2023-08-15T14:30:00.000Z"
+            }
+        } 

@@ -1,322 +1,142 @@
-import React, { useEffect } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
-import { Link } from 'react-router-dom';
-import {
-  Box,
-  Button,
-  Card,
-  CardContent,
-  CardHeader,
-  Container,
-  Divider,
-  Grid,
-  LinearProgress,
-  List,
-  ListItem,
-  ListItemText,
-  Paper,
-  Typography,
-  useTheme,
-} from '@mui/material';
-import {
-  Add as AddIcon,
-  FitnessCenter as FitnessCenterIcon,
-  Timeline as TimelineIcon,
-  Schedule as ScheduleIcon,
-} from '@mui/icons-material';
-
-import { AppDispatch, RootState } from '../../store';
-import { fetchRehabPlans } from '../../store/slices/rehabSlice';
+import React, { useEffect, useState } from 'react';
+import { Box, Typography, Grid, Paper, Button, Divider, useTheme, useMediaQuery } from '@mui/material';
+import DashboardLayout from '../../components/Layout/DashboardLayout';
+import DashboardStatistics from '../../components/Dashboard/DashboardStatistics';
+import { useSelector } from 'react-redux';
+import { RootState } from '../../store';
+import { Refresh as RefreshIcon, Favorite as FavoriteIcon } from '@mui/icons-material';
+import { format } from 'date-fns';
+import { zhCN } from 'date-fns/locale';
 
 const Dashboard: React.FC = () => {
-  const dispatch = useDispatch<AppDispatch>();
   const theme = useTheme();
-  const { plans, loading } = useSelector((state: RootState) => state.rehab);
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+  const [currentDate, setCurrentDate] = useState<string>('');
+  const [greeting, setGreeting] = useState<string>('');
   const { user } = useSelector((state: RootState) => state.auth);
-
+  
+  // 获取当前日期和问候语
   useEffect(() => {
-    dispatch(fetchRehabPlans());
-  }, [dispatch]);
-
-  const getActivePlans = () => {
-    return plans.filter(plan => plan.status === 'active');
-  };
-
-  const getCompletedExercises = (planId: string) => {
-    const plan = plans.find(p => p.id === planId);
-    if (!plan) return 0;
+    // 格式化日期，使用中文locale
+    const now = new Date();
+    setCurrentDate(format(now, 'yyyy年MM月dd日 EEEE', { locale: zhCN }));
     
-    const completedCount = plan.exercises.filter(ex => ex.completed).length;
-    return {
-      count: completedCount,
-      total: plan.exercises.length,
-      percentage: plan.exercises.length > 0 
-        ? (completedCount / plan.exercises.length) * 100 
-        : 0
-    };
-  };
-
-  const formatDate = (dateString: string | null | undefined) => {
-    if (!dateString) return 'N/A';
-    
-    try {
-      const date = new Date(dateString);
-      // 检查日期是否有效
-      if (isNaN(date.getTime())) {
-        return 'Invalid Date';
-      }
-      
-      return new Intl.DateTimeFormat('zh-CN', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric'
-      }).format(date);
-    } catch (error) {
-      console.error('Date formatting error:', error);
-      return 'Invalid Date';
+    // 根据时间设置问候语
+    const hour = now.getHours();
+    if (hour >= 5 && hour < 12) {
+      setGreeting('早上好');
+    } else if (hour >= 12 && hour < 18) {
+      setGreeting('下午好');
+    } else {
+      setGreeting('晚上好');
     }
+  }, []);
+  
+  // 用户角色标题映射
+  const roleTitle = {
+    doctor: '医生',
+    patient: '患者',
+    healthManager: '健康管理师',
+    admin: '系统管理员'
   };
-
-  const getNextScheduledExercises = () => {
-    const allExercises = plans.flatMap((plan, planIndex) => 
-      plan.exercises.map((ex, exIndex) => ({
-        ...ex,
-        planId: plan.id,
-        planName: plan.name,
-        id: ex.id || `exercise-${plan.id}-${exIndex}`
-      }))
-    );
-    
-    return allExercises
-      .filter(ex => !ex.completed && ex.scheduledDate)
-      .sort((a, b) => new Date(a.scheduledDate).getTime() - new Date(b.scheduledDate).getTime())
-      .slice(0, 5);
-  };
-
-  if (loading) {
-    return (
-      <Box sx={{ width: '100%', mt: 4 }}>
-        <LinearProgress />
-      </Box>
-    );
-  }
-
+  
+  // 健康小贴士数据
+  const healthTips = [
+    '规律运动对康复有显著帮助，每天30分钟适度运动是基础。',
+    '均衡饮食对身体恢复至关重要，增加蛋白质和蔬果摄入。',
+    '充足的睡眠有助于身体自我修复，建议每晚7-8小时。',
+    '保持积极乐观的心态可以加速康复进程，减轻焦虑和压力。',
+    '听从医嘱按时服药和复诊，确保治疗计划有效执行。'
+  ];
+  
+  // 随机选择一条健康小贴士
+  const randomTip = healthTips[Math.floor(Math.random() * healthTips.length)];
+  
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Typography variant="h4" component="h1" gutterBottom>
-          欢迎, {user?.name || '用户'}
-        </Typography>
-        <Button
-          variant="contained" 
-          color="primary"
-          startIcon={<AddIcon />}
-          component={Link}
-          to="/rehab-plans/new"
+    <DashboardLayout>
+      <Box>
+        {/* 顶部欢迎区域 */}
+        <Paper 
+          elevation={0} 
+          sx={{ 
+            p: 3, 
+            mb: 3, 
+            borderRadius: 2,
+            background: `linear-gradient(135deg, ${theme.palette.primary.light} 0%, ${theme.palette.primary.main} 100%)`,
+            color: 'white'
+          }}
         >
-          新建康复计划
-        </Button>
+          <Grid container spacing={2} alignItems="center">
+            <Grid item xs={12} md={8}>
+              <Typography variant="h4" fontWeight="bold" gutterBottom>
+                {greeting}，{user?.name || '用户'}！
+              </Typography>
+              <Typography variant="body1">
+                今天是 {currentDate}
+              </Typography>
+              <Typography variant="body1" sx={{ mt: 1, maxWidth: '80%' }}>
+                欢迎回到医疗康复助手系统。{user?.role && `作为${roleTitle[user.role as keyof typeof roleTitle]}，`}您可以在这里管理健康数据、查看康复进展和制定康复计划。
+              </Typography>
+            </Grid>
+            <Grid item xs={12} md={4} sx={{ textAlign: { xs: 'left', md: 'right' } }}>
+              <Button 
+                variant="contained" 
+                sx={{ 
+                  bgcolor: 'white', 
+                  color: theme.palette.primary.main,
+                  '&:hover': {
+                    bgcolor: 'rgba(255, 255, 255, 0.9)',
+                  },
+                  boxShadow: theme.shadows[2],
+                  fontWeight: 'bold',
+                  mb: { xs: 1, md: 0 },
+                  mr: { xs: 1, md: 0 }
+                }}
+              >
+                快速创建
+              </Button>
+              <Button
+                variant="outlined"
+                sx={{ 
+                  color: 'white', 
+                  borderColor: 'white',
+                  '&:hover': {
+                    borderColor: 'white',
+                    bgcolor: 'rgba(255, 255, 255, 0.1)',
+                  },
+                  ml: { xs: 0, md: 1 }
+                }}
+                startIcon={<RefreshIcon />}
+              >
+                刷新数据
+              </Button>
+            </Grid>
+          </Grid>
+        </Paper>
+        
+        {/* 健康小贴士区域 */}
+        <Paper 
+          elevation={0}
+          sx={{ 
+            p: 2, 
+            mb: 3, 
+            borderRadius: 2,
+            bgcolor: theme.palette.info.light,
+            color: theme.palette.info.contrastText,
+            display: 'flex',
+            alignItems: 'center'
+          }}
+        >
+          <FavoriteIcon sx={{ mr: 1 }} />
+          <Typography variant="body1">
+            <strong>每日健康贴士：</strong> {randomTip}
+          </Typography>
+        </Paper>
+        
+        {/* 仪表盘统计区域 */}
+        <DashboardStatistics userRole={user?.role || 'patient'} />
       </Box>
-
-      <Grid container spacing={3}>
-        {/* Active Plans */}
-        <Grid item xs={12} md={8}>
-          <Paper
-            sx={{
-              p: 2,
-              display: 'flex',
-              flexDirection: 'column',
-              borderRadius: 2,
-              boxShadow: theme.shadows[2],
-              height: '100%',
-            }}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-              <FitnessCenterIcon color="primary" sx={{ mr: 1 }} />
-              <Typography component="h2" variant="h6" color="primary">
-                进行中的康复计划
-              </Typography>
-            </Box>
-            <Divider sx={{ mb: 2 }} />
-            
-            {getActivePlans().length === 0 ? (
-              <Box sx={{ py: 4, textAlign: 'center' }}>
-                <Typography variant="body1" color="text.secondary">
-                  您目前没有进行中的康复计划。
-                </Typography>
-                <Button
-                  variant="outlined"
-                  color="primary"
-                  startIcon={<AddIcon />}
-                  component={Link}
-                  to="/rehab-plans/new"
-                  sx={{ mt: 2 }}
-                >
-                  创建您的第一个计划
-                </Button>
-              </Box>
-            ) : (
-              <List>
-                {getActivePlans().map((plan) => {
-                  const progress = getCompletedExercises(plan.id);
-                  
-                  return (
-                    <ListItem 
-                      key={plan.id}
-                      sx={{ 
-                        border: '1px solid',
-                        borderColor: 'divider',
-                        borderRadius: 1,
-                        mb: 2,
-                        flexDirection: 'column',
-                        alignItems: 'flex-start'
-                      }}
-                      component={Link}
-                      to={`/rehab-plans/${plan.id}`}
-                      style={{ textDecoration: 'none', color: 'inherit' }}
-                    >
-                      <Box sx={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <ListItemText
-                          primary={plan.name}
-                          secondary={`创建时间: ${formatDate(plan.createdAt)}`}
-                          primaryTypographyProps={{ fontWeight: 'bold', color: 'primary.main' }}
-                        />
-                        <Typography variant="body2" color="text.secondary">
-                          已完成 {progress.count} / {progress.total} 个训练
-                        </Typography>
-                      </Box>
-                      <Box sx={{ width: '100%', mt: 1 }}>
-                        <LinearProgress 
-                          variant="determinate" 
-                          value={progress.percentage} 
-                          sx={{ height: 8, borderRadius: 5 }}
-                        />
-                      </Box>
-                    </ListItem>
-                  );
-                })}
-              </List>
-            )}
-          </Paper>
-        </Grid>
-        
-        {/* Upcoming Exercises */}
-        <Grid item xs={12} md={4}>
-          <Card
-            sx={{
-              height: '100%',
-              display: 'flex',
-              flexDirection: 'column',
-              borderRadius: 2,
-              boxShadow: theme.shadows[2],
-            }}
-          >
-            <CardHeader
-              title="即将进行的训练"
-              titleTypographyProps={{ variant: 'h6', color: 'primary' }}
-              avatar={<ScheduleIcon color="primary" />}
-            />
-            <Divider />
-            <CardContent sx={{ flexGrow: 1, pt: 0 }}>
-              {getNextScheduledExercises().length === 0 ? (
-                <Box sx={{ py: 3, textAlign: 'center' }}>
-                  <Typography variant="body2" color="text.secondary">
-                    您没有即将进行的训练。
-                  </Typography>
-                </Box>
-              ) : (
-                <List>
-                  {getNextScheduledExercises().map((exercise) => (
-                    <ListItem
-                      key={exercise.id}
-                      sx={{
-                        borderBottom: '1px solid',
-                        borderColor: 'divider',
-                        py: 1,
-                      }}
-                      component={Link}
-                      to={`/rehab-plans/${exercise.planId}`}
-                      style={{ textDecoration: 'none', color: 'inherit' }}
-                    >
-                      <ListItemText
-                        primary={exercise.name}
-                        secondary={`${exercise.planName} · ${formatDate(exercise.scheduledDate)}`}
-                        primaryTypographyProps={{ fontWeight: 'medium' }}
-                      />
-                    </ListItem>
-                  ))}
-                </List>
-              )}
-            </CardContent>
-          </Card>
-        </Grid>
-        
-        {/* Progress Summary */}
-        <Grid item xs={12}>
-          <Paper
-            sx={{
-              p: 2,
-              display: 'flex',
-              flexDirection: 'column',
-              borderRadius: 2,
-              boxShadow: theme.shadows[2],
-            }}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-              <TimelineIcon color="primary" sx={{ mr: 1 }} />
-              <Typography component="h2" variant="h6" color="primary">
-                康复总体进度
-              </Typography>
-            </Box>
-            <Divider sx={{ mb: 2 }} />
-            
-            {plans.length === 0 ? (
-              <Box sx={{ py: 4, textAlign: 'center' }}>
-                <Typography variant="body1" color="text.secondary">
-                  您还没有创建任何康复计划。
-                </Typography>
-              </Box>
-            ) : (
-              <Grid container spacing={2}>
-                {plans.slice(0, 3).map((plan) => {
-                  const progress = getCompletedExercises(plan.id);
-                  
-                  return (
-                    <Grid item xs={12} md={4} key={plan.id}>
-                      <Box
-                        sx={{
-                          p: 2,
-                          border: '1px solid',
-                          borderColor: 'divider',
-                          borderRadius: 2,
-                        }}
-                      >
-                        <Typography variant="subtitle1" fontWeight="bold">
-                          {plan.name}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                          状态: {plan.status === 'active' ? '进行中' : '已完成'}
-                        </Typography>
-                        <Box sx={{ width: '100%', mb: 1 }}>
-                          <LinearProgress
-                            variant="determinate"
-                            value={progress.percentage}
-                            sx={{ height: 8, borderRadius: 5 }}
-                          />
-                        </Box>
-                        <Typography variant="body2" align="right">
-                          {Math.round(progress.percentage)}% 完成
-                        </Typography>
-                      </Box>
-                    </Grid>
-                  );
-                })}
-              </Grid>
-            )}
-          </Paper>
-        </Grid>
-      </Grid>
-    </Container>
+    </DashboardLayout>
   );
 };
 

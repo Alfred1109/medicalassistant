@@ -29,6 +29,7 @@ import DialogActions from '@mui/material/DialogActions';
 import InputAdornment from '@mui/material/InputAdornment';
 import Snackbar from '@mui/material/Snackbar';
 import { useTheme } from '@mui/material/styles';
+import { alpha } from '@mui/material/styles';
 
 // 导入Material-UI图标
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -71,15 +72,35 @@ import {
 import { 
   DragDropContext, 
   Droppable, 
-  Draggable, 
-  DropResult,
-  DroppableProvided,
-  DraggableProvided,
-  DraggableStateSnapshot
+  Draggable,
+  type DropResult,
+  type DroppableProvided,
+  type DraggableProvided,
+  type DraggableStateSnapshot
 } from 'react-beautiful-dnd';
 
-// 导入服务
-import { healthDataService, HealthData, WidgetConfig } from '../../services/healthDataService';
+// 导入类型和服务
+import { HealthDataType, WidgetSize, TimeRange, WidgetType } from '../../types/health';
+import healthDataService from '../../services/healthDataService';
+import type { HealthData } from '../../services/healthDataService';
+
+// 自定义组件类型，覆盖原来的WidgetConfig类型
+interface WidgetConfig {
+  id: string;
+  title: string;
+  type: WidgetType;
+  dataType: HealthDataType;
+  dataKey: string;  // 添加必需的dataKey字段
+  size: WidgetSize;
+  timeRange: TimeRange;
+  position: number;
+  thresholds?: {
+    min: number;
+    max: number;
+  };
+  goal?: number;
+  color?: string;
+}
 
 // 图表工具提示接口
 interface CustomTooltipProps {
@@ -91,10 +112,10 @@ interface CustomTooltipProps {
 // 新增小部件表单接口
 interface WidgetFormData {
   title: string;
-  type: WidgetConfig['type'];
-  dataType: HealthData['type'];
-  size: WidgetConfig['size'];
-  timeRange: WidgetConfig['timeRange'];
+  type: WidgetType;
+  dataType: HealthDataType;
+  size: WidgetSize;
+  timeRange: TimeRange;
   goal?: number;
   color?: string;
 }
@@ -244,6 +265,7 @@ const getDefaultWidgets = (): WidgetConfig[] => {
       title: '心率趋势',
       type: 'line',
       dataType: 'heart_rate',
+      dataKey: 'heart_rate',
       size: 'medium',
       timeRange: 'day',
       position: 0,
@@ -255,6 +277,7 @@ const getDefaultWidgets = (): WidgetConfig[] => {
       title: '血压记录',
       type: 'bar',
       dataType: 'blood_pressure',
+      dataKey: 'blood_pressure',
       size: 'medium',
       timeRange: 'week',
       position: 1,
@@ -265,6 +288,7 @@ const getDefaultWidgets = (): WidgetConfig[] => {
       title: '血糖监测',
       type: 'line',
       dataType: 'blood_glucose',
+      dataKey: 'blood_glucose',
       size: 'small',
       timeRange: 'week',
       position: 2,
@@ -276,6 +300,7 @@ const getDefaultWidgets = (): WidgetConfig[] => {
       title: '体重记录',
       type: 'line',
       dataType: 'weight',
+      dataKey: 'weight',
       size: 'small',
       timeRange: 'month',
       position: 3,
@@ -286,6 +311,7 @@ const getDefaultWidgets = (): WidgetConfig[] => {
       title: '每日步数',
       type: 'goal',
       dataType: 'steps',
+      dataKey: 'steps',
       size: 'small',
       timeRange: 'day',
       position: 4,
@@ -297,6 +323,7 @@ const getDefaultWidgets = (): WidgetConfig[] => {
       title: '睡眠时长',
       type: 'stat',
       dataType: 'sleep',
+      dataKey: 'sleep',
       size: 'small',
       timeRange: 'day',
       position: 5,
@@ -306,53 +333,49 @@ const getDefaultWidgets = (): WidgetConfig[] => {
   ];
 };
 
-// 辅助函数：格式化数据用于图表显示
-const formatDataForChart = (data: HealthData[], type: HealthData['type']): ChartDataItem[] => {
-  // 筛选特定类型的数据
-  const filteredData = data.filter(item => item.type === type);
+// 格式化数据以供图表使用
+const formatDataForChart = (data: HealthData[], dataType: HealthDataType): ChartDataItem[] => {
+  // 根据数据类型进行不同的处理
+  const filteredData = data.filter(item => item.type === dataType);
   
   // 按时间排序
-  filteredData.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  const sortedData = filteredData.sort((a, b) => 
+    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
   
-  // 格式化数据用于图表
-  return filteredData.map(item => {
+  // 转换为图表所需格式
+  return sortedData.map(item => {
     const date = new Date(item.timestamp);
-    const formattedTime = `${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
-    
-    // 处理血压特殊情况，需要拆分收缩压和舒张压
-    if (type === 'blood_pressure' && typeof item.value === 'string') {
-      const [systolic, diastolic] = item.value.split('/').map(Number);
-      return {
-        time: formattedTime,
-        date: date.toLocaleDateString(),
-        value: item.value,
-        systolic,
-        diastolic,
-        unit: item.unit
-      };
-    }
-    
-    return {
-      time: formattedTime,
+    const result: ChartDataItem = {
+      time: date.toLocaleTimeString(),
       date: date.toLocaleDateString(),
-      value: typeof item.value === 'string' ? item.value : Number(item.value),
+      value: item.value,
       unit: item.unit
     };
+    
+    // 血压数据特殊处理
+    if (dataType === 'blood_pressure') {
+      const parts = typeof item.value === 'string' ? item.value.split('/') : [];
+      if (parts.length === 2) {
+        result.systolic = parseInt(parts[0]);
+        result.diastolic = parseInt(parts[1]);
+      }
+    }
+    
+    return result;
   });
 };
 
-// 辅助函数：获取指定类型数据的最新值
-const getLatestValue = (data: HealthData[], type: HealthData['type']) => {
-  const filteredData = data.filter(item => item.type === type);
+// 获取最新值
+const getLatestValue = (data: HealthData[], dataType: HealthDataType) => {
+  const filteredData = data.filter(item => item.type === dataType);
   
-  if (filteredData.length === 0) {
-    return { value: '暂无数据', unit: '', timestamp: '' };
-  }
+  if (filteredData.length === 0) return null;
   
-  // 按时间排序并返回最新值
-  filteredData.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  
-  return filteredData[0];
+  // 按时间排序并获取最新的
+  return filteredData.sort((a, b) => 
+    new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  )[0];
 };
 
 // 辅助函数：获取数据图标
@@ -423,15 +446,15 @@ const PersonalizedDashboard: React.FC = () => {
       
       if (patientId === 'current') {
         // 获取当前登录用户的健康数据
-        response = await healthDataService.getHealthData('me', params);
+        response = await healthDataService.getUserHealthData('me', params.timeRange);
       } else {
         // 获取特定患者的健康数据
-        response = await healthDataService.getHealthData(patientId, params);
+        response = await healthDataService.getUserHealthData(patientId, params.timeRange);
       }
       
       // 检查响应数据
-      if (response && response.data && response.data.length > 0) {
-        setHealthData(response.data);
+      if (response && response.length > 0) {
+        setHealthData(response);
       } else {
         // 如果没有数据，使用模拟数据
         console.log('未找到真实健康数据，使用模拟数据');
@@ -509,7 +532,7 @@ const PersonalizedDashboard: React.FC = () => {
     try {
       await healthDataService.saveUserDashboardConfig(
         patientId === 'current' ? 'me' : patientId, 
-        { widgets }
+        widgets
       );
       return true;
     } catch (error) {
@@ -553,54 +576,62 @@ const PersonalizedDashboard: React.FC = () => {
       title: '',
       type: 'line',
       dataType: 'heart_rate',
-      size: 'small',
+      size: 'medium',
       timeRange: 'day',
-      color: '#8884d8'
+      color: '#2196f3'
     });
-    setEditingWidgetId(null);
     setOpenWidgetDialog(true);
   };
 
   // 处理小部件表单变更
   const handleWidgetFormChange = (field: keyof WidgetFormData, value: any) => {
-    setWidgetFormData({
-      ...widgetFormData,
+    setWidgetFormData(prev => ({
+      ...prev,
       [field]: value
-    });
+    }));
   };
 
   // 保存小部件
   const handleSaveWidget = () => {
-    // 表单验证
-    if (!widgetFormData.title.trim()) {
-      setSnackbarMessage('请输入小部件标题');
-      setSnackbarOpen(true);
-      return;
-    }
-
     if (editingWidgetId) {
-      // 更新现有小部件
-      setWidgets(widgets.map(widget => 
-        widget.id === editingWidgetId 
-          ? { ...widget, ...widgetFormData } 
-          : widget
-      ));
+      // 编辑现有小部件
+      setWidgets(prev => 
+        prev.map(w => w.id === editingWidgetId ? {
+          ...w,
+          title: widgetFormData.title,
+          type: widgetFormData.type,
+          dataType: widgetFormData.dataType,
+          dataKey: widgetFormData.dataType, // 使用数据类型作为dataKey
+          size: widgetFormData.size,
+          timeRange: widgetFormData.timeRange,
+          goal: widgetFormData.goal,
+          color: widgetFormData.color
+        } : w)
+      );
     } else {
-      // 创建新小部件
+      // 添加新小部件
       const newWidget: WidgetConfig = {
         id: `widget-${Date.now()}`,
-        position: widgets.length,
-        ...widgetFormData
+        title: widgetFormData.title,
+        type: widgetFormData.type,
+        dataType: widgetFormData.dataType,
+        dataKey: widgetFormData.dataType, // 使用数据类型作为dataKey
+        size: widgetFormData.size,
+        timeRange: widgetFormData.timeRange,
+        position: widgets.length + 1,
+        ...(widgetFormData.goal && { goal: widgetFormData.goal }),
+        ...(widgetFormData.color && { color: widgetFormData.color })
       };
-      setWidgets([...widgets, newWidget]);
+      
+      setWidgets(prev => [...prev, newWidget]);
     }
-
-    // 关闭对话框
+    
     setOpenWidgetDialog(false);
+    setEditingWidgetId(null);
   };
 
   // 根据小部件大小返回Grid尺寸
-  const getGridSize = (size: WidgetConfig['size']) => {
+  const getGridSize = (size: WidgetSize) => {
     switch (size) {
       case 'small':
         return { xs: 12, sm: 6, md: 4 };
@@ -637,130 +668,163 @@ const PersonalizedDashboard: React.FC = () => {
     switch (widget.type) {
       case 'line':
         return (
-          <ResponsiveContainer width="100%" height={200}>
-            {/* @ts-ignore: Recharts类型问题 */}
-            <LineChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="time" />
-              <YAxis />
-              {/* @ts-ignore: Recharts类型问题 */}
-              <RechartsTooltip content={<CustomTooltip />} />
-              {/* @ts-ignore: Recharts类型问题 */}
-              <Legend />
-              {/* @ts-ignore: Recharts类型问题 */}
-              <Line
-                type="monotone"
-                dataKey="value"
-                stroke={widget.color || '#8884d8'}
-                activeDot={{ r: 8 }}
-                name={widget.title}
-              />
-              {widget.dataType === 'blood_pressure' && (
-                <>
-                  {/* @ts-ignore: Recharts类型问题 */}
-                  <Line
-                    type="monotone"
-                    dataKey="systolic"
-                    stroke="#FF5252"
-                    name="收缩压"
-                  />
-                  {/* @ts-ignore: Recharts类型问题 */}
-                  <Line
-                    type="monotone"
-                    dataKey="diastolic"
-                    stroke="#536DFE"
-                    name="舒张压"
-                  />
-                </>
-              )}
-            </LineChart>
-          </ResponsiveContainer>
+          <Box sx={{ height: 200, width: '100%' }}>
+            <ResponsiveContainer>
+              <LineChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="time" />
+                <YAxis />
+                <RechartsTooltip content={<CustomTooltip />} />
+                <Legend />
+                <Line 
+                  type="monotone" 
+                  dataKey="value" 
+                  stroke={widget.color || '#8884d8'} 
+                  activeDot={{ r: 8 }} 
+                />
+                {widget.dataType === 'blood_pressure' && (
+                  <>
+                    <Line type="monotone" dataKey="systolic" stroke="#82ca9d" />
+                    <Line type="monotone" dataKey="diastolic" stroke="#ffc658" />
+                  </>
+                )}
+              </LineChart>
+            </ResponsiveContainer>
+          </Box>
         );
       
       case 'bar':
         return (
-          <ResponsiveContainer width="100%" height={200}>
-            {/* @ts-ignore: Recharts类型问题 */}
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="time" />
-              <YAxis />
-              {/* @ts-ignore: Recharts类型问题 */}
-              <RechartsTooltip content={<CustomTooltip />} />
-              {/* @ts-ignore: Recharts类型问题 */}
-              <Legend />
-              {widget.dataType === 'blood_pressure' ? (
-                <>
-                  {/* @ts-ignore: Recharts类型问题 */}
-                  <Bar dataKey="systolic" fill="#FF5252" name="收缩压" />
-                  {/* @ts-ignore: Recharts类型问题 */}
-                  <Bar dataKey="diastolic" fill="#536DFE" name="舒张压" />
-                </>
-              ) : (
-                /* @ts-ignore: Recharts类型问题 */
-                <Bar dataKey="value" fill={widget.color || '#8884d8'} name={widget.title} />
-              )}
-            </BarChart>
-          </ResponsiveContainer>
+          <Box sx={{ height: 200, width: '100%' }}>
+            <ResponsiveContainer>
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="time" />
+                <YAxis />
+                <RechartsTooltip content={<CustomTooltip />} />
+                <Legend />
+                <Bar 
+                  dataKey="value" 
+                  fill={widget.color || '#8884d8'} 
+                />
+                {widget.dataType === 'blood_pressure' && (
+                  <>
+                    <Bar dataKey="systolic" fill="#82ca9d" />
+                    <Bar dataKey="diastolic" fill="#ffc658" />
+                  </>
+                )}
+              </BarChart>
+            </ResponsiveContainer>
+          </Box>
         );
       
       case 'stat':
         const latestData = getLatestValue(healthData, widget.dataType);
         return (
-          <Box sx={{ textAlign: 'center', py: 2 }}>
-            <Typography variant="h3" component="div" sx={{ mb: 1 }}>
-              {latestData.value} {latestData.unit}
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              最后更新: {new Date(latestData.timestamp).toLocaleString()}
-            </Typography>
-          </Box>
+          <Card 
+            sx={{ 
+              height: '100%', 
+              boxShadow: 'none', 
+              border: `1px solid ${alpha(theme.palette.primary.main, 0.2)}`
+            }}
+          >
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                <Box 
+                  sx={{ 
+                    bgcolor: widget.color || theme.palette.primary.main, 
+                    color: '#fff',
+                    width: 40,
+                    height: 40,
+                    borderRadius: '50%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    mr: 2
+                  }}
+                >
+                  {getDataTypeIcon(widget.dataType)}
+                </Box>
+                <Typography variant="h6">{widget.title}</Typography>
+              </Box>
+              <Box sx={{ textAlign: 'center', py: 2 }}>
+                <Typography variant="h3" component="div" sx={{ mb: 1 }}>
+                  {latestData?.value || '暂无数据'} {latestData?.unit || ''}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {latestData?.timestamp ? `最后更新: ${new Date(latestData.timestamp).toLocaleString()}` : '暂无数据'}
+                </Typography>
+              </Box>
+            </CardContent>
+          </Card>
         );
       
       case 'goal':
         const latestGoalData = getLatestValue(healthData, widget.dataType);
-        const currentValue = typeof latestGoalData.value === 'number' ? latestGoalData.value : 0;
+        const currentValue = latestGoalData && typeof latestGoalData.value === 'number' ? latestGoalData.value : 0;
         const goalValue = widget.goal || 100;
         const progress = Math.min(100, (currentValue / goalValue) * 100);
         
         return (
-          <Box sx={{ textAlign: 'center', py: 2 }}>
-            <Box sx={{ position: 'relative', display: 'inline-flex' }}>
-              <CircularProgress 
-                variant="determinate" 
-                value={progress} 
-                size={80} 
-                thickness={4} 
-                sx={{ color: widget.color || '#8884d8' }} 
-              />
-              <Box
-                sx={{
-                  top: 0,
-                  left: 0,
-                  bottom: 0,
-                  right: 0,
-                  position: 'absolute',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Typography variant="caption" component="div" color="text.secondary">
-                  {Math.round(progress)}%
+          <Card 
+            sx={{ 
+              height: '100%', 
+              boxShadow: 'none', 
+              border: `1px solid ${alpha(theme.palette.primary.main, 0.2)}`
+            }}
+          >
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                <Box 
+                  sx={{ 
+                    bgcolor: widget.color || theme.palette.primary.main, 
+                    color: '#fff',
+                    width: 40,
+                    height: 40,
+                    borderRadius: '50%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    mr: 2
+                  }}
+                >
+                  {getDataTypeIcon(widget.dataType)}
+                </Box>
+                <Typography variant="h6">{widget.title}</Typography>
+              </Box>
+              <Box sx={{ textAlign: 'center', position: 'relative' }}>
+                <CircularProgress
+                  variant="determinate"
+                  value={progress}
+                  size={120}
+                  thickness={4}
+                  sx={{ color: widget.color || theme.palette.primary.main }}
+                />
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                  }}
+                >
+                  <Typography variant="h4" component="div">
+                    {Math.round(progress)}%
+                  </Typography>
+                </Box>
+                <Typography variant="h6" component="div" sx={{ mt: 2 }}>
+                  {currentValue} / {goalValue} {latestGoalData?.unit || ''}
                 </Typography>
               </Box>
-            </Box>
-            <Typography variant="h6" component="div" sx={{ mt: 2 }}>
-              {currentValue} / {goalValue} {latestGoalData.unit}
-            </Typography>
-          </Box>
+            </CardContent>
+          </Card>
         );
       
       default:
         return (
-          <Typography variant="body1" sx={{ p: 2 }}>
-            数据不可用
-          </Typography>
+          <Box sx={{ p: 3, textAlign: 'center' }}>
+            <Typography variant="body1">不支持的小部件类型</Typography>
+          </Box>
         );
     }
   };
@@ -771,8 +835,8 @@ const PersonalizedDashboard: React.FC = () => {
       if (patientId) {
         // 获取用户仪表盘配置
         const configResponse = await healthDataService.getUserDashboardConfig(patientId === 'current' ? 'me' : patientId);
-        if (configResponse && configResponse.widgets) {
-          setWidgets(configResponse.widgets);
+        if (configResponse && Array.isArray(configResponse)) {
+          setWidgets(configResponse);
         } else {
           // 如果没有配置或格式不正确，使用默认配置
           setWidgets(getDefaultWidgets());
@@ -969,7 +1033,7 @@ const PersonalizedDashboard: React.FC = () => {
               <InputLabel>小部件类型</InputLabel>
               <Select
                 value={widgetFormData.type}
-                onChange={(e: SelectChangeEvent) => handleWidgetFormChange('type', e.target.value as WidgetConfig['type'])}
+                onChange={(e: SelectChangeEvent) => handleWidgetFormChange('type', e.target.value as WidgetType)}
                 label="小部件类型"
               >
                 <MenuItem value="line">折线图</MenuItem>
@@ -983,7 +1047,7 @@ const PersonalizedDashboard: React.FC = () => {
               <InputLabel>数据类型</InputLabel>
               <Select
                 value={widgetFormData.dataType}
-                onChange={(e: SelectChangeEvent) => handleWidgetFormChange('dataType', e.target.value as HealthData['type'])}
+                onChange={(e: SelectChangeEvent) => handleWidgetFormChange('dataType', e.target.value as HealthDataType)}
                 label="数据类型"
               >
                 <MenuItem value="heart_rate">心率</MenuItem>
@@ -1000,7 +1064,7 @@ const PersonalizedDashboard: React.FC = () => {
               <InputLabel>小部件大小</InputLabel>
               <Select
                 value={widgetFormData.size}
-                onChange={(e: SelectChangeEvent) => handleWidgetFormChange('size', e.target.value as WidgetConfig['size'])}
+                onChange={(e: SelectChangeEvent) => handleWidgetFormChange('size', e.target.value as WidgetSize)}
                 label="小部件大小"
               >
                 <MenuItem value="small">小</MenuItem>
@@ -1013,7 +1077,7 @@ const PersonalizedDashboard: React.FC = () => {
               <InputLabel>时间范围</InputLabel>
               <Select
                 value={widgetFormData.timeRange}
-                onChange={(e: SelectChangeEvent) => handleWidgetFormChange('timeRange', e.target.value as WidgetConfig['timeRange'])}
+                onChange={(e: SelectChangeEvent) => handleWidgetFormChange('timeRange', e.target.value as TimeRange)}
                 label="时间范围"
               >
                 <MenuItem value="day">天</MenuItem>

@@ -6,6 +6,7 @@
 from datetime import datetime
 from bson import ObjectId
 from typing import Dict, List, Optional, Any, Union
+from pydantic import BaseModel, Field
 
 class HealthRecord:
     """患者健康档案模型"""
@@ -465,4 +466,54 @@ class MedicalTimeline:
             created_by=health_data.recorded_by,
             related_ids=[health_data._id],
             metadata={"data_type": health_data.data_type, "source": health_data.source}
-        ) 
+        )
+
+# 健康指标模型
+class HealthMetric(BaseModel):
+    id: str = Field(default_factory=lambda: str(ObjectId()))
+    name: str  # 指标名称，如心率、血压等
+    value: str  # 当前值
+    unit: str  # 单位，如次/分、mmHg等
+    status: str = "normal"  # normal, good, warning, danger
+    trend: str = "+0%"  # 趋势百分比，如+2%，-1%等
+    timestamp: datetime = Field(default_factory=datetime.now)
+    user_id: str  # 用户ID
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": "60d21b4967d0d8992e610c85",
+                "name": "心率",
+                "value": "75",
+                "unit": "次/分",
+                "status": "normal",
+                "trend": "+2%",
+                "timestamp": "2023-08-15T14:30:00.000Z",
+                "user_id": "60d21b4967d0d8992e610c83"
+            }
+        }
+
+# 待办事项模型
+class TodoItem(BaseModel):
+    id: str = Field(default_factory=lambda: str(ObjectId()))
+    title: str  # 待办事项标题
+    description: str  # 描述
+    due: str  # 到期时间描述，如"今天"，"12:30"等
+    completed: bool = False  # 是否已完成
+    important: bool = False  # 是否重要
+    user_id: str  # 用户ID
+    timestamp: datetime = Field(default_factory=datetime.now)
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": "60d21b4967d0d8992e610c85",
+                "title": "血压记录",
+                "description": "请完成今日的血压测量记录", 
+                "due": "今天", 
+                "completed": False, 
+                "important": True,
+                "user_id": "60d21b4967d0d8992e610c83",
+                "timestamp": "2023-08-15T14:30:00.000Z"
+            }
+        } 

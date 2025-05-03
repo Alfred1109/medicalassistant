@@ -22,6 +22,9 @@ openai==1.2.4
 anthropic==0.50.0
 requests==2.31.0
 
+# 日志相关
+loguru==0.7.2
+
 # 工具和辅助库
 python-dotenv==1.0.0
 typing-extensions==4.13.0

@@ -1,5 +1,5 @@
-// API基础URL
-export const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5502/api';
+// API配置
+export const API_BASE_URL = 'http://localhost:5502/api';
 
 // 文件上传限制大小（单位：字节）
 export const MAX_UPLOAD_FILE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -14,15 +14,17 @@ export const ALLOWED_FILE_TYPES = [
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 ];
 
-// 分页参数
-export const DEFAULT_PAGE_SIZE = 10;
+// 分页配置
+export const PAGINATION = {
+  DEFAULT_PAGE_SIZE: 10,
+  DEFAULT_PAGE: 1
+};
 
 // 本地存储键名
 export const STORAGE_KEYS = {
-  AUTH_TOKEN: 'auth_token',
-  USER_INFO: 'user_info',
-  THEME_PREFERENCE: 'theme_preference',
-  NOTIFICATION_SETTINGS: 'notification_settings'
+  TOKEN: 'token',
+  USER: 'user',
+  PREFERENCES: 'preferences'
 };
 
 // 路由路径
@@ -73,10 +75,26 @@ export const HTTP_STATUS = {
 
 // 通知类型
 export const NOTIFICATION_TYPES = {
-  INFO: 'info',
-  SUCCESS: 'success',
+  GENERAL: 'general',
+  MEDICAL: 'medical',
+  APPOINTMENT: 'appointment',
+  SYSTEM: 'system'
+};
+
+// 通知优先级
+export const NOTIFICATION_PRIORITIES = {
+  LOW: 'low',
+  NORMAL: 'normal',
+  HIGH: 'high',
+  URGENT: 'urgent'
+};
+
+// 健康指标状态
+export const HEALTH_METRIC_STATUS = {
+  NORMAL: 'normal',
+  GOOD: 'good',
   WARNING: 'warning',
-  ERROR: 'error'
+  DANGER: 'danger'
 };
 
 // 用户角色

@@ -252,6 +252,105 @@ const Layout: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   
+  // Define base and role menus first
+  // 基础菜单项 (Corrected)
+  const baseMenuItems: MenuItem[] = [
+    { name: '首页', path: '/app/dashboard', icon: <HomeIcon /> },
+    { 
+      name: '康复中心', 
+      path: '/app/rehabilitation',
+      icon: <AccessibilityIcon />,
+      children: [
+        { name: '康复计划', path: '/app/rehab-plans', icon: <FitnessCenterIcon /> },
+        { name: '康复评估', path: '/app/rehab-assessment', icon: <AssessmentIcon /> },
+        { name: '进度报告', path: '/app/rehab-progress', icon: <TrendingUpIcon /> },
+        { name: '练习库', path: '/app/exercises', icon: <DirectionsRunIcon /> },
+      ]
+    },
+    { 
+      name: '智能助手', 
+      path: '/app/ai-assistant',
+      icon: <PsychologyIcon />,
+      children: [
+        { name: '智能问答', path: '/app/agents', icon: <StarIcon /> },
+        { name: '训练推荐', path: '/app/exercise-recommendations', icon: <FavoriteIcon /> },
+      ] 
+    },
+  ];
+  
+  // 角色模块菜单 (Corrected)
+  const roleMenuItems: MenuItem[] = [
+    { 
+      name: '管理员', 
+      path: '/app/admin', 
+      icon: <AdminIcon />, 
+      roles: ['admin'],
+      children: [
+        { name: '医生管理', path: '/app/admin/doctors', icon: <DoctorIcon /> },
+        { name: '患者管理', path: '/app/admin/patients', icon: <PatientIcon /> },
+        { name: '健管师管理', path: '/app/admin/health-managers', icon: <HealthManagerIcon /> },
+        { name: '组织机构', path: '/app/admin/organizations', icon: <BusinessIcon /> },
+        { name: '标签管理', path: '/app/admin/tags', icon: <LabelIcon /> },
+        { name: '设备查看', path: '/app/admin/devices', icon: <DevicesIcon /> },
+        { name: '数据可视化', path: '/app/admin/visualization', icon: <InsightsIcon /> },
+        { name: '审计日志', path: '/app/admin/audit-logs', icon: <HistoryIcon />, chip: { text: '审', color: 'info' } },
+      ]
+    },
+    { 
+      name: '医生工作站', 
+      path: '/app/doctor', 
+      icon: <DoctorIcon />, 
+      roles: ['doctor'],
+      children: [
+        { name: '患者管理', path: '/app/doctor/patients', icon: <PatientIcon /> },
+        { name: '健康档案', path: '/app/doctor/health-records', icon: <FolderIcon /> },
+        { name: '随访管理', path: '/app/doctor/follow-ups', icon: <EventNoteIcon /> },
+        { name: '数据监测', path: '/app/doctor/monitoring', icon: <MonitorHeartIcon /> },
+        { name: '医患沟通', path: '/app/doctor/communications', icon: <ChatIcon /> },
+        { name: '数据统计', path: '/app/doctor/statistics', icon: <QueryStatsIcon /> },
+        { name: '知情同意', path: '/app/doctor/informed-consent', icon: <DescriptionIcon /> },
+        { name: '文档管理', path: '/app/doctor/documents', icon: <AssignmentIcon /> },
+      ]
+    },
+    { 
+      name: '患者中心', 
+      path: '/app/patient', 
+      icon: <PatientIcon />, 
+      roles: ['patient'],
+      children: [
+        { name: '主面板', path: '/app/patient/main-dashboard', icon: <DashboardIcon /> },
+        { name: '健康档案', path: '/app/patient/health-records', icon: <FolderIcon /> },
+        { name: '日常记录', path: '/app/patient/daily-records', icon: <EventNoteIcon /> },
+        { name: '设备绑定', path: '/app/patient/devices', icon: <DevicesIcon /> },
+        { name: '医患沟通', path: '/app/patient/communications', icon: <ChatIcon /> },
+        { name: '数据统计', path: '/app/patient/statistics', icon: <QueryStatsIcon /> },
+        { name: '知情同意文档', path: '/app/patient/documents', icon: <AssignmentIcon /> },
+      ]
+    },
+    { 
+      name: '健康管理师', 
+      path: '/app/health-manager', 
+      icon: <HealthManagerIcon />, 
+      roles: ['health_manager'],
+      children: [
+        { name: '患者管理', path: '/app/health-manager/patients', icon: <PatientIcon /> },
+        { name: '健康档案', path: '/app/health-manager/health-records', icon: <FolderIcon /> },
+        { name: '健康数据时间线', path: '/app/health-manager/health-data-timeline', icon: <TimelineIcon /> },
+        { name: '健康数据阈值', path: '/app/health-manager/thresholds', icon: <TuneIcon /> },
+        { name: '随访管理', path: '/app/health-manager/follow-ups', icon: <EventNoteIcon /> },
+        { name: '数据监测', path: '/app/health-manager/monitoring', icon: <MonitorHeartIcon /> },
+        { name: '医患沟通', path: '/app/health-manager/communications', icon: <ChatIcon /> },
+        { name: '数据统计', path: '/app/health-manager/statistics', icon: <QueryStatsIcon /> },
+        { name: '文档管理', path: '/app/health-manager/documents', icon: <AssignmentIcon /> },
+      ]
+    },
+  ];
+  
+  // Calculate filteredRoleMenuItems BEFORE it's used in useCallback
+  const filteredRoleMenuItems = roleMenuItems.filter(item => 
+    !item.roles || item.roles.includes(userRole)
+  );
+
   // 新增：记忆菜单展开状态
   useEffect(() => {
     const savedOpenMenus = localStorage.getItem('openMenus');
@@ -260,62 +359,36 @@ const Layout: React.FC = () => {
     }
   }, []);
   
-  // 根据当前路径自动打开子菜单
-  useEffect(() => {
-    const path = location.pathname;
-    let newOpenSubmenu = null;
-    
-    if (path.includes('/app/admin')) {
-      newOpenSubmenu = 'admin';
-    } else if (path.includes('/app/doctor')) {
-      newOpenSubmenu = 'doctor';
-    } else if (path.includes('/app/patient')) {
-      newOpenSubmenu = 'patient';
-    } else if (path.includes('/app/health-manager')) {
-      newOpenSubmenu = 'health-manager';
-    } else if (path.includes('/app/rehab')) {
-      newOpenSubmenu = 'rehabilitation';
-    } else if (path.includes('/app/assessment')) {
-      newOpenSubmenu = 'rehabilitation';
-    } else if (path.includes('/app/exercise')) {
-      newOpenSubmenu = 'rehabilitation';
-    } else if (path.includes('/app/progress')) {
-      newOpenSubmenu = 'rehabilitation';
-    } else if (path.includes('/app/agent')) {
-      newOpenSubmenu = 'ai-assistant';
-    } else if (path.includes('/app/rehab-guidance')) {
-      newOpenSubmenu = 'ai-assistant';
-    }
-    
-    if (newOpenSubmenu) {
-      setOpenSubmenu(newOpenSubmenu);
-      localStorage.setItem('openMenus', JSON.stringify(newOpenSubmenu));
-    }
-    
-    // 更新最近访问记录
-    updateRecentPages(path);
-  }, [location.pathname]);
-  
   // 新增：更新最近访问页面
-  const updateRecentPages = (path: string) => {
-    // 所有菜单项平铺
-    const allMenuItems: MenuItem[] = [
-      ...baseMenuItems,
-      ...baseMenuItems.flatMap(item => item.children || []),
-      ...filteredRoleMenuItems.flatMap(item => item.children || [])
-    ];
-    
-    const currentPage = allMenuItems.find(item => item.path === path);
-    if (currentPage) {
-      const newRecentPages = [
-        currentPage,
-        ...recentPages.filter(page => page.path !== currentPage.path)
-      ].slice(0, 5); // 只保留最近5个
+  const updateRecentPages = useCallback((path: string) => {
+    // Use functional update for setRecentPages to avoid dependency on recentPages state
+    setRecentPages(prevPages => {
+      // 所有菜单项平铺 (Calculation moved inside functional update)
+      const allMenuItems: MenuItem[] = [
+        ...baseMenuItems,
+        ...baseMenuItems.flatMap(item => item.children || []),
+        ...filteredRoleMenuItems,
+        ...filteredRoleMenuItems.flatMap(item => item.children || [])
+      ];
       
-      setRecentPages(newRecentPages);
-      localStorage.setItem('recentPages', JSON.stringify(newRecentPages));
-    }
-  };
+      const currentPage = allMenuItems.find(item => item.path === path);
+      if (currentPage) {
+        const newRecentPages = [
+          currentPage,
+          ...prevPages.filter(page => page.path !== currentPage.path) // Use prevPages here
+        ].slice(0, 5); // 只保留最近5个
+        
+        // Only update localStorage if pages actually changed
+        if (JSON.stringify(newRecentPages) !== JSON.stringify(prevPages)) {
+          localStorage.setItem('recentPages', JSON.stringify(newRecentPages));
+        }
+        return newRecentPages;
+      } else {
+        // If current page not found, return previous pages unchanged
+        return prevPages;
+      }
+    });
+  }, [baseMenuItems, filteredRoleMenuItems]); 
   
   const handleDrawerToggle = () => {
     dispatch(toggleSidebar());
@@ -353,121 +426,22 @@ const Layout: React.FC = () => {
     setSearchQuery(event.target.value);
   };
   
-  // 搜索菜单结果
-  const getSearchResults = () => {
+  // Define getSearchResults which also depends on filteredRoleMenuItems
+  const getSearchResults = useCallback(() => {
     if (!searchQuery.trim()) return [];
     
     const query = searchQuery.toLowerCase();
     const allMenuItems: MenuItem[] = [
       ...baseMenuItems,
       ...baseMenuItems.flatMap(item => item.children || []),
+      ...filteredRoleMenuItems,
       ...filteredRoleMenuItems.flatMap(item => item.children || [])
     ];
     
     return allMenuItems.filter(item => 
       item.name.toLowerCase().includes(query)
     ).slice(0, 5);
-  };
-  
-  // 基础菜单项
-  const baseMenuItems: MenuItem[] = [
-    { name: '首页', path: '/app/dashboard', icon: <HomeIcon /> },
-    { 
-      name: '康复中心', 
-      path: '/app/rehabilitation', 
-      icon: <AccessibilityIcon />,
-      children: [
-        { name: '康复计划', path: '/app/rehab-plans', icon: <FitnessCenterIcon /> },
-        { name: '康复评估', path: '/app/assessments', icon: <AssessmentIcon /> },
-        { name: '训练记录', path: '/app/exercise-logs', icon: <DirectionsRunIcon /> },
-        { name: '进度报告', path: '/app/progress-reports', icon: <TrendingUpIcon /> },
-      ]
-    },
-    { 
-      name: '智能助手', 
-      path: '/app/ai-assistant', 
-      icon: <PsychologyIcon />,
-      children: [
-        { name: '智能问答', path: '/app/agents', icon: <StarIcon /> },
-        { name: '训练推荐', path: '/app/exercise-recommendations', icon: <FavoriteIcon /> },
-        { name: '康复指导', path: '/app/rehab-guidance', icon: <InfoOutlinedIcon /> },
-      ] 
-    },
-  ];
-  
-  // 角色模块菜单
-  const roleMenuItems: MenuItem[] = [
-    { 
-      name: '管理员', 
-      path: '/app/admin', 
-      icon: <AdminIcon />, 
-      roles: ['admin'],
-      children: [
-        { name: '医生管理', path: '/app/admin/doctors', icon: <DoctorIcon /> },
-        { name: '患者管理', path: '/app/admin/patients', icon: <PatientIcon /> },
-        { name: '健管师管理', path: '/app/admin/health-managers', icon: <HealthManagerIcon /> },
-        { name: '组织机构', path: '/app/admin/organizations', icon: <BusinessIcon /> },
-        { name: '标签管理', path: '/app/admin/tags', icon: <LabelIcon /> },
-        { name: '设备查看', path: '/app/admin/devices', icon: <DevicesIcon /> },
-        { name: '数据可视化', path: '/app/admin/visualization', icon: <InsightsIcon /> },
-        { name: '康复方案管理', path: '/app/admin/rehab-templates', icon: <AssignmentIcon />, chip: { text: '新', color: 'success' } },
-      ]
-    },
-    { 
-      name: '医生工作站', 
-      path: '/app/doctor', 
-      icon: <DoctorIcon />, 
-      roles: ['doctor'],
-      children: [
-        { name: '患者管理', path: '/app/doctor/patients', icon: <PatientIcon /> },
-        { name: '健康档案', path: '/app/doctor/health-records', icon: <FolderIcon /> },
-        { name: '随访管理', path: '/app/doctor/follow-ups', icon: <EventNoteIcon /> },
-        { name: '数据监测', path: '/app/doctor/monitoring', icon: <MonitorHeartIcon /> },
-        { name: '医患沟通', path: '/app/doctor/communications', icon: <ChatIcon /> },
-        { name: '数据统计', path: '/app/doctor/statistics', icon: <QueryStatsIcon /> },
-        { name: '康复评估', path: '/app/doctor/assessments', icon: <AssessmentIcon />, chip: { text: '新', color: 'success' } },
-        { name: '康复处方', path: '/app/doctor/prescriptions', icon: <FitnessCenterIcon />, chip: { text: '新', color: 'success' } },
-        { name: '知情同意', path: '/app/doctor/informed-consent', icon: <DescriptionIcon /> },
-      ]
-    },
-    { 
-      name: '患者中心', 
-      path: '/app/patient', 
-      icon: <PatientIcon />, 
-      roles: ['patient'],
-      children: [
-        { name: '康复任务', path: '/app/patient/rehab-tasks', icon: <ScheduleIcon />, badge: 3 },
-        { name: '健康档案', path: '/app/patient/health-records', icon: <FolderIcon /> },
-        { name: '日常记录', path: '/app/patient/daily-records', icon: <EventNoteIcon /> },
-        { name: '康复进度', path: '/app/patient/rehab-progress', icon: <TrendingUpIcon />, chip: { text: '新', color: 'success' } },
-        { name: '设备绑定', path: '/app/patient/devices', icon: <DevicesIcon /> },
-        { name: '医患沟通', path: '/app/patient/communications', icon: <ChatIcon /> },
-        { name: '数据统计', path: '/app/patient/statistics', icon: <QueryStatsIcon /> },
-      ]
-    },
-    { 
-      name: '健康管理师', 
-      path: '/app/health-manager', 
-      icon: <HealthManagerIcon />, 
-      roles: ['health_manager'],
-      children: [
-        { name: '患者管理', path: '/app/health-manager/patients', icon: <PatientIcon /> },
-        { name: '健康档案', path: '/app/health-manager/health-records', icon: <FolderIcon /> },
-        { name: '健康数据时间线', path: '/app/health-manager/health-data-timeline', icon: <TimelineIcon /> },
-        { name: '健康数据阈值', path: '/app/health-manager/thresholds', icon: <TuneIcon /> },
-        { name: '随访管理', path: '/app/health-manager/follow-ups', icon: <EventNoteIcon /> },
-        { name: '数据监测', path: '/app/health-manager/monitoring', icon: <MonitorHeartIcon /> },
-        { name: '康复计划监督', path: '/app/health-manager/rehab-monitoring', icon: <AssessmentIcon />, chip: { text: '新', color: 'success' } },
-        { name: '医患沟通', path: '/app/health-manager/communications', icon: <ChatIcon /> },
-        { name: '数据统计', path: '/app/health-manager/statistics', icon: <QueryStatsIcon /> },
-      ]
-    },
-  ];
-  
-  // 过滤当前用户可见的角色菜单
-  const filteredRoleMenuItems = roleMenuItems.filter(item => 
-    !item.roles || item.roles.includes(userRole)
-  );
+  }, [searchQuery, baseMenuItems, filteredRoleMenuItems]);
   
   // 新增：角色个性化配置
   const roleConfig = {
@@ -767,34 +741,31 @@ const Layout: React.FC = () => {
           }
         }}
       >
-        {/* 基础菜单，使用记忆化渲染 */}
-        <List component="nav" aria-label="basic menu" sx={{ mb: 1 }}>
+        <List component="nav" aria-label="main navigation menu" sx={{ py: 1 }}>
           {renderMenuItems(baseMenuItems)}
-        </List>
         
-        {/* 用户角色相关菜单，使用记忆化渲染 */}
-        {filteredRoleMenuItems.length > 0 && (
-          <>
-            <Divider sx={{ mx: 2, my: 1 }} />
-            <Typography 
-              variant="caption" 
-              sx={{ 
-                px: 3, 
-                py: 1, 
-                display: 'block', 
-                color: 'text.secondary',
-                fontWeight: 'medium',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px'
-              }}
-            >
-              角色功能
-            </Typography>
-            <List component="nav" aria-label="role menu">
+          {filteredRoleMenuItems.length > 0 && (
+            <>
+              <Divider sx={{ mx: 2, my: 1.5 }} />
+              <ListItem sx={{ mt: 1, mb: 0.5 }}>
+                 <ListItemText
+                   primary="角色功能"
+                   primaryTypographyProps={{
+                     variant: 'caption',
+                     sx: {
+                       px: 1,
+                       color: 'text.secondary',
+                       fontWeight: 'medium',
+                       textTransform: 'uppercase',
+                       letterSpacing: '0.5px'
+                     }
+                   }}
+                 />
+              </ListItem>
               {renderMenuItems(filteredRoleMenuItems)}
-            </List>
-          </>
-        )}
+            </>
+          )}
+        </List>
       </Box>
       
       <Divider sx={{ mt: 'auto' }} />

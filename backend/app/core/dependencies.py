@@ -1,6 +1,9 @@
 from fastapi import Depends, HTTPException, status
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from bson import ObjectId
+import json
+from datetime import datetime
 
 from app.db.mongodb import get_database
 from app.db.crud_services import (
@@ -222,3 +225,69 @@ async def get_health_record_service(db: AsyncIOMotorDatabase = Depends(get_datab
 async def get_health_alert_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> HealthAlertService:
     """获取健康预警服务"""
     return HealthAlertService(db=db)
+
+# 健康档案相关方法
+async def get_health_record_for_patient(
+    patient_id: str, 
+    db: AsyncIOMotorDatabase
+) -> Dict[str, Any]:
+    """获取或创建患者健康档案"""
+    try:
+        # 获取患者数据
+        users_collection = db["users"]
+        patient = await users_collection.find_one({"_id": ObjectId(patient_id), "role": "patient"})
+        
+        if not patient:
+            return {}
+            
+        # 获取健康档案
+        health_records_collection = db["health_records"]
+        health_record = await health_records_collection.find_one({"patient_id": patient_id})
+        
+        # 如果没有健康档案，创建基本结构
+        if not health_record:
+            # 将患者基本信息格式化为健康档案结构
+            return {
+                "id": patient_id,
+                "patient_id": patient_id,
+                "name": patient.get("name", "Unknown"),
+                "age": patient.get("age", 0),
+                "gender": patient.get("gender", "Unknown"),
+                "height": patient.get("height", 0),
+                "weight": patient.get("weight", 0),
+                "blood_type": patient.get("blood_type", "Unknown"),
+                "allergies": patient.get("allergies", []),
+                "emergency_contact": patient.get("emergency_contact", "None"),
+                "medical_history": [],
+                "rehab_history": [],
+                "medications": [],
+                "vital_signs": [],
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+        # 格式化MongoDB对象
+        return format_mongo_doc(health_record)
+    except Exception as e:
+        print(f"获取患者健康档案时出错: {str(e)}")
+        return {}
+
+# MongoDB文档格式化函数
+def format_mongo_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """格式化MongoDB文档，将ObjectId转换为字符串等"""
+    if not doc:
+        return {}
+        
+    def convert(obj):
+        if isinstance(obj, ObjectId):
+            return str(obj)
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert(item) for item in obj]
+        else:
+            return obj
+            
+    return convert(doc)

@@ -1,233 +1,290 @@
-import { apiService } from './api';
-import api from './api';
-import { HealthData as BaseHealthData, WidgetConfig as BaseWidgetConfig, DashboardConfig } from '../types/health';
+import { HealthDataType, WidgetSize, TimeRange, WidgetType } from '../types/health';
 
-// 健康数据服务扩展类型
-export interface HealthData extends BaseHealthData {
+// 健康数据类型
+export interface HealthData {
   id: string;
-  type: 'heart_rate' | 'blood_pressure' | 'blood_glucose' | 'weight' | 'steps' | 'sleep' | 'temperature';
+  type: HealthDataType;
   value: number | string;
   unit: string;
-  // 这里保留服务特有的字段
+  timestamp: string;
   deviceId?: string;
   deviceName?: string;
+  userId?: string;
+  notes?: string;
 }
 
-// 扩展WidgetConfig以兼容服务特定功能
-export interface WidgetConfig extends BaseWidgetConfig {
-  dataType?: HealthData['type'];
-  size?: 'small' | 'medium' | 'large';
-  timeRange?: 'day' | 'week' | 'month' | 'year';
-  position?: number;
-  goal?: number;
+// 小部件配置类型
+export interface WidgetConfig {
+  id: string;
+  title: string;
+  type: WidgetType;
+  dataType: HealthDataType;
+  dataKey: string;
+  size: WidgetSize;
+  timeRange: TimeRange;
+  position: number;
   thresholds?: {
-    min?: number;
-    max?: number;
+    min: number;
+    max: number;
   };
+  goal?: number;
+  color?: string;
 }
 
-// 健康数据服务
-const healthDataService = {
-  // 获取患者健康数据
-  getHealthData: async (patientId?: string, params?: { timeRange?: string; type?: string; startDate?: string; endDate?: string }) => {
-    try {
-      if (patientId) {
-        const response = await apiService.getHealthData(patientId, params);
-        return response.data;
-      } else {
-        // 获取当前登录用户的健康数据
-        const response = await api.get('/health-records/health-data/current-user');
-        return response;
+// 图表数据项类型
+export interface ChartDataItem {
+  time: string;
+  date: string;
+  value: number | string;
+  unit: string;
+  systolic?: number;
+  diastolic?: number;
+}
+
+// 格式化数据以供图表使用
+export const formatDataForChart = (data: HealthData[], dataType: HealthDataType): ChartDataItem[] => {
+  // 根据数据类型进行不同的处理
+  const filteredData = data.filter(item => item.type === dataType);
+  
+  // 按时间排序
+  const sortedData = filteredData.sort((a, b) => 
+    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+  
+  // 转换为图表所需格式
+  return sortedData.map(item => {
+    const date = new Date(item.timestamp);
+    const result: ChartDataItem = {
+      time: date.toLocaleTimeString(),
+      date: date.toLocaleDateString(),
+      value: item.value,
+      unit: item.unit
+    };
+    
+    // 血压数据特殊处理
+    if (dataType === 'blood_pressure') {
+      const parts = typeof item.value === 'string' ? item.value.split('/') : [];
+      if (parts.length === 2) {
+        result.systolic = parseInt(parts[0]);
+        result.diastolic = parseInt(parts[1]);
       }
+    }
+    
+    return result;
+  });
+};
+
+// 获取最新值
+export const getLatestValue = (data: HealthData[], dataType: HealthDataType): HealthData | null => {
+  const filteredData = data.filter(item => item.type === dataType);
+  
+  if (filteredData.length === 0) return null;
+  
+  // 按时间排序并获取最新的
+  return filteredData.sort((a, b) => 
+    new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  )[0];
+};
+
+// 生成模拟健康数据
+const generateMockHealthData = (): HealthData[] => {
+  const now = new Date();
+  const data: HealthData[] = [];
+  
+  // 心率数据
+  for (let i = 0; i < 24; i++) {
+    const timestamp = new Date(now);
+    timestamp.setHours(now.getHours() - 24 + i);
+    
+    data.push({
+      id: `hr-${i}`,
+      type: 'heart_rate',
+      value: Math.floor(60 + Math.random() * 40), // 60-100 bpm
+      unit: 'bpm',
+      timestamp: timestamp.toISOString()
+    });
+  }
+  
+  // 血压数据
+  for (let i = 0; i < 6; i++) {
+    const timestamp = new Date(now);
+    timestamp.setHours(now.getHours() - 24 + i * 4);
+    
+    const systolic = Math.floor(110 + Math.random() * 30); // 收缩压 110-140
+    const diastolic = Math.floor(60 + Math.random() * 30); // 舒张压 60-90
+    
+    data.push({
+      id: `bp-${i}`,
+      type: 'blood_pressure',
+      value: `${systolic}/${diastolic}`,
+      unit: 'mmHg',
+      timestamp: timestamp.toISOString()
+    });
+  }
+  
+  // 体重数据
+  data.push({
+    id: 'weight-1',
+    type: 'weight',
+    value: 72.5,
+    unit: 'kg',
+    timestamp: new Date().toISOString()
+  });
+  
+  // 血糖数据
+  data.push({
+    id: 'glucose-1',
+    type: 'blood_glucose',
+    value: 95,
+    unit: 'mg/dL',
+    timestamp: new Date().toISOString()
+  });
+  
+  // 步数数据
+  data.push({
+    id: 'steps-1',
+    type: 'steps',
+    value: 8500,
+    unit: '步',
+    timestamp: new Date().toISOString()
+  });
+  
+  // 睡眠数据
+  data.push({
+    id: 'sleep-1',
+    type: 'sleep',
+    value: 7.5,
+    unit: '小时',
+    timestamp: new Date().toISOString()
+  });
+  
+  return data;
+};
+
+// 模拟数据
+const mockHealthData: HealthData[] = generateMockHealthData();
+
+// 默认小部件配置
+const defaultWidgets: WidgetConfig[] = [
+  {
+    id: 'widget-1',
+    title: '心率监测',
+    type: 'line',
+    dataType: 'heart_rate',
+    dataKey: 'value',
+    size: 'medium',
+    timeRange: 'day',
+    position: 1,
+    color: '#FF5252'
+  },
+  {
+    id: 'widget-2',
+    title: '血压监测',
+    type: 'bar',
+    dataType: 'blood_pressure',
+    dataKey: 'value',
+    size: 'medium',
+    timeRange: 'week',
+    position: 2,
+    color: '#536DFE'
+  },
+  {
+    id: 'widget-3',
+    title: '血糖监测',
+    type: 'line',
+    dataType: 'blood_glucose',
+    dataKey: 'value',
+    size: 'small',
+    timeRange: 'week',
+    position: 3,
+    color: '#FF9800'
+  },
+  {
+    id: 'widget-4',
+    title: '体重趋势',
+    type: 'line',
+    dataType: 'weight',
+    dataKey: 'value',
+    size: 'small',
+    timeRange: 'month',
+    position: 4,
+    color: '#4CAF50'
+  },
+  {
+    id: 'widget-5',
+    title: '今日步数',
+    type: 'goal',
+    dataType: 'steps',
+    dataKey: 'value',
+    size: 'small',
+    timeRange: 'day',
+    position: 5,
+    goal: 10000,
+    color: '#03A9F4'
+  },
+  {
+    id: 'widget-6',
+    title: '睡眠时长',
+    type: 'stat',
+    dataType: 'sleep',
+    dataKey: 'value',
+    size: 'small',
+    timeRange: 'day',
+    position: 6,
+    color: '#9C27B0'
+  }
+];
+
+/**
+ * 健康数据服务
+ */
+const healthDataService = {
+  /**
+   * 获取用户健康数据
+   * @param userId 用户ID
+   * @param timeRange 时间范围
+   * @returns 健康数据数组
+   */
+  getUserHealthData: async (userId: string, timeRange?: string): Promise<HealthData[]> => {
+    try {
+      // 这里应该从API获取数据，现在使用模拟数据
+      return mockHealthData;
     } catch (error) {
       console.error('获取健康数据失败:', error);
-      throw error;
+      return [];
     }
   },
-
-  // 获取特定类型的最新健康数据
-  getLatestHealthData: async (patientId: string, type: HealthData['type']) => {
+  
+  /**
+   * 获取用户仪表盘配置
+   * @param userId 用户ID
+   * @returns 仪表盘配置
+   */
+  getUserDashboardConfig: async (userId: string): Promise<WidgetConfig[]> => {
     try {
-      const response = await apiService.getHealthData(patientId, { limit: 1, type, sort: '-timestamp' });
-      return response.data.length > 0 ? response.data[0] : null;
-    } catch (error) {
-      console.error(`获取${type}最新数据失败:`, error);
-      throw error;
-    }
-  },
-
-  // 创建健康数据记录
-  createHealthData: async (data: Omit<HealthData, 'id'>) => {
-    try {
-      const response = await apiService.createHealthData(data);
-      return response.data;
-    } catch (error) {
-      console.error('创建健康数据失败:', error);
-      throw error;
-    }
-  },
-
-  // 批量创建健康数据记录（例如从设备同步）
-  createBatchHealthData: async (dataArray: Omit<HealthData, 'id'>[]) => {
-    try {
-      const response = await api.post('/health-records/health-data/batch', { data: dataArray });
-      return response.data;
-    } catch (error) {
-      console.error('批量创建健康数据失败:', error);
-      throw error;
-    }
-  },
-
-  // 获取用户的仪表盘配置
-  getUserDashboardConfig: async (userId: string): Promise<{ widgets: WidgetConfig[] }> => {
-    try {
-      const response = await apiService.getUserDashboardConfig(userId);
-      return response.data;
+      // 这里应该从API获取数据，现在使用默认配置
+      return defaultWidgets;
     } catch (error) {
       console.error('获取仪表盘配置失败:', error);
-      throw error;
+      return defaultWidgets;
     }
   },
-
-  // 保存用户的仪表盘配置
-  saveUserDashboardConfig: async (userId: string, config: { widgets: WidgetConfig[] }) => {
+  
+  /**
+   * 保存用户健康仪表盘配置
+   * @param userId 用户ID
+   * @param widgets 控件配置数组
+   * @returns 是否成功
+   */
+  saveUserDashboardConfig: async (userId: string, widgets: WidgetConfig[]): Promise<boolean> => {
     try {
-      const response = await apiService.saveUserDashboardConfig(userId, config);
-      return response.data;
+      // 这里应该调用API保存配置
+      console.log('保存仪表盘配置:', userId, widgets);
+      return true;
     } catch (error) {
       console.error('保存仪表盘配置失败:', error);
-      throw error;
+      return false;
     }
-  },
-
-  // 重置用户的仪表盘配置为默认值
-  resetUserDashboardConfig: async (userId: string) => {
-    try {
-      const response = await apiService.resetUserDashboardConfig(userId);
-      return response.data;
-    } catch (error) {
-      console.error('重置仪表盘配置失败:', error);
-      throw error;
-    }
-  },
-
-  // 获取健康数据统计信息
-  getHealthDataStats: async (patientId: string, params?: { type?: string; startDate?: string; endDate?: string }) => {
-    try {
-      const response = await api.get(`/health-records/health-data/stats`, {
-        params: { patient_id: patientId, ...params }
-      });
-      return response.data;
-    } catch (error) {
-      console.error('获取健康数据统计信息失败:', error);
-      throw error;
-    }
-  },
-
-  // 获取健康数据阈值
-  getHealthDataThresholds: async (patientId: string) => {
-    try {
-      const response = await api.get(`/health-records/thresholds`, {
-        params: { patient_id: patientId }
-      });
-      return response.data;
-    } catch (error) {
-      console.error('获取健康数据阈值失败:', error);
-      throw error;
-    }
-  },
-
-  // 设置健康数据阈值
-  setHealthDataThreshold: async (patientId: string, type: HealthData['type'], threshold: { min?: number; max?: number; warnMin?: number; warnMax?: number }) => {
-    try {
-      const response = await api.post(`/health-records/thresholds`, {
-        patientId,
-        type,
-        ...threshold
-      });
-      return response.data;
-    } catch (error) {
-      console.error('设置健康数据阈值失败:', error);
-      throw error;
-    }
-  },
-
-  // 以下是为了支持PersonalizedDashboard组件而添加的新方法
-
-  // 获取当前用户的仪表盘配置
-  getDashboardConfig: async (): Promise<{ data: DashboardConfig }> => {
-    try {
-      const response = await api.get('/health-records/dashboard/config');
-      return response;
-    } catch (error) {
-      console.error('获取仪表盘配置失败:', error);
-      throw error;
-    }
-  },
-
-  // 保存当前用户的仪表盘配置
-  saveDashboardConfig: async (config: DashboardConfig): Promise<{ data: DashboardConfig }> => {
-    try {
-      const response = await api.post('/health-records/dashboard/config', config);
-      return response;
-    } catch (error) {
-      console.error('保存仪表盘配置失败:', error);
-      throw error;
-    }
-  },
-
-  // 获取用户的格式化健康数据（与PersonalizedDashboard组件兼容）
-  getFormattedHealthData: async (timeRange: string = 'week'): Promise<HealthData[]> => {
-    try {
-      const response = await api.get('/health-records/health-data/formatted', {
-        params: { timeRange }
-      });
-      return response.data;
-    } catch (error) {
-      console.error('获取格式化健康数据失败:', error);
-      throw error;
-    }
-  },
-
-  // 转换API数据格式为Dashboard兼容格式
-  transformHealthData: (apiData: any[]): HealthData[] => {
-    return apiData.map(item => {
-      const result: HealthData = {
-        id: item.id,
-        type: item.type,
-        value: item.value,
-        unit: item.unit,
-        timestamp: item.timestamp
-      };
-
-      // 根据类型设置对应的属性
-      switch (item.type) {
-        case 'heart_rate':
-          result.heartRate = Number(item.value);
-          break;
-        case 'blood_pressure':
-          if (item.systolic) result.bloodPressureSystolic = Number(item.systolic);
-          if (item.diastolic) result.bloodPressureDiastolic = Number(item.diastolic);
-          break;
-        case 'blood_glucose':
-          result.bloodSugar = Number(item.value);
-          break;
-        case 'weight':
-          result.weight = Number(item.value);
-          break;
-        case 'temperature':
-          result.temperature = Number(item.value);
-          break;
-        case 'steps':
-          result.stepCount = Number(item.value);
-          break;
-        case 'sleep':
-          result.sleepHours = Number(item.value);
-          break;
-      }
-
-      return result;
-    });
   }
 };
 

@@ -7,6 +7,7 @@ from app.api.routers.health_manager_router import router as health_manager_route
 from app.api.routers.patient_router import router as patient_router
 from app.api.routers.system_admin_router import router as system_admin_router
 from app.api.routers.health_alert_router import router as health_alert_router
+from app.api.routers.notification_router import router as notification_router
 # from app.api.routers.auth_router import router as auth_router  # 暂未实现
 # from app.api.routers.health_record_router import router as health_record_router  # 暂未实现
 # from app.api.routers.device_router import router as device_router  # 设备路由器 - 暂未实现

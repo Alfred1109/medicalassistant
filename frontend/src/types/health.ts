@@ -1,3 +1,59 @@
+/**
+ * 健康数据相关类型声明
+ */
+
+// 健康数据类型
+export type HealthDataType = 'heart_rate' | 'blood_pressure' | 'weight' | 'blood_glucose' | 'sleep' | 'steps' | 'temperature';
+
+// 健康数据实体
+export interface HealthData {
+  id: string;
+  timestamp: string;
+  type: HealthDataType;
+  value: number;
+  unit: string;
+  notes?: string;
+  source?: string;
+  userId?: string;
+  heartRate?: number;
+  systolicBP?: number;
+  diastolicBP?: number;
+  weight?: number;
+  bloodGlucose?: number;
+  sleepHours?: number;
+  steps?: number;
+  temperature?: number;
+  oxygenSaturation?: number;
+  stressLevel?: number;
+}
+
+// 窗口组件尺寸
+export type WidgetSize = 'small' | 'medium' | 'large';
+
+// 时间范围
+export type TimeRange = 'day' | 'week' | 'month' | 'year';
+
+// 窗口组件类型
+export type WidgetType = 'line' | 'bar' | 'stat' | 'area' | 'progress' | 'goal';
+
+// 窗口组件配置
+export interface WidgetConfig {
+  id: string;
+  title: string;
+  type: WidgetType;
+  dataType: HealthDataType;
+  dataKey: string;  // 对应HealthData中的属性名
+  size: WidgetSize;
+  timeRange: TimeRange;
+  position: number;
+  thresholds?: {
+    min: number;
+    max: number;
+  };
+  goal?: number;
+  color?: string;
+}
+
 // 健康数据基本类型
 export interface HealthData {
   timestamp: string;
@@ -19,9 +75,6 @@ export interface HealthData {
   hydration?: number;
   stressLevel?: number;
 }
-
-// Widget类型
-export type WidgetType = 'line' | 'bar' | 'stat' | 'progress';
 
 // Widget配置接口
 export interface WidgetConfig {

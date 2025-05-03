@@ -49,6 +49,7 @@ import EventIcon from '@mui/icons-material/Event';
 import ArrowForwardIosIcon from '@mui/icons-material/ArrowForwardIos';
 import PeopleIcon from '@mui/icons-material/People';
 import { apiService } from '../../services/api';
+import { Doctor } from '../../types/doctor.types';
 
 // 模拟部门数据
 const departments = [
@@ -68,11 +69,11 @@ const titles = ['全部', '主任医师', '副主任医师', '主治医师', '�
 const DoctorManagement: React.FC = () => {
   // 状态管理
   const [isLoading, setIsLoading] = useState(true);
-  const [doctors, setDoctors] = useState<any[]>([]);
-  const [filteredDoctors, setFilteredDoctors] = useState<any[]>([]);
+  const [doctors, setDoctors] = useState<Doctor[]>([]);
+  const [filteredDoctors, setFilteredDoctors] = useState<Doctor[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [openDialog, setOpenDialog] = useState(false);
-  const [selectedDoctor, setSelectedDoctor] = useState<any>(null);
+  const [selectedDoctor, setSelectedDoctor] = useState<Doctor | null>(null);
   const [filterDepartment, setFilterDepartment] = useState('全部');
   const [filterTitle, setFilterTitle] = useState('全部');
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
@@ -105,7 +106,7 @@ const DoctorManagement: React.FC = () => {
         console.log('正在获取医生数据，参数:', params);
         // 使用Promise.race实现请求超时控制
         const response = await Promise.race([
-          apiService.getDoctors(params),
+          apiService.admin.getDoctors(params),
           timeoutPromise
         ]) as any;
         
@@ -196,28 +197,10 @@ const DoctorManagement: React.FC = () => {
     fetchDoctors();
   }, [filterDepartment]); // 当部门筛选条件变更时重新加载
 
-  // 本地筛选（仅当API已返回数据后）
+  // Use raw doctors list when filtering effect is disabled
   useEffect(() => {
-    if (doctors.length > 0) {
-      let filtered = [...doctors];
-      
-      // 根据职称筛选
-      if (filterTitle !== '全部') {
-        filtered = filtered.filter(doctor => doctor.title === filterTitle);
-      }
-      
-      // 根据搜索词筛选
-      if (searchTerm) {
-        filtered = filtered.filter(doctor => 
-          doctor.name.includes(searchTerm) || 
-          doctor.department?.includes(searchTerm) ||
-          doctor.specialty?.includes(searchTerm)
-        );
-      }
-      
-      setFilteredDoctors(filtered);
-    }
-  }, [searchTerm, filterTitle, doctors]);
+    setFilteredDoctors(doctors);
+  }, [doctors]);
 
   const handleSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     setSearchTerm(event.target.value);
@@ -228,19 +211,19 @@ const DoctorManagement: React.FC = () => {
     setOpenDialog(true);
   };
 
-  const handleEditDoctor = (doctor: any) => {
+  const handleEditDoctor = (doctor: Doctor) => {
     setSelectedDoctor(doctor);
     setOpenDialog(true);
   };
 
-  const handleViewDoctor = (doctor: any) => {
+  const handleViewDoctor = (doctor: Doctor) => {
     setSelectedDoctor(doctor);
     setDetailDialogOpen(true);
   };
 
   const handleDeleteDoctor = (doctorId: string) => {
-    setDoctors(doctors.filter(doctor => doctor.id !== doctorId));
-    setFilteredDoctors(filteredDoctors.filter(doctor => doctor.id !== doctorId));
+    setDoctors(doctors.filter((doctor: Doctor) => doctor.id !== doctorId));
+    setFilteredDoctors(filteredDoctors.filter((doctor: Doctor) => doctor.id !== doctorId));
   };
 
   const handleCloseDialog = () => {
@@ -387,7 +370,7 @@ const DoctorManagement: React.FC = () => {
               </TableRow>
             </TableHead>
             <TableBody>
-              {filteredDoctors.map((doctor) => (
+              {filteredDoctors.map((doctor: Doctor) => (
                 <TableRow key={doctor.id}>
                   <TableCell>
                     <Box display="flex" alignItems="center">
@@ -408,7 +391,7 @@ const DoctorManagement: React.FC = () => {
                       {doctor.email}
                     </Typography>
                   </TableCell>
-                  <TableCell>{doctor.patients}</TableCell>
+                  <TableCell>{doctor.patients ?? 'N/A'}</TableCell>
                   <TableCell>
                     <Chip 
                       label={doctor.status} 
@@ -445,7 +428,7 @@ const DoctorManagement: React.FC = () => {
 
       {tabValue === 1 && (
         <Grid container spacing={2}>
-          {filteredDoctors.map((doctor) => (
+          {filteredDoctors.map((doctor: Doctor) => (
             <Grid item xs={12} sm={6} md={4} key={doctor.id}>
               <Paper sx={{ p: 2 }}>
                 <Box display="flex" alignItems="center" mb={2}>
@@ -489,7 +472,7 @@ const DoctorManagement: React.FC = () => {
                     </ListItemAvatar>
                     <ListItemText 
                       primary="管理患者数"
-                      secondary={doctor.patients}
+                      secondary={doctor.patients ?? 'N/A'}
                     />
                   </ListItem>
                   <ListItem>
@@ -498,7 +481,7 @@ const DoctorManagement: React.FC = () => {
                     </ListItemAvatar>
                     <ListItemText 
                       primary="入职日期"
-                      secondary={doctor.joinDate}
+                      secondary={doctor.joinDate ?? '未知'}
                     />
                   </ListItem>
                 </List>
@@ -683,7 +666,7 @@ const DoctorManagement: React.FC = () => {
                     </ListItemAvatar>
                     <ListItemText 
                       primary="管理患者数"
-                      secondary={selectedDoctor?.patients}
+                      secondary={selectedDoctor?.patients ?? 'N/A'}
                     />
                   </ListItem>
                   <ListItem>
@@ -692,7 +675,7 @@ const DoctorManagement: React.FC = () => {
                     </ListItemAvatar>
                     <ListItemText 
                       primary="入职日期"
-                      secondary={selectedDoctor?.joinDate}
+                      secondary={selectedDoctor?.joinDate ?? '未知'}
                     />
                   </ListItem>
                 </List>
@@ -705,14 +688,9 @@ const DoctorManagement: React.FC = () => {
                 <Divider sx={{ mb: 2 }} />
                 
                 <List>
-                  {selectedDoctor?.certifications.map((cert: string, index: number) => (
-                    <ListItem key={index}>
-                      <ListItemAvatar>
-                        <LocalHospitalIcon color="primary" />
-                      </ListItemAvatar>
-                      <ListItemText primary={cert} />
-                    </ListItem>
-                  ))}
+                  <ListItem>
+                    <ListItemText primary="暂无资质信息" />
+                  </ListItem>
                 </List>
               </Paper>
             </Grid>
@@ -725,7 +703,7 @@ const DoctorManagement: React.FC = () => {
                 <Stack direction="row" spacing={2} justifyContent="space-around">
                   <Box textAlign="center">
                     <Typography variant="h4" color="primary">
-                      {selectedDoctor?.patients}
+                      {selectedDoctor?.patients ?? 'N/A'}
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
                       当前患者

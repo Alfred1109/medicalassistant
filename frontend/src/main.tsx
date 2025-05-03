@@ -3,8 +3,12 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { Provider } from 'react-redux';
 import { CssBaseline, CircularProgress, Box } from '@mui/material';
-import { ThemeProvider, createTheme } from '@mui/material/styles';
+import { ThemeProvider } from '@mui/material/styles';
 import store from './store';
+import { PersistGate } from 'redux-persist/integration/react';
+import { persistor } from './store';
+// 导入自定义主题
+import theme from './theme';
 
 // 导入备用页面组件
 import {
@@ -108,53 +112,18 @@ const DataVisualization = React.lazy(() => import('./pages/Admin/DataVisualizati
 // 404页面
 const NotFound = React.lazy(() => import('./pages/NotFound'));
 
-// 定义主题
-const theme = createTheme({
-  palette: {
-    primary: {
-      main: '#1976d2',
-    },
-    secondary: {
-      main: '#f50057',
-    },
-    background: {
-      default: '#f8f9fa',
-    },
-  },
-  typography: {
-    fontFamily: '"Roboto", "Helvetica", "Arial", sans-serif',
-  },
-  components: {
-    MuiButton: {
-      styleOverrides: {
-        root: {
-          textTransform: 'none',
-          borderRadius: 8,
-        },
-      },
-    },
-    MuiPaper: {
-      styleOverrides: {
-        root: {
-          borderRadius: 12,
-        },
-      },
-    },
-  },
-});
-
-// 基本错误处理
-const rootElement = document.getElementById('root');
-if (!rootElement) {
-  throw new Error('未找到根元素，无法渲染应用');
-}
-
 // 加载中组件
 const LoadingFallback = () => (
   <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
     <CircularProgress />
   </Box>
 );
+
+// 基本错误处理
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error('未找到根元素，无法渲染应用');
+}
 
 // 错误边界组件
 class ErrorBoundary extends React.Component<
@@ -373,8 +342,15 @@ const App = () => (
 );
 
 // 渲染应用
-ReactDOM.createRoot(rootElement).render(
+ReactDOM.createRoot(rootElement!).render(
   <React.StrictMode>
-    <App />
+    <Provider store={store}>
+      <PersistGate loading={<LoadingFallback />} persistor={persistor}>
+        <ThemeProvider theme={theme}>
+          <CssBaseline />
+          <App />
+        </ThemeProvider>
+      </PersistGate>
+    </Provider>
   </React.StrictMode>
 ); 

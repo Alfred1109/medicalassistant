@@ -14,74 +14,83 @@ import {
   IconButton,
   Chip,
   InputAdornment,
+  CircularProgress,
+  Alert,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
 import EditIcon from '@mui/icons-material/Edit';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import { useNavigate } from 'react-router-dom';
-
-// 模拟数据
-const mockPatients = [
-  { id: '1', name: '张三', age: 45, gender: '男', diagnosis: '腰椎间盘突出', status: '在治疗' },
-  { id: '2', name: '李四', age: 62, gender: '女', diagnosis: '膝关节炎', status: '已完成' },
-  { id: '3', name: '王五', age: 38, gender: '男', diagnosis: '肩周炎', status: '在治疗' },
-  { id: '4', name: '赵六', age: 55, gender: '女', diagnosis: '颈椎病', status: '随访中' },
-  { id: '5', name: '钱七', age: 41, gender: '男', diagnosis: '腕管综合征', status: '已完成' },
-];
+import { apiService } from '../../services/api';
+import { useApi } from '../../hooks/useApi';
+import { Patient } from '../../types/patient.types';
 
 const PatientManagement: React.FC = () => {
-  const [patients, setPatients] = useState(mockPatients);
-  const [searchTerm, setSearchTerm] = useState('');
   const navigate = useNavigate();
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filteredPatients, setFilteredPatients] = useState<Patient[]>([]);
   
+  // 使用API钩子获取患者列表
+  const { 
+    data: patients,
+    loading,
+    error,
+    execute: fetchPatients 
+  } = useApi<Patient[]>(apiService.doctor.getPatients, true);
+  
+  // 搜索处理
   useEffect(() => {
-    // 这里可以替换为实际的API调用
-    // fetchPatients();
-  }, []);
-  
-  const handleSearch = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setSearchTerm(event.target.value);
-    // 在实际应用中可以发起API请求进行搜索
-    // 这里简单模拟本地搜索功能
-    if (event.target.value === '') {
-      setPatients(mockPatients);
+    if (patients) {
+      if (searchTerm) {
+        const filtered = patients.filter(
+          (patient) =>
+            patient.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            patient.diagnosis?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            patient.status?.toLowerCase().includes(searchTerm.toLowerCase())
+        );
+        setFilteredPatients(filtered);
+      } else {
+        setFilteredPatients(patients);
+      }
     } else {
-      const filtered = mockPatients.filter(patient => 
-        patient.name.includes(event.target.value) || 
-        patient.diagnosis.includes(event.target.value)
-      );
-      setPatients(filtered);
+      // 没有数据时显示空数组，而不是使用模拟数据
+      setFilteredPatients([]);
+    }
+  }, [searchTerm, patients]);
+  
+  // 重试获取数据
+  const handleRetry = () => {
+    fetchPatients();
+  };
+  
+  // 状态显示样式
+  const getStatusChipColor = (status: string) => {
+    switch (status?.toLowerCase()) {
+      case '在治疗':
+        return 'primary';
+      case '已完成':
+        return 'success';
+      case '随访中':
+        return 'info';
+      default:
+        return 'default';
     }
   };
-  
-  const handleViewPatient = (patientId: string) => {
-    navigate(`/doctor/health-records/${patientId}`);
-  };
-  
+
   return (
-    <Box>
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
-        <Typography variant="h5" component="h2">
-          患者管理
-        </Typography>
-        <Button
-          variant="contained"
-          color="primary"
-          startIcon={<AddIcon />}
-          onClick={() => console.log('添加患者')}
-        >
-          添加患者
-        </Button>
-      </Box>
+    <Box p={3}>
+      <Typography variant="h4" gutterBottom>
+        患者管理
+      </Typography>
       
-      <Box mb={3}>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
         <TextField
-          fullWidth
-          placeholder="搜索患者姓名或诊断..."
+          placeholder="搜索患者"
           variant="outlined"
+          size="small"
           value={searchTerm}
-          onChange={handleSearch}
+          onChange={(e) => setSearchTerm(e.target.value)}
           InputProps={{
             startAdornment: (
               <InputAdornment position="start">
@@ -89,55 +98,91 @@ const PatientManagement: React.FC = () => {
               </InputAdornment>
             ),
           }}
+          sx={{ width: '300px' }}
         />
+        <Button
+          variant="contained"
+          color="primary"
+          startIcon={<AddIcon />}
+          onClick={() => navigate('/app/doctor/patients/add')}
+        >
+          添加患者
+        </Button>
       </Box>
-      
+
+      {error && (
+        <Alert 
+          severity="error" 
+          sx={{ mb: 3 }}
+          action={
+            <Button color="inherit" size="small" onClick={handleRetry}>
+              重试
+            </Button>
+          }
+        >
+          获取患者数据时出错：{error.message}
+        </Alert>
+      )}
+
       <TableContainer component={Paper}>
         <Table>
           <TableHead>
             <TableRow>
-              <TableCell>姓名</TableCell>
+              <TableCell>患者姓名</TableCell>
               <TableCell>年龄</TableCell>
               <TableCell>性别</TableCell>
-              <TableCell>主要诊断</TableCell>
+              <TableCell>诊断</TableCell>
               <TableCell>状态</TableCell>
-              <TableCell align="center">操作</TableCell>
+              <TableCell align="right">操作</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
-            {patients.map((patient) => (
-              <TableRow key={patient.id}>
-                <TableCell>{patient.name}</TableCell>
-                <TableCell>{patient.age}</TableCell>
-                <TableCell>{patient.gender}</TableCell>
-                <TableCell>{patient.diagnosis}</TableCell>
-                <TableCell>
-                  <Chip 
-                    label={patient.status} 
-                    color={
-                      patient.status === '在治疗' ? 'primary' : 
-                      patient.status === '已完成' ? 'success' : 
-                      'warning'
-                    }
-                    size="small"
-                  />
-                </TableCell>
-                <TableCell align="center">
-                  <IconButton
-                    color="primary"
-                    onClick={() => handleViewPatient(patient.id)}
-                  >
-                    <VisibilityIcon />
-                  </IconButton>
-                  <IconButton
-                    color="primary"
-                    onClick={() => console.log('编辑', patient.id)}
-                  >
-                    <EditIcon />
-                  </IconButton>
+            {loading ? (
+              <TableRow>
+                <TableCell colSpan={6} align="center">
+                  <CircularProgress size={24} />
+                  <Typography variant="body2" sx={{ ml: 1 }}>
+                    加载中...
+                  </Typography>
                 </TableCell>
               </TableRow>
-            ))}
+            ) : filteredPatients.length > 0 ? (
+              filteredPatients.map((patient) => (
+                <TableRow key={patient.id}>
+                  <TableCell>{patient.name}</TableCell>
+                  <TableCell>{patient.age}</TableCell>
+                  <TableCell>{patient.gender}</TableCell>
+                  <TableCell>{patient.diagnosis}</TableCell>
+                  <TableCell>
+                    <Chip
+                      label={patient.status || '未知'}
+                      color={getStatusChipColor(patient.status || '')}
+                      size="small"
+                    />
+                  </TableCell>
+                  <TableCell align="right">
+                    <IconButton
+                      color="primary"
+                      onClick={() => navigate(`/app/doctor/patients/${patient.id}`)}
+                    >
+                      <VisibilityIcon />
+                    </IconButton>
+                    <IconButton
+                      color="secondary"
+                      onClick={() => navigate(`/app/doctor/patients/${patient.id}/edit`)}
+                    >
+                      <EditIcon />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : (
+              <TableRow>
+                <TableCell colSpan={6} align="center">
+                  {error ? '加载数据失败，请点击重试按钮' : '没有找到匹配的患者'}
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       </TableContainer>

@@ -5,6 +5,7 @@
 from datetime import datetime
 from bson import ObjectId
 from typing import Dict, List, Optional, Any
+from pydantic import BaseModel, Field
 
 class Message:
     """消息模型"""
@@ -181,4 +182,39 @@ class Conversation:
     def activate(self):
         """激活对话"""
         self.status = "active"
-        self.updated_at = datetime.utcnow() 
+        self.updated_at = datetime.utcnow()
+
+# 通知模型
+class Notification(BaseModel):
+    id: str = Field(default_factory=lambda: str(ObjectId()))
+    title: str
+    content: str
+    sender_id: str  # 发送者ID
+    sender_name: str  # 发送者名称
+    sender_role: str  # 发送者角色
+    recipient_id: str  # 接收者ID
+    time: datetime = Field(default_factory=datetime.now)
+    read: bool = False
+    notification_type: str = "general"  # 通知类型：general, medical, appointment, system
+    priority: str = "normal"  # 优先级：low, normal, high, urgent
+    related_entity_id: Optional[str] = None  # 相关实体ID（如预约ID、健康记录ID等）
+    related_entity_type: Optional[str] = None  # 相关实体类型
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": "60d21b4967d0d8992e610c85",
+                "title": "康复计划已更新",
+                "content": "您的康复计划已由张医生更新，请查看最新内容。",
+                "sender_id": "60d21b4967d0d8992e610c82",
+                "sender_name": "张医生",
+                "sender_role": "doctor",
+                "recipient_id": "60d21b4967d0d8992e610c83",
+                "time": "2023-08-15T14:30:00.000Z",
+                "read": False,
+                "notification_type": "medical",
+                "priority": "high",
+                "related_entity_id": "60d21b4967d0d8992e610c84",
+                "related_entity_type": "rehabilitation_plan"
+            }
+        } 

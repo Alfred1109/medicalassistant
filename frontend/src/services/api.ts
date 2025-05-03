@@ -1,197 +1,175 @@
 import axios from 'axios';
+import type { AxiosInstance, AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios';
+import { 
+  ApiResponse, 
+  LoginCredentials, 
+  TokenResponse, 
+  User 
+} from '../types/api.types';
+import { 
+  Patient, 
+  PatientHealthRecord 
+} from '../types/patient.types';
+import { 
+  Doctor, 
+  FollowUp 
+} from '../types/doctor.types';
 
-// Create axios instance with base URL and default headers
-const api = axios.create({
-  // 直接使用硬编码URL，避免环境变量可能导致的问题
+// 创建具有基础URL和默认头部的axios实例
+const api: AxiosInstance = axios.create({
   baseURL: 'http://localhost:5502/api',
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
-// Add a request interceptor to include the auth token
+// 添加请求拦截器，包含认证令牌
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token');
-    console.log('发送请求，当前token:', token);
-    if (token) {
+    if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-    console.log('发送API请求:', config.method?.toUpperCase(), config.url, config);
     return config;
   },
   (error) => Promise.reject(error)
 );
 
-// Add a response interceptor to handle common errors
+// 添加响应拦截器，处理常见错误
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    // Handle 401 Unauthorized errors
+    // 处理401未授权错误
     if (error.response && error.response.status === 401) {
-      // Clear local storage when token is invalid or expired
+      // 当令牌无效或过期时清除本地存储
       if (localStorage.getItem('token')) {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         
-        // Redirect to login page if not already there
+        // 如果不在认证页面，重定向到登录页面
         if (!window.location.pathname.includes('/auth')) {
           window.location.href = '/auth';
         }
       }
     }
     
-    // Handle network errors
+    // 处理网络错误
     if (!error.response) {
-      console.error('Network Error:', error.message);
+      console.error('网络错误:', error.message);
     }
     
     return Promise.reject(error);
   }
 );
 
-// API service methods
-const apiService = {
-  // Auth endpoints
-  login: (credentials) => api.post('/users/login', credentials),
-  register: (userData) => api.post('/users/register', userData),
-  getCurrentUser: () => api.get('/users/me'),
-  updateProfile: (userId, data) => api.put(`/users/${userId}`, data),
-  
-  // Rehab plan endpoints
-  getRehabPlans: () => api.get('/rehabilitation/plans'),
-  getRehabPlanById: (planId) => api.get(`/rehabilitation/plans/${planId}`),
-  createRehabPlan: (planData) => api.post('/rehabilitation/plans', planData),
-  updateRehabPlan: (planId, planData) => api.put(`/rehabilitation/plans/${planId}`, planData),
-  deleteRehabPlan: (planId) => api.delete(`/rehabilitation/plans/${planId}`),
-  
-  // Exercise endpoints
-  getExercises: () => api.get('/rehabilitation/exercises'),
-  getExerciseById: (exerciseId) => api.get(`/rehabilitation/exercises/${exerciseId}`),
-  createExercise: (exerciseData) => api.post('/rehabilitation/exercises', exerciseData),
-  updateExercise: (exerciseId, exerciseData) => api.put(`/rehabilitation/exercises/${exerciseId}`, exerciseData),
-  deleteExercise: (exerciseId) => api.delete(`/rehabilitation/exercises/${exerciseId}`),
-  
-  // Agent endpoints
-  getAgents: () => api.get('/agents'),
-  getAgentById: (agentId) => api.get(`/agents/${agentId}`),
-  createAgent: (agentData) => api.post('/agents', agentData),
-  updateAgent: (agentId, agentData) => api.put(`/agents/${agentId}`, agentData),
-  deleteAgent: (agentId) => api.delete(`/agents/${agentId}`),
-  queryAgent: (agentId, query) => api.post(`/agents/${agentId}/query`, query),
-  
-  // 健康档案相关接口
-  // 获取患者健康档案列表
-  getHealthRecords: (patientId, params) => api.get(`/health-records?patient_id=${patientId}`, { params }),
-  // 获取健康档案详情
-  getHealthRecordById: (recordId) => api.get(`/health-records/${recordId}`),
-  // 创建健康档案
-  createHealthRecord: (recordData) => api.post('/health-records', recordData),
-  // 更新健康档案
-  updateHealthRecord: (recordId, recordData) => api.put(`/health-records/${recordId}`, recordData),
-  // 删除健康档案
-  deleteHealthRecord: (recordId) => api.delete(`/health-records/${recordId}`),
-  // 获取健康档案版本
-  getHealthRecordVersion: (recordId, versionNumber) => api.get(`/health-records/version/${recordId}/${versionNumber}`),
-  // 获取健康档案统计信息
-  getHealthRecordStats: (patientId) => api.get(`/health-records/stats/${patientId}`),
-  
-  // 随访记录相关接口
-  // 创建随访记录
-  createFollowUp: (followUpData) => api.post('/health-records/followups', followUpData),
-  // 获取随访记录详情
-  getFollowUpById: (followUpId) => api.get(`/health-records/followups/${followUpId}`),
-  // 更新随访记录
-  updateFollowUp: (followUpId, followUpData) => api.put(`/health-records/followups/${followUpId}`, followUpData),
-  // 获取患者的随访记录列表
-  getFollowUps: (patientId, params) => api.get(`/health-records/followups?patient_id=${patientId}`, { params }),
-  // 完成随访
-  completeFollowUp: (followUpId, data) => api.post(`/health-records/followups/${followUpId}/complete`, data),
-  // 取消随访
-  cancelFollowUp: (followUpId, data) => api.post(`/health-records/followups/${followUpId}/cancel`, data),
-  // 重新安排随访
-  rescheduleFollowUp: (followUpId, data) => api.post(`/health-records/followups/${followUpId}/reschedule`, data),
-  // 获取即将到来的随访
-  getUpcomingFollowUps: (patientId, days) => api.get(`/health-records/followups/upcoming`, { params: { patient_id: patientId, days } }),
-  // 获取与健康档案关联的随访记录
-  getRelatedFollowUps: (recordId) => api.get(`/health-records/related-followups/${recordId}`),
-  
-  // 健康数据相关接口
-  // 创建健康数据
-  createHealthData: (data) => api.post('/health-records/health-data', data),
-  // 获取健康数据详情
-  getHealthDataById: (dataId) => api.get(`/health-records/health-data/${dataId}`),
-  // 获取患者的健康数据列表
-  getHealthData: (patientId, params) => api.get(`/health-records/health-data?patient_id=${patientId}`, { params }),
-  // 创建生命体征记录
-  createVitalSign: (data) => api.post('/health-records/vital-signs', data),
-  // 创建实验室检查结果
-  createLabResult: (data) => api.post('/health-records/lab-results', data),
-  // 获取医疗时间线
-  getMedicalTimeline: (patientId, params) => api.get(`/health-records/timeline/${patientId}`, { params }),
-  
-  // 用户仪表盘配置相关接口
-  // 获取用户仪表盘配置
-  getUserDashboardConfig: (userId) => api.get(`/users/${userId}/dashboard-config`),
-  // 保存用户仪表盘配置
-  saveUserDashboardConfig: (userId, configData) => api.put(`/users/${userId}/dashboard-config`, configData),
-  // 重置用户仪表盘配置为默认值
-  resetUserDashboardConfig: (userId) => api.post(`/users/${userId}/dashboard-config/reset`),
-  
-  // 设备管理相关接口
-  // 获取用户绑定的设备列表
-  getUserDevices: (userId) => api.get(`/users/${userId}/devices`),
-  // 绑定新设备
-  bindUserDevice: (userId, deviceData) => api.post(`/users/${userId}/devices`, deviceData),
-  // 解绑设备
-  unbindUserDevice: (userId, deviceId) => api.delete(`/users/${userId}/devices/${deviceId}`),
-  // 获取设备数据
-  getDeviceData: (deviceId, params) => api.get(`/devices/${deviceId}/data`, { params }),
-  // 同步设备数据
-  syncDeviceData: (deviceId) => api.post(`/devices/${deviceId}/sync`),
-  // 获取设备状态
-  getDeviceStatus: (deviceId) => api.get(`/devices/${deviceId}/status`),
-  // 配置设备
-  configureDevice: (deviceId, configData) => api.put(`/devices/${deviceId}/config`, configData),
-  
-  // 管理员服务
-  getDoctors: (params) => {
-    console.log('调用getDoctors API, 参数:', params);
+// API服务方法
+export const apiService = {
+  // 认证接口
+  auth: {
+    login: (credentials: LoginCredentials): Promise<AxiosResponse<TokenResponse>> => 
+      api.post('/users/login', credentials),
     
-    // 检查token是否存在
-    const token = localStorage.getItem('token');
-    if (!token) {
-      console.error('getDoctors API错误: 没有登录凭证，请先登录');
-      return Promise.reject(new Error('未登录，请先登录系统'));
-    }
+    register: (userData: Partial<User>): Promise<AxiosResponse<User>> => 
+      api.post('/users/register', userData),
     
-    return api.get('/admin/doctors', { params })
-      .then(response => {
-        console.log('getDoctors API响应:', response);
-        return response;
-      })
-      .catch(error => {
-        console.error('getDoctors API错误:', error);
-        
-        // 如果是401错误，可能是token过期，引导用户重新登录
-        if (error.response && error.response.status === 401) {
-          // 清除登录信息
-          localStorage.removeItem('token');
-          localStorage.removeItem('userRole');
-          
-          // 如果不在登录页，跳转到登录页
-          if (!window.location.pathname.includes('/auth')) {
-            window.location.href = '/auth';
-          }
-        }
-        
-        throw error;
-      });
+    getCurrentUser: (): Promise<AxiosResponse<User>> => 
+      api.get('/users/me'),
+    
+    updateProfile: (userId: string, data: Partial<User>): Promise<AxiosResponse<User>> => 
+      api.put(`/users/${userId}`, data),
   },
-  createDoctor: (doctorData) => api.post('/admin/doctors', doctorData),
-  updateDoctor: (doctorId, doctorData) => api.put(`/admin/doctors/${doctorId}`, doctorData),
-  deleteDoctor: (doctorId) => api.delete(`/admin/doctors/${doctorId}`),
+  
+  // 医生相关接口
+  doctor: {
+    getPatients: (): Promise<AxiosResponse<Patient[]>> => 
+      api.get('/doctors/patients'),
+    
+    getPatientHealthRecord: (patientId: string): Promise<AxiosResponse<PatientHealthRecord>> => 
+      api.get(`/doctors/health-records/${patientId}`),
+    
+    getFollowUps: (status?: string): Promise<AxiosResponse<FollowUp[]>> => 
+      api.get('/doctors/follow-ups', { params: { status } }),
+    
+    createFollowUp: (data: Partial<FollowUp>): Promise<AxiosResponse<FollowUp>> => 
+      api.post('/doctors/follow-ups', data),
+    
+    getPatientMonitoring: (patientId: string, startDate?: string, endDate?: string): Promise<AxiosResponse<any>> => 
+      api.get(`/doctors/patient-monitoring/${patientId}`, {
+        params: { start_date: startDate, end_date: endDate }
+      }),
+  },
+  
+  // 康复计划接口
+  rehabilitation: {
+    getPlans: (patientId?: string): Promise<AxiosResponse<any[]>> => 
+      api.get('/rehabilitation/plans', { params: { patient_id: patientId } }),
+    
+    getPlanById: (planId: string): Promise<AxiosResponse<any>> => 
+      api.get(`/rehabilitation/plans/${planId}`),
+    
+    createPlan: (planData: any): Promise<AxiosResponse<any>> => 
+      api.post('/rehabilitation/plans', planData),
+    
+    updatePlan: (planId: string, planData: any): Promise<AxiosResponse<any>> => 
+      api.put(`/rehabilitation/plans/${planId}`, planData),
+    
+    deletePlan: (planId: string): Promise<AxiosResponse<any>> => 
+      api.delete(`/rehabilitation/plans/${planId}`),
+  },
+  
+  // 健康记录接口
+  healthRecord: {
+    getRecords: (patientId: string): Promise<AxiosResponse<any[]>> => 
+      api.get(`/health-records`, { params: { patient_id: patientId } }),
+    
+    getRecordById: (recordId: string): Promise<AxiosResponse<any>> => 
+      api.get(`/health-records/${recordId}`),
+    
+    createRecord: (recordData: any): Promise<AxiosResponse<any>> => 
+      api.post('/health-records', recordData),
+    
+    updateRecord: (recordId: string, recordData: any): Promise<AxiosResponse<any>> => 
+      api.put(`/health-records/${recordId}`, recordData),
+    
+    deleteRecord: (recordId: string): Promise<AxiosResponse<any>> => 
+      api.delete(`/health-records/${recordId}`),
+  },
+  
+  // AI助手接口
+  agent: {
+    executeAgent: (agentId: string): Promise<AxiosResponse<any>> => 
+      api.post(`/agents/${agentId}/execute`),
+    
+    getAgents: (): Promise<AxiosResponse<any[]>> => 
+      api.get('/agents'),
+    
+    createAgent: (agentData: any): Promise<AxiosResponse<any>> => 
+      api.post('/agents', agentData),
+    
+    updateAgent: (agentId: string, agentData: any): Promise<AxiosResponse<any>> => 
+      api.put(`/agents/${agentId}`, agentData),
+    
+    deleteAgent: (agentId: string): Promise<AxiosResponse<any>> => 
+      api.delete(`/agents/${agentId}`),
+    
+    queryAgent: (agentId: string, query: string): Promise<AxiosResponse<any>> => 
+      api.post(`/agents/${agentId}/query`, { query })
+  },
+  
+  // 管理员接口
+  admin: {
+    getDoctors: (params?: any): Promise<AxiosResponse<Doctor[]>> => 
+      api.get('/admin/doctors', { params }),
+    
+    createDoctor: (doctorData: Partial<Doctor>): Promise<AxiosResponse<Doctor>> => 
+      api.post('/admin/doctors', doctorData),
+    
+    updateDoctor: (doctorId: string, doctorData: Partial<Doctor>): Promise<AxiosResponse<Doctor>> => 
+      api.put(`/admin/doctors/${doctorId}`, doctorData),
+    
+    deleteDoctor: (doctorId: string): Promise<AxiosResponse<any>> => 
+      api.delete(`/admin/doctors/${doctorId}`),
+  }
 };
 
-export { apiService };
 export default api; 

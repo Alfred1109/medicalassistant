@@ -32,7 +32,7 @@ import { login, clearAuthError, mockAdminLogin } from '../../store/slices/authSl
 // 管理员账号信息
 const ADMIN_CREDENTIALS = {
   email: 'admin@example.com',
-  password: 'admin123',  // 改为后端实际设置的密码
+  password: 'Admin123!',
 };
 
 // 医生账号信息
@@ -41,14 +41,26 @@ const DOCTOR_CREDENTIALS = {
   password: 'Doctor123!',
 };
 
+// 健康管理师账号信息
+const HEALTH_MANAGER_CREDENTIALS = {
+  email: 'liujk@example.com',
+  password: 'Manager123!',
+};
+
+// 患者账号信息
+const PATIENT_CREDENTIALS = {
+  email: 'zhangsan@example.com',
+  password: 'Patient123!',
+};
+
 const Login: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
   const { loading, error } = useSelector((state: RootState) => state.auth);
 
   const [formData, setFormData] = useState({
-    email: '',
-    password: '',
+    email: ADMIN_CREDENTIALS.email, // Default to admin email
+    password: ADMIN_CREDENTIALS.password, // Default to admin password
   });
   const [showPassword, setShowPassword] = useState(false);
 
@@ -97,11 +109,25 @@ const Login: React.FC = () => {
   // 填充管理员账号
   const fillAdminCredentials = () => {
     setFormData(ADMIN_CREDENTIALS);
+    if (error) dispatch(clearAuthError());
   };
 
   // 填充医生账号
   const fillDoctorCredentials = () => {
     setFormData(DOCTOR_CREDENTIALS);
+    if (error) dispatch(clearAuthError());
+  };
+
+  // 填充健康管理师账号
+  const fillHealthManagerCredentials = () => {
+    setFormData(HEALTH_MANAGER_CREDENTIALS);
+    if (error) dispatch(clearAuthError());
+  };
+
+  // 填充患者账号
+  const fillPatientCredentials = () => {
+    setFormData(PATIENT_CREDENTIALS);
+    if (error) dispatch(clearAuthError());
   };
 
   // 添加自动登录功能
@@ -159,7 +185,7 @@ const Login: React.FC = () => {
           <Box display="flex" alignItems="center">
             <InfoIcon color="primary" sx={{ mr: 1 }} />
             <Typography variant="body2" fontWeight="medium" color="primary.main">
-              系统账号
+              演示账号
             </Typography>
           </Box>
           
@@ -167,7 +193,7 @@ const Login: React.FC = () => {
             <Typography variant="subtitle2" color="text.primary">
               管理员账号:
             </Typography>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
               邮箱: {ADMIN_CREDENTIALS.email} <br />
               密码: {ADMIN_CREDENTIALS.password}
             </Typography>
@@ -178,7 +204,7 @@ const Login: React.FC = () => {
               sx={{ mt: 1 }}
               onClick={fillAdminCredentials}
             >
-              使用管理员账号
+              使用此账号
             </Button>
           </Box>
           
@@ -188,7 +214,7 @@ const Login: React.FC = () => {
             <Typography variant="subtitle2" color="text.primary">
               医生账号:
             </Typography>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
               邮箱: {DOCTOR_CREDENTIALS.email} <br />
               密码: {DOCTOR_CREDENTIALS.password}
             </Typography>
@@ -199,7 +225,49 @@ const Login: React.FC = () => {
               sx={{ mt: 1 }}
               onClick={fillDoctorCredentials}
             >
-              使用医生账号
+              使用此账号
+            </Button>
+          </Box>
+
+          <Divider sx={{ my: 1 }} />
+
+          <Box>
+            <Typography variant="subtitle2" color="text.primary">
+              健康管理师账号:
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
+              邮箱: {HEALTH_MANAGER_CREDENTIALS.email} <br />
+              密码: {HEALTH_MANAGER_CREDENTIALS.password}
+            </Typography>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              color="warning"
+              sx={{ mt: 1 }}
+              onClick={fillHealthManagerCredentials}
+            >
+              使用此账号
+            </Button>
+          </Box>
+
+          <Divider sx={{ my: 1 }} />
+
+          <Box>
+            <Typography variant="subtitle2" color="text.primary">
+              患者账号:
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
+              邮箱: {PATIENT_CREDENTIALS.email} <br />
+              密码: {PATIENT_CREDENTIALS.password}
+            </Typography>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              color="success"
+              sx={{ mt: 1 }}
+              onClick={fillPatientCredentials}
+            >
+              使用此账号
             </Button>
           </Box>
         </Box>
