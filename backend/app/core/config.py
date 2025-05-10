@@ -85,6 +85,25 @@ class Settings(BaseSettings):
     # 健康检查
     HEALTH_CHECK_INCLUDE_DB: bool = True
     
+    # 数据库优化配置
+    ENABLE_SLOW_QUERY_MONITORING: bool = os.getenv("ENABLE_SLOW_QUERY_MONITORING", "False").lower() == "true"
+    SLOW_QUERY_THRESHOLD_MS: int = int(os.getenv("SLOW_QUERY_THRESHOLD_MS", "200"))
+    ENABLE_QUERY_CACHE: bool = os.getenv("ENABLE_QUERY_CACHE", "True").lower() == "true"
+    QUERY_CACHE_TTL_SECONDS: int = int(os.getenv("QUERY_CACHE_TTL_SECONDS", "300"))
+    
+    # 文件存储配置
+    UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
+    MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))  # 10MB
+    
+    # 日志配置
+    LOG_FILE: str = os.getenv("LOG_FILE", "logs/app.log")
+    
+    # 缓存配置
+    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
+    REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
+    
     model_config = {
         "case_sensitive": True
     }

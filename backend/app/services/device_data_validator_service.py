@@ -83,7 +83,7 @@ class DeviceDataValidatorService:
         
         return data
     
-    def batch_validate_device_data(self, data_list: List[Dict], device_type: str) -> List[Dict]:
+    def batch_validate_device_data(self, data_list: List[Dict], device_type: str) -> Dict:
         """
         批量验证设备数据，返回有效和无效数据
         
@@ -170,5 +170,115 @@ class DeviceDataValidatorService:
             return None
             
         return data_type_def.dict()
+    
+    def validate_complex_device_data(self, data: Dict, device_type: str, strict_mode: bool = False) -> Dict:
+        """
+        对复杂设备数据进行高级验证
+        
+        参数:
+        - data: 设备数据字典
+        - device_type: 设备类型
+        - strict_mode: 严格模式，如果为True则所有字段必须完全符合标准
+        
+        返回:
+        - 验证结果 {"valid": bool, "errors": [], "warnings": []}
+        """
+        result = {
+            "valid": True,
+            "errors": [],
+            "warnings": []
+        }
+        
+        # 先进行基本验证
+        is_valid, error_msg = self.validate_device_data(data, device_type)
+        if not is_valid:
+            result["valid"] = False
+            result["errors"].append(error_msg)
+            return result
+        
+        # 对特定设备类型进行高级验证
+        data_type_key = data["data_type"]
+        data_type_def = DeviceDataValidator.get_data_type_definition(data_type_key)
+        
+        if not data_type_def:
+            result["valid"] = False
+            result["errors"].append(f"未知的数据类型: {data_type_key}")
+            return result
+        
+        # 检查单位是否一致
+        if "unit" in data and data["unit"] != data_type_def.unit:
+            msg = f"单位不匹配: 提供的是'{data['unit']}'，标准单位是'{data_type_def.unit}'"
+            if strict_mode:
+                result["valid"] = False
+                result["errors"].append(msg)
+            else:
+                result["warnings"].append(msg)
+        
+        # 检查精度是否符合要求
+        if data_type_def.precision is not None and isinstance(data["value"], (int, float)):
+            current_precision = self._get_decimal_places(data["value"])
+            if current_precision > data_type_def.precision:
+                msg = f"数值精度过高: 提供了{current_precision}位小数，标准精度为{data_type_def.precision}位小数"
+                if strict_mode:
+                    result["valid"] = False
+                    result["errors"].append(msg)
+                else:
+                    result["warnings"].append(msg)
+        
+        # 验证元数据的有效性（扩展验证）
+        if "metadata" in data and data_type_def.metadata_fields:
+            for field, value in data["metadata"].items():
+                if field not in data_type_def.metadata_fields:
+                    msg = f"未知的元数据字段: {field}"
+                    if strict_mode:
+                        result["valid"] = False
+                        result["errors"].append(msg)
+                    else:
+                        result["warnings"].append(msg)
+        
+        return result
+    
+    def _get_decimal_places(self, value: float) -> int:
+        """获取浮点数的小数位数"""
+        str_value = str(value)
+        if '.' in str_value:
+            return len(str_value.split('.')[1])
+        return 0
+    
+    def normalize_device_data(self, data: Dict, device_type: str) -> Dict:
+        """
+        标准化设备数据，确保符合标准并进行必要的转换
+        
+        参数:
+        - data: 设备数据字典
+        - device_type: 设备类型
+        
+        返回:
+        - 标准化后的数据字典
+        """
+        # 先进行格式化
+        result = self.format_device_data(data.copy())
+        
+        # 获取数据类型定义
+        if "data_type" in result:
+            data_type_def = DeviceDataValidator.get_data_type_definition(result["data_type"])
+            
+            if data_type_def:
+                # 确保使用正确的单位
+                result["unit"] = data_type_def.unit
+                
+                # 确保精度符合要求
+                if data_type_def.precision is not None and isinstance(result["value"], (int, float)):
+                    result["value"] = round(result["value"], data_type_def.precision)
+                
+                # 确保元数据字段完整
+                if data_type_def.metadata_fields:
+                    metadata = result.get("metadata", {})
+                    for field in data_type_def.metadata_fields:
+                        if field not in metadata:
+                            metadata[field] = "未指定"
+                    result["metadata"] = metadata
+        
+        return result
 
 device_data_validator_service = DeviceDataValidatorService() 

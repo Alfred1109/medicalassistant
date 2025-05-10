@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from app.api.endpoints import (
     auth, users, utils, agents, patients, health, 
     doctor, dashboard, rehabilitation, analytics, device, 
-    chat, permission, prediction, agent_optimized
+    chat, permission, prediction, agent_optimized, db_optimizer
 )
 
 # 创建API路由集合
@@ -30,4 +30,5 @@ api_router.include_router(permission.router, prefix="/permission", tags=["permis
 
 # 添加新路由
 api_router.include_router(prediction.router, prefix="/prediction", tags=["prediction"])
-api_router.include_router(agent_optimized.router, prefix="/agent-optimized", tags=["agent-optimized"]) 
+api_router.include_router(agent_optimized.router, prefix="/agent-optimized", tags=["agent-optimized"])
+api_router.include_router(db_optimizer.router, prefix="/system/db-optimizer", tags=["database-optimizer"]) 
