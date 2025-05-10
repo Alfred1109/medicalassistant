@@ -171,22 +171,35 @@ async def get_device_data(
     return data
 
 
-@router.post("/{device_id}/sync", response_model=DeviceSyncResponse)
+@router.post("/{device_id}/sync", response_model=dict)
 async def sync_device_data(
     device_id: str,
-    user=Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user)
 ):
-    """同步设备数据"""
-    # 检查权限
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
+    """
+    同步设备数据
+    """
+    return await device_service.sync_device_data(device_id)
+
+
+@router.post("/{device_id}/repair", response_model=dict)
+async def repair_device(
+    device_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """
+    自动修复设备异常状态
+    """
+    # 检查用户权限（实际应用中可能需要更详细的权限检查）
+    if "doctor" not in current_user.get("roles", []) and "admin" not in current_user.get("roles", []):
+        raise HTTPException(
+            status_code=403,
+            detail="权限不足，只有医生或管理员可以执行设备修复操作"
+        )
     
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权同步此设备数据")
-    
-    result = await device_service.sync_device_data(device_id)
-    return result
+    # 调用设备修复服务
+    repair_result = await device_service.auto_repair_device(device_id)
+    return repair_result
 
 
 @router.get("/{device_id}/status", response_model=DeviceStatusResponse)

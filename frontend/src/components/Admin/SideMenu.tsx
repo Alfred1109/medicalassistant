@@ -19,7 +19,8 @@ import {
   Label as TagIcon,
   Devices as DevicesIcon,
   Insights as InsightsIcon,
-  History as HistoryIcon
+  History as HistoryIcon,
+  Security as SecurityIcon
 } from '@mui/icons-material';
 
 // 导航菜单项
@@ -71,6 +72,12 @@ const menuItems = [
     label: '审计日志', 
     icon: <HistoryIcon />, 
     path: '/app/admin/audit-logs' 
+  },
+  { 
+    id: 'permission-audit', 
+    label: '权限审计', 
+    icon: <SecurityIcon />, 
+    path: '/app/admin/permission-audit' 
   }
 ];
 

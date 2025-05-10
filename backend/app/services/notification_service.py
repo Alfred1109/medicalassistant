@@ -6,6 +6,11 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
+import asyncio
+import logging
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 class NotificationService:
     """通知服务类"""
@@ -137,4 +142,124 @@ class NotificationService:
         }
         
         result = await db.notifications.insert_one(notification)
-        return str(result.inserted_id) 
+        
+        # 异步推送通知（如果启用了WebSocket连接管理器）
+        try:
+            from app.api.websockets import get_connection_manager
+            connection_manager = get_connection_manager()
+            
+            # 转换通知为可JSON序列化格式
+            notification_json = {
+                "id": str(notification["_id"]),
+                "title": notification["title"],
+                "content": notification["content"],
+                "sender_id": notification["sender_id"],
+                "sender_name": notification["sender_name"],
+                "sender_role": notification["sender_role"],
+                "time": notification["time"].isoformat(),
+                "notification_type": notification["notification_type"],
+                "priority": notification["priority"],
+                "related_entity_id": notification["related_entity_id"],
+                "related_entity_type": notification["related_entity_type"]
+            }
+            
+            # 创建异步任务发送通知
+            asyncio.create_task(connection_manager.send_notification(notification_json, recipient_id))
+            
+            # 更新未读通知计数
+            unread_count = await NotificationService.get_unread_count(db, recipient_id)
+            asyncio.create_task(connection_manager.send_personal_message(
+                {
+                    "type": "notification_count",
+                    "count": unread_count
+                },
+                recipient_id
+            ))
+        except Exception as e:
+            logger.warning(f"通知实时推送失败: {str(e)}")
+        
+        return str(result.inserted_id)
+    
+    @staticmethod
+    async def create_batch_notifications(
+        db: AsyncIOMotorClient,
+        title: str,
+        content: str,
+        sender_id: str,
+        sender_name: str,
+        sender_role: str,
+        recipient_ids: List[str],
+        notification_type: str = "general",
+        priority: str = "normal",
+        related_entity_id: Optional[str] = None,
+        related_entity_type: Optional[str] = None
+    ) -> List[str]:
+        """批量创建通知给多个用户"""
+        if not recipient_ids:
+            return []
+        
+        notifications = []
+        notification_ids = []
+        
+        for recipient_id in recipient_ids:
+            notification_id = ObjectId()
+            notification = {
+                "_id": notification_id,
+                "title": title,
+                "content": content,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "sender_role": sender_role,
+                "recipient_id": recipient_id,
+                "time": datetime.now(),
+                "read": False,
+                "notification_type": notification_type,
+                "priority": priority,
+                "related_entity_id": related_entity_id,
+                "related_entity_type": related_entity_type
+            }
+            notifications.append(notification)
+            notification_ids.append(str(notification_id))
+        
+        if notifications:
+            await db.notifications.insert_many(notifications)
+            
+            # 异步推送通知
+            try:
+                from app.api.websockets import get_connection_manager
+                connection_manager = get_connection_manager()
+                
+                for notification in notifications:
+                    recipient_id = notification["recipient_id"]
+                    
+                    # 转换通知为可JSON序列化格式
+                    notification_json = {
+                        "id": str(notification["_id"]),
+                        "title": notification["title"],
+                        "content": notification["content"],
+                        "sender_id": notification["sender_id"],
+                        "sender_name": notification["sender_name"],
+                        "sender_role": notification["sender_role"],
+                        "time": notification["time"].isoformat(),
+                        "notification_type": notification["notification_type"],
+                        "priority": notification["priority"],
+                        "related_entity_id": notification["related_entity_id"],
+                        "related_entity_type": notification["related_entity_type"]
+                    }
+                    
+                    # 发送通知
+                    asyncio.create_task(connection_manager.send_notification(notification_json, recipient_id))
+                    
+                    # 更新未读通知计数
+                    unread_count = await NotificationService.get_unread_count(db, recipient_id)
+                    asyncio.create_task(connection_manager.send_personal_message(
+                        {
+                            "type": "notification_count",
+                            "count": unread_count
+                        },
+                        recipient_id
+                    ))
+            except Exception as e:
+                logger.warning(f"批量通知实时推送失败: {str(e)}")
+        
+        return notification_ids 

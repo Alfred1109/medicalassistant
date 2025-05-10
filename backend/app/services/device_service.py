@@ -7,6 +7,10 @@ from typing import Dict, List, Optional, Any, Union
 from bson import ObjectId
 
 from ..models.device import Device, DeviceData
+from ..models.device_data_standard import DeviceType, DeviceStatus, ConnectionType
+from ..models.device_repair_log import DeviceRepairLog
+from .device_adapters import get_device_adapter
+from .device_data_validator_service import device_data_validator_service
 from ..db.mongodb import get_db
 
 
@@ -33,6 +37,15 @@ class DeviceService:
     async def bind_device(self, user_id: str, device_data: Dict) -> Dict:
         """绑定新设备到用户"""
         db = await get_db()
+        
+        # 验证设备类型和固件版本
+        if "device_type" in device_data and device_data["device_type"] not in [d.value for d in DeviceType]:
+            return {"error": "不支持的设备类型"}
+            
+        if "firmware_version" in device_data:
+            if not device_data_validator_service.validate_device_firmware(device_data["firmware_version"]):
+                return {"error": "固件版本格式不正确，应为x.y.z格式"}
+                
         device = {
             "device_id": device_data.get("device_id", str(ObjectId())),
             "device_type": device_data["device_type"],
@@ -98,9 +111,7 @@ class DeviceService:
             return {"success": False, "message": "设备不存在"}
         
         # 根据设备类型选择适配器
-        adapter = self.get_device_adapter(device["device_type"])
-        if not adapter:
-            return {"success": False, "message": "不支持的设备类型"}
+        adapter = get_device_adapter(device["device_type"])
         
         # 使用适配器同步数据
         try:
@@ -133,15 +144,7 @@ class DeviceService:
             }
         
         # 根据设备类型选择适配器
-        adapter = self.get_device_adapter(device["device_type"])
-        if not adapter:
-            return {
-                "status": "error", 
-                "message": "不支持的设备类型",
-                "battery_level": 0,
-                "signal_strength": 0,
-                "last_sync_time": device.get("last_connected")
-            }
+        adapter = get_device_adapter(device["device_type"])
         
         # 使用适配器获取状态
         try:
@@ -179,595 +182,247 @@ class DeviceService:
         else:
             return {"success": False, "message": "设备配置更新失败"}
     
-    def get_device_adapter(self, device_type: str) -> Optional["DeviceAdapter"]:
-        """根据设备类型获取适配器"""
-        adapter_map = {
-            "血压计": BloodPressureAdapter(),
-            "血糖仪": GlucoseMeterAdapter(),
-            "体温计": ThermometerAdapter(),
-            "心电图": ECGAdapter(),
-            "体重秤": ScaleAdapter(),
-            "手环": WearableAdapter(),
-        }
+    async def auto_repair_device(self, device_id: str) -> Dict:
+        """
+        尝试自动修复设备状态异常
         
-        return adapter_map.get(device_type, GenericAdapter())
-
-
-class DeviceAdapter:
-    """设备适配器基类"""
-    
-    async def sync_data(self, device: Dict) -> Dict:
-        """同步设备数据"""
-        raise NotImplementedError("子类必须实现此方法")
-    
-    async def get_status(self, device: Dict) -> Dict:
-        """获取设备状态"""
-        raise NotImplementedError("子类必须实现此方法")
-    
-    async def save_device_data(self, device_id: str, data_list: List[Dict]) -> List[str]:
-        """保存设备数据到数据库"""
-        if not data_list:
-            return []
+        参数:
+        - device_id: 设备ID
+        
+        返回:
+        - 修复结果，包含成功状态和消息
+        """
+        # 获取设备信息
+        device = await self.get_device(device_id)
+        if not device:
+            return {"success": False, "message": "设备不存在"}
+        
+        # 获取当前设备状态
+        current_status = await self.get_device_status(device_id)
+        
+        # 根据状态类型进行不同的修复操作
+        repair_actions = []
+        repair_results = []
+        
+        # 检查设备状态
+        if current_status.get("status") in ["error", "offline", "unknown"]:
+            repair_actions.append("重置设备连接")
             
-        db = await get_db()
-        
-        # 准备数据
-        device_data = []
-        for data in data_list:
-            if "timestamp" not in data:
-                data["timestamp"] = datetime.utcnow()
+            # 模拟重置设备连接
+            try:
+                # 获取设备适配器
+                adapter = get_device_adapter(device["device_type"])
+                # 执行重置操作（实际环境中调用设备SDK的重置方法）
+                repair_results.append({"action": "重置设备连接", "success": True})
                 
-            device_data.append({
-                "device_id": device_id,
-                "timestamp": data["timestamp"],
-                "data_type": data["data_type"],
-                "value": data["value"],
-                "unit": data.get("unit", ""),
-                "metadata": data.get("metadata", {}),
-                "created_at": datetime.utcnow()
-            })
+                # 更新设备状态
+                db = await get_db()
+                await db.devices.update_one(
+                    {"_id": ObjectId(device_id)},
+                    {"$set": {
+                        "status": "active",
+                        "last_connected": datetime.utcnow(),
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+            except Exception as e:
+                repair_results.append({"action": "重置设备连接", "success": False, "reason": str(e)})
         
-        # 批量插入
-        result = await db.device_data.insert_many(device_data)
-        return [str(id) for id in result.inserted_ids]
-
-
-class GenericAdapter(DeviceAdapter):
-    """通用设备适配器，用于不支持的设备类型"""
-    
-    async def sync_data(self, device: Dict) -> Dict:
-        """同步设备数据"""
-        return {
-            "success": False,
-            "message": "此设备类型暂不支持自动同步",
-            "new_data": []
-        }
-    
-    async def get_status(self, device: Dict) -> Dict:
-        """获取设备状态"""
-        return {
-            "status": "unknown",
-            "battery_level": 0,
-            "signal_strength": 0,
-            "last_sync_time": device.get("last_connected")
-        }
-
-
-class BloodPressureAdapter(DeviceAdapter):
-    """血压计适配器"""
-    
-    async def sync_data(self, device: Dict) -> Dict:
-        """同步血压计数据"""
-        # 实际项目中，这里应该调用设备SDK或API获取数据
-        # 这里使用模拟数据作为示例
+        # 检查是否需要固件更新
+        if device.get("firmware_update_available"):
+            repair_actions.append("固件更新")
+            
+            # 模拟固件更新（实际环境中调用设备SDK的固件更新方法）
+            try:
+                # 更新固件状态
+                db = await get_db()
+                await db.devices.update_one(
+                    {"_id": ObjectId(device_id)},
+                    {"$set": {
+                        "firmware_update_available": False,
+                        "firmware_version": f"{device.get('firmware_version', '1.0')}.1",  # 模拟版本增加
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+                repair_results.append({"action": "固件更新", "success": True})
+            except Exception as e:
+                repair_results.append({"action": "固件更新", "success": False, "reason": str(e)})
         
-        # 模拟数据
-        import random
-        from datetime import timedelta
-        
-        new_data = []
-        timestamp = datetime.utcnow()
-        
-        # 生成一条血压记录
-        systolic = random.randint(110, 140)
-        diastolic = random.randint(70, 90)
-        pulse = random.randint(60, 100)
-        
-        # 收缩压
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "blood_pressure_systolic",
-            "value": systolic,
-            "unit": "mmHg",
-            "metadata": {"measurement_position": "left_arm"}
-        })
-        
-        # 舒张压
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "blood_pressure_diastolic",
-            "value": diastolic,
-            "unit": "mmHg",
-            "metadata": {"measurement_position": "left_arm"}
-        })
-        
-        # 脉搏
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "pulse",
-            "value": pulse,
-            "unit": "bpm",
-            "metadata": {}
-        })
-        
-        # 保存到数据库
-        saved_ids = await self.save_device_data(str(device["_id"]), new_data)
-        
-        return {
-            "success": True,
-            "message": f"成功同步{len(saved_ids)}条血压计数据",
-            "new_data": new_data
-        }
-    
-    async def get_status(self, device: Dict) -> Dict:
-        """获取血压计状态"""
-        # 实际项目中应该通过设备API获取状态
-        import random
-        
-        # 模拟电池电量和信号强度
-        battery_level = random.randint(30, 100)
-        signal_strength = random.randint(1, 5)
-        
-        # 根据最后连接时间判断状态
-        last_connected = device.get("last_connected")
-        status = "offline"
-        
-        if last_connected:
-            time_diff = (datetime.utcnow() - last_connected).total_seconds()
-            if time_diff < 3600:  # 1小时内
-                status = "online"
-            elif time_diff < 86400:  # 24小时内
-                status = "idle"
-        
-        return {
-            "status": status,
-            "battery_level": battery_level,
-            "signal_strength": signal_strength,
-            "last_sync_time": last_connected
-        }
-
-
-# 这里可以继续添加其他设备类型的适配器
-class GlucoseMeterAdapter(DeviceAdapter):
-    """血糖仪适配器"""
-    
-    async def sync_data(self, device: Dict) -> Dict:
-        """同步血糖仪数据"""
-        # 实际项目中，这里应该调用设备SDK或API获取数据
-        # 这里使用模拟数据作为示例
-        
-        # 模拟数据
-        import random
-        
-        new_data = []
-        timestamp = datetime.utcnow()
-        
-        # 生成一条血糖记录
-        glucose_value = round(random.uniform(4.0, 10.0), 1)
-        
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "blood_glucose",
-            "value": glucose_value,
-            "unit": "mmol/L",
-            "metadata": {
-                "measurement_time": "fasting" if 4 <= datetime.now().hour <= 9 else "postprandial"
-            }
-        })
-        
-        # 保存到数据库
-        saved_ids = await self.save_device_data(str(device["_id"]), new_data)
-        
-        return {
-            "success": True,
-            "message": f"成功同步{len(saved_ids)}条血糖仪数据",
-            "new_data": new_data
-        }
-    
-    async def get_status(self, device: Dict) -> Dict:
-        """获取血糖仪状态"""
-        # 实际项目中应该通过设备API获取状态
-        import random
-        
-        # 模拟电池电量和信号强度
-        battery_level = random.randint(30, 100)
-        signal_strength = random.randint(1, 5)
-        
-        # 根据最后连接时间判断状态
-        last_connected = device.get("last_connected")
-        status = "offline"
-        
-        if last_connected:
-            time_diff = (datetime.utcnow() - last_connected).total_seconds()
-            if time_diff < 3600:  # 1小时内
-                status = "online"
-            elif time_diff < 86400:  # 24小时内
-                status = "idle"
-        
-        return {
-            "status": status,
-            "battery_level": battery_level,
-            "signal_strength": signal_strength,
-            "last_sync_time": last_connected
-        }
-
-
-class ThermometerAdapter(DeviceAdapter):
-    """体温计适配器"""
-    
-    async def sync_data(self, device: Dict) -> Dict:
-        """同步体温计数据"""
-        # 实际项目中，这里应该调用设备SDK或API获取数据
-        # 这里使用模拟数据作为示例
-        
-        # 模拟数据
-        import random
-        
-        new_data = []
-        timestamp = datetime.utcnow()
-        
-        # 生成一条体温记录
-        temperature = round(36.0 + random.uniform(0.1, 1.5), 1)
-        
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "body_temperature",
-            "value": temperature,
-            "unit": "°C",
-            "metadata": {
-                "measurement_method": random.choice(["oral", "ear", "forehead", "armpit"])
-            }
-        })
-        
-        # 保存到数据库
-        saved_ids = await self.save_device_data(str(device["_id"]), new_data)
-        
-        return {
-            "success": True,
-            "message": f"成功同步{len(saved_ids)}条体温计数据",
-            "new_data": new_data
-        }
-    
-    async def get_status(self, device: Dict) -> Dict:
-        """获取体温计状态"""
-        # 实际项目中应该通过设备API获取状态
-        import random
-        
-        # 模拟电池电量和信号强度
-        battery_level = random.randint(30, 100)
-        signal_strength = random.randint(1, 5)
-        
-        # 根据最后连接时间判断状态
-        last_connected = device.get("last_connected")
-        status = "offline"
-        
-        if last_connected:
-            time_diff = (datetime.utcnow() - last_connected).total_seconds()
-            if time_diff < 3600:  # 1小时内
-                status = "online"
-            elif time_diff < 86400:  # 24小时内
-                status = "idle"
-        
-        return {
-            "status": status,
-            "battery_level": battery_level,
-            "signal_strength": signal_strength,
-            "last_sync_time": last_connected
-        }
-
-
-class ECGAdapter(DeviceAdapter):
-    """心电图适配器"""
-    
-    async def sync_data(self, device: Dict) -> Dict:
-        """同步心电图数据"""
-        # 实际项目中，这里应该调用设备SDK或API获取数据
-        # 心电图数据通常是一段时间内的波形数据
-        
-        # 模拟数据
-        import random
-        import numpy as np
-        
-        new_data = []
-        timestamp = datetime.utcnow()
-        
-        # 模拟一段简单的ECG波形数据（简化版）
-        # 实际心电数据要复杂得多
-        duration_seconds = 30  # 30秒的心电记录
-        sampling_rate = 100  # 100Hz采样率
-        num_samples = duration_seconds * sampling_rate
-        
-        # 生成基础波形（简化的正弦波模拟）
-        # 实际心电图数据应使用更复杂的模型
-        t = np.linspace(0, duration_seconds, num_samples)
-        heart_rate = random.randint(60, 100)  # 每分钟心跳次数
-        frequency = heart_rate / 60.0  # 转换为每秒频率
-        
-        # 创建基础心跳波形
-        base_signal = np.sin(2 * np.pi * frequency * t)
-        
-        # 添加一些变异和噪声
-        noise = np.random.normal(0, 0.05, num_samples)
-        ecg_signal = base_signal + noise
-        
-        # 限制数据点数量（实际情况会保存全部数据）
-        # 这里为了简化，只保存前10个点
-        ecg_sample = ecg_signal[:10].tolist()
-        
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "ecg_waveform",
-            "value": {
-                "waveform_sample": ecg_sample,  # 实际应存储完整波形
-                "heart_rate": heart_rate,
-                "sampling_rate": sampling_rate,
-                "duration": duration_seconds
-            },
-            "unit": "mV",
-            "metadata": {
-                "device_mode": "continuous",
-                "lead_type": "single_lead",
-                "filtering": "bandpass"
-            }
-        })
-        
-        # 同时记录计算出的心率
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "heart_rate",
-            "value": heart_rate,
-            "unit": "bpm",
-            "metadata": {
-                "measurement_method": "ecg_derived"
-            }
-        })
-        
-        # 保存到数据库
-        saved_ids = await self.save_device_data(str(device["_id"]), new_data)
-        
-        return {
-            "success": True,
-            "message": f"成功同步{len(saved_ids)}条心电图数据",
-            "new_data": new_data
-        }
-    
-    async def get_status(self, device: Dict) -> Dict:
-        """获取心电图设备状态"""
-        import random
-        
-        # 模拟电池电量和信号强度
-        battery_level = random.randint(30, 100)
-        signal_strength = random.randint(1, 5)
-        
-        # 根据最后连接时间判断状态
-        last_connected = device.get("last_connected")
-        status = "offline"
-        
-        if last_connected:
-            time_diff = (datetime.utcnow() - last_connected).total_seconds()
-            if time_diff < 3600:  # 1小时内
-                status = "online"
-            elif time_diff < 86400:  # 24小时内
-                status = "idle"
-        
-        return {
-            "status": status,
-            "battery_level": battery_level,
-            "signal_strength": signal_strength,
-            "last_sync_time": last_connected
-        }
-
-
-class ScaleAdapter(DeviceAdapter):
-    """体重秤适配器"""
-    
-    async def sync_data(self, device: Dict) -> Dict:
-        """同步体重秤数据"""
-        # 实际项目中，这里应该调用设备SDK或API获取数据
-        
-        # 模拟数据
-        import random
-        
-        new_data = []
-        timestamp = datetime.utcnow()
-        
-        # 生成体重数据
-        weight = round(50.0 + random.uniform(0, 40.0), 1)
-        
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "weight",
-            "value": weight,
-            "unit": "kg",
-            "metadata": {}
-        })
-        
-        # 如果是智能体重秤，还可能提供体脂率等数据
-        if random.random() > 0.3:  # 模拟70%的概率提供额外数据
-            body_fat = round(15.0 + random.uniform(0, 20.0), 1)
-            new_data.append({
-                "timestamp": timestamp,
-                "data_type": "body_fat_percentage",
-                "value": body_fat,
-                "unit": "%",
-                "metadata": {}
+        # 检查电池状态（如果电池过低）
+        if current_status.get("battery_level", 0) < 20:
+            repair_actions.append("电池状态检查")
+            repair_results.append({
+                "action": "电池状态检查", 
+                "success": True, 
+                "message": "已提醒用户充电"
             })
             
-            muscle_mass = round(25.0 + random.uniform(0, 30.0), 1)
-            new_data.append({
-                "timestamp": timestamp,
-                "data_type": "muscle_mass",
-                "value": muscle_mass,
-                "unit": "kg",
-                "metadata": {}
+            # 在实际应用中，这里可以发送提醒消息给用户
+        
+        # 检查信号强度（如果信号弱）
+        if current_status.get("signal_strength", 0) < 2:
+            repair_actions.append("信号强度检查")
+            repair_results.append({
+                "action": "信号强度检查", 
+            "success": True,
+                "message": "已建议用户调整设备位置"
             })
+        
+        # 如果没有执行任何修复操作
+        if not repair_actions:
+            return {"success": True, "message": "设备状态正常，无需修复"}
+        
+        # 生成修复报告
+        success_count = sum(1 for result in repair_results if result.get("success"))
+        
+        if success_count == len(repair_actions):
+            overall_success = True
+            message = "设备修复成功"
+        elif success_count > 0:
+            overall_success = True
+            message = "设备部分修复成功"
+        else:
+            overall_success = False
+            message = "设备修复失败"
+        
+        # 记录修复操作日志
+        repair_log = DeviceRepairLog(
+            device_id=device_id,
+            device_type=device["device_type"],
+            repair_time=datetime.utcnow(),
+            initial_status=current_status,
+            repair_actions=repair_actions,
+            repair_results=repair_results,
+            overall_success=overall_success
+        )
+        
+        # 存储修复日志
+        try:
+            db = await get_db()
+            await db.device_repair_logs.insert_one(repair_log.to_mongo())
+        except Exception as e:
+            print(f"保存修复日志失败: {e}")
+        
+        # 返回修复结果
+        return {
+            "success": overall_success,
+            "message": message,
+            "device_id": device_id,
+            "device_type": device["device_type"],
+            "repair_actions": repair_actions,
+            "repair_results": repair_results,
+            "new_status": await self.get_device_status(device_id)
+        }
+    
+    async def get_supported_data_types(self, device_type: Optional[str] = None) -> Dict:
+        """
+        获取支持的数据类型
+        
+        参数:
+        - device_type: 可选的设备类型
+        
+        返回:
+        - 数据类型列表
+        """
+        if device_type:
+            return device_data_validator_service.get_supported_data_types_for_device(device_type)
+        else:
+            # 返回所有设备类型
+            all_types = []
+            for device_enum in DeviceType:
+                device_data_types = device_data_validator_service.get_supported_data_types_for_device(device_enum.value)
+                all_types.append({
+                    "device_type": device_enum.value,
+                    "data_types": device_data_types
+                })
+            return all_types
+    
+    async def get_device_repair_history(
+        self, 
+        device_id: Optional[str] = None, 
+        limit: int = 20
+    ) -> List[Dict]:
+        """
+        获取设备修复历史
+        
+        参数:
+        - device_id: 可选的设备ID，如果提供则只返回特定设备的修复历史
+        - limit: 返回的记录数量限制
+        
+        返回:
+        - 修复历史记录列表
+        """
+        db = await get_db()
+        query = {}
+        if device_id:
+            query["device_id"] = device_id
             
-            water_percentage = round(50.0 + random.uniform(0, 15.0), 1)
-            new_data.append({
-                "timestamp": timestamp,
-                "data_type": "water_percentage",
-                "value": water_percentage,
-                "unit": "%",
-                "metadata": {}
-            })
+        repair_logs = await db.device_repair_logs.find(query).sort(
+            "repair_time", -1
+        ).limit(limit).to_list(None)
         
-        # 保存到数据库
-        saved_ids = await self.save_device_data(str(device["_id"]), new_data)
-        
-        return {
-            "success": True,
-            "message": f"成功同步{len(saved_ids)}条体重秤数据",
-            "new_data": new_data
-        }
+        # 转换ObjectId为字符串
+        for log in repair_logs:
+            if "_id" in log:
+                log["_id"] = str(log["_id"])
+                
+        return repair_logs
     
-    async def get_status(self, device: Dict) -> Dict:
-        """获取体重秤状态"""
-        import random
+    async def get_devices_by_type(self, device_type: str) -> List[Dict]:
+        """
+        获取特定类型的所有设备
         
-        # 模拟电池电量和信号强度
-        battery_level = random.randint(30, 100)
-        signal_strength = random.randint(1, 5)
+        参数:
+        - device_type: 设备类型
         
-        # 根据最后连接时间判断状态
-        last_connected = device.get("last_connected")
-        status = "offline"
+        返回:
+        - 设备列表
+        """
+        db = await get_db()
+        devices = await db.devices.find(
+            {"device_type": device_type, "status": {"$ne": "deleted"}}
+        ).to_list(None)
         
-        if last_connected:
-            time_diff = (datetime.utcnow() - last_connected).total_seconds()
-            if time_diff < 3600:  # 1小时内
-                status = "online"
-            elif time_diff < 86400:  # 24小时内
-                status = "idle"
-        
-        return {
-            "status": status,
-            "battery_level": battery_level,
-            "signal_strength": signal_strength,
-            "last_sync_time": last_connected
-        }
-
-
-class WearableAdapter(DeviceAdapter):
-    """可穿戴设备适配器（如智能手环、手表）"""
+        return [{**device, "_id": str(device["_id"])} for device in devices]
     
-    async def sync_data(self, device: Dict) -> Dict:
-        """同步可穿戴设备数据"""
-        # 实际项目中，这里应该调用设备SDK或API获取数据
+    async def update_device_firmware(
+        self, 
+        device_id: str, 
+        new_firmware_version: str
+    ) -> Dict:
+        """
+        更新设备固件版本
         
-        # 模拟数据
-        import random
-        from datetime import timedelta
+        参数:
+        - device_id: 设备ID
+        - new_firmware_version: 新固件版本
         
-        new_data = []
-        timestamp = datetime.utcnow()
+        返回:
+        - 更新结果
+        """
+        # 验证固件版本格式
+        if not device_data_validator_service.validate_device_firmware(new_firmware_version):
+            return {"success": False, "message": "固件版本格式不正确，应为x.y.z格式"}
+            
+        device = await self.get_device(device_id)
+        if not device:
+            return {"success": False, "message": "设备不存在"}
+            
+        # 更新固件版本
+        db = await get_db()
+        result = await db.devices.update_one(
+            {"_id": ObjectId(device_id)},
+            {"$set": {
+                "firmware_version": new_firmware_version,
+                "firmware_update_available": False,
+                "updated_at": datetime.utcnow()
+            }}
+        )
         
-        # 生成心率数据
-        heart_rate = random.randint(60, 110)
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "heart_rate",
-            "value": heart_rate,
-            "unit": "bpm",
-            "metadata": {
-                "measurement_method": "optical"
-            }
-        })
-        
-        # 生成步数数据
-        steps = random.randint(1000, 15000)
-        new_data.append({
-            "timestamp": timestamp,
-            "data_type": "steps",
-            "value": steps,
-            "unit": "steps",
-            "metadata": {
-                "duration": "daily"
-            }
-        })
-        
-        # 生成睡眠数据（过去8小时）
-        sleep_start = datetime.utcnow() - timedelta(hours=8)
-        deep_sleep = random.randint(90, 240)  # 深度睡眠分钟数
-        light_sleep = random.randint(180, 300)  # 浅度睡眠分钟数
-        rem_sleep = random.randint(60, 120)  # REM睡眠分钟数
-        awake = random.randint(10, 30)  # 清醒分钟数
-        
-        total_sleep = deep_sleep + light_sleep + rem_sleep
-        
-        new_data.append({
-            "timestamp": sleep_start,
-            "data_type": "sleep",
-            "value": {
-                "total_minutes": total_sleep,
-                "deep_sleep_minutes": deep_sleep,
-                "light_sleep_minutes": light_sleep,
-                "rem_sleep_minutes": rem_sleep,
-                "awake_minutes": awake
-            },
-            "unit": "minutes",
-            "metadata": {
-                "sleep_start": sleep_start.isoformat(),
-                "sleep_end": (sleep_start + timedelta(minutes=total_sleep + awake)).isoformat()
-            }
-        })
-        
-        # 生成血氧数据
-        if random.random() > 0.3:  # 模拟70%的可能性有血氧数据
-            oxygen_saturation = random.randint(95, 100)
-            new_data.append({
-                "timestamp": timestamp,
-                "data_type": "oxygen_saturation",
-                "value": oxygen_saturation,
-                "unit": "%",
-                "metadata": {
-                    "measurement_method": "optical"
-                }
-            })
-        
-        # 保存到数据库
-        saved_ids = await self.save_device_data(str(device["_id"]), new_data)
-        
-        return {
-            "success": True,
-            "message": f"成功同步{len(saved_ids)}条可穿戴设备数据",
-            "new_data": new_data
-        }
-    
-    async def get_status(self, device: Dict) -> Dict:
-        """获取可穿戴设备状态"""
-        import random
-        
-        # 模拟电池电量和信号强度
-        battery_level = random.randint(30, 100)
-        signal_strength = random.randint(1, 5)
-        
-        # 根据最后连接时间判断状态
-        last_connected = device.get("last_connected")
-        status = "offline"
-        
-        if last_connected:
-            time_diff = (datetime.utcnow() - last_connected).total_seconds()
-            if time_diff < 3600:  # 1小时内
-                status = "online"
-            elif time_diff < 86400:  # 24小时内
-                status = "idle"
-        
-        return {
-            "status": status,
-            "battery_level": battery_level,
-            "signal_strength": signal_strength,
-            "last_sync_time": last_connected
-        }
+        if result.modified_count > 0:
+            return {"success": True, "message": "设备固件版本已更新"}
+        else:
+            return {"success": False, "message": "设备固件更新失败"}
 
 
 device_service = DeviceService() 

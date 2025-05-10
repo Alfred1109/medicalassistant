@@ -117,6 +117,23 @@ const deviceService = {
     }
   },
 
+  // 修复设备异常
+  repairDevice: async (deviceId: string): Promise<{ 
+    success: boolean; 
+    message: string;
+    repair_actions?: string[];
+    repair_results?: Array<{action: string; success: boolean; message?: string; reason?: string}>;
+    new_status?: any;
+  }> => {
+    try {
+      const response = await apiService.repairDevice(deviceId);
+      return response.data;
+    } catch (error) {
+      console.error('修复设备失败:', error);
+      throw error;
+    }
+  },
+
   // 模拟扫描设备（仅用于演示）
   scanForDevices: async (): Promise<Device[]> => {
     // 模拟API调用延迟

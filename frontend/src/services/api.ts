@@ -1,5 +1,5 @@
-import axios from 'axios';
-import type { AxiosInstance, AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios';
+import { API_BASE_URL } from '../config/constants';
 import { 
   ApiResponse, 
   LoginCredentials, 
@@ -15,55 +15,56 @@ import {
   FollowUp 
 } from '../types/doctor.types';
 
-// 创建具有基础URL和默认头部的axios实例
+// 创建axios实例
 const api: AxiosInstance = axios.create({
-  baseURL: 'http://localhost:5502/api',
+  baseURL: API_BASE_URL,
+  timeout: 10000,
   headers: {
     'Content-Type': 'application/json',
-  },
+  }
 });
 
-// 添加请求拦截器，包含认证令牌
+// 请求拦截器
 api.interceptors.request.use(
-  (config) => {
+  (config: AxiosRequestConfig) => {
+    // 从localStorage获取token
     const token = localStorage.getItem('token');
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
     return config;
   },
-  (error) => Promise.reject(error)
+  (error: AxiosError) => {
+    return Promise.reject(error);
+  }
 );
 
-// 添加响应拦截器，处理常见错误
+// 响应拦截器
 api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    // 处理401未授权错误
+  (response: AxiosResponse) => response,
+  (error: AxiosError) => {
+    // 处理错误情况，例如401未授权跳转到登录页
     if (error.response && error.response.status === 401) {
-      // 当令牌无效或过期时清除本地存储
-      if (localStorage.getItem('token')) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        
-        // 如果不在认证页面，重定向到登录页面
-        if (!window.location.pathname.includes('/auth')) {
-          window.location.href = '/auth';
-        }
-      }
+      // 重定向到登录页或清除token
+      localStorage.removeItem('token');
+      window.location.href = '/login';
     }
-    
-    // 处理网络错误
-    if (!error.response) {
-      console.error('网络错误:', error.message);
-    }
-    
     return Promise.reject(error);
   }
 );
 
 // API服务方法
 export const apiService = {
+  // 设备相关API
+  getUserDevices: (userId: string) => api.get(`/devices/user/${userId}`),
+  bindUserDevice: (userId: string, deviceData: any) => api.post(`/devices/bind`, { ...deviceData, user_id: userId }),
+  unbindUserDevice: (userId: string, deviceId: string) => api.post(`/devices/unbind`, { user_id: userId, device_id: deviceId }),
+  getDeviceData: (deviceId: string, params: any) => api.get(`/devices/${deviceId}/data`, { params }),
+  syncDeviceData: (deviceId: string) => api.post(`/devices/${deviceId}/sync`),
+  getDeviceStatus: (deviceId: string) => api.get(`/devices/${deviceId}/status`),
+  configureDevice: (deviceId: string, config: any) => api.post(`/devices/${deviceId}/configure`, config),
+  repairDevice: (deviceId: string) => api.post(`/devices/${deviceId}/repair`),
+
   // 认证接口
   auth: {
     login: (credentials: LoginCredentials): Promise<AxiosResponse<TokenResponse>> => 

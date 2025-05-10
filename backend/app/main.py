@@ -19,6 +19,20 @@ from app.api.routers import doctor_router, health_manager_router, patient_router
 # 导入数据库连接函数
 from app.db.mongodb import connect_to_mongodb, close_mongodb_connection, DatabaseConnectionError
 
+# 导入WebSocket服务
+from app.api.websockets import setup_websockets
+# 导入通信路由
+from app.api.routers import communication_router
+
+# 添加新的路由导入
+from .api.routers import report_scheduler_router, data_filter_router
+
+# 导入设备相关路由
+from .api.routers import device_router, device_data_router, device_repair_router, device_data_standard_router
+
+# 导入权限审计中间件
+from app.core.permission_audit import PermissionAuditMiddleware
+
 # 创建应用实例
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -70,6 +84,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 添加权限审计中间件
+app.add_middleware(
+    PermissionAuditMiddleware,
+    audit_paths=[
+        "/api/users",
+        "/api/roles", 
+        "/api/permissions",
+        "/api/admin",
+        "/api/audit-logs",
+        "/api/rehabilitation",
+        "/api/agents",
+        "/api/doctors",
+        "/api/patients",
+        "/api/health-managers"
+    ],
+    exclude_paths=[
+        "/api/health",
+        "/docs",
+        "/openapi.json",
+        "/api/auth"
+    ]
+)
+
 # 添加MongoDB连接和关闭事件
 @app.on_event("startup")
 async def startup_db_client():
@@ -77,6 +114,9 @@ async def startup_db_client():
     logger.info("Application starting up...")
     try:
         await connect_to_mongodb()
+        # 初始化WebSocket服务
+        setup_websockets(app)
+        logger.info("WebSocket服务已初始化")
     except DatabaseConnectionError as e:
         logger.critical(f"Failed to connect to database: {str(e)}")
         # 在生产环境可能需要退出应用
@@ -148,6 +188,19 @@ app.include_router(system_admin_router, prefix="/api/admin", tags=["admin"])
 app.include_router(health_alert_router, tags=["health-alerts"])
 # 添加通知路由
 app.include_router(notification_router, prefix="/api", tags=["notifications"])
+
+# 注册通信路由
+app.include_router(communication_router, prefix="/api", tags=["communications"])
+
+# 在 app.include_router 部分添加新的路由
+app.include_router(report_scheduler_router.router, prefix="/api")
+app.include_router(data_filter_router.router, prefix="/api")
+
+# 添加设备相关路由
+app.include_router(device_router.router)
+app.include_router(device_data_router.router)
+app.include_router(device_repair_router.router)
+app.include_router(device_data_standard_router.router)
 
 @app.get("/")
 async def root():

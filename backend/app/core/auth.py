@@ -7,11 +7,14 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from typing import Optional, Any
 import logging
+from datetime import datetime
+from bson import ObjectId
+from fastapi import WebSocket
 
 from app.core.config import settings
-from app.schemas.user import UserResponse, TokenData
+from app.schemas.user import UserResponse, TokenData, TokenPayload
 from app.db.mongodb import get_database
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorClient
 
 # OAuth2 password bearer for token validation
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/users/login")
@@ -71,4 +74,49 @@ async def get_current_active_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账户已被停用"
         )
-    return current_user 
+    return current_user
+
+# 添加WebSocket用户验证函数
+async def get_current_user_ws(websocket: WebSocket, db: AsyncIOMotorClient) -> Optional[dict]:
+    """
+    从WebSocket连接中获取当前用户信息
+    WebSocket连接应在查询参数或cookie中包含token
+    """
+    token = None
+    
+    # 首先尝试从查询参数中获取token
+    try:
+        token = websocket.query_params.get("token")
+    except Exception:
+        pass
+    
+    # 如果查询参数中没有token，尝试从cookie中获取
+    if not token:
+        try:
+            cookies = websocket.cookies
+            token = cookies.get(settings.TOKEN_COOKIE_NAME)
+        except Exception:
+            pass
+    
+    if not token:
+        return None
+    
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            return None
+            
+        token_data = TokenPayload(**payload)
+        if token_data.exp and datetime.fromtimestamp(token_data.exp) < datetime.now():
+            return None
+    except JWTError:
+        return None
+    
+    user = await db.users.find_one({"_id": ObjectId(user_id)})
+    if user is None:
+        return None
+    
+    return user 
