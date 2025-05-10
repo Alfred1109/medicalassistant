@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from app.schemas.base import PydanticConfig
 
 class Tool(BaseModel):
     name: str
@@ -38,9 +39,8 @@ class AgentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
+    class Config(PydanticConfig):
+        pass
         
 class AgentQuery(BaseModel):
     query: str

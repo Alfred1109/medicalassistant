@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from enum import Enum
 
-from .base import TimestampModel, PyObjectId
+from .base import TimestampModel, PyObjectId, PydanticConfig
 
 
 # 记录类型枚举
@@ -194,10 +194,8 @@ class HealthRecordResponse(BaseModel):
     versions: Optional[List[RecordVersion]] = None
     metadata: Dict[str, Any] = {}
 
-    class Config:
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
+    class Config(PydanticConfig):
+        pass
 
 
 # 随访记录创建请求模型
@@ -244,10 +242,8 @@ class FollowUpRecordResponse(BaseModel):
     updated_at: datetime
     metadata: Dict[str, Any] = {}
 
-    class Config:
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
+    class Config(PydanticConfig):
+        pass
 
 
 # 完成随访请求模型
@@ -296,10 +292,8 @@ class HealthDataResponse(BaseModel):
     updated_at: datetime
     metadata: Dict[str, Any] = {}
 
-    class Config:
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
+    class Config(PydanticConfig):
+        pass
 
 
 # 健康档案统计响应模型
@@ -416,12 +410,8 @@ class HealthRecordResponse(HealthRecordBase, TimestampModel):
     related_follow_ups: List[str] = []
     updated_by: Optional[str] = None
 
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
+    class Config(PydanticConfig):
+        pass
 
 
 class HealthRecordStats(BaseModel):
@@ -433,6 +423,11 @@ class HealthRecordStats(BaseModel):
     recent_activity: List[Dict[str, Any]]
     completion_percentage: float
     total_attachments: int
+
+    class Config:
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat()
+        }
 
 
 # 随访记录相关模型定义
@@ -556,12 +551,8 @@ class FollowUpRecordResponse(FollowUpBase, TimestampModel):
     completion_data: Optional[Dict[str, Any]] = None
     cancellation_data: Optional[Dict[str, Any]] = None
 
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
+    class Config(PydanticConfig):
+        pass
 
 
 # 健康数据相关模型定义
@@ -594,12 +585,8 @@ class HealthDataResponse(HealthDataBase, TimestampModel):
     id: str
     metadata: Dict[str, Any] = {}
 
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
+    class Config(PydanticConfig):
+        pass
 
 
 class VitalSignData(BaseModel):

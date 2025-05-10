@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from app.schemas.base import PydanticConfig
 
 class ExerciseBase(BaseModel):
     name: str
@@ -40,9 +41,8 @@ class ExerciseResponse(ExerciseBase):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
+    class Config(PydanticConfig):
+        pass
         
 class RehabPlanBase(BaseModel):
     name: str
@@ -80,9 +80,8 @@ class RehabPlanResponse(RehabPlanBase):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
+    class Config(PydanticConfig):
+        pass
         
 class ProgressUpdate(BaseModel):
     plan_id: str
@@ -97,9 +96,8 @@ class ProgressResponse(ProgressUpdate):
     id: str = Field(..., alias="_id")
     patient_id: str
     
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
+    class Config(PydanticConfig):
+        pass
 
 # 新增康复评估相关模型
 class RangeOfMotion(BaseModel):
@@ -219,6 +217,5 @@ class AssessmentResponse(AssessmentBase):
     scores: Dict[str, float]  # 自动计算的评估得分
     ai_analysis: Optional[Dict[str, Any]] = None  # AI生成的评估分析
     
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True 
+    class Config(PydanticConfig):
+        pass 

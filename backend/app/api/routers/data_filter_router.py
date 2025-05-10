@@ -8,7 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from ...services.data_filter_service import data_filter_service
-from ...auth.jwt_auth import get_current_user
+from ...core.dependencies import get_current_user
 
 router = APIRouter(prefix="/data-filters", tags=["data-filters"])
 

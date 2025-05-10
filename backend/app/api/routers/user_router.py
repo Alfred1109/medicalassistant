@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Form
 from typing import List, Dict, Any, Optional
 from fastapi.security import OAuth2PasswordRequestForm
 
@@ -25,12 +25,13 @@ async def register_user(
 
 @router.post("/login", response_model=Token)
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    username: str = Form(...),
+    password: str = Form(...),
     user_service: UserService = Depends(get_user_service)
 ):
     """用户登录并获取访问令牌"""
     try:
-        user = await user_service.authenticate_user(form_data.username, form_data.password)
+        user = await user_service.authenticate_user(username, password)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

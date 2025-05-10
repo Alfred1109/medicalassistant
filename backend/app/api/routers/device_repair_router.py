@@ -1,6 +1,6 @@
 """
-设备修复路由
-提供设备修复历史查询等接口
+设备维修路由器
+处理设备维修和修复记录相关API请求
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Dict, Optional
@@ -9,7 +9,8 @@ from bson import ObjectId
 
 from ...db.mongodb import get_db
 from ...services.device_service import device_service
-from ...auth.auth_utils import get_current_user
+from ...services.device_repair_service import device_repair_service
+from ...core.dependencies import get_current_user
 
 router = APIRouter(prefix="/device-repairs", tags=["device-repairs"])
 

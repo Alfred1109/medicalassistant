@@ -59,25 +59,31 @@ export const login = createAsyncThunk(
     try {
       console.log('Attempting login with:', credentials.email);
       
-      // 使用FormData来匹配OAuth2PasswordRequestForm的要求
-      const formData = new FormData();
-      formData.append('username', credentials.email);
-      formData.append('password', credentials.password);
+      // 使用URLSearchParams来匹配OAuth2PasswordRequestForm的要求
+      const params = new URLSearchParams();
+      params.append('username', credentials.email);
+      params.append('password', credentials.password);
       
-      const response = await axios.post(`/api/users/login`, formData, {
+      // 使用相对路径，让Vite的代理来处理
+      const response = await axios.post(`/api/users/login`, params, {
         headers: {
-          'Content-Type': 'multipart/form-data',
+          'Content-Type': 'application/x-www-form-urlencoded',
         }
       });
       
       console.log('Login response:', response.data);
       
-      localStorage.setItem('token', response.data.access_token);
-      localStorage.setItem('userRole', response.data.user.role);
-      return {
-        user: response.data.user,
-        token: response.data.access_token
-      };
+      if (response.data && response.data.access_token) {
+        localStorage.setItem('token', response.data.access_token);
+        localStorage.setItem('userRole', response.data.user.role);
+        return {
+          user: response.data.user,
+          token: response.data.access_token
+        };
+      } else {
+        console.error('Login response format error:', response.data);
+        return rejectWithValue('登录响应格式错误');
+      }
     } catch (error: any) {
       console.error('Login error:', error);
       

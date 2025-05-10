@@ -1,14 +1,14 @@
 """
-报表调度路由
-提供报表调度和管理的API接口
+报表调度器路由模块
+负责报表生成调度配置与执行
 """
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, Path
 from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, EmailStr
 
+from ...core.dependencies import get_current_user
 from ...services.report_scheduler_service import report_scheduler_service
-from ...auth.jwt_auth import get_current_user
 
 router = APIRouter(prefix="/report-schedules", tags=["report-schedules"])
 

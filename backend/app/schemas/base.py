@@ -39,4 +39,19 @@ class TimestampModel(BaseModel):
             datetime: lambda dt: dt.isoformat(),
             ObjectId: lambda oid: str(oid)
         }
-    } 
+    }
+
+
+# 添加一个通用的配置类，适配Pydantic V2
+class PydanticConfig:
+    """用于适配Pydantic V2的通用配置类"""
+    from_attributes = True  # 替代 orm_mode
+    populate_by_name = True  # 替代 allow_population_by_field_name
+    json_encoders = {
+        datetime: lambda dt: dt.isoformat()
+    }
+    
+    @classmethod
+    def get_json_schema_extra(cls, schema):
+        """替代 schema_extra"""
+        return schema 

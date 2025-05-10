@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from ...services.device_service import device_service
 from ...services.device_analysis_service import device_analysis_service
-from ...auth.jwt_auth import get_current_user
+from ...core.dependencies import get_current_user
 
 router = APIRouter(prefix="/device-analysis", tags=["device-analysis"])
 

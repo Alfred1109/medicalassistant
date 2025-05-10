@@ -28,7 +28,9 @@ from app.api.routers import communication_router
 from .api.routers import report_scheduler_router, data_filter_router
 
 # 导入设备相关路由
-from .api.routers import device_router, device_data_router, device_repair_router, device_data_standard_router
+from .api.routers.device_router import router as device_router
+from .api.routers.device_repair_router import router as device_repair_router
+from .api.routers.device_data_standard_router import router as device_data_standard_router
 
 # 导入权限审计中间件
 from app.core.permission_audit import PermissionAuditMiddleware
@@ -83,6 +85,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 添加CORS调试中间件
+@app.middleware("http")
+async def cors_debug_middleware(request: Request, call_next):
+    """CORS调试中间件，记录请求的Origin头"""
+    origin = request.headers.get("Origin")
+    if origin:
+        logger.debug(f"收到请求，Origin: {origin}, 路径: {request.url.path}")
+        logger.debug(f"允许的Origins: {origins}")
+    
+    response = await call_next(request)
+    
+    if origin:
+        cors_headers = {k: v for k, v in response.headers.items() if k.startswith("access-control-")}
+        logger.debug(f"返回CORS头: {cors_headers}")
+    
+    return response
 
 # 添加权限审计中间件
 app.add_middleware(
@@ -197,10 +216,21 @@ app.include_router(report_scheduler_router.router, prefix="/api")
 app.include_router(data_filter_router.router, prefix="/api")
 
 # 添加设备相关路由
-app.include_router(device_router.router)
-app.include_router(device_data_router.router)
-app.include_router(device_repair_router.router)
-app.include_router(device_data_standard_router.router)
+app.include_router(device_router, prefix="/api")
+app.include_router(device_repair_router, prefix="/api")
+app.include_router(device_data_standard_router, prefix="/api")
+
+@app.get("/api")
+async def api_root():
+    """API根路径响应"""
+    logger.debug("API root endpoint called")
+    return {
+        "name": settings.PROJECT_NAME,
+        "version": settings.API_VERSION,
+        "status": "running",
+        "docs_url": "/docs",
+        "health_url": "/health"
+    }
 
 @app.get("/")
 async def root():

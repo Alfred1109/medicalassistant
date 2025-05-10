@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from pydantic import BaseModel, Field
 
-from app.schemas.base import PyObjectId, TimestampModel
+from app.schemas.base import PyObjectId, TimestampModel, PydanticConfig
 
 
 class AlertLevel(str, Enum):
@@ -69,12 +69,8 @@ class ThresholdResponse(ThresholdBase, TimestampModel):
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
 
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
+    class Config(PydanticConfig):
+        pass
 
 
 # 预警基础模型
@@ -117,12 +113,8 @@ class AlertResponse(AlertBase, TimestampModel):
     resolved_by: Optional[str] = None
     resolution_notes: Optional[str] = None
 
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
+    class Config(PydanticConfig):
+        pass
 
 
 # 血压阈值创建模型

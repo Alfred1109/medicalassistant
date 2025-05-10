@@ -62,6 +62,14 @@ class UserLogin(BaseModel):
 class TokenData(BaseModel):
     user_id: str
     
+# Token负载模型
+class TokenPayload(BaseModel):
+    sub: Optional[str] = None
+    exp: Optional[int] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    permissions: Optional[List[str]] = None
+    
 # Token响应模型
 class Token(BaseModel):
     access_token: str

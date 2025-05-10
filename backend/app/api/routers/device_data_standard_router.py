@@ -1,14 +1,15 @@
 """
-设备数据标准路由
-提供设备数据标准相关的API
+设备数据标准路由器
+提供设备数据标准的查询和管理API
 """
-from fastapi import APIRouter, Depends, HTTPException
-from typing import List, Dict, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Dict, List, Optional
+from pydantic import BaseModel, Field
 
 from ...models.device_data_standard import DeviceType, DEVICE_DATA_TYPES, METADATA_FIELDS, DEVICE_DATA_STANDARD_VERSION
 from ...services.device_data_validator_service import device_data_validator_service
 from ...services.device_service import device_service
-from ...auth.auth_utils import get_current_user
+from ...core.dependencies import get_current_user
 
 router = APIRouter(prefix="/device-standards", tags=["device-standards"])
 

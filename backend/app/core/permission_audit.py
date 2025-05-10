@@ -103,8 +103,8 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
             try:
                 # 读取请求体，但要确保不影响后续处理
                 request_body = await request.body()
-                # 重要: 需要重置request body以供后续中间件/路由处理
-                await request.json()
+                # 重置request body以供后续中间件/路由处理
+                await request._receive()
             except Exception as e:
                 logger.error(f"Failed to read request body: {str(e)}")
         
@@ -120,9 +120,8 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
         try:
             # 获取数据库连接
             # 注意：实际实现中可能需要从应用状态获取数据库连接
-            # 这里仅作为示例
             from app.db.mongodb import get_database
-            db = await get_database()
+            db = await anext(get_database())
             audit_service = AuditLogService(db)
             
             # 记录审计日志
@@ -256,4 +255,11 @@ class ResourcePermissionTracker:
 # 创建单例实例以便在应用中使用
 async def get_permission_tracker(db=None):
     """获取权限跟踪器实例"""
+    if not db:
+        from app.db.mongodb import get_database
+        try:
+            db = await anext(get_database())
+        except Exception as e:
+            logger.error(f"获取数据库连接失败: {str(e)}")
+    
     return ResourcePermissionTracker(db) 

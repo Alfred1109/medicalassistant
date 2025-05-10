@@ -3,13 +3,13 @@
 处理设备管理相关API请求
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
 
 from ...services.device_service import device_service
-from ...services.user_service import user_service
-from ...auth.jwt_auth import get_current_user
+from ...services.user_service import UserService
+from ...core.dependencies import get_current_user
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -53,7 +53,7 @@ class DeviceStatusResponse(BaseModel):
 class DeviceDataBase(BaseModel):
     timestamp: datetime = Field(..., description="数据时间戳")
     data_type: str = Field(..., description="数据类型")
-    value: any = Field(..., description="数据值")
+    value: Any = Field(..., description="数据值")
     unit: str = Field(..., description="单位")
     metadata: Optional[Dict] = Field(None, description="元数据")
 

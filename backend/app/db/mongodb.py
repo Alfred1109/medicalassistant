@@ -51,6 +51,21 @@ async def get_database() -> AsyncGenerator:
     
     yield db.db
 
+# 为了向后兼容，添加get_db函数作为get_database的别名
+async def get_db() -> AsyncIOMotorDatabase:
+    """获取数据库连接 (get_database的别名)"""
+    if not db.is_connected():
+        await connect_to_mongodb()
+    
+    if not await db.ping():
+        logger.warning("检测到数据库连接异常，尝试重新连接")
+        await connect_to_mongodb()
+        
+        if not await db.ping():
+            raise DatabaseConnectionError("无法连接到MongoDB数据库")
+    
+    return db.db
+
 async def connect_to_mongodb():
     """连接到MongoDB"""
     try:

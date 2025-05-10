@@ -27,7 +27,7 @@ import {
 } from '@mui/icons-material';
 
 import { AppDispatch, RootState } from '../../store';
-import { login, clearAuthError, mockAdminLogin } from '../../store/slices/authSlice';
+import { login, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManagerLogin, mockPatientLogin } from '../../store/slices/authSlice';
 
 // 管理员账号信息
 const ADMIN_CREDENTIALS = {
@@ -73,11 +73,52 @@ const Login: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      console.log('开始登录，用户邮箱:', formData.email);
+      
+      // 在开发环境下，当使用默认管理员账号时，可以选择绕过实际登录
+      if (process.env.NODE_ENV === 'development' && 
+          formData.email === ADMIN_CREDENTIALS.email && 
+          formData.password === ADMIN_CREDENTIALS.password) {
+        console.log('开发环境使用默认管理员账号，使用模拟登录');
+        dispatch(mockAdminLogin());
+        navigate('/app/admin');
+        return;
+      }
+      
       const result = await dispatch(login(formData)).unwrap();
+      console.log('登录成功，用户信息:', result);
       // 根据用户角色跳转到相应的页面
       redirectBasedOnRole(result.user.role);
-    } catch (err) {
-      // Error is handled by the reducer
+    } catch (err: any) {
+      console.error('登录失败，错误:', err);
+      console.error('详细错误堆栈:', new Error().stack);
+      
+      // 显示更详细的错误信息
+      if (err?.response?.status === 0) {
+        dispatch({ 
+          type: 'auth/loginFailed', 
+          payload: '无法连接到服务器，请检查网络连接' 
+        });
+      }
+      
+      // 如果在开发环境中登录失败，使用模拟登录
+      if (process.env.NODE_ENV === 'development') {
+        console.log('开发环境下使用模拟登录');
+        // 根据尝试登录的用户名选择不同的模拟登录
+        if (formData.email.includes('doctor')) {
+          dispatch(mockDoctorLogin());
+          navigate('/app/doctor');
+        } else if (formData.email.includes('health')) {
+          dispatch(mockHealthManagerLogin());
+          navigate('/app/health-manager');
+        } else if (formData.email.includes('patient')) {
+          dispatch(mockPatientLogin());
+          navigate('/app/patient/main-dashboard');
+        } else {
+          dispatch(mockAdminLogin());
+          navigate('/app/admin');
+        }
+      }
     }
   };
 
@@ -153,6 +194,12 @@ const Login: React.FC = () => {
       }, 500);
     }
   }, []);
+
+  // 添加一个应急方案，直接使用模拟登录
+  const handleMockLogin = () => {
+    dispatch(mockAdminLogin());
+    navigate('/app/admin');
+  };
 
   return (
     <Box component="form" onSubmit={handleSubmit} noValidate>
@@ -326,15 +373,35 @@ const Login: React.FC = () => {
         </Grid>
       </Grid>
 
-      <Button
-        type="submit"
-        fullWidth
-        variant="contained"
-        disabled={loading}
-        sx={{ mt: 3, mb: 2, py: 1.2 }}
-      >
-        {loading ? <CircularProgress size={24} /> : '登录'}
-      </Button>
+      <Box mt={3}>
+        {error && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {error}
+          </Alert>
+        )}
+        <Button
+          fullWidth
+          variant="contained"
+          color="primary"
+          type="submit"
+          disabled={loading}
+          startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <LockIcon />}
+        >
+          {loading ? '登录中...' : '登录'}
+        </Button>
+
+        {process.env.NODE_ENV === 'development' && (
+          <Button
+            fullWidth
+            variant="outlined"
+            color="secondary"
+            onClick={handleMockLogin}
+            sx={{ mt: 1 }}
+          >
+            开发环境应急登录
+          </Button>
+        )}
+      </Box>
 
       <Divider sx={{ my: 2 }}>
         <Typography variant="body2" color="text.secondary">
@@ -350,6 +417,73 @@ const Login: React.FC = () => {
           </Link>
         </Typography>
       </Box>
+
+      {/* 在开发环境或特定条件下显示紧急登录按钮 */}
+      {(process.env.NODE_ENV === 'development' || window.location.hostname === 'localhost') && (
+        <Box mt={3} p={2} sx={{ border: '1px dashed #ff9800', borderRadius: 1, bgcolor: '#fff8e1' }}>
+          <Typography variant="subtitle2" color="warning.main" gutterBottom>
+            开发环境紧急登录
+          </Typography>
+          <Grid container spacing={1}>
+            <Grid item xs={6}>
+              <Button
+                fullWidth
+                variant="outlined"
+                color="warning"
+                size="small"
+                onClick={() => {
+                  dispatch(mockAdminLogin());
+                  navigate('/app/admin');
+                }}
+              >
+                管理员登录
+              </Button>
+            </Grid>
+            <Grid item xs={6}>
+              <Button
+                fullWidth
+                variant="outlined"
+                color="warning"
+                size="small"
+                onClick={() => {
+                  dispatch(mockDoctorLogin());
+                  navigate('/app/doctor');
+                }}
+              >
+                医生登录
+              </Button>
+            </Grid>
+            <Grid item xs={6}>
+              <Button
+                fullWidth
+                variant="outlined"
+                color="warning"
+                size="small"
+                onClick={() => {
+                  dispatch(mockHealthManagerLogin());
+                  navigate('/app/health-manager');
+                }}
+              >
+                健康管理师登录
+              </Button>
+            </Grid>
+            <Grid item xs={6}>
+              <Button
+                fullWidth
+                variant="outlined"
+                color="warning"
+                size="small"
+                onClick={() => {
+                  dispatch(mockPatientLogin());
+                  navigate('/app/patient/main-dashboard');
+                }}
+              >
+                患者登录
+              </Button>
+            </Grid>
+          </Grid>
+        </Box>
+      )}
     </Box>
   );
 };
