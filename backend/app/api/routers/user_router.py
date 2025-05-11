@@ -1,11 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Form, Request
-from typing import List, Dict, Any, Optional
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Body, Query, Path
 from fastapi.security import OAuth2PasswordRequestForm
+from datetime import datetime, timedelta
 import logging
+import json
+from bson import ObjectId
 
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserLogin, Token, PermissionAssignment
+from app.core.dependencies import get_user_service, get_current_active_user, get_current_user
 from app.services.user_service import UserService
-from app.core.dependencies import get_user_service, get_current_user
+from app.schemas.user import (
+    UserCreate, UserUpdate, UserResponse, Token, TokenResponse, RefreshTokenRequest,
+    DoctorResponse, PatientResponse, HealthManagerResponse,
+    Organization, DoctorCreate, PatientCreate, HealthManagerCreate,
+    DoctorUpdate, PatientUpdate, HealthManagerUpdate
+)
 from app.core.permissions import require_permission, Permission, PermissionChecker
 
 logger = logging.getLogger(__name__)
@@ -72,6 +80,67 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="登录过程中发生内部错误",
+        )
+
+@router.post("/login/refresh", response_model=TokenResponse)
+async def login_with_refresh(
+    request: Request, 
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    user_service: UserService = Depends(get_user_service)
+):
+    """用户登录并获取带刷新令牌的访问令牌"""
+    client_host = request.client.host if request.client else "unknown_client"
+    username = form_data.username
+    password = form_data.password
+    logger.info(f"Login with refresh attempt for user: '{username}' from {client_host}")
+
+    try:
+        user = await user_service.authenticate_user(username, password)
+        if not user:
+            logger.warning(f"Authentication failed for '{username}': User not found or password mismatch.")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="用户名或密码不正确",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        logger.info(f"User '{username}' authenticated successfully. Creating token with refresh.")
+        token = await user_service.create_token_with_refresh(user)
+        logger.info(f"Token with refresh created successfully for '{username}'.")
+        return token
+    except Exception as e:
+        logger.error(f"Error during login with refresh for '{username}': {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"登录过程中发生错误: {str(e)}",
+        )
+
+@router.post("/refresh-token", response_model=TokenResponse)
+async def refresh_token(
+    request: Request,
+    refresh_request: RefreshTokenRequest,
+    user_service: UserService = Depends(get_user_service)
+):
+    """使用刷新令牌获取新的访问令牌"""
+    client_host = request.client.host if request.client else "unknown_client"
+    logger.info(f"Token refresh request from {client_host}")
+    
+    try:
+        token_response = await user_service.refresh_access_token(refresh_request.refresh_token)
+        logger.info(f"Token refreshed successfully")
+        return token_response
+    except ValueError as e:
+        logger.warning(f"Token refresh failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during token refresh: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="刷新令牌过程中发生错误",
         )
 
 @router.get("/me", response_model=UserResponse)

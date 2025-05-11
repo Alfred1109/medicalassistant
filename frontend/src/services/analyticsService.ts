@@ -8,9 +8,10 @@ import {
   ComparisonData,
   PredictionResult
 } from '../types/dataAnalysis';
+import api from './api'; // 导入配置好的axios实例
 
-// 基础API路径
-const API_BASE_URL = '/api';
+// 基础API路径 - 已移除，因为api实例已设置baseURL
+// const API_BASE_URL = '/api';
 
 /**
  * 数据分析服务
@@ -22,19 +23,13 @@ export const analyticsService = {
    */
   async getStatsOverview(): Promise<StatsOverview> {
     try {
-      const response = await fetch(`${API_BASE_URL}/system/visualization/overview`);
+      const response = await api.get(`/system/visualization/overview`);
       
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (response.data.status === 'error') {
+        throw new Error(response.data.message || '获取统计数据失败');
       }
       
-      const data: AnalyticsApiResponse<StatsOverview> = await response.json();
-      
-      if (data.status === 'error') {
-        throw new Error(data.message || '获取统计数据失败');
-      }
-      
-      return data.data;
+      return response.data.data;
     } catch (error) {
       console.error('获取统计数据概览失败:', error);
       
@@ -59,21 +54,15 @@ export const analyticsService = {
    */
   async getTrendData(dataType: ChartDataType, timeRange: TimeRange): Promise<TrendData[]> {
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/analytics/trend?dataType=${dataType}&timeRange=${timeRange}`
-      );
+      const response = await api.get(`/analytics/trend`, {
+        params: { dataType, timeRange }
+      });
       
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (response.data.status === 'error') {
+        throw new Error(response.data.message || '获取趋势数据失败');
       }
       
-      const data: AnalyticsApiResponse<TrendData[]> = await response.json();
-      
-      if (data.status === 'error') {
-        throw new Error(data.message || '获取趋势数据失败');
-      }
-      
-      return data.data;
+      return response.data.data;
     } catch (error) {
       console.error(`获取${dataType}趋势数据失败:`, error);
       
@@ -89,21 +78,15 @@ export const analyticsService = {
    */
   async getDistributionData(dataType: ChartDataType, timeRange: TimeRange): Promise<DistributionData[]> {
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/analytics/distribution?dataType=${dataType}&timeRange=${timeRange}`
-      );
+      const response = await api.get(`/analytics/distribution`, {
+        params: { dataType, timeRange }
+      });
       
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (response.data.status === 'error') {
+        throw new Error(response.data.message || '获取分布数据失败');
       }
       
-      const data: AnalyticsApiResponse<DistributionData[]> = await response.json();
-      
-      if (data.status === 'error') {
-        throw new Error(data.message || '获取分布数据失败');
-      }
-      
-      return data.data;
+      return response.data.data;
     } catch (error) {
       console.error(`获取${dataType}分布数据失败:`, error);
       
@@ -124,21 +107,15 @@ export const analyticsService = {
     compareWith: string
   ): Promise<ComparisonData[]> {
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/analytics/comparison?dataType=${dataType}&timeRange=${timeRange}&compareWith=${compareWith}`
-      );
+      const response = await api.get(`/analytics/comparison`, {
+        params: { dataType, timeRange, compareWith }
+      });
       
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (response.data.status === 'error') {
+        throw new Error(response.data.message || '获取对比数据失败');
       }
       
-      const data: AnalyticsApiResponse<ComparisonData[]> = await response.json();
-      
-      if (data.status === 'error') {
-        throw new Error(data.message || '获取对比数据失败');
-      }
-      
-      return data.data;
+      return response.data.data;
     } catch (error) {
       console.error(`获取${dataType}对比数据失败:`, error);
       
@@ -159,16 +136,15 @@ export const analyticsService = {
     format: 'csv' | 'xlsx' | 'pdf'
   ): Promise<Blob> {
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/analytics/export?dataType=${dataType}&timeRange=${timeRange}&format=${format}`,
-        { headers: { Accept: format === 'pdf' ? 'application/pdf' : 'application/octet-stream' } }
-      );
+      const response = await api.get(`/analytics/export`, {
+        params: { dataType, timeRange, format },
+        responseType: 'blob',
+        headers: { 
+          Accept: format === 'pdf' ? 'application/pdf' : 'application/octet-stream' 
+        }
+      });
       
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
-      return await response.blob();
+      return response.data;
     } catch (error) {
       console.error(`导出${dataType}报表数据失败:`, error);
       throw error;
@@ -205,7 +181,7 @@ export const analyticsService = {
       });
       
       const response = await fetch(
-        `${API_BASE_URL}/device-analysis/predict-advanced/${deviceId}?${params.toString()}`
+        `/device-analysis/predict-advanced/${deviceId}?${params.toString()}`
       );
       
       if (!response.ok) {

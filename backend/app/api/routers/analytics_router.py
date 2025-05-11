@@ -20,7 +20,7 @@ async def get_stats_overview(
     """
     # 权限检查 - 要求管理员或者医生权限
     if not (PermissionChecker.has_permission(current_user, Permission.SYSTEM_ADMIN) or 
-            PermissionChecker.has_permission(current_user, Permission.DOCTOR)):
+            current_user.role == "doctor"):  # 直接检查用户角色
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="您没有权限访问这些数据"
@@ -49,7 +49,7 @@ async def get_trend_data(
     """
     # 权限检查 - 要求管理员或者医生权限
     if not (PermissionChecker.has_permission(current_user, Permission.SYSTEM_ADMIN) or 
-            PermissionChecker.has_permission(current_user, Permission.DOCTOR)):
+            current_user.role == "doctor"):  # 直接检查用户角色
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="您没有权限访问这些数据"
@@ -78,7 +78,7 @@ async def get_distribution_data(
     """
     # 权限检查 - 要求管理员或者医生权限
     if not (PermissionChecker.has_permission(current_user, Permission.SYSTEM_ADMIN) or 
-            PermissionChecker.has_permission(current_user, Permission.DOCTOR)):
+            current_user.role == "doctor"):  # 直接检查用户角色
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="您没有权限访问这些数据"
@@ -108,7 +108,7 @@ async def get_comparison_data(
     """
     # 权限检查 - 要求管理员或者医生权限
     if not (PermissionChecker.has_permission(current_user, Permission.SYSTEM_ADMIN) or 
-            PermissionChecker.has_permission(current_user, Permission.DOCTOR)):
+            current_user.role == "doctor"):  # 直接检查用户角色
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="您没有权限访问这些数据"

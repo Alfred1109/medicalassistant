@@ -89,6 +89,18 @@ class Token(BaseModel):
     token_type: str
     user: Optional[UserResponse] = None
 
+# 扩展的Token响应模型，包含refresh token
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str
+    user: Optional[UserResponse] = None
+    expires_in: int
+    
+# 刷新Token请求模型
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
 # 特定角色用户数据
 # 医生响应
 class DoctorResponse(UserResponse):

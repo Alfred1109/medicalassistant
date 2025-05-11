@@ -1,25 +1,44 @@
 import React, { useState, useEffect } from 'react';
-import { Box, Typography, Container, Paper, CircularProgress } from '@mui/material';
+import { Box, Typography, Container, Paper, CircularProgress, Alert } from '@mui/material';
 import NotificationCenter from '../components/Patient/NotificationCenter';
-import axios from 'axios';
+import api from '../services/api';
 import { Notification } from '../services/notificationService';
+import { useNavigate } from 'react-router-dom';
+import { ROUTES } from '../config/constants';
 
 /**
  * 通知页面
  * 集成NotificationCenter组件，提供通知数据和操作
  */
 const NotificationsPage: React.FC = () => {
+  const navigate = useNavigate();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
   // 获取通知列表
   const fetchNotifications = async () => {
     setLoading(true);
+    setError(null);
+    
+    // 检查token是否存在
+    const token = localStorage.getItem('token');
+    if (!token) {
+      console.log('用户未登录，请先登录');
+      setError('您需要登录才能查看通知');
+      setLoading(false);
+      // 可选：重定向到登录页
+      // navigate(ROUTES.LOGIN);
+      return;
+    }
+    
     try {
-      const response = await axios.get('/api/notifications');
+      // 使用api服务而不是直接使用axios，api服务会自动添加token
+      const response = await api.get('/notifications');
       setNotifications(response.data || []);
     } catch (error) {
       console.error('获取通知列表失败:', error);
+      setError('获取通知列表失败，请稍后重试');
       setNotifications([]);
     } finally {
       setLoading(false);
@@ -29,7 +48,7 @@ const NotificationsPage: React.FC = () => {
   // 标记通知为已读
   const handleMarkAsRead = async (notificationId: string) => {
     try {
-      await axios.put(`/api/notifications/${notificationId}/read`);
+      await api.put(`/notifications/${notificationId}/read`);
       setNotifications(prevNotifications =>
         prevNotifications.map(notification =>
           notification.id === notificationId
@@ -45,7 +64,7 @@ const NotificationsPage: React.FC = () => {
   // 标记所有通知为已读
   const handleMarkAllAsRead = async () => {
     try {
-      await axios.put('/api/notifications/read-all');
+      await api.put('/notifications/read-all');
       setNotifications(prevNotifications =>
         prevNotifications.map(notification => ({ ...notification, isRead: true }))
       );
@@ -57,7 +76,7 @@ const NotificationsPage: React.FC = () => {
   // 删除通知
   const handleDeleteNotification = async (notificationId: string) => {
     try {
-      await axios.delete(`/api/notifications/${notificationId}`);
+      await api.delete(`/notifications/${notificationId}`);
       setNotifications(prevNotifications =>
         prevNotifications.filter(notification => notification.id !== notificationId)
       );
@@ -69,7 +88,7 @@ const NotificationsPage: React.FC = () => {
   // 清除所有通知
   const handleClearAll = async () => {
     try {
-      await axios.delete('/api/notifications/clear-all');
+      await api.delete('/notifications/clear-all');
       setNotifications([]);
     } catch (error) {
       console.error('清除所有通知失败:', error);
@@ -88,6 +107,13 @@ const NotificationsPage: React.FC = () => {
         <Typography variant="h4" component="h1" gutterBottom>
           通知中心
         </Typography>
+        
+        {error && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {error}
+          </Alert>
+        )}
+        
         <Box sx={{ mt: 3 }}>
           <NotificationCenter
             notifications={notifications}

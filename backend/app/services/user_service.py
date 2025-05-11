@@ -10,7 +10,7 @@ import logging
 from fastapi import HTTPException, status, Request
 
 from app.core.config import settings
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, Token, PermissionAssignment
+from app.schemas.user import UserCreate, UserUpdate, UserResponse, Token, PermissionAssignment, TokenResponse
 from app.core.permissions import ROLE_PERMISSIONS, Permission
 from app.db.mongodb import get_database
 from app.services.audit_log_service import AuditLogService
@@ -525,6 +525,96 @@ class UserService:
         encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
         
         return Token(access_token=encoded_jwt, token_type="bearer", user=user_obj)
+    
+    async def create_token_with_refresh(self, user: Dict[str, Any]) -> TokenResponse:
+        """创建包含刷新令牌的访问令牌"""
+        user_obj = self._map_user_to_schema(user)
+        
+        # 创建访问令牌 (短期)
+        access_token_expires = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token_payload = {
+            "sub": str(user["_id"]),
+            "exp": access_token_expires,
+            "email": user["email"],
+            "role": user["role"],
+            "permissions": user.get("permissions", []),
+            "token_type": "access"
+        }
+        access_token = jwt.encode(access_token_payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+        
+        # 创建刷新令牌 (长期)
+        refresh_token_expires = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        refresh_token_payload = {
+            "sub": str(user["_id"]),
+            "exp": refresh_token_expires,
+            "token_type": "refresh"
+        }
+        refresh_token = jwt.encode(refresh_token_payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+        
+        # 存储刷新令牌到数据库（可选，有助于实现令牌撤销）
+        await self.collection.update_one(
+            {"_id": user["_id"]},
+            {"$push": {"refresh_tokens": {
+                "token": refresh_token,
+                "expires_at": refresh_token_expires,
+                "created_at": datetime.utcnow(),
+                "user_agent": "", # 在实际环境中，可以存储用户代理信息
+                "ip": ""         # 在实际环境中，可以存储IP地址
+            }}}
+        )
+        
+        return TokenResponse(
+            access_token=access_token, 
+            refresh_token=refresh_token,
+            token_type="bearer", 
+            user=user_obj,
+            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60 # 秒为单位
+        )
+    
+    async def refresh_access_token(self, refresh_token: str) -> TokenResponse:
+        """使用刷新令牌获取新的访问令牌"""
+        try:
+            # 解析刷新令牌
+            payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            
+            # 检查令牌类型
+            if payload.get("token_type") != "refresh":
+                raise ValueError("无效的刷新令牌类型")
+            
+            user_id = payload.get("sub")
+            if not user_id:
+                raise ValueError("刷新令牌中没有用户ID")
+            
+            # 从数据库获取用户
+            user = await self.get_user_by_id(user_id)
+            if not user:
+                raise ValueError("找不到用户")
+                
+            # 验证刷新令牌是否存在于数据库中(可选，如果存储了刷新令牌)
+            user_data = await self.collection.find_one(
+                {
+                    "_id": ObjectId(user_id),
+                    "refresh_tokens.token": refresh_token,
+                    "refresh_tokens.expires_at": {"$gt": datetime.utcnow()}
+                }
+            )
+            
+            if not user_data:
+                # 令牌可能已过期或已被撤销
+                raise ValueError("刷新令牌已过期或已被撤销")
+            
+            # 生成新的令牌
+            return await self.create_token_with_refresh(user_data)
+            
+        except JWTError as e:
+            # 令牌解析错误
+            raise ValueError(f"无效的刷新令牌: {str(e)}")
+        except ValueError as e:
+            # 重新抛出已有的错误
+            raise e
+        except Exception as e:
+            # 其他未预料的错误
+            raise ValueError(f"刷新令牌过程中发生错误: {str(e)}")
         
     async def assign_practitioner(self, patient_id: str, practitioner_id: str) -> Optional[UserResponse]:
         """Assign a practitioner to a patient"""

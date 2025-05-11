@@ -23,8 +23,10 @@ export const PAGINATION = {
 // 本地存储键名
 export const STORAGE_KEYS = {
   TOKEN: 'token',
+  REFRESH_TOKEN: 'refresh_token',
   USER: 'user',
-  PREFERENCES: 'preferences'
+  PREFERENCES: 'preferences',
+  TOKEN_EXPIRY: 'token_expiry'
 };
 
 // 路由路径
