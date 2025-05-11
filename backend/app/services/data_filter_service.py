@@ -19,7 +19,7 @@ class DataFilterService:
     
     async def init_db(self):
         """初始化数据库连接"""
-        if not self.db:
+        if self.db is None:
             self.db = await get_db()
     
     def build_filter_query(self, conditions: List[Dict[str, Any]]) -> Dict[str, Any]:

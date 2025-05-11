@@ -255,7 +255,7 @@ class ResourcePermissionTracker:
 # 创建单例实例以便在应用中使用
 async def get_permission_tracker(db=None):
     """获取权限跟踪器实例"""
-    if not db:
+    if db is None:
         from app.db.mongodb import get_database
         try:
             db = await anext(get_database())

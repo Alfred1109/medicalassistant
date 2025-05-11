@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List, Optional
 from app.schemas.user import UserResponse
-from app.core.dependencies import get_current_user
+from app.core.auth import get_current_user
 from app.services.user_service import UserService
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import get_database
@@ -31,6 +31,24 @@ async def get_doctors(
     # 完全移除权限检查，便于调试
     
     try:
+        # 验证数据库连接
+        if db is None:
+            logging.error("数据库连接为空")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="数据库连接失败"
+            )
+            
+        # 验证可用集合
+        try:
+            collection_names = await db.list_collection_names()
+            logging.info(f"可用集合: {collection_names}")
+            if 'users' not in collection_names:
+                logging.warning("users集合不存在")
+        except Exception as e:
+            logging.error(f"无法获取集合列表: {str(e)}")
+            # 继续执行，可能只是权限问题
+        
         # 调用服务层获取医生列表
         user_service = UserService(db)
         doctors = await user_service.get_doctors(status=status, department=department, skip=skip, limit=limit)
@@ -68,29 +86,26 @@ async def get_doctors(
             return mock_doctors
         else:
             logging.info(f"成功获取到 {len(doctors)} 条医生数据")
-            logging.info(f"医生数据示例: {doctors[0] if doctors else 'None'}")
+            if doctors:
+                logging.info(f"医生数据示例: {doctors[0]}")
             return doctors
     except Exception as e:
         logging.error(f"获取医生列表时发生错误: {str(e)}")
-        logging.exception("详细错误信息:")
+        logging.exception(f"详细错误堆栈:")
         
-        # 返回模拟数据而不是抛出异常，用于调试
-        logging.info("错误情况下返回模拟数据")
-        mock_error_doctors = [
-            {
-                "id": "error-doc-001",
-                "name": "模拟医生(错误)",
-                "department": "测试科",
-                "title": "主任医师",
-                "specialty": "测试康复",
-                "email": "error@hospital.com",
-                "phone": "13800138099",
-                "status": "在职",
-                "patients": 5,
-                "joinDate": "2022-01-01"
-            }
-        ]
-        return mock_error_doctors
+        # 添加更详细的数据库状态日志
+        logging.error(f"当前连接的MongoDB: {db.name if db else 'None'}")
+        if db and hasattr(db, 'client'):
+            try:
+                logging.error(f"MongoDB服务器信息: {db.client.server_info()}")
+            except Exception as server_err:
+                logging.error(f"无法获取MongoDB服务器信息: {str(server_err)}")
+        
+        # 抛出异常以便前端能看到具体错误信息
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取医生列表失败: {str(e)}"
+        )
 
 @router.post("/doctors", status_code=status.HTTP_201_CREATED)
 async def create_doctor(

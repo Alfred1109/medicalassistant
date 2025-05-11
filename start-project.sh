@@ -394,7 +394,7 @@ start_backend() {
     
     # 等待服务启动
     echo -e "${YELLOW}等待后端服务启动...${NC}"
-    sleep 3
+    sleep 10
     
     # 检查服务是否成功启动
     if kill -0 $BACKEND_PID 2>/dev/null; then

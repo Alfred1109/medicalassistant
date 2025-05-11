@@ -1,11 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Form, Request
 from typing import List, Dict, Any, Optional
 from fastapi.security import OAuth2PasswordRequestForm
+import logging
 
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserLogin, Token, PermissionAssignment
 from app.services.user_service import UserService
 from app.core.dependencies import get_user_service, get_current_user
 from app.core.permissions import require_permission, Permission, PermissionChecker
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -25,26 +28,50 @@ async def register_user(
 
 @router.post("/login", response_model=Token)
 async def login(
-    username: str = Form(...),
-    password: str = Form(...),
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
     user_service: UserService = Depends(get_user_service)
 ):
     """用户登录并获取访问令牌"""
+    # Log a unique identifier for the request if available, or client IP
+    client_host = request.client.host if request.client else "unknown_client"
+    username = form_data.username
+    password = form_data.password
+    logger.info(f"Login attempt for user: '{username}' from {client_host}")
+    logger.debug(f"Received login form data - username: '{username}', password_provided: {'yes' if password else 'no'}")
+
     try:
+        logger.info(f"Calling user_service.authenticate_user for '{username}'")
         user = await user_service.authenticate_user(username, password)
+        logger.info(f"user_service.authenticate_user returned for '{username}'. User found: {'yes' if user else 'no'}")
+
         if not user:
+            logger.warning(f"Authentication failed for '{username}': User not found or password mismatch.")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="用户名或密码不正确",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        
+        logger.info(f"User '{username}' authenticated successfully. Creating token.")
         token = await user_service.create_token(user)
+        logger.info(f"Token created successfully for '{username}'. Returning token.")
         return token
     except ValueError as e:
+        logger.error(f"ValueError during login for '{username}': {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
             headers={"WWW-Authenticate": "Bearer"},
+        )
+    except HTTPException as http_exc:
+        logger.error(f"HTTPException during login for '{username}': {http_exc.detail}, status: {http_exc.status_code}")
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Unexpected error during login for '{username}': {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="登录过程中发生内部错误",
         )
 
 @router.get("/me", response_model=UserResponse)

@@ -158,3 +158,57 @@ Example production deployment command:
 ```bash
 gunicorn app.main:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 ```
+
+## 模拟数据生成
+
+项目中的模拟数据生成脚本已整理至 `mock_data_scripts` 目录。这些脚本用于开发和测试阶段初始化数据库，生成各类模拟数据。
+
+### 使用方法
+
+我们提供了一个便捷的脚本 `run_mock_data.py` 来运行这些模拟数据生成脚本：
+
+```bash
+# 进入backend目录
+cd backend
+
+# 查看可用的数据生成选项
+python mock_data_scripts/run_mock_data.py --list
+
+# 生成所有模拟数据
+python mock_data_scripts/run_mock_data.py all
+
+# 或者直接执行脚本（默认生成所有数据）
+python mock_data_scripts/run_mock_data.py
+
+# 生成特定类型的模拟数据
+python mock_data_scripts/run_mock_data.py users
+python mock_data_scripts/run_mock_data.py doctors
+python mock_data_scripts/run_mock_data.py patients
+# 其他类型请参考 --list 查看所有选项
+```
+
+也可以通过Python模块的方式运行：
+
+```bash
+# 生成所有模拟数据
+python -m mock_data_scripts.create_mockdata
+
+# 生成特定类型的模拟数据
+python -m mock_data_scripts.create_test_users
+python -m mock_data_scripts.create_test_doctors
+# 其他脚本使用类似方式运行
+```
+
+### 主要模拟数据脚本
+
+- `create_mockdata.py` - 主脚本，调用所有其他模拟数据生成脚本
+- `create_test_users.py` - 生成基础用户账号
+- `create_test_organizations.py` - 生成医疗机构数据
+- `create_test_doctors.py` - 生成医生数据
+- `create_test_health_managers.py` - 生成健康管理师数据
+- `create_test_patients.py` - 生成患者基础数据
+- `create_test_rehab_plans.py` - 生成康复计划数据
+- `create_test_health_records.py` - 生成健康记录数据
+- `create_test_devices.py` - 生成设备和设备数据
+- `init_dashboard_data.py` - 生成仪表盘数据
+- `init_notification_data.py` - 生成系统通知数据

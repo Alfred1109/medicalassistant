@@ -13,6 +13,19 @@ class UserBase(BaseModel):
 # 用户创建模型
 class UserCreate(UserBase):
     password: str
+    # 医生特有字段
+    specialty: Optional[str] = None
+    license_number: Optional[str] = None
+    professional_title: Optional[str] = None
+    department: Optional[str] = None
+    # 健康管理师特有字段
+    certification: Optional[str] = None
+    specialty_areas: Optional[List[str]] = None
+    education: Optional[Dict[str, str]] = None
+    # 患者特有字段
+    medical_info: Optional[Dict[str, Any]] = None
+    emergency_contact: Optional[Dict[str, str]] = None
+    demographic_info: Optional[Dict[str, Any]] = None
     
     @validator('role')
     def validate_role(cls, v):

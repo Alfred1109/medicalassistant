@@ -226,6 +226,8 @@ const OrganizationManagement: React.FC = () => {
   const [tabValue, setTabValue] = React.useState(0);
   const [detailsOpen, setDetailsOpen] = React.useState(false);
   const [selectedNodeDetails, setSelectedNodeDetails] = React.useState<any>(null);
+  const [dialogType, setDialogType] = React.useState<'department' | 'team' | ''>('');
+  const [parentId, setParentId] = React.useState<string>('');
 
   const handleSearch = (event: React.ChangeEvent<HTMLInputElement>) => {
     setSearchTerm(event.target.value);
@@ -254,6 +256,8 @@ const OrganizationManagement: React.FC = () => {
   const handleCloseDialog = () => {
     setOpenDialog(false);
     setDetailsOpen(false);
+    setDialogType('');
+    setParentId('');
   };
 
   const handleDeleteOrg = (orgId: string) => {

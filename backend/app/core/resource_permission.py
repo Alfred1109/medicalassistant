@@ -64,13 +64,13 @@ class ResourcePermission:
                 
                 # 获取数据库连接
                 db = kwargs.get("db")
-                if not db:
+                if db is None:
                     for arg in args:
                         if hasattr(arg, "command"):  # MongoDB数据库连接通常有command方法
                             db = arg
                             break
                 
-                if not db:
+                if db is None:
                     # 尝试从依赖中获取
                     db = await get_database()
                 
@@ -110,7 +110,7 @@ class ResourcePermission:
                     return await func(*args, **kwargs)
                 
                 # 检查资源所有权
-                if check_ownership and resource_id and db:
+                if check_ownership and resource_id and db is not None:
                     try:
                         # 获取资源集合
                         collection = db[resource_type]

@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 import time
 import uuid
+from jose import JWTError  # 导入JWTError异常类
 
 # 导入日志模块
 from app.core.logging import app_logger as logger
@@ -33,7 +34,7 @@ from .api.routers.device_repair_router import router as device_repair_router
 from .api.routers.device_data_standard_router import router as device_data_standard_router
 
 # 导入权限审计中间件
-from app.core.permission_audit import PermissionAuditMiddleware
+# from app.core.permission_audit import PermissionAuditMiddleware
 
 # 创建应用实例
 app = FastAPI(
@@ -103,29 +104,6 @@ async def cors_debug_middleware(request: Request, call_next):
     
     return response
 
-# 添加权限审计中间件
-app.add_middleware(
-    PermissionAuditMiddleware,
-    audit_paths=[
-        "/api/users",
-        "/api/roles", 
-        "/api/permissions",
-        "/api/admin",
-        "/api/audit-logs",
-        "/api/rehabilitation",
-        "/api/agents",
-        "/api/doctors",
-        "/api/patients",
-        "/api/health-managers"
-    ],
-    exclude_paths=[
-        "/api/health",
-        "/docs",
-        "/openapi.json",
-        "/api/auth"
-    ]
-)
-
 # 添加MongoDB连接和关闭事件
 @app.on_event("startup")
 async def startup_db_client():
@@ -133,6 +111,14 @@ async def startup_db_client():
     logger.info("Application starting up...")
     try:
         await connect_to_mongodb()
+        
+        # 初始化用户服务，确保创建默认用户
+        from app.services.user_service import UserService
+        from app.db.mongodb import db
+        user_service = UserService(db.db)
+        await user_service.initialize()
+        logger.info("用户服务初始化完成，已创建默认用户")
+        
         # 初始化WebSocket服务
         setup_websockets(app)
         logger.info("WebSocket服务已初始化")
@@ -165,6 +151,23 @@ async def app_exception_handler(request: Request, exc: AppBaseException):
             "details": exc.details,
             "request_id": getattr(request.state, "request_id", str(uuid.uuid4()))
         }
+    )
+
+# 添加JWT异常处理
+@app.exception_handler(JWTError)
+async def jwt_exception_handler(request: Request, exc: JWTError):
+    """处理JWT令牌验证异常"""
+    logger.warning(f"JWT验证错误: {str(exc)} - {request.method} {request.url.path}")
+    
+    return JSONResponse(
+        status_code=401,
+        content={
+            "error": "INVALID_TOKEN",
+            "message": "无效的认证令牌",
+            "details": {"reason": str(exc)},
+            "request_id": getattr(request.state, "request_id", str(uuid.uuid4()))
+        },
+        headers={"WWW-Authenticate": "Bearer"}
     )
 
 # 验证错误处理

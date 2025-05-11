@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -9,30 +9,30 @@ import {
   FormControl,
   Grid,
   IconButton,
-  InputAdornment,
   InputLabel,
-  OutlinedInput,
   TextField,
   Typography,
   Alert,
   Paper,
-  Tooltip,
 } from '@mui/material';
+import InputAdornment from '@mui/material/InputAdornment';
+import OutlinedInput from '@mui/material/OutlinedInput';
+
 import {
   Visibility,
-  VisibilityOff,
   LockOutlined as LockIcon,
   Person as PersonIcon,
-  Info as InfoIcon,
 } from '@mui/icons-material';
+import VisibilityOff from '@mui/icons-material/VisibilityOff';
+import InfoIcon from '@mui/icons-material/Info';
 
 import { AppDispatch, RootState } from '../../store';
-import { login, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManagerLogin, mockPatientLogin } from '../../store/slices/authSlice';
+import { login, clearAuthError, User } from '../../store/slices/authSlice';
 
 // 管理员账号信息
 const ADMIN_CREDENTIALS = {
   email: 'admin@example.com',
-  password: 'Admin123!',
+  password: 'Admin123!', // 使用后端创建时的默认密码
 };
 
 // 医生账号信息
@@ -53,95 +53,152 @@ const PATIENT_CREDENTIALS = {
   password: 'Patient123!',
 };
 
+// 添加防抖函数
+const debounce = (func: Function, wait: number) => {
+  let timeout: ReturnType<typeof setTimeout>;
+  return function executedFunction(...args: any[]) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+};
+
 const Login: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
-  const { loading, error } = useSelector((state: RootState) => state.auth);
+  const { loading, loginLoading, error, user, token } = useSelector((state: RootState) => state.auth);
+
+  // 使用loginLoading状态，如果不存在则回退到通用loading状态
+  const isLoading = loginLoading !== undefined ? loginLoading : loading;
 
   const [formData, setFormData] = useState({
     email: ADMIN_CREDENTIALS.email, // Default to admin email
     password: ADMIN_CREDENTIALS.password, // Default to admin password
   });
   const [showPassword, setShowPassword] = useState(false);
+  // 定义FormErrors接口
+  interface FormErrors {
+    email?: string;
+    password?: string;
+    server?: string;
+  }
+  const [formErrors, setFormErrors] = useState({} as FormErrors);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
     setFormData({ ...formData, [name]: value });
+    
+    // 清除相关字段的错误
+    if (formErrors[name as keyof FormErrors]) {
+      setFormErrors((prev: FormErrors) => ({ ...prev, [name]: undefined }));
+    }
+    
+    // 清除Redux错误状态
     if (error) dispatch(clearAuthError());
+  };
+
+  // 验证表单
+  const validateForm = (): boolean => {
+    const errors: FormErrors = {};
+    
+    // 验证邮箱
+    if (!formData.email) {
+      errors.email = '请输入邮箱地址';
+    } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
+      errors.email = '请输入有效的邮箱地址';
+    }
+    
+    // 验证密码
+    if (!formData.password) {
+      errors.password = '请输入密码';
+    } else if (formData.password.length < 6) {
+      errors.password = '密码长度至少为6个字符';
+    }
+    
+    setFormErrors(errors);
+    return Object.keys(errors).length === 0;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // 表单验证
+    if (!validateForm()) {
+      return;
+    }
+    
     try {
-      console.log('开始登录，用户邮箱:', formData.email);
+      console.log('Login.tsx: 开始登录，用户邮箱:', formData.email);
+      // 尝试登录，等待完成或错误
+      // .unwrap() 会在成功时返回 action.payload，失败时抛出错误
+      const result = await dispatch(login(formData)).unwrap(); 
       
-      // 在开发环境下，当使用默认管理员账号时，可以选择绕过实际登录
-      if (process.env.NODE_ENV === 'development' && 
-          formData.email === ADMIN_CREDENTIALS.email && 
-          formData.password === ADMIN_CREDENTIALS.password) {
-        console.log('开发环境使用默认管理员账号，使用模拟登录');
-        dispatch(mockAdminLogin());
-        navigate('/app/admin');
-        return;
+      // 如果登录成功 (真实登录，非模拟登录的 _handled case)
+      // 实际上，跳转现在由上面的 useEffect 处理
+      // 所以这里只需要知道操作已完成即可
+      if (result && result._handled) {
+        console.log('Login.tsx: 模拟登录流程已由thunk处理.');
+      } else if (result && result.user) {
+        console.log('Login.tsx: 真实登录成功，等待useEffect跳转.', result);
+      } else {
+        console.log('Login.tsx: 登录操作完成，但未识别明确的成功结果用于立即跳转:', result);
       }
-      
-      const result = await dispatch(login(formData)).unwrap();
-      console.log('登录成功，用户信息:', result);
-      // 根据用户角色跳转到相应的页面
-      redirectBasedOnRole(result.user.role);
+
     } catch (err: any) {
-      console.error('登录失败，错误:', err);
-      console.error('详细错误堆栈:', new Error().stack);
-      
-      // 显示更详细的错误信息
-      if (err?.response?.status === 0) {
-        dispatch({ 
-          type: 'auth/loginFailed', 
-          payload: '无法连接到服务器，请检查网络连接' 
-        });
-      }
-      
-      // 如果在开发环境中登录失败，使用模拟登录
-      if (process.env.NODE_ENV === 'development') {
-        console.log('开发环境下使用模拟登录');
-        // 根据尝试登录的用户名选择不同的模拟登录
-        if (formData.email.includes('doctor')) {
-          dispatch(mockDoctorLogin());
-          navigate('/app/doctor');
-        } else if (formData.email.includes('health')) {
-          dispatch(mockHealthManagerLogin());
-          navigate('/app/health-manager');
-        } else if (formData.email.includes('patient')) {
-          dispatch(mockPatientLogin());
-          navigate('/app/patient/main-dashboard');
-        } else {
-          dispatch(mockAdminLogin());
-          navigate('/app/admin');
-        }
-      }
+      console.error('Login.tsx: 登录 dispatch/unwrap 失败:', err);
+      // 错误状态 (err) 会被 authSlice 的 rejected case 更新到 Redux store 的 error 字段
+      // UI 会通过 useSelector((state) => state.auth.error) 来显示错误
+      // 这里不需要再次 setFormErrors，除非是特定于此组件的、非API相关的表单错误
+      // 例如，如果 err 是我们自定义的超时并且没有设置到Redux的error中，可以在这里处理
+      // 但我们之前的逻辑是把超时信息也 rejectWithValue，所以它会进入 Redux error
     }
   };
 
-  // 根据用户角色进行跳转
-  const redirectBasedOnRole = (role: string) => {
+  // 根据用户角色进行跳转，使用useCallback避免无限重渲染
+  const redirectBasedOnRole = useCallback((role: string) => {
+    let targetPath = '/app/dashboard'; // 默认路径
+    
     switch (role) {
       case 'admin':
-        navigate('/app/admin');
+        targetPath = '/app/admin';
         break;
       case 'doctor':
-        navigate('/app/doctor');
+        targetPath = '/app/doctor';
         break;
       case 'health_manager':
-        navigate('/app/health-manager');
+        targetPath = '/app/health-manager';
         break;
       case 'patient':
-        navigate('/app/patient/main-dashboard');
+        targetPath = '/app/patient/main-dashboard';
         break;
-      default:
-        // 默认跳转到通用仪表板
-        navigate('/app/dashboard');
     }
-  };
+    
+    // 避免重复导航到相同路径
+    if (window.location.pathname !== targetPath) {
+      console.log(`Login.tsx: 跳转到 ${targetPath}`);
+      navigate(targetPath);
+    } else {
+      console.log('Login.tsx: 已在目标路径，不进行跳转');
+    }
+  }, [navigate]);
+
+  // 使用防抖处理的redirect函数
+  const debouncedRedirect = useCallback(
+    debounce((role: string) => redirectBasedOnRole(role), 300),
+    [redirectBasedOnRole]
+  );
+
+  // Effect to handle redirection after login (real or mock)
+  useEffect(() => {
+    if (user && token) {
+      console.log('Login.tsx: User state changed, attempting to redirect.', user);
+      // 使用防抖函数来避免短时间内多次导航
+      debouncedRedirect(user.role);
+    }
+  }, [user, token, debouncedRedirect]);
 
   const handleClickShowPassword = () => {
     setShowPassword(!showPassword);
@@ -169,36 +226,6 @@ const Login: React.FC = () => {
   const fillPatientCredentials = () => {
     setFormData(PATIENT_CREDENTIALS);
     if (error) dispatch(clearAuthError());
-  };
-
-  // 添加自动登录功能
-  useEffect(() => {
-    // 检查URL参数中是否有autologin=admin
-    const urlParams = new URLSearchParams(window.location.search);
-    const autoLogin = urlParams.get('autologin');
-    
-    if (autoLogin === 'admin') {
-      setFormData(ADMIN_CREDENTIALS);
-      // 延迟500ms自动提交，确保表单状态已更新
-      setTimeout(() => {
-        dispatch(login(ADMIN_CREDENTIALS)).unwrap()
-          .then(result => {
-            redirectBasedOnRole(result.user.role);
-          })
-          .catch(err => {
-            console.error('自动登录失败:', err);
-            // 失败后使用模拟登录
-            dispatch(mockAdminLogin());
-            navigate('/app/admin');
-          });
-      }, 500);
-    }
-  }, []);
-
-  // 添加一个应急方案，直接使用模拟登录
-  const handleMockLogin = () => {
-    dispatch(mockAdminLogin());
-    navigate('/app/admin');
   };
 
   return (
@@ -332,6 +359,8 @@ const Login: React.FC = () => {
             autoFocus
             value={formData.email}
             onChange={handleChange}
+            error={!!formErrors.email}
+            helperText={formErrors.email}
             InputProps={{
               startAdornment: (
                 <InputAdornment position="start">
@@ -342,7 +371,7 @@ const Login: React.FC = () => {
           />
         </Grid>
         <Grid item xs={12}>
-          <FormControl variant="outlined" fullWidth required>
+          <FormControl variant="outlined" fullWidth required error={!!formErrors.password}>
             <InputLabel htmlFor="password">密码</InputLabel>
             <OutlinedInput
               id="password"
@@ -369,6 +398,11 @@ const Login: React.FC = () => {
               }
               label="密码"
             />
+            {formErrors.password && (
+              <Typography variant="caption" color="error" sx={{ mt: 0.5, ml: 2 }}>
+                {formErrors.password}
+              </Typography>
+            )}
           </FormControl>
         </Grid>
       </Grid>
@@ -379,28 +413,29 @@ const Login: React.FC = () => {
             {error}
           </Alert>
         )}
+        {formErrors.server && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {formErrors.server}
+          </Alert>
+        )}
         <Button
+          type="submit"
           fullWidth
           variant="contained"
-          color="primary"
-          type="submit"
-          disabled={loading}
-          startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <LockIcon />}
+          size="large"
+          disabled={isLoading}
+          sx={{ mb: 2 }}
+          onClick={handleSubmit}
         >
-          {loading ? '登录中...' : '登录'}
+          {isLoading ? (
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <CircularProgress size={24} sx={{ mr: 1, color: 'grey.400' }} />
+              <span>登录中...</span>
+            </Box>
+          ) : (
+            '登录'
+          )}
         </Button>
-
-        {process.env.NODE_ENV === 'development' && (
-          <Button
-            fullWidth
-            variant="outlined"
-            color="secondary"
-            onClick={handleMockLogin}
-            sx={{ mt: 1 }}
-          >
-            开发环境应急登录
-          </Button>
-        )}
       </Box>
 
       <Divider sx={{ my: 2 }}>
@@ -417,73 +452,6 @@ const Login: React.FC = () => {
           </Link>
         </Typography>
       </Box>
-
-      {/* 在开发环境或特定条件下显示紧急登录按钮 */}
-      {(process.env.NODE_ENV === 'development' || window.location.hostname === 'localhost') && (
-        <Box mt={3} p={2} sx={{ border: '1px dashed #ff9800', borderRadius: 1, bgcolor: '#fff8e1' }}>
-          <Typography variant="subtitle2" color="warning.main" gutterBottom>
-            开发环境紧急登录
-          </Typography>
-          <Grid container spacing={1}>
-            <Grid item xs={6}>
-              <Button
-                fullWidth
-                variant="outlined"
-                color="warning"
-                size="small"
-                onClick={() => {
-                  dispatch(mockAdminLogin());
-                  navigate('/app/admin');
-                }}
-              >
-                管理员登录
-              </Button>
-            </Grid>
-            <Grid item xs={6}>
-              <Button
-                fullWidth
-                variant="outlined"
-                color="warning"
-                size="small"
-                onClick={() => {
-                  dispatch(mockDoctorLogin());
-                  navigate('/app/doctor');
-                }}
-              >
-                医生登录
-              </Button>
-            </Grid>
-            <Grid item xs={6}>
-              <Button
-                fullWidth
-                variant="outlined"
-                color="warning"
-                size="small"
-                onClick={() => {
-                  dispatch(mockHealthManagerLogin());
-                  navigate('/app/health-manager');
-                }}
-              >
-                健康管理师登录
-              </Button>
-            </Grid>
-            <Grid item xs={6}>
-              <Button
-                fullWidth
-                variant="outlined"
-                color="warning"
-                size="small"
-                onClick={() => {
-                  dispatch(mockPatientLogin());
-                  navigate('/app/patient/main-dashboard');
-                }}
-              >
-                患者登录
-              </Button>
-            </Grid>
-          </Grid>
-        </Box>
-      )}
     </Box>
   );
 };

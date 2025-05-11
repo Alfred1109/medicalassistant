@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from typing import Optional, Any
 import logging
 from datetime import datetime
-from bson import ObjectId
+from bson import ObjectId, errors
 from fastapi import WebSocket
 
 from app.core.config import settings
@@ -36,7 +36,7 @@ async def get_current_user(
         # 解码JWT令牌
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         user_id: str = payload.get("sub")
-        logging.info(f"令牌解析成功，用户ID: {user_id}")
+        logging.info(f"令牌解析成功，用户ID (sub): '{user_id}' (类型: {type(user_id)})")
         
         if user_id is None:
             logging.warning("令牌中没有用户ID (sub)")
@@ -55,9 +55,10 @@ async def get_current_user(
     
     # 获取用户信息
     try:
+        logging.info(f"尝试通过UserService获取用户，ID: '{token_data.user_id}'")
         user = await user_service.get_user_by_id(token_data.user_id)
         if user is None:
-            logging.warning(f"未找到用户(ID: {token_data.user_id})")
+            logging.warning(f"UserService未能通过ID '{token_data.user_id}' 找到用户")
             raise credentials_exception
         logging.info(f"成功获取用户: {user.email}, 角色: {user.role}")
         return user

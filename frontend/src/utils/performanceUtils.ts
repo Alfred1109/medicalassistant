@@ -65,7 +65,8 @@ export const createPreloadableComponent = <T extends React.ComponentType<any>>(
       return () => observer.disconnect();
     }, [triggerRef]);
     
-    return <LazyComponent {...restProps as any} />;
+    // 使用React.createElement替代JSX语法，避免TypeScript错误
+    return React.createElement(LazyComponent, restProps as any);
   };
   
   // 为组件添加预加载方法
@@ -178,7 +179,8 @@ export function withRenderDebounce<T extends React.ComponentType<any>>(
       };
     }, [props, debounceTime]);
     
-    return <Component {...debouncedProps} />;
+    // 使用React.createElement替代JSX语法，避免TypeScript错误
+    return React.createElement(Component, debouncedProps as any);
   };
   
   DebounceComponent.displayName = `Debounced(${Component.displayName || Component.name || 'Component'})`;

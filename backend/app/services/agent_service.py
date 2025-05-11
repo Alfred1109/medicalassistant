@@ -282,105 +282,116 @@ class AgentService:
         latest_assessment = patient_data.get("latest_assessment", {})
         assessment_text = ""
         if latest_assessment:
-            assessment_text = f"""
-患者最新评估数据:
-- 评估日期: {latest_assessment.get('date', '')}
-- 关节活动度: {self._format_assessment_value(latest_assessment.get('range_of_motion', {}))}
-- 肌肉力量: {self._format_assessment_value(latest_assessment.get('muscle_strength', {}))}
-- 疼痛水平: {self._format_assessment_value(latest_assessment.get('pain_level', {}))}
-- 功能状态: {self._format_assessment_value(latest_assessment.get('functional_status', {}))}
-"""
+            rom_value = self._format_assessment_value(latest_assessment.get('range_of_motion', {}))
+            muscle_value = self._format_assessment_value(latest_assessment.get('muscle_strength', {}))
+            pain_value = self._format_assessment_value(latest_assessment.get('pain_level', {}))
+            func_value = self._format_assessment_value(latest_assessment.get('functional_status', {}))
+            assessment_date = latest_assessment.get('date', '')
+            
+            assessment_text = "\n患者最新评估数据:\n"
+            assessment_text += f"- 评估日期: {assessment_date}\n"
+            assessment_text += f"- 关节活动度: {rom_value}\n"
+            assessment_text += f"- 肌肉力量: {muscle_value}\n"
+            assessment_text += f"- 疼痛水平: {pain_value}\n"
+            assessment_text += f"- 功能状态: {func_value}\n"
         
         # 构建提示词
-        prompt = f"""作为一名专业的康复医学专家，请为以下患者制定一份详细且个性化的康复计划。请在方案中应用循证医学原则，确保计划的安全性和有效性。
-
-患者信息:
-- 姓名: {patient_name}
-- 年龄: {age}
-- 性别: {gender}
-- 康复需求/诊断: {condition}
-- 康复目标: {goal}
-- 身体状况: {physical_condition}
-- 医疗历史: {medical_history}
-{assessment_text}
-
-请提供一份完整的康复计划，包括以下内容:
-1. 计划名称: 应反映康复方向和主要目标
-2. 计划描述: 提供详细的康复目标和预期效果
-3. 分阶段计划: 将康复计划分为初始期、进步期和维持期三个阶段
-4. 具体的康复运动列表（至少6-8个），每个运动应包括:
-   - 运动名称（简洁明了）
-   - 详细描述（目的、原理）
-   - 针对的身体部位
-   - 难度级别（简单/中等/困难）
-   - 持续时间（分钟）
-   - 重复次数和组数（明确指导）
-   - 执行指南（详细步骤说明）
-   - 注意事项和技巧
-   - 预期益处
-   - 可能的调整方案（如何简化或增加难度）
-5. 运动进阶建议: 当患者达到特定标准时如何调整运动难度
-6. 总体康复周期建议: 并解释为何推荐此周期
-7. 进度追踪方法: 如何评估康复效果
-8. 预防措施和注意事项: 针对患者特定情况的警示和建议
-
-请以专业的医学术语结合通俗易懂的解释，使计划既专业又易于患者理解和执行。所有建议必须基于循证医学和最新康复指南。
-
-以JSON格式返回，确保专业性、安全性和个性化。返回格式示例:
-
-{
-  "name": "计划名称",
-  "description": "计划详细描述",
-  "phases": [
-    {
-      "name": "初始期",
-      "duration": "2周",
-      "focus": "适应与基础能力建立",
-      "description": "阶段详细描述..."
-    },
-    {
-      "name": "进步期",
-      "duration": "4周",
-      "focus": "能力提升",
-      "description": "阶段详细描述..."
-    },
-    {
-      "name": "维持期",
-      "duration": "持续",
-      "focus": "功能维持与日常融合",
-      "description": "阶段详细描述..."
-    }
-  ],
-  "duration_weeks": 12,
-  "frequency": "初始每周3次，进步期每周4-5次",
-  "exercises": [
-    {
-      "name": "运动名称",
-      "description": "运动详细描述",
-      "body_part": "目标部位",
-      "difficulty": "难度级别",
-      "duration_minutes": 5,
-      "repetitions": 10,
-      "sets": 3,
-      "instructions": ["步骤1", "步骤2", "步骤3"],
-      "precautions": ["注意事项1", "注意事项2"],
-      "benefits": ["预期益处1", "预期益处2"],
-      "adjustments": {
-        "easier": "如何简化",
-        "harder": "如何增加难度"
-      },
-      "progression_criteria": "何时进阶此运动的标准"
-    }
-  ],
-  "progress_tracking": {
-    "metrics": ["追踪指标1", "追踪指标2"],
-    "methods": ["追踪方法1", "追踪方法2"],
-    "milestones": ["里程碑1", "里程碑2"]
-  },
-  "precautions": ["总体注意事项1", "总体注意事项2"],
-  "notes": "其他重要信息和建议"
-}
-"""
+        prompt_intro = "作为一名专业的康复医学专家，请为以下患者制定一份详细且个性化的康复计划。请在方案中应用循证医学原则，确保计划的安全性和有效性。\n\n"
+        
+        patient_info = "患者信息:\n"
+        patient_info += f"- 姓名: {patient_name}\n"
+        patient_info += f"- 年龄: {age}\n"
+        patient_info += f"- 性别: {gender}\n"
+        patient_info += f"- 身体状况: {physical_condition}\n"
+        patient_info += f"- 病史: {medical_history}\n"
+        
+        condition_info = "康复需求:\n"
+        condition_info += f"- 主要症状/疾病: {condition}\n"
+        condition_info += f"- 康复目标: {goal}\n"
+        
+        # 合并所有部分
+        prompt = prompt_intro + patient_info + condition_info + assessment_text
+        
+        # 添加康复计划要求部分
+        plan_requirements = "\n请提供一份完整的康复计划，包括以下内容:\n"
+        plan_requirements += "1. 计划名称: 应反映康复方向和主要目标\n"
+        plan_requirements += "2. 计划描述: 提供详细的康复目标和预期效果\n"
+        plan_requirements += "3. 分阶段计划: 将康复计划分为初始期、进步期和维持期三个阶段\n"
+        plan_requirements += "4. 具体的康复运动列表（至少6-8个），每个运动应包括:\n"
+        plan_requirements += "   - 运动名称（简洁明了）\n"
+        plan_requirements += "   - 详细描述（目的、原理）\n"
+        plan_requirements += "   - 针对的身体部位\n"
+        plan_requirements += "   - 难度级别（简单/中等/困难）\n"
+        plan_requirements += "   - 持续时间（分钟）\n"
+        plan_requirements += "   - 重复次数和组数（明确指导）\n"
+        plan_requirements += "   - 执行指南（详细步骤说明）\n"
+        plan_requirements += "   - 注意事项和技巧\n"
+        plan_requirements += "   - 预期益处\n"
+        plan_requirements += "   - 可能的调整方案（如何简化或增加难度）\n"
+        plan_requirements += "5. 运动进阶建议: 当患者达到特定标准时如何调整运动难度\n"
+        plan_requirements += "6. 总体康复周期建议: 并解释为何推荐此周期\n"
+        plan_requirements += "7. 进度追踪方法: 如何评估康复效果\n"
+        plan_requirements += "8. 预防措施和注意事项: 针对患者特定情况的警示和建议\n"
+        
+        format_instructions = "\n请以专业的医学术语结合通俗易懂的解释，使计划既专业又易于患者理解和执行。所有建议必须基于循证医学和最新康复指南。\n"
+        format_instructions += "\n以JSON格式返回，确保专业性、安全性和个性化。返回格式示例:\n\n"
+        
+        json_example = "{\n"
+        json_example += '  "name": "计划名称",\n'
+        json_example += '  "description": "计划详细描述",\n'
+        json_example += '  "phases": [\n'
+        json_example += '    {\n'
+        json_example += '      "name": "初始期",\n'
+        json_example += '      "duration": "2周",\n'
+        json_example += '      "focus": "适应与基础能力建立",\n'
+        json_example += '      "description": "阶段详细描述..."\n'
+        json_example += '    },\n'
+        json_example += '    {\n'
+        json_example += '      "name": "进步期",\n'
+        json_example += '      "duration": "4周",\n'
+        json_example += '      "focus": "能力提升",\n'
+        json_example += '      "description": "阶段详细描述..."\n'
+        json_example += '    },\n'
+        json_example += '    {\n'
+        json_example += '      "name": "维持期",\n'
+        json_example += '      "duration": "持续",\n'
+        json_example += '      "focus": "功能维持与日常融合",\n'
+        json_example += '      "description": "阶段详细描述..."\n'
+        json_example += '    }\n'
+        json_example += '  ],\n'
+        json_example += '  "duration_weeks": 12,\n'
+        json_example += '  "frequency": "初始每周3次，进步期每周4-5次",\n'
+        json_example += '  "exercises": [\n'
+        json_example += '    {\n'
+        json_example += '      "name": "运动名称",\n'
+        json_example += '      "description": "运动详细描述",\n'
+        json_example += '      "body_part": "目标部位",\n'
+        json_example += '      "difficulty": "难度级别",\n'
+        json_example += '      "duration_minutes": 5,\n'
+        json_example += '      "repetitions": 10,\n'
+        json_example += '      "sets": 3,\n'
+        json_example += '      "instructions": ["步骤1", "步骤2", "步骤3"],\n'
+        json_example += '      "precautions": ["注意事项1", "注意事项2"],\n'
+        json_example += '      "benefits": ["预期益处1", "预期益处2"],\n'
+        json_example += '      "adjustments": {\n'
+        json_example += '        "easier": "如何简化",\n'
+        json_example += '        "harder": "如何增加难度"\n'
+        json_example += '      },\n'
+        json_example += '      "progression_criteria": "何时进阶此运动的标准"\n'
+        json_example += '    }\n'
+        json_example += '  ],\n'
+        json_example += '  "progress_tracking": {\n'
+        json_example += '    "metrics": ["追踪指标1", "追踪指标2"],\n'
+        json_example += '    "methods": ["追踪方法1", "追踪方法2"],\n'
+        json_example += '    "milestones": ["里程碑1", "里程碑2"]\n'
+        json_example += '  },\n'
+        json_example += '  "precautions": ["总体注意事项1", "总体注意事项2"],\n'
+        json_example += '  "notes": "其他重要信息和建议"\n'
+        json_example += "}"
+        
+        # 合并完整提示词
+        prompt += plan_requirements + format_instructions + json_example
+        
         return prompt
     
     def _format_assessment_value(self, assessment_dict: Dict[str, Any]) -> str:

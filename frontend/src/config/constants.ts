@@ -1,5 +1,5 @@
 // API配置
-export const API_BASE_URL = 'http://localhost:5502/api';
+export const API_BASE_URL = '/api';
 
 // 文件上传限制大小（单位：字节）
 export const MAX_UPLOAD_FILE_SIZE = 5 * 1024 * 1024; // 5MB

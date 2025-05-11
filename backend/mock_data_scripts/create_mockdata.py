@@ -7,17 +7,24 @@ import os
 import sys
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
+
+# 添加项目根目录到系统路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
 from app.core.config import settings
 
 # 导入各个模拟数据创建模块
-from create_test_users import create_test_users
-from create_test_doctors import create_test_doctors 
-from create_test_patients import create_test_patients
-from create_test_health_managers import create_test_health_managers
-from create_test_rehab_plans import create_test_rehab_plans
-from create_test_health_records import create_test_health_records
-from create_test_devices import create_test_devices
-from create_test_organizations import create_test_organizations
+from mock_data_scripts.create_test_users import create_test_users
+from mock_data_scripts.create_test_doctors import create_test_doctors 
+from mock_data_scripts.create_test_patients import create_test_patients
+from mock_data_scripts.create_test_health_managers import create_test_health_managers
+from mock_data_scripts.create_test_rehab_plans import create_test_rehab_plans
+from mock_data_scripts.create_test_health_records import create_test_health_records
+from mock_data_scripts.create_test_devices import create_test_devices
+from mock_data_scripts.create_test_organizations import create_test_organizations
 
 async def create_all_mock_data():
     """创建所有模拟数据"""

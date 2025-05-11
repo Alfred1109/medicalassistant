@@ -1,5 +1,5 @@
-import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
-import axios from 'axios';
+import { createSlice, createAsyncThunk, PayloadAction, Dispatch } from '@reduxjs/toolkit';
+import axios, { AxiosResponse } from 'axios';
 import { RootState } from '..';
 
 // Base API URL - 使用代理配置，不需要完整URL
@@ -21,6 +21,9 @@ export interface AuthState {
   token: string | null;
   checking: boolean;
   loading: boolean;
+  loginLoading: boolean;  // 专门用于登录操作的loading状态
+  registerLoading: boolean;  // 专门用于注册操作的loading状态
+  profileLoading: boolean;  // 专门用于个人资料操作的loading状态
   error: string | null;
 }
 
@@ -30,20 +33,47 @@ const initialState: AuthState = {
   token: localStorage.getItem('token'),
   checking: true,
   loading: false,
+  loginLoading: false,
+  registerLoading: false,
+  profileLoading: false,
   error: null,
 };
 
+interface LoginThunkArg {
+  email: string;
+  password: string;
+}
+
+interface LoginSuccessPayload {
+  user: User;
+  token: string;
+}
+
+// Typed ThunkAPI
+interface ThunkApiConfig {
+  dispatch: Dispatch;
+  getState: () => RootState;
+  rejectValue: string;
+}
+
 // Register user
-export const register = createAsyncThunk(
+export const register = createAsyncThunk<
+  { user: User; token: string }, // Returned
+  { name: string; email: string; password: string }, // ThunkArg
+  ThunkApiConfig // ThunkApiConfig
+>(
   'auth/register',
-  async (userData: { name: string; email: string; password: string }, { rejectWithValue }) => {
+  async (userData, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`/api/users/register`, {
-        email: userData.email,
-        password: userData.password,
-        name: userData.name,
-        role: 'patient' // 默认角色
-      });
+      const response: AxiosResponse<{ user: User; token: string }> = await (axios as any).post(
+        `/api/users/register`,
+        {
+          email: userData.email,
+          password: userData.password,
+          name: userData.name,
+          role: 'patient', // Default role, or get from userData if applicable
+        }
+      );
       localStorage.setItem('token', response.data.token);
       return response.data;
     } catch (error: any) {
@@ -53,65 +83,103 @@ export const register = createAsyncThunk(
 );
 
 // Login user
-export const login = createAsyncThunk(
+export const login = createAsyncThunk<
+  LoginSuccessPayload, // Returned type
+  LoginThunkArg,       // Argument type
+  ThunkApiConfig       // ThunkAPI config with rejectValue type
+>(
   'auth/login',
-  async (credentials: { email: string; password: string }, { rejectWithValue }) => {
+  async (credentials, { rejectWithValue }) => {
     try {
       console.log('Attempting login with:', credentials.email);
-      
-      // 使用URLSearchParams来匹配OAuth2PasswordRequestForm的要求
       const params = new URLSearchParams();
       params.append('username', credentials.email);
       params.append('password', credentials.password);
-      
-      // 使用相对路径，让Vite的代理来处理
-      const response = await axios.post(`/api/users/login`, params, {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        }
+      console.log('Sending login request to API...');
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('请求超时，请检查网络连接或服务器状态')), 8000);
       });
-      
-      console.log('Login response:', response.data);
-      
-      if (response.data && response.data.access_token) {
-        localStorage.setItem('token', response.data.access_token);
-        localStorage.setItem('userRole', response.data.user.role);
-        return {
-          user: response.data.user,
-          token: response.data.access_token
-        };
-      } else {
-        console.error('Login response format error:', response.data);
-        return rejectWithValue('登录响应格式错误');
+
+      const requestPromise: Promise<AxiosResponse<LoginSuccessPayload & { access_token: string }>> = (axios as any).post(
+        '/api/users/login', 
+        params, 
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Accept': 'application/json'
+          }
+        }
+      );
+
+      const responseOrError = await Promise.race([requestPromise, timeoutPromise]);
+
+      // If timeoutPromise rejected, it would be caught by the outer catch block.
+      // So, if we are here, responseOrError should be the result of requestPromise.
+      // We assume it's an AxiosResponse if it's an object with a 'data' property.
+      if (responseOrError && typeof responseOrError === 'object' && 'data' in responseOrError && 'status' in responseOrError) {
+        const successfulResponse = responseOrError as AxiosResponse<LoginSuccessPayload & { access_token: string }>;
+        if (successfulResponse.data && successfulResponse.data.access_token && successfulResponse.data.user) {
+          localStorage.setItem('token', successfulResponse.data.access_token);
+          localStorage.setItem('userRole', successfulResponse.data.user.role);
+          return {
+            user: successfulResponse.data.user as User,
+            token: successfulResponse.data.access_token
+          };
+        }
       }
+      // If the structure is not as expected, or if it somehow wasn't a timeout but also not a valid success
+      console.error('Login response format error or unexpected issue:', responseOrError);
+      return rejectWithValue('登录响应格式错误或请求被中断');
+
     } catch (error: any) {
-      console.error('Login error:', error);
-      
-      // 提供更详细的错误信息
-      const errorMessage = error.response?.data?.detail || 
-                         error.response?.statusText || 
-                         (error.message === 'Network Error' ? '无法连接到服务器' : '登录失败');
-      
+      console.error('Login error (outer catch):', error);
+      let errorMessage = '登录失败，请稍后重试';
+      if (error.message && error.message.includes('超时')) {
+        errorMessage = error.message;
+      } else if ((axios as any).isAxiosError(error) && error.response) {
+        console.error('Error response data:', error.response.data);
+        console.error('Error response status:', error.response.status);
+        if (error.response.status === 401) {
+          errorMessage = '用户名或密码不正确';
+        } else if (error.response.status === 400) {
+          errorMessage = '请求格式错误';
+          if (error.response.data && error.response.data.detail) {
+            errorMessage += `: ${error.response.data.detail}`;
+          }
+        } else if (error.response.status === 500) {
+          errorMessage = '服务器内部错误，请稍后重试';
+        } else {
+          errorMessage = error.response.data?.detail || error.response.statusText || '登录请求失败';
+        }
+      } else if ((axios as any).isAxiosError(error) && error.request) {
+        errorMessage = '无法连接到服务器，请检查网络连接';
+      } else {
+        // This will catch the TypeError if isAxiosError itself is the problem on a non-Axios error
+        errorMessage = error.message || '发送请求时发生未知错误';
+      }
       return rejectWithValue(errorMessage);
     }
   }
 );
 
 // Check token validity and get user data
-export const checkAuthStatus = createAsyncThunk(
+export const checkAuthStatus = createAsyncThunk<
+  User, // Returned
+  void, // ThunkArg (no argument for this one)
+  ThunkApiConfig
+>(
   'auth/checkStatus',
   async (_, { rejectWithValue, getState }) => {
-    const { auth } = getState() as { auth: AuthState };
-    
+    const { auth } = getState(); 
     if (!auth.token) {
       return rejectWithValue('No token found');
     }
-    
     try {
-      const response = await axios.get(`/api/users/me`, {
-        headers: {
-          Authorization: `Bearer ${auth.token}`
-        }
+      const response: AxiosResponse<User> = await (axios as any).get(`/api/users/me`, {
+        headers: { Authorization: `Bearer ${auth.token}` }
       });
       return response.data;
     } catch (error: any) {
@@ -121,21 +189,28 @@ export const checkAuthStatus = createAsyncThunk(
   }
 );
 
+interface UpdateUserProfileArg {
+  name: string;
+  email?: string;
+  currentPassword?: string;
+  newPassword?: string;
+}
+
 // 添加更新用户资料的异步操作
-export const updateUserProfile = createAsyncThunk(
+export const updateUserProfile = createAsyncThunk<
+  User, // Returned
+  UpdateUserProfileArg, // ThunkArg
+  ThunkApiConfig
+>(
   'auth/updateProfile',
-  async (userData: {name: string, email?: string, currentPassword?: string, newPassword?: string}, { rejectWithValue, getState }) => {
-    const { auth } = getState() as { auth: AuthState };
-    
+  async (userData, { rejectWithValue, getState }) => {
+    const { auth } = getState();
     if (!auth.token) {
       return rejectWithValue('No token found');
     }
-    
     try {
-      const response = await axios.put(`/api/users/profile`, userData, {
-        headers: {
-          Authorization: `Bearer ${auth.token}`
-        }
+      const response: AxiosResponse<User> = await axios.put(`/api/users/profile`, userData, {
+        headers: { Authorization: `Bearer ${auth.token}` }
       });
       return response.data;
     } catch (error: any) {
@@ -149,147 +224,66 @@ const authSlice = createSlice({
   name: 'auth',
   initialState,
   reducers: {
-    logout: (state) => {
+    logout: (state: AuthState) => {
       state.user = null;
       state.token = null;
       state.error = null;
       localStorage.removeItem('token');
       localStorage.removeItem('userRole');
     },
-    clearAuthError: (state) => {
+    clearAuthError: (state: AuthState) => {
       state.error = null;
     },
-    // 添加模拟登录的reducer
-    mockAdminLogin: (state) => {
-      const mockToken = 'mock-admin-token-123456';
-      const mockUser: User = {
-        id: 'admin1',
-        email: 'admin@example.com',
-        name: '系统管理员',
-        role: 'admin',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
-      state.user = mockUser;
-      state.token = mockToken;
-      state.checking = false;
-      state.loading = false;
-      state.error = null;
-      
-      localStorage.setItem('token', mockToken);
-      localStorage.setItem('userRole', 'admin');
-    },
-    // 添加模拟医生登录
-    mockDoctorLogin: (state) => {
-      const mockToken = 'mock-doctor-token-123456';
-      const mockUser: User = {
-        id: 'doctor1',
-        email: 'doctor@example.com',
-        name: '张医生',
-        role: 'doctor',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
-      state.user = mockUser;
-      state.token = mockToken;
-      state.checking = false;
-      state.loading = false;
-      state.error = null;
-      
-      localStorage.setItem('token', mockToken);
-      localStorage.setItem('userRole', 'doctor');
-    },
-    // 添加模拟健康管理师登录
-    mockHealthManagerLogin: (state) => {
-      const mockToken = 'mock-health-manager-token-123456';
-      const mockUser: User = {
-        id: 'hm1',
-        email: 'healthmanager@example.com',
-        name: '李健康',
-        role: 'health_manager',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
-      state.user = mockUser;
-      state.token = mockToken;
-      state.checking = false;
-      state.loading = false;
-      state.error = null;
-      
-      localStorage.setItem('token', mockToken);
-      localStorage.setItem('userRole', 'health_manager');
-    },
-    // 添加模拟患者登录
-    mockPatientLogin: (state) => {
-      const mockToken = 'mock-patient-token-123456';
-      const mockUser: User = {
-        id: 'patient1',
-        email: 'patient@example.com',
-        name: '王患者',
-        role: 'patient',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
-      state.user = mockUser;
-      state.token = mockToken;
-      state.checking = false;
-      state.loading = false;
-      state.error = null;
-      
-      localStorage.setItem('token', mockToken);
-      localStorage.setItem('userRole', 'patient');
-    }
   },
   extraReducers: (builder) => {
     builder
       // Register cases
-      .addCase(register.pending, (state) => {
-        state.loading = true;
+      .addCase(register.pending, (state: AuthState) => {
+        state.registerLoading = true;
+        state.loading = false;
         state.error = null;
       })
-      .addCase(register.fulfilled, (state, action: PayloadAction<{ user: User; token: string }>) => {
+      .addCase(register.fulfilled, (state: AuthState, action: PayloadAction<{ user: User; token: string }>) => {
+        state.registerLoading = false;
         state.loading = false;
         state.checking = false;
         state.user = action.payload.user;
         state.token = action.payload.token;
       })
-      .addCase(register.rejected, (state, action) => {
+      .addCase(register.rejected, (state: AuthState, action) => {
+        state.registerLoading = false;
         state.loading = false;
         state.checking = false;
         state.error = action.payload as string;
       })
       
       // Login cases
-      .addCase(login.pending, (state) => {
-        state.loading = true;
+      .addCase(login.pending, (state: AuthState) => {
+        state.loginLoading = true;
         state.error = null;
       })
-      .addCase(login.fulfilled, (state, action: PayloadAction<{ user: User; token: string }>) => {
-        state.loading = false;
+      .addCase(login.fulfilled, (state: AuthState, action: PayloadAction<LoginSuccessPayload>) => {
+        state.loginLoading = false;
         state.checking = false;
         state.user = action.payload.user;
         state.token = action.payload.token;
+        state.error = null;
       })
-      .addCase(login.rejected, (state, action) => {
-        state.loading = false;
-        state.checking = false;
+      .addCase(login.rejected, (state: AuthState, action) => {
+        state.loginLoading = false;
         state.error = action.payload as string;
       })
       
       // Check auth status cases
-      .addCase(checkAuthStatus.pending, (state) => {
+      .addCase(checkAuthStatus.pending, (state: AuthState) => {
         state.checking = true;
         state.error = null;
       })
-      .addCase(checkAuthStatus.fulfilled, (state, action: PayloadAction<User>) => {
+      .addCase(checkAuthStatus.fulfilled, (state: AuthState, action: PayloadAction<User>) => {
         state.checking = false;
         state.user = action.payload;
       })
-      .addCase(checkAuthStatus.rejected, (state, action) => {
+      .addCase(checkAuthStatus.rejected, (state: AuthState, action) => {
         state.checking = false;
         state.user = null;
         state.token = null;
@@ -297,21 +291,21 @@ const authSlice = createSlice({
       })
       
       // Update user profile cases
-      .addCase(updateUserProfile.pending, (state) => {
-        state.loading = true;
+      .addCase(updateUserProfile.pending, (state: AuthState) => {
+        state.profileLoading = true;
         state.error = null;
       })
-      .addCase(updateUserProfile.fulfilled, (state, action: PayloadAction<User>) => {
-        state.loading = false;
+      .addCase(updateUserProfile.fulfilled, (state: AuthState, action: PayloadAction<User>) => {
+        state.profileLoading = false;
         state.user = action.payload;
         state.error = null;
       })
-      .addCase(updateUserProfile.rejected, (state, action) => {
-        state.loading = false;
+      .addCase(updateUserProfile.rejected, (state: AuthState, action) => {
+        state.profileLoading = false;
         state.error = action.payload as string;
       });
   },
 });
 
-export const { logout, clearAuthError, mockAdminLogin, mockDoctorLogin, mockHealthManagerLogin, mockPatientLogin } = authSlice.actions;
+export const { logout, clearAuthError } = authSlice.actions;
 export default authSlice.reducer; 

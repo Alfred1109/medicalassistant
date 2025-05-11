@@ -31,7 +31,10 @@ import { register, clearAuthError } from '../../store/slices/authSlice';
 const Register: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
-  const { loading, error } = useSelector((state: RootState) => state.auth);
+  const { loading, registerLoading, error } = useSelector((state: RootState) => state.auth);
+  
+  // 使用registerLoading状态，如果不存在则回退到通用loading状态
+  const isLoading = registerLoading !== undefined ? registerLoading : loading;
 
   const [formData, setFormData] = useState({
     name: '',
@@ -261,10 +264,10 @@ const Register: React.FC = () => {
         type="submit"
         fullWidth
         variant="contained"
-        disabled={loading}
+        disabled={isLoading}
         sx={{ mt: 3, mb: 2, py: 1.2 }}
       >
-        {loading ? <CircularProgress size={24} /> : '注册'}
+        {isLoading ? <CircularProgress size={24} /> : '注册'}
       </Button>
 
       <Divider sx={{ my: 2 }}>

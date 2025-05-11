@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Login</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            background-color: #f9f9f9;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test Login API</h1>
+    <div class="form-group">
+        <label for="email">Email:</label>
+        <input type="email" id="email" value="admin@example.com">
+    </div>
+    <div class="form-group">
+        <label for="password">Password:</label>
+        <input type="password" id="password" value="Admin123!">
+    </div>
+    <div class="form-group">
+        <button id="login-btn">Login (FormData Method)</button>
+        <button id="login-btn-url">Login (URLSearchParams Method)</button>
+    </div>
+    <div id="result">Results will appear here</div>
+
+    <script>
+        document.getElementById('login-btn').addEventListener('click', async () => {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const resultDiv = document.getElementById('result');
+            
+            resultDiv.textContent = 'Sending request...';
+            
+            try {
+                // Using FormData approach (alternative to URLSearchParams)
+                const formData = new FormData();
+                formData.append('username', email);
+                formData.append('password', password);
+                
+                console.log('Sending login request with FormData...');
+                
+                const response = await fetch('/api/users/login', {
+                    method: 'POST',
+                    body: formData,
+                    headers: {
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache'
+                    }
+                });
+                
+                console.log('Response status:', response.status);
+                
+                const data = await response.json();
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                
+                if (data.access_token) {
+                    localStorage.setItem('token', data.access_token);
+                    resultDiv.textContent += '\n\nToken saved to localStorage!';
+                }
+            } catch (error) {
+                console.error('Login error:', error);
+                resultDiv.textContent = `Error: ${error.message}`;
+            }
+        });
+        
+        document.getElementById('login-btn-url').addEventListener('click', async () => {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const resultDiv = document.getElementById('result');
+            
+            resultDiv.textContent = 'Sending request with URLSearchParams...';
+            
+            try {
+                // Using URLSearchParams (same as in Redux action)
+                const params = new URLSearchParams();
+                params.append('username', email);
+                params.append('password', password);
+                
+                console.log('Sending login request with URLSearchParams...');
+                
+                const response = await fetch('/api/users/login', {
+                    method: 'POST',
+                    body: params,
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache'
+                    }
+                });
+                
+                console.log('Response status:', response.status);
+                
+                const data = await response.json();
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                
+                if (data.access_token) {
+                    localStorage.setItem('token', data.access_token);
+                    resultDiv.textContent += '\n\nToken saved to localStorage!';
+                }
+            } catch (error) {
+                console.error('Login error:', error);
+                resultDiv.textContent = `Error: ${error.message}`;
+            }
+        });
+    </script>
+</body>
+</html> 
