@@ -23,7 +23,7 @@ export const analyticsService = {
    */
   async getStatsOverview(): Promise<StatsOverview> {
     try {
-      const response = await api.get(`/system/visualization/overview`);
+      const response = await api.get(`system/visualization/overview`);
       
       if (response.data.status === 'error') {
         throw new Error(response.data.message || '获取统计数据失败');
@@ -54,7 +54,7 @@ export const analyticsService = {
    */
   async getTrendData(dataType: ChartDataType, timeRange: TimeRange): Promise<TrendData[]> {
     try {
-      const response = await api.get(`/analytics/trend`, {
+      const response = await api.get(`analytics/trend`, {
         params: { dataType, timeRange }
       });
       
@@ -78,7 +78,7 @@ export const analyticsService = {
    */
   async getDistributionData(dataType: ChartDataType, timeRange: TimeRange): Promise<DistributionData[]> {
     try {
-      const response = await api.get(`/analytics/distribution`, {
+      const response = await api.get(`analytics/distribution`, {
         params: { dataType, timeRange }
       });
       
@@ -107,7 +107,7 @@ export const analyticsService = {
     compareWith: string
   ): Promise<ComparisonData[]> {
     try {
-      const response = await api.get(`/analytics/comparison`, {
+      const response = await api.get(`analytics/comparison`, {
         params: { dataType, timeRange, compareWith }
       });
       
@@ -136,7 +136,7 @@ export const analyticsService = {
     format: 'csv' | 'xlsx' | 'pdf'
   ): Promise<Blob> {
     try {
-      const response = await api.get(`/analytics/export`, {
+      const response = await api.get(`analytics/export`, {
         params: { dataType, timeRange, format },
         responseType: 'blob',
         headers: { 
@@ -180,21 +180,16 @@ export const analyticsService = {
         interval
       });
       
-      const response = await fetch(
-        `/device-analysis/predict-advanced/${deviceId}?${params.toString()}`
+      const response = await api.get(
+        `device-analysis/predict-advanced/${deviceId}`,
+        { params }
       );
       
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (response.data.status === 'error') {
+        throw new Error(response.data.message || '获取预测分析数据失败');
       }
       
-      const data = await response.json();
-      
-      if (data.status === 'error') {
-        throw new Error(data.message || '获取预测分析数据失败');
-      }
-      
-      return data;
+      return response.data;
     } catch (error) {
       console.error(`获取预测分析数据失败:`, error);
       

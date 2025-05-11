@@ -4,7 +4,7 @@ import NotificationCenter from '../components/Patient/NotificationCenter';
 import api from '../services/api';
 import { Notification } from '../services/notificationService';
 import { useNavigate } from 'react-router-dom';
-import { ROUTES } from '../config/constants';
+import { ROUTES, STORAGE_KEYS } from '../config/constants';
 
 /**
  * 通知页面
@@ -22,7 +22,7 @@ const NotificationsPage: React.FC = () => {
     setError(null);
     
     // 检查token是否存在
-    const token = localStorage.getItem('token');
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
     if (!token) {
       console.log('用户未登录，请先登录');
       setError('您需要登录才能查看通知');
@@ -34,7 +34,7 @@ const NotificationsPage: React.FC = () => {
     
     try {
       // 使用api服务而不是直接使用axios，api服务会自动添加token
-      const response = await api.get('/notifications');
+      const response = await api.get('notifications');
       setNotifications(response.data || []);
     } catch (error) {
       console.error('获取通知列表失败:', error);
@@ -48,7 +48,7 @@ const NotificationsPage: React.FC = () => {
   // 标记通知为已读
   const handleMarkAsRead = async (notificationId: string) => {
     try {
-      await api.put(`/notifications/${notificationId}/read`);
+      await api.put(`notifications/${notificationId}/read`);
       setNotifications(prevNotifications =>
         prevNotifications.map(notification =>
           notification.id === notificationId
@@ -64,7 +64,7 @@ const NotificationsPage: React.FC = () => {
   // 标记所有通知为已读
   const handleMarkAllAsRead = async () => {
     try {
-      await api.put('/notifications/read-all');
+      await api.put('notifications/read-all');
       setNotifications(prevNotifications =>
         prevNotifications.map(notification => ({ ...notification, isRead: true }))
       );
@@ -76,7 +76,7 @@ const NotificationsPage: React.FC = () => {
   // 删除通知
   const handleDeleteNotification = async (notificationId: string) => {
     try {
-      await api.delete(`/notifications/${notificationId}`);
+      await api.delete(`notifications/${notificationId}`);
       setNotifications(prevNotifications =>
         prevNotifications.filter(notification => notification.id !== notificationId)
       );
@@ -88,7 +88,7 @@ const NotificationsPage: React.FC = () => {
   // 清除所有通知
   const handleClearAll = async () => {
     try {
-      await api.delete('/notifications/clear-all');
+      await api.delete('notifications/clear-all');
       setNotifications([]);
     } catch (error) {
       console.error('清除所有通知失败:', error);

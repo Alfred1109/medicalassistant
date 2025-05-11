@@ -1,8 +1,8 @@
-import axios from 'axios';
+import api from './api'; // 使用配置好的api实例
 import { AuditLog, AuditLogFilter, AuditLogList } from '../types/audit';
 
-// 基础URL - 确保与后端路由匹配
-const BASE_URL = '/api/audit-logs';
+// 无需添加前导斜杠，因为api实例已配置baseURL
+const BASE_URL = 'audit-logs';
 
 /**
  * 审计日志服务类
@@ -25,30 +25,25 @@ export const AuditService = {
     sortBy: string = 'created_at',
     sortOrder: number = -1
   ): Promise<AuditLogList> {
-    // 构建查询参数
-    const params = new URLSearchParams();
-    
-    // 添加过滤条件参数
-    if (filter.user_id) params.append('user_id', filter.user_id);
-    if (filter.action) params.append('action', filter.action);
-    if (filter.resource_type) params.append('resource_type', filter.resource_type);
-    if (filter.resource_id) params.append('resource_id', filter.resource_id);
-    if (filter.status) params.append('status', filter.status);
-    if (filter.start_date) params.append('start_date', filter.start_date);
-    if (filter.end_date) params.append('end_date', filter.end_date);
-    
-    // 添加分页和排序参数
-    params.append('skip', (page * limit).toString());
-    params.append('limit', limit.toString());
-    params.append('sort_by', sortBy);
-    params.append('sort_order', sortOrder.toString());
-    
     try {
-      const response = await axios({
-        method: 'GET',
-        url: `${BASE_URL}`,
-        params: params
-      });
+      // 构建查询参数
+      const params: Record<string, string | number> = {
+        skip: page * limit,
+        limit,
+        sort_by: sortBy,
+        sort_order: sortOrder
+      };
+      
+      // 添加过滤条件参数
+      if (filter.user_id) params.user_id = filter.user_id;
+      if (filter.action) params.action = filter.action;
+      if (filter.resource_type) params.resource_type = filter.resource_type;
+      if (filter.resource_id) params.resource_id = filter.resource_id;
+      if (filter.status) params.status = filter.status;
+      if (filter.start_date) params.start_date = filter.start_date;
+      if (filter.end_date) params.end_date = filter.end_date;
+      
+      const response = await api.get(BASE_URL, { params });
       return response.data;
     } catch (error) {
       console.error('获取审计日志失败:', error);
@@ -63,10 +58,7 @@ export const AuditService = {
    */
   async getAuditLogById(id: string): Promise<AuditLog> {
     try {
-      const response = await axios({
-        method: 'GET',
-        url: `${BASE_URL}/${id}`
-      });
+      const response = await api.get(`${BASE_URL}/${id}`);
       return response.data;
     } catch (error) {
       console.error('获取审计日志详情失败:', error);
@@ -82,9 +74,7 @@ export const AuditService = {
    */
   async getRecentLogsByUser(userId: string, limit: number = 10): Promise<AuditLog[]> {
     try {
-      const response = await axios({
-        method: 'GET',
-        url: `${BASE_URL}/user/${userId}/recent`,
+      const response = await api.get(`${BASE_URL}/user/${userId}/recent`, {
         params: { limit }
       });
       return response.data;

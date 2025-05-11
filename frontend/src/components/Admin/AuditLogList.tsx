@@ -313,7 +313,6 @@ const AuditLogList: React.FC = () => {
                   ...tempFilter, 
                   start_date: date ? date.toISOString() : undefined 
                 })}
-                renderInput={(params) => <TextField {...params} fullWidth size="small" margin="normal" />}
                 slotProps={{ textField: { fullWidth: true, size: 'small', margin: 'normal' } }}
               />
             </LocalizationProvider>
@@ -327,7 +326,6 @@ const AuditLogList: React.FC = () => {
                   ...tempFilter, 
                   end_date: date ? date.toISOString() : undefined 
                 })}
-                renderInput={(params) => <TextField {...params} fullWidth size="small" margin="normal" />}
                 slotProps={{ textField: { fullWidth: true, size: 'small', margin: 'normal' } }}
               />
             </LocalizationProvider>
