@@ -92,7 +92,13 @@ export const fetchExercises = createAsyncThunk(
   'rehab/fetchExercises',
   async (_, { rejectWithValue }) => {
     try {
-      const response = await axios.get(`/api/rehabilitation/exercises`);
+      const response = await axios.post(`${BASE_URL}/api/rehabilitation/exercises/list`, {
+        category: null,
+        difficulty: null,
+        body_parts: null,
+        skip: 0,
+        limit: 100
+      });
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.detail || 'Failed to fetch exercises');
@@ -104,7 +110,7 @@ export const createExercise = createAsyncThunk(
   'rehab/createExercise',
   async (exerciseData: ExerciseFormValues, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`/api/rehabilitation/exercises`, exerciseData);
+      const response = await axios.post(`${BASE_URL}/api/rehabilitation/exercises`, exerciseData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.detail || 'Failed to create exercise');
@@ -131,7 +137,7 @@ export const getRecommendedExercises = createAsyncThunk(
   'rehab/getRecommendedExercises',
   async (requestData: RecommendationRequest, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`/api/rehabilitation/exercises/recommendations`, requestData);
+      const response = await axios.post(`${BASE_URL}/api/rehabilitation/exercises/recommendations`, requestData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.detail || 'Failed to get exercise recommendations');

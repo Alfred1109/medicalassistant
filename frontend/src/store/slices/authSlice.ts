@@ -219,6 +219,150 @@ export const updateUserProfile = createAsyncThunk<
   }
 );
 
+// 模拟医生登录函数
+export const mockDoctorLogin = createAsyncThunk<
+  LoginSuccessPayload,
+  void,
+  ThunkApiConfig
+>(
+  'auth/mockDoctorLogin',
+  async (_, { rejectWithValue }) => {
+    try {
+      // 模拟的医生用户数据
+      const mockUser: User = {
+        id: 'mock-doctor-id',
+        email: 'doctor@example.com',
+        name: '张医生',
+        role: 'doctor',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      // 模拟的token
+      const mockToken = 'mock-doctor-token-' + Date.now();
+      
+      // 存储到localStorage
+      localStorage.setItem('token', mockToken);
+      localStorage.setItem('userRole', mockUser.role);
+      
+      return {
+        user: mockUser,
+        token: mockToken
+      };
+    } catch (error: any) {
+      return rejectWithValue('模拟医生登录失败');
+    }
+  }
+);
+
+// 模拟健康管理师登录函数
+export const mockHealthManagerLogin = createAsyncThunk<
+  LoginSuccessPayload,
+  void,
+  ThunkApiConfig
+>(
+  'auth/mockHealthManagerLogin',
+  async (_, { rejectWithValue }) => {
+    try {
+      // 模拟的健康管理师用户数据
+      const mockUser: User = {
+        id: 'mock-health-manager-id',
+        email: 'health-manager@example.com',
+        name: '李健康管理师',
+        role: 'health_manager',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      // 模拟的token
+      const mockToken = 'mock-health-manager-token-' + Date.now();
+      
+      // 存储到localStorage
+      localStorage.setItem('token', mockToken);
+      localStorage.setItem('userRole', mockUser.role);
+      
+      return {
+        user: mockUser,
+        token: mockToken
+      };
+    } catch (error: any) {
+      return rejectWithValue('模拟健康管理师登录失败');
+    }
+  }
+);
+
+// 模拟管理员登录函数
+export const mockAdminLogin = createAsyncThunk<
+  LoginSuccessPayload,
+  void,
+  ThunkApiConfig
+>(
+  'auth/mockAdminLogin',
+  async (_, { rejectWithValue }) => {
+    try {
+      // 模拟的管理员用户数据
+      const mockUser: User = {
+        id: 'mock-admin-id',
+        email: 'admin@example.com',
+        name: '管理员',
+        role: 'admin',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      // 模拟的token
+      const mockToken = 'mock-admin-token-' + Date.now();
+      
+      // 存储到localStorage
+      localStorage.setItem('token', mockToken);
+      localStorage.setItem('userRole', mockUser.role);
+      
+      return {
+        user: mockUser,
+        token: mockToken
+      };
+    } catch (error: any) {
+      return rejectWithValue('模拟管理员登录失败');
+    }
+  }
+);
+
+// 模拟患者登录函数
+export const mockPatientLogin = createAsyncThunk<
+  LoginSuccessPayload,
+  void,
+  ThunkApiConfig
+>(
+  'auth/mockPatientLogin',
+  async (_, { rejectWithValue }) => {
+    try {
+      // 模拟的患者用户数据
+      const mockUser: User = {
+        id: 'mock-patient-id',
+        email: 'zhangsan@example.com',
+        name: '张三',
+        role: 'patient',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      // 模拟的token
+      const mockToken = 'mock-patient-token-' + Date.now();
+      
+      // 存储到localStorage
+      localStorage.setItem('token', mockToken);
+      localStorage.setItem('userRole', mockUser.role);
+      
+      return {
+        user: mockUser,
+        token: mockToken
+      };
+    } catch (error: any) {
+      return rejectWithValue('模拟患者登录失败');
+    }
+  }
+);
+
 // Auth slice
 const authSlice = createSlice({
   name: 'auth',
@@ -303,6 +447,82 @@ const authSlice = createSlice({
       .addCase(updateUserProfile.rejected, (state: AuthState, action) => {
         state.profileLoading = false;
         state.error = action.payload as string;
+      })
+      
+      // 添加模拟医生登录处理
+      .addCase(mockDoctorLogin.pending, (state) => {
+        state.loading = true;
+        state.loginLoading = true;
+        state.error = null;
+      })
+      .addCase(mockDoctorLogin.fulfilled, (state, action) => {
+        state.loading = false;
+        state.loginLoading = false;
+        state.user = action.payload.user;
+        state.token = action.payload.token;
+        state.checking = false;
+      })
+      .addCase(mockDoctorLogin.rejected, (state, action) => {
+        state.loading = false;
+        state.loginLoading = false;
+        state.error = action.payload || '模拟医生登录失败';
+      })
+
+      // 添加模拟健康管理师登录处理
+      .addCase(mockHealthManagerLogin.pending, (state) => {
+        state.loading = true;
+        state.loginLoading = true;
+        state.error = null;
+      })
+      .addCase(mockHealthManagerLogin.fulfilled, (state, action) => {
+        state.loading = false;
+        state.loginLoading = false;
+        state.user = action.payload.user;
+        state.token = action.payload.token;
+        state.checking = false;
+      })
+      .addCase(mockHealthManagerLogin.rejected, (state, action) => {
+        state.loading = false;
+        state.loginLoading = false;
+        state.error = action.payload || '模拟健康管理师登录失败';
+      })
+
+      // 添加模拟管理员登录处理
+      .addCase(mockAdminLogin.pending, (state) => {
+        state.loading = true;
+        state.loginLoading = true;
+        state.error = null;
+      })
+      .addCase(mockAdminLogin.fulfilled, (state, action) => {
+        state.loading = false;
+        state.loginLoading = false;
+        state.user = action.payload.user;
+        state.token = action.payload.token;
+        state.checking = false;
+      })
+      .addCase(mockAdminLogin.rejected, (state, action) => {
+        state.loading = false;
+        state.loginLoading = false;
+        state.error = action.payload || '模拟管理员登录失败';
+      })
+
+      // 添加模拟患者登录处理
+      .addCase(mockPatientLogin.pending, (state) => {
+        state.loading = true;
+        state.loginLoading = true;
+        state.error = null;
+      })
+      .addCase(mockPatientLogin.fulfilled, (state, action) => {
+        state.loading = false;
+        state.loginLoading = false;
+        state.user = action.payload.user;
+        state.token = action.payload.token;
+        state.checking = false;
+      })
+      .addCase(mockPatientLogin.rejected, (state, action) => {
+        state.loading = false;
+        state.loginLoading = false;
+        state.error = action.payload || '模拟患者登录失败';
       });
   },
 });

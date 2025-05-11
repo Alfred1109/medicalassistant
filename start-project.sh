@@ -271,13 +271,15 @@ start_frontend() {
         fi
     fi
     
-    # 清理缓存
+    # 清理缓存，确保代码变更生效
     echo -e "${YELLOW}清理前端缓存...${NC}"
     rm -rf node_modules/.vite 2>/dev/null
+    rm -rf .vite 2>/dev/null
+    rm -rf dist 2>/dev/null
     
     # 启动前端服务
     echo -e "${YELLOW}正在启动前端服务(端口5501)...${NC}"
-    npm run dev >> "$FRONTEND_LOG" 2>&1 &
+    VITE_FORCE_OPTIMIZATION=true npm run dev >> "$FRONTEND_LOG" 2>&1 &
     FRONTEND_PID=$!
     echo $FRONTEND_PID > .frontend_pid
     

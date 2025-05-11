@@ -292,6 +292,43 @@ class RehabilitationService:
         
         return exercise
         
+    async def list_exercises(
+        self, 
+        category: Optional[str] = None,
+        difficulty: Optional[str] = None,
+        body_parts: Optional[List[str]] = None,
+        skip: int = 0, 
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """获取康复运动列表，支持按类别、难度和身体部位筛选"""
+        try:
+            filter_dict = {}
+            
+            if category:
+                filter_dict["category"] = category
+                
+            if difficulty:
+                filter_dict["difficulty"] = difficulty
+                
+            if body_parts and len(body_parts) > 0:
+                filter_dict["body_part"] = {"$in": body_parts}
+
+            print(f"Exercise list query: {filter_dict}, skip: {skip}, limit: {limit}")
+                
+            cursor = self.exercises_collection.find(filter_dict).skip(skip).limit(limit)
+            exercises = []
+            
+            async for exercise in cursor:
+                exercise["_id"] = str(exercise["_id"])
+                exercises.append(exercise)
+                
+            print(f"Found {len(exercises)} exercises")
+            return exercises
+        except Exception as e:
+            print(f"Error in list_exercises: {str(e)}")
+            # 出错时返回空列表
+            return []
+        
     async def get_exercise(self, exercise_id: str) -> Optional[Dict[str, Any]]:
         """Get exercise by ID"""
         try:

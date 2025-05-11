@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -27,7 +27,10 @@ import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import InfoIcon from '@mui/icons-material/Info';
 
 import { AppDispatch, RootState } from '../../store';
-import { login, clearAuthError, User } from '../../store/slices/authSlice';
+import { 
+  login, clearAuthError, User, 
+  mockDoctorLogin, mockHealthManagerLogin, mockAdminLogin, mockPatientLogin 
+} from '../../store/slices/authSlice';
 
 // 管理员账号信息
 const ADMIN_CREDENTIALS = {
@@ -70,6 +73,10 @@ const Login: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
   const { loading, loginLoading, error, user, token } = useSelector((state: RootState) => state.auth);
+  
+  // 添加上一次用户状态的引用，用于比较
+  const prevUserRef = useRef<User | null>(null);
+  const prevTokenRef = useRef<string | null>(null);
 
   // 使用loginLoading状态，如果不存在则回退到通用loading状态
   const isLoading = loginLoading !== undefined ? loginLoading : loading;
@@ -163,7 +170,7 @@ const Login: React.FC = () => {
     
     switch (role) {
       case 'admin':
-        targetPath = '/app/admin';
+        targetPath = '/app/admin/doctors';
         break;
       case 'doctor':
         targetPath = '/app/doctor';
@@ -179,7 +186,7 @@ const Login: React.FC = () => {
     // 避免重复导航到相同路径
     if (window.location.pathname !== targetPath) {
       console.log(`Login.tsx: 跳转到 ${targetPath}`);
-      navigate(targetPath);
+      navigate(targetPath, { replace: true }); // 使用replace模式避免导航历史堆积
     } else {
       console.log('Login.tsx: 已在目标路径，不进行跳转');
     }
@@ -193,8 +200,16 @@ const Login: React.FC = () => {
 
   // Effect to handle redirection after login (real or mock)
   useEffect(() => {
-    if (user && token) {
-      console.log('Login.tsx: User state changed, attempting to redirect.', user);
+    // 只有当用户或令牌状态实际变化时才执行重定向
+    const userChanged = user !== prevUserRef.current;
+    const tokenChanged = token !== prevTokenRef.current;
+    
+    if (user && token && (userChanged || tokenChanged)) {
+      console.log('Login.tsx: User/token state changed, attempting to redirect.', user);
+      // 更新引用值
+      prevUserRef.current = user;
+      prevTokenRef.current = token;
+      
       // 使用防抖函数来避免短时间内多次导航
       debouncedRedirect(user.role);
     }
@@ -228,6 +243,34 @@ const Login: React.FC = () => {
     if (error) dispatch(clearAuthError());
   };
 
+  // 模拟登录处理函数
+  const handleMockLogin = async (type: 'admin' | 'doctor' | 'health_manager' | 'patient') => {
+    try {
+      // 清除之前的错误
+      if (error) dispatch(clearAuthError());
+      
+      // 根据类型调用不同的模拟登录函数
+      switch (type) {
+        case 'admin':
+          await dispatch(mockAdminLogin()).unwrap();
+          break;
+        case 'doctor':
+          await dispatch(mockDoctorLogin()).unwrap();
+          break;
+        case 'health_manager':
+          await dispatch(mockHealthManagerLogin()).unwrap();
+          break;
+        case 'patient':
+          await dispatch(mockPatientLogin()).unwrap();
+          break;
+      }
+      
+      console.log(`Login.tsx: 模拟${type}登录成功`);
+    } catch (err) {
+      console.error(`Login.tsx: 模拟${type}登录失败:`, err);
+    }
+  };
+
   return (
     <Box component="form" onSubmit={handleSubmit} noValidate>
       <Box sx={{ mb: 3, textAlign: 'center' }}>
@@ -244,6 +287,51 @@ const Login: React.FC = () => {
           {error}
         </Alert>
       )}
+
+      {/* 快速登录按钮组 */}
+      <Box sx={{ mb: 3 }}>
+        <Typography variant="subtitle2" gutterBottom>
+          快速登录:
+        </Typography>
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+          <Button 
+            variant="contained" 
+            color="primary" 
+            size="small"
+            onClick={() => handleMockLogin('admin')}
+            disabled={isLoading}
+          >
+            管理员登录
+          </Button>
+          <Button 
+            variant="contained" 
+            color="secondary" 
+            size="small"
+            onClick={() => handleMockLogin('doctor')}
+            disabled={isLoading}
+          >
+            医生登录
+          </Button>
+          <Button 
+            variant="contained" 
+            color="warning" 
+            size="small"
+            onClick={() => handleMockLogin('health_manager')}
+            disabled={isLoading}
+          >
+            健康管理师登录
+          </Button>
+          <Button 
+            variant="contained" 
+            color="success" 
+            size="small"
+            onClick={() => handleMockLogin('patient')}
+            disabled={isLoading}
+          >
+            患者登录
+          </Button>
+        </Box>
+      </Box>
 
       {/* 账号提示 */}
       <Paper 

@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { AuditLog, AuditLogFilter, AuditLogList } from '../types/audit';
 
-// 基础URL
+// 基础URL - 确保与后端路由匹配
 const BASE_URL = '/api/audit-logs';
 
 /**
@@ -44,7 +44,11 @@ export const AuditService = {
     params.append('sort_order', sortOrder.toString());
     
     try {
-      const response = await axios.get(`${BASE_URL}?${params.toString()}`);
+      const response = await axios({
+        method: 'GET',
+        url: `${BASE_URL}`,
+        params: params
+      });
       return response.data;
     } catch (error) {
       console.error('获取审计日志失败:', error);
@@ -59,7 +63,10 @@ export const AuditService = {
    */
   async getAuditLogById(id: string): Promise<AuditLog> {
     try {
-      const response = await axios.get(`${BASE_URL}/${id}`);
+      const response = await axios({
+        method: 'GET',
+        url: `${BASE_URL}/${id}`
+      });
       return response.data;
     } catch (error) {
       console.error('获取审计日志详情失败:', error);
@@ -75,7 +82,11 @@ export const AuditService = {
    */
   async getRecentLogsByUser(userId: string, limit: number = 10): Promise<AuditLog[]> {
     try {
-      const response = await axios.get(`${BASE_URL}/user/${userId}/recent?limit=${limit}`);
+      const response = await axios({
+        method: 'GET',
+        url: `${BASE_URL}/user/${userId}/recent`,
+        params: { limit }
+      });
       return response.data;
     } catch (error) {
       console.error('获取用户最近审计日志失败:', error);

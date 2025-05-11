@@ -223,6 +223,14 @@ app.include_router(device_router, prefix="/api")
 app.include_router(device_repair_router, prefix="/api")
 app.include_router(device_data_standard_router, prefix="/api")
 
+# 添加审计日志路由
+from app.api.routers import audit_log_router
+app.include_router(audit_log_router, prefix="/api", tags=["audit-logs"])
+
+# 添加数据分析路由
+from app.api.routers import analytics_router
+app.include_router(analytics_router, prefix="/api", tags=["analytics"])
+
 @app.get("/api")
 async def api_root():
     """API根路径响应"""

@@ -137,6 +137,32 @@ async def create_exercise(
     """Create a new rehabilitation exercise"""
     return await rehab_service.create_exercise(exercise_data)
 
+@router.post("/exercises/list", response_model=List[Dict[str, Any]])
+async def list_exercises(
+    filter_data: Dict[str, Any] = Body(default={}),
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
+):
+    """获取康复运动列表，支持按类别、难度和身体部位筛选"""
+    try:
+        category = filter_data.get("category")
+        difficulty = filter_data.get("difficulty")
+        body_parts = filter_data.get("body_parts", [])
+        skip = filter_data.get("skip", 0)
+        limit = filter_data.get("limit", 100)
+        
+        return await rehab_service.list_exercises(
+            category=category, 
+            difficulty=difficulty,
+            body_parts=body_parts,
+            skip=skip,
+            limit=limit
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error fetching exercises: {str(e)}"
+        )
+
 @router.get("/exercises/recommendations", response_model=List[Dict[str, Any]])
 async def get_exercise_recommendations(
     patient_id: str,
