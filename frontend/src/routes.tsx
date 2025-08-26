@@ -83,6 +83,9 @@ import ExerciseRecommendations from './pages/Recommendations/ExerciseRecommendat
 // 功能开发演示页面
 import FeatureDemoPage from './pages/Common/FeatureDemoPage';
 
+// 系统设置页面
+import SystemSettings from './pages/Settings/SystemSettings';
+
 // 导入备用页面组件
 import {
   FallbackIndexPage,
@@ -286,6 +289,9 @@ const AppRoutes: React.FC = () => (
       {/* Profile route */}
       <Route path="profile" element={<Profile />} />
       
+      {/* Settings route */}
+      <Route path="settings" element={<SystemSettings />} />
+      
       {/* 医生专属路由 */}
       <Route 
         path="doctor" 
@@ -359,6 +365,7 @@ const AppRoutes: React.FC = () => (
         <Route path="visualization" element={<DataVisualization />} />
         <Route path="audit-logs" element={<AuditLogsPage />} />
         <Route path="permission-audit" element={<PermissionAuditLog />} />
+        <Route path="settings" element={<SystemSettings />} />
       </Route>
     </Route>
     

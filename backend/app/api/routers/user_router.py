@@ -10,7 +10,7 @@ from app.core.dependencies import get_user_service, get_current_active_user, get
 from app.services.user_service import UserService
 from app.schemas.user import (
     UserCreate, UserUpdate, UserResponse, Token, TokenResponse, RefreshTokenRequest,
-    DoctorResponse, PatientResponse, HealthManagerResponse,
+    DoctorResponse, PatientResponse, HealthManagerResponse, PermissionAssignment,
     Organization, DoctorCreate, PatientCreate, HealthManagerCreate,
     DoctorUpdate, PatientUpdate, HealthManagerUpdate
 )

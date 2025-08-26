@@ -191,7 +191,7 @@ const ChatComponent: React.FC<ChatComponentProps> = ({
   
   // 使用WebSocket钩子替代原生WebSocket
   const wsUrl = conversationId 
-    ? `${process.env.REACT_APP_WS_URL || 'wss://api.example.com'}/chat/${conversationId}`
+    ? `${import.meta.env.VITE_WS_URL || 'wss://api.example.com'}/chat/${conversationId}`
     : '';
   
   const { 

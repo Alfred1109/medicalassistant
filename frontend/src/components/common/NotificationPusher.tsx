@@ -22,7 +22,7 @@ const NotificationPusher: React.FC<NotificationPusherProps> = ({
   } | null>(null);
   
   // WebSocket连接，用于接收实时通知
-  const { lastMessage, isConnected } = useWebSocket(`${process.env.REACT_APP_WS_URL || 'wss://api.example.com'}/notifications/ws`);
+  const { lastMessage, isConnected } = useWebSocket(`${import.meta.env.VITE_WS_URL || 'wss://api.example.com'}/notifications/ws`);
   
   // 处理收到的WebSocket消息
   useEffect(() => {

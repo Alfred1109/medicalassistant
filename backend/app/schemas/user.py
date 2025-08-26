@@ -164,4 +164,60 @@ class UserSession(BaseModel):
     user_agent: str
     login_time: datetime
     expires_at: datetime
-    is_active: bool = True 
+    is_active: bool = True
+
+# 组织机构模型（用于导入）
+class Organization(BaseModel):
+    id: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    type: str = "hospital"
+    address: Optional[Dict[str, Any]] = None
+    contact_info: Optional[Dict[str, Any]] = None
+    parent_id: Optional[str] = None
+    admin_ids: Optional[List[str]] = []
+    tags: Optional[List[str]] = []
+    active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+# 医生创建模型
+class DoctorCreate(UserCreate):
+    role: str = "doctor"
+    specialty: Optional[str] = None
+    license_number: Optional[str] = None
+    professional_title: Optional[str] = None
+    department: Optional[str] = None
+
+# 患者创建模型
+class PatientCreate(UserCreate):
+    role: str = "patient"
+    medical_info: Optional[Dict[str, Any]] = None
+    emergency_contact: Optional[Dict[str, str]] = None
+    demographic_info: Optional[Dict[str, Any]] = None
+
+# 健康管理师创建模型
+class HealthManagerCreate(UserCreate):
+    role: str = "health_manager"
+    certification: Optional[str] = None
+    specialty_areas: Optional[List[str]] = None
+    education: Optional[Dict[str, str]] = None
+
+# 医生更新模型
+class DoctorUpdate(UserUpdate):
+    specialty: Optional[str] = None
+    license_number: Optional[str] = None
+    professional_title: Optional[str] = None
+    department: Optional[str] = None
+
+# 患者更新模型
+class PatientUpdate(UserUpdate):
+    medical_info: Optional[Dict[str, Any]] = None
+    emergency_contact: Optional[Dict[str, str]] = None
+    demographic_info: Optional[Dict[str, Any]] = None
+
+# 健康管理师更新模型
+class HealthManagerUpdate(UserUpdate):
+    certification: Optional[str] = None
+    specialty_areas: Optional[List[str]] = None
+    education: Optional[Dict[str, str]] = None 

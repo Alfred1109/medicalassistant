@@ -1,7 +1,7 @@
 import api from './api';
 
 // API基础URL
-const API_URL = process.env.REACT_APP_API_URL || '/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 // 消息类型
 export interface ChatMessage {

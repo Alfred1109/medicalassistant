@@ -31,7 +31,7 @@ export interface NotificationSettings {
 }
 
 // API基础URL
-const API_URL = process.env.REACT_APP_API_URL || '/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 // 创建通知API服务
 export const notificationApi = {

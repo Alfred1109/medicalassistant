@@ -127,18 +127,10 @@ async def get_agent_service(
     return AgentService(db=db)
 
 async def get_rehabilitation_service(
-    db: AsyncIOMotorDatabase = Depends(get_database),
-    plan_crud: RehabilitationPlanCRUD = Depends(get_rehabilitation_plan_crud),
-    exercise_crud: ExerciseCRUD = Depends(get_exercise_crud),
-    progress_crud: ProgressRecordCRUD = Depends(get_progress_record_crud)
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """获取康复服务"""
-    return RehabilitationService(
-        db=db,
-        plan_crud=plan_crud,
-        exercise_crud=exercise_crud,
-        progress_crud=progress_crud
-    )
+    return RehabilitationService(db=db)
 
 # 权限检查依赖
 def check_permission(permission: str):
