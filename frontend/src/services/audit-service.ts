@@ -2,7 +2,8 @@ import api from './api'; // 使用配置好的api实例
 import { AuditLog, AuditLogFilter, AuditLogList } from '../types/audit';
 
 // 无需添加前导斜杠，因为api实例已配置baseURL
-const BASE_URL = 'audit-logs';
+// 注意：添加尾部斜杠以匹配FastAPI路由定义
+const BASE_URL = 'audit-logs/';
 
 /**
  * 审计日志服务类
