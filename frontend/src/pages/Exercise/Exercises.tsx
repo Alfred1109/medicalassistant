@@ -128,7 +128,7 @@ const Exercises: React.FC = () => {
             color="primary"
             startIcon={<AddIcon />}
             component={Link}
-            to="/exercises/new"
+            to="/app/exercises/new"
           >
             新建练习
           </Button>
@@ -233,7 +233,7 @@ const Exercises: React.FC = () => {
                 color="primary"
                 startIcon={<AddIcon />}
                 component={Link}
-                to="/exercises/new"
+                to="/app/exercises/new"
                 sx={{ mt: 1 }}
               >
                 创建第一个练习
@@ -303,7 +303,7 @@ const Exercises: React.FC = () => {
                   <Button 
                     size="small" 
                     component={Link} 
-                    to={`/exercises/${exercise._id || exercise.id}`}
+                    to={`/app/exercises/${exercise._id || exercise.id}`}
                   >
                     查看详情
                   </Button>
@@ -311,7 +311,7 @@ const Exercises: React.FC = () => {
                     <Button 
                       size="small"
                       component={Link}
-                      to={`/exercises/edit/${exercise._id || exercise.id}`}
+                      to={`/app/exercises/edit/${exercise._id || exercise.id}`}
                     >
                       编辑
                     </Button>

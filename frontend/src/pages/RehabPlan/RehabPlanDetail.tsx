@@ -81,7 +81,7 @@ const RehabPlanDetail: React.FC = () => {
     if (id && id !== 'undefined' && id !== 'null') {
       dispatch(fetchRehabPlanById(id));
     } else {
-      navigate('/rehab-plans');
+      navigate('/app/rehab-plans');
     }
   }, [dispatch, id, navigate]);
   
@@ -98,7 +98,7 @@ const RehabPlanDetail: React.FC = () => {
       dispatch(deleteRehabPlan(id))
         .unwrap()
         .then(() => {
-          navigate('/rehab-plans');
+          navigate('/app/rehab-plans');
         });
     }
     setDeleteDialogOpen(false);
@@ -179,7 +179,7 @@ const RehabPlanDetail: React.FC = () => {
       <Box sx={{ mb: 3 }}>
         <Button
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/rehab-plans')}
+          onClick={() => navigate('/app/rehab-plans')}
           sx={{ mb: 2 }}
         >
           返回康复计划列表

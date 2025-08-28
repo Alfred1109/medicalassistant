@@ -98,7 +98,7 @@ const ExerciseDetail: React.FC = () => {
     if (id) {
       dispatch(deleteExercise(id))
         .then(() => {
-          navigate('/exercises');
+          navigate('/app/exercises');
         });
     }
     setDeleteDialogOpen(false);
@@ -134,7 +134,7 @@ const ExerciseDetail: React.FC = () => {
         </Alert>
         <Button 
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/exercises')}
+          onClick={() => navigate('/app/exercises')}
         >
           返回练习列表
         </Button>
@@ -150,7 +150,7 @@ const ExerciseDetail: React.FC = () => {
         </Alert>
         <Button 
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/exercises')}
+          onClick={() => navigate('/app/exercises')}
         >
           返回练习列表
         </Button>
@@ -163,7 +163,7 @@ const ExerciseDetail: React.FC = () => {
       <Box sx={{ mb: 3 }}>
         <Button
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/exercises')}
+          onClick={() => navigate('/app/exercises')}
           sx={{ mb: 2 }}
         >
           返回练习列表
@@ -181,7 +181,7 @@ const ExerciseDetail: React.FC = () => {
                 color="primary"
                 startIcon={<EditIcon />}
                 component={Link}
-                to={`/exercises/edit/${id}`}
+                to={`/app/exercises/edit/${id}`}
                 sx={{ mr: 1 }}
               >
                 编辑

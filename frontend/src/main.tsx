@@ -22,6 +22,8 @@ import {
 import { FallbackIndexPage } from './fallbackPages';
 
 import './index.css';
+// 导入highlight.js样式用于代码高亮
+import 'highlight.js/styles/github.css';
 
 console.log('🚀 开始启动医疗助手应用...');
 console.log('🔧 调试: 检查是否到达了主文件入口');

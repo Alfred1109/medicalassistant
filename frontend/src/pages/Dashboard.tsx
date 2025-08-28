@@ -139,7 +139,7 @@ const Dashboard: React.FC = () => {
               variant="contained" 
               size="large"
               color="secondary"
-              onClick={() => navigate('/rehab-plans')}
+              onClick={() => navigate('/app/rehab-plans')}
               sx={{ 
                 py: 1.5,
                 px: 4,
@@ -188,7 +188,7 @@ const Dashboard: React.FC = () => {
                     <ListItem 
                       key={plan._id}
                       secondaryAction={
-                        <IconButton edge="end" onClick={() => navigate(`/rehab-plans/${plan._id}`)}>
+                        <IconButton edge="end" onClick={() => navigate(`/app/rehab-plans/${plan._id}`)}>
                           <LaunchIcon fontSize="small" />
                         </IconButton>
                       }
@@ -220,7 +220,7 @@ const Dashboard: React.FC = () => {
               <Button 
                 size="small" 
                 startIcon={<FitnessCenterIcon />}
-                onClick={() => navigate('/rehab-plans')}
+                onClick={() => navigate('/app/rehab-plans')}
                 sx={{ ml: 1, mb: 1 }}
               >
                 Manage Plans
@@ -407,7 +407,7 @@ const Dashboard: React.FC = () => {
               <Button 
                 size="small" 
                 startIcon={<CalendarIcon />}
-                onClick={() => navigate('/calendar')}
+                onClick={() => navigate('/app/calendar')}
                 sx={{ ml: 1, mb: 1 }}
               >
                 View Calendar
@@ -436,7 +436,7 @@ const Dashboard: React.FC = () => {
                   size="large"
                   fullWidth
                   startIcon={<FitnessCenterIcon />}
-                  onClick={() => navigate('/rehab-plans/new')}
+                  onClick={() => navigate('/app/rehab-plans/new')}
                   sx={{ py: 1.5 }}
                 >
                   New Plan
@@ -460,7 +460,7 @@ const Dashboard: React.FC = () => {
                   size="large"
                   fullWidth
                   startIcon={<CheckCircleIcon />}
-                  onClick={() => navigate('/exercises')}
+                  onClick={() => navigate('/app/exercises')}
                   sx={{ py: 1.5 }}
                 >
                   Exercises
@@ -472,7 +472,7 @@ const Dashboard: React.FC = () => {
                   size="large"
                   fullWidth
                   startIcon={<PersonIcon />}
-                  onClick={() => navigate('/profile')}
+                  onClick={() => navigate('/app/profile')}
                   sx={{ py: 1.5 }}
                 >
                   My Profile

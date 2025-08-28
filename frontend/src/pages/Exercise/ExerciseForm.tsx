@@ -349,7 +349,7 @@ const ExerciseForm: React.FC = () => {
       }
       
       // 导航回练习列表
-      navigate('/exercises');
+      navigate('/app/exercises');
     } catch (err: any) {
       setSubmitError(err.message || '保存练习失败');
     } finally {
@@ -362,7 +362,7 @@ const ExerciseForm: React.FC = () => {
       <Box sx={{ mb: 4 }}>
         <Button
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/exercises')}
+          onClick={() => navigate('/app/exercises')}
           sx={{ mb: 2 }}
         >
           返回练习列表
@@ -756,7 +756,7 @@ const ExerciseForm: React.FC = () => {
           <Box sx={{ mt: 3, display: 'flex', justifyContent: 'flex-end' }}>
             <Button
               variant="outlined"
-              onClick={() => navigate('/exercises')}
+              onClick={() => navigate('/app/exercises')}
               sx={{ mr: 2 }}
             >
               取消

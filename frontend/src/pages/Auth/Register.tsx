@@ -129,7 +129,7 @@ const Register: React.FC = () => {
     try {
       const { confirmPassword, ...registerData } = formData;
       await dispatch(register(registerData)).unwrap();
-      navigate('/dashboard');
+      navigate('/app/dashboard');
     } catch (err) {
       // Error is handled by the reducer
     }

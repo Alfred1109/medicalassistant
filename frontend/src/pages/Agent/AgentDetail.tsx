@@ -24,6 +24,9 @@ import {
   Send as SendIcon 
 } from '@mui/icons-material';
 
+// 导入markdown渲染组件
+import MarkdownRenderer from '../../components/Common/MarkdownRenderer';
+
 // 导入store类型
 import { RootState } from '../../store';
 import { fetchAgentById, deleteAgent, queryAgent } from '../../store/slices/agentSlice';
@@ -232,9 +235,7 @@ const AgentDetail = () => {
             {queryResponse && (
               <Card variant="outlined" sx={{ mt: 2 }}>
                 <CardContent>
-                  <Typography variant="body1" style={{ whiteSpace: 'pre-wrap' }}>
-                    {queryResponse}
-                  </Typography>
+                  <MarkdownRenderer content={queryResponse} />
                 </CardContent>
               </Card>
             )}
