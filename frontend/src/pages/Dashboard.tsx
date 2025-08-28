@@ -448,7 +448,7 @@ const Dashboard: React.FC = () => {
                   size="large"
                   fullWidth
                   startIcon={<PsychologyIcon />}
-                  onClick={() => navigate('/agents/new')}
+                  onClick={() => navigate('/app/agents/new')}
                   sx={{ py: 1.5 }}
                 >
                   New Agent

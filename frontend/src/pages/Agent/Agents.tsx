@@ -36,7 +36,7 @@ const Agents = () => {
           color="primary"
           startIcon={<AddIcon />}
           component={Link}
-          to="/agents/new"
+          to="/app/agents/new"
         >
           新建助手
         </Button>
