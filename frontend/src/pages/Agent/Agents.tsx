@@ -60,7 +60,7 @@ const Agents = () => {
                 <Box mt={2}>
                   <Button 
                     component={Link} 
-                    to={`/agents/${agent._id}`}
+                    to={`/app/agents/${agent._id}`}
                     variant="outlined" 
                     size="small"
                   >

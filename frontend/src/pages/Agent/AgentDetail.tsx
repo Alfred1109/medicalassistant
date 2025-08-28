@@ -127,7 +127,7 @@ const AgentDetail = () => {
           color="primary"
           startIcon={<EditIcon />}
           component={Link}
-          to={`/agents/edit/${selectedAgent._id}`}
+          to={`/app/agents/edit/${selectedAgent._id}`}
           sx={{ mr: 1 }}
         >
           编辑

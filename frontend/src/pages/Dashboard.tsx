@@ -261,7 +261,7 @@ const Dashboard: React.FC = () => {
                         <Button 
                           size="small" 
                           variant="outlined" 
-                          onClick={() => navigate(`/agents/${agent._id}`)}
+                          onClick={() => navigate(`/app/agents/${agent._id}`)}
                         >
                           Chat
                         </Button>

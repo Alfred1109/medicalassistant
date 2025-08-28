@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+。、import React, { useState, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -88,13 +88,13 @@ const AgentForm: React.FC<AgentFormProps> = ({ initialValues, mode }) => {
     try {
       if (mode === 'create') {
         const result = await dispatch(createAgent(values)).unwrap();
-        navigate(`/agents/${result._id}`);
+        navigate(`/app/agents/${result._id}`);
       } else if (mode === 'edit' && initialValues?._id) {
         await dispatch(updateAgent({ 
           agentId: initialValues._id, 
           agentData: values 
         })).unwrap();
-        navigate(`/agents/${initialValues._id}`);
+        navigate(`/app/agents/${initialValues._id}`);
       }
     } catch (err) {
       // Error is handled by Redux
