@@ -44,7 +44,7 @@ const AgentDetail = () => {
       dispatch(fetchAgentById(id));
     } else {
       // 如果ID无效，重定向到助手列表页面
-      navigate('/agents');
+      navigate('/app/agents');
     }
   }, [dispatch, id, navigate]);
   
@@ -52,7 +52,7 @@ const AgentDetail = () => {
     if (id && window.confirm('确定要删除这个助手吗？')) {
       dispatch(deleteAgent(id))
         .then(() => {
-          navigate('/agents');
+          navigate('/app/agents');
         });
     }
   };
@@ -82,7 +82,7 @@ const AgentDetail = () => {
           <Typography color="error">{error}</Typography>
           <Button 
             variant="contained" 
-            onClick={() => navigate('/agents')} 
+            onClick={() => navigate('/app/agents')} 
             sx={{ mt: 2 }}
           >
             返回助手列表
@@ -99,7 +99,7 @@ const AgentDetail = () => {
           <Typography>未找到助手信息</Typography>
           <Button 
             variant="contained" 
-            onClick={() => navigate('/agents')} 
+            onClick={() => navigate('/app/agents')} 
             sx={{ mt: 2 }}
           >
             返回助手列表
@@ -114,7 +114,7 @@ const AgentDetail = () => {
       <Box display="flex" alignItems="center" mb={4}>
         <Button
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/agents')}
+          onClick={() => navigate('/app/agents')}
           sx={{ mr: 2 }}
         >
           返回

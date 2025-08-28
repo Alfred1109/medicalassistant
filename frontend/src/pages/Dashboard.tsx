@@ -294,7 +294,7 @@ const Dashboard: React.FC = () => {
               <Button 
                 size="small" 
                 startIcon={<PsychologyIcon />}
-                onClick={() => navigate('/agents')}
+                onClick={() => navigate('/app/agents')}
                 sx={{ ml: 1, mb: 1 }}
               >
                 Manage Agents

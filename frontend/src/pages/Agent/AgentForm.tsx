@@ -81,7 +81,7 @@ const AgentForm = () => {
     if (isEditMode && id && id !== 'undefined') {
       dispatch(fetchAgentById(id));
     } else if (isEditMode && (!id || id === 'undefined')) {
-      navigate('/agents');
+      navigate('/app/agents');
     }
   }, [dispatch, id, isEditMode, navigate]);
   
@@ -192,14 +192,14 @@ const AgentForm = () => {
       dispatch(updateAgent({ id, agentData }))
         .then((result: any) => {
           if (!result.error) {
-            navigate(`/agents/${id}`);
+            navigate(`/app/agents/${id}`);
           }
         });
     } else {
       dispatch(createAgent(agentData))
         .then((result: any) => {
           if (!result.error) {
-            navigate('/agents');
+            navigate('/app/agents');
           }
         });
     }
@@ -211,7 +211,7 @@ const AgentForm = () => {
       <Box display="flex" alignItems="center" mb={4}>
         <Button
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/agents')}
+          onClick={() => navigate('/app/agents')}
           sx={{ mr: 2 }}
         >
           返回
