@@ -84,6 +84,16 @@ const mockOrganizations = [
   },
 ];
 
+// 组织结构树节点
+interface OrgTreeNode {
+  id: string;
+  name: string;
+  type?: string;
+  members?: number;
+  leader?: string;
+  children?: OrgTreeNode[];
+}
+
 // 模拟组织结构树
 const orgTree = {
   id: 'root',
@@ -323,7 +333,7 @@ const OrganizationManagement: React.FC = () => {
     handleCloseDialog();
   };
 
-  const renderTree = (nodes: any) => (
+  const renderTree = (nodes: OrgTreeNode) => (
     <TreeItem 
       key={nodes.id} 
       nodeId={nodes.id} 

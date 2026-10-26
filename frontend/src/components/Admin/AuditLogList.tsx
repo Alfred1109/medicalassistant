@@ -44,7 +44,7 @@ import { AuditLog, AuditLogFilter, AuditAction, AuditResourceType } from '../../
 const statusColors = {
   success: 'success',
   failure: 'error'
-};
+} as const;
 
 // 操作类型颜色映射
 const actionColors: Record<string, 'default' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning'> = {

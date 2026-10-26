@@ -30,7 +30,7 @@ import {
   Error as ErrorIcon,
   BatteryAlert as BatteryIcon,
   SignalWifiStatusbar4Bar as SignalIcon,
-  SignalWifiStatusbarConnectedNoInternet0 as NoSignalIcon,
+  SignalWifiStatusbarConnectedNoInternet4 as NoSignalIcon,
   DataUsage as DataIcon,
   Refresh as RefreshIcon,
   Build as RepairIcon,
@@ -160,7 +160,13 @@ const DeviceMonitoringDashboard: React.FC = () => {
       
       // 调用设备修复API
       const response = await deviceService.repairDevice(deviceId);
-      setRepairResult(response);
+      setRepairResult({
+        success: response.success,
+        message: response.message,
+        repair_actions: response.repair_actions || [],
+        repair_results: response.repair_results || [],
+        new_status: response.new_status
+      });
       
       // 打开修复结果对话框
       setRepairDialogOpen(true);

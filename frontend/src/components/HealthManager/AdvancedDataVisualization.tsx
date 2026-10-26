@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   Box, Paper, Typography, Grid, FormControl, 
   InputLabel, Select, MenuItem, Button, Divider,
-  Card, CardContent, CircularProgress, Chip
+  Card, CardContent, CircularProgress, Chip,
+  SelectChangeEvent,
 } from '@mui/material';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, 
@@ -334,12 +335,12 @@ const AdvancedDataVisualization: React.FC<AdvancedDataVisualizationProps> = ({
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>(datasets.map(d => d.id));
   
   // 处理图表类型变更
-  const handleChartTypeChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleChartTypeChange = (event: SelectChangeEvent<string>) => {
     setChartType(event.target.value as ChartType);
   };
   
   // 处理时间范围变更
-  const handleTimeRangeChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleTimeRangeChange = (event: SelectChangeEvent<string>) => {
     const newRange = event.target.value as TimeRange;
     setTimeRange(newRange);
     onTimeRangeChange?.(newRange);

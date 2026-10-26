@@ -30,9 +30,11 @@ export function useApi<T, P extends any[]>(
         return response.data;
       } catch (err) {
         const axiosError = err as AxiosError;
-        const errorMessage = 
-          axiosError.response?.data?.message || 
-          axiosError.message || 
+        // 错误响应体结构由后端决定，这里收窄为常见的 { message } 形式
+        const responseData = axiosError.response?.data as { message?: string } | undefined;
+        const errorMessage =
+          responseData?.message ||
+          axiosError.message ||
           '发生未知错误';
         
         const error = new Error(errorMessage);

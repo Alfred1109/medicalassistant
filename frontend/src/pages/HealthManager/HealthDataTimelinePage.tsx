@@ -24,9 +24,10 @@ import axios from 'axios';
 
 // 导入组件
 import HealthDataTimeline from '../../components/HealthManager/HealthDataTimeline';
+import { API_ORIGIN } from '../../config/constants';
 
-// API URL
-const API_BASE_URL = 'http://localhost:8000';
+// API 根地址(不含 /api),由 nginx 反向代理转发
+const API_BASE_URL = API_ORIGIN;
 
 // 健康数据时间线项目类型
 interface HealthDataTimelineItem {

@@ -64,13 +64,21 @@ interface DataAnomaly {
   patientName?: string;
 }
 
+// 筛选条件
+interface AnomalyFilters {
+  showAcknowledged: boolean;
+  showResolved: boolean;
+  severityFilters: string[];
+  deviceFilters: string[];
+}
+
 const DeviceAnomalyAlert: React.FC = () => {
   const [anomalies, setAnomalies] = useState<DataAnomaly[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedAnomaly, setSelectedAnomaly] = useState<DataAnomaly | null>(null);
   const [detailsDialogOpen, setDetailsDialogOpen] = useState<boolean>(false);
   const [filtersDialogOpen, setFiltersDialogOpen] = useState<boolean>(false);
-  const [filters, setFilters] = useState({
+  const [filters, setFilters] = useState<AnomalyFilters>({
     showAcknowledged: false,
     showResolved: false,
     severityFilters: ['info', 'warning', 'critical'],

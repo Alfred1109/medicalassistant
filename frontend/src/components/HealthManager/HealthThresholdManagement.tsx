@@ -36,9 +36,10 @@ import InfoIcon from '@mui/icons-material/Info';
 import WarningIcon from '@mui/icons-material/Warning';
 import ErrorIcon from '@mui/icons-material/Error';
 import axios from 'axios';
+import { API_ORIGIN } from '../../config/constants';
 
-// API基础URL
-const API_BASE_URL = 'http://localhost:8000';
+// API 根地址(不含 /api),由 nginx 反向代理转发
+const API_BASE_URL = API_ORIGIN;
 
 // 健康数据阈值接口
 interface HealthDataThreshold {
@@ -196,7 +197,7 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
   };
 
   // 处理表单输入变化
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) => {
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement> | SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     
     if (!name) return;

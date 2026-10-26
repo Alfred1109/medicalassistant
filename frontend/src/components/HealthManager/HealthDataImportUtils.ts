@@ -273,13 +273,20 @@ export const validateImportData = (data: DataRow[], mapping: FieldMapping[]): Va
  * @param patientId 患者ID
  * @returns 健康数据记录数组
  */
+// 导入过程中构造的记录：允许包含导入映射的任意目标字段
+type HealthDataImportRecord = Partial<HealthDataRecord> & {
+  vital_type?: string;
+  test_name?: string;
+  [key: string]: any;
+};
+
 export const convertToHealthData = (
   data: DataRow[],
   mapping: FieldMapping[],
   patientId: string
 ): HealthDataRecord[] => {
   return data.map((row) => {
-    const healthData: Partial<HealthDataRecord> = {
+    const healthData: HealthDataImportRecord = {
       patient_id: patientId
     };
     

@@ -54,7 +54,7 @@ const actionColors = {
   view: 'primary',
   assign: 'warning',
   remove: 'default'
-};
+} as const;
 
 /**
  * 权限审计日志组件

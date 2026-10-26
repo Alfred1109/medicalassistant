@@ -25,6 +25,7 @@ import {
   Tabs,
   Tab,
   Stack,
+  SelectChangeEvent,
 } from '@mui/material';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -210,11 +211,11 @@ const HealthManagerManagement: React.FC = () => {
     handleCloseDialog();
   };
 
-  const handleFilterDepartmentChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFilterDepartmentChange = (event: SelectChangeEvent<string>) => {
     setFilterDepartment(event.target.value);
   };
 
-  const handleFilterTitleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFilterTitleChange = (event: SelectChangeEvent<string>) => {
     setFilterTitle(event.target.value);
   };
 

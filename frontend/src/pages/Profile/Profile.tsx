@@ -29,7 +29,7 @@ import {
 } from '@mui/icons-material';
 
 // 导入store类型
-import { RootState } from '../../store';
+import { RootState, AppDispatch } from '../../store';
 
 // 模拟用户数据 - 实际应用中应该从store或API获取
 const mockUserData = {
@@ -45,7 +45,7 @@ const mockUserData = {
 };
 
 const Profile = () => {
-  const dispatch = useDispatch();
+  const dispatch = useDispatch<AppDispatch>();
   // const { user, loading, error } = useSelector((state: RootState) => state.auth);
   
   // 使用模拟数据替代store数据，实际应用中应该使用上面注释的代码

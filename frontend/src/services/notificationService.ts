@@ -30,9 +30,6 @@ export interface NotificationSettings {
   dailySummary: boolean;
 }
 
-// API基础URL
-const API_URL = import.meta.env.VITE_API_URL || '/api';
-
 // 创建通知API服务
 export const notificationApi = {
   // 获取通知列表

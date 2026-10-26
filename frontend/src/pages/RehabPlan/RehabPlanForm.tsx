@@ -33,6 +33,7 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
+  SelectChangeEvent,
 } from '@mui/material';
 import {
   ArrowBack as ArrowBackIcon,
@@ -50,10 +51,12 @@ import {
   updateRehabPlan,
   fetchRehabPlanById
 } from '../../store/slices/rehabSlice';
+import { RehabPlan } from '../../types/rehab';
 import axios from 'axios';
+import { API_ORIGIN } from '../../config/constants';
 
-// 添加BASE_URL常量
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5502';
+// 添加BASE_URL常量(API 根地址,不含 /api)
+const BASE_URL = API_ORIGIN;
 
 // 生成计划所需的患者信息类型
 interface PatientInfo {
@@ -165,7 +168,7 @@ const RehabPlanForm: React.FC = () => {
   };
   
   // 患者信息表单变更处理
-  const handlePatientInfoChange = (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) => {
+  const handlePatientInfoChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement> | SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     setPatientInfo(prev => ({
       ...prev,
@@ -304,7 +307,7 @@ const RehabPlanForm: React.FC = () => {
   });
   
   // 手动模式表单变更处理
-  const handleFormChange = (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) => {
+  const handleFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement> | SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     setFormData(prev => ({
       ...prev,
@@ -316,10 +319,14 @@ const RehabPlanForm: React.FC = () => {
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    // 转换值类型
-    const planData = {
-      ...formData,
-      duration: parseInt(formData.duration, 10),
+    // 转换为后端使用的字段名(snake_case)
+    const planData: Partial<RehabPlan> = {
+      name: formData.title,
+      description: formData.description,
+      patient_name: formData.patientName,
+      condition: formData.condition,
+      duration_days: parseInt(formData.duration, 10),
+      status: formData.status as RehabPlan['status'],
     };
     
     if (isEditMode) {

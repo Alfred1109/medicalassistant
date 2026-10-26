@@ -32,11 +32,16 @@ interface ExerciseRecommendationProps {
   patientId?: string;
   planId?: string;  // Optional - if provided, allows adding to rehab plan
   onClose?: () => void;
+  /** 选中的运动被确认添加时回调(不带 planId 时也会触发) */
+  onAddExercises?: (exercises: Exercise[]) => void;
 }
 
-const ExerciseRecommendation: React.FC<ExerciseRecommendationProps> = ({ patientId = '', planId, onClose }) => {
+// 兼容后端返回的多种 ID 字段
+const getExerciseId = (exercise: Exercise) => exercise.id || exercise._id || '';
+
+const ExerciseRecommendation: React.FC<ExerciseRecommendationProps> = ({ patientId = '', planId, onClose, onAddExercises }) => {
   const dispatch = useDispatch<AppDispatch>();
-  const { recommendedExercises = [], isLoading = false, error = null } = useSelector((state: RootState) => state.rehab || {});
+  const { recommendations = [], loading = false, error = null } = useSelector((state: RootState) => state.rehab);
   const { agents = [] } = useSelector((state: RootState) => state.agents || { agents: [] });
   const [selectedExercises, setSelectedExercises] = useState<string[]>([]);
   const [condition, setCondition] = useState('');
@@ -74,21 +79,29 @@ const ExerciseRecommendation: React.FC<ExerciseRecommendationProps> = ({ patient
 
   const handleGetRecommendations = () => {
     dispatch(getRecommendations({
-      patient_id: patientId,
+      patientId,
       condition,
       goal,
-      agent_id: selectedAgentId || undefined
+      agentId: selectedAgentId || undefined
     }));
   };
 
+  // 当前选中的运动对象
+  const selectedExerciseObjects = recommendations.filter(
+    (exercise) => selectedExercises.includes(getExerciseId(exercise))
+  );
+
   const handleAddToPlan = () => {
-    if (planId && selectedExercises.length > 0) {
+    if (selectedExercises.length === 0) return;
+
+    if (planId) {
       dispatch(addExercisesToPlan({
         planId,
         exerciseIds: selectedExercises
       }));
-      setSelectedExercises([]);
     }
+    onAddExercises?.(selectedExerciseObjects);
+    setSelectedExercises([]);
   };
 
   const handleToggleExerciseSelection = (exerciseId: string) => {
@@ -190,10 +203,10 @@ const ExerciseRecommendation: React.FC<ExerciseRecommendationProps> = ({ patient
             <Button
               variant="contained"
               onClick={handleGetRecommendations}
-              disabled={isLoading || !condition}
-              startIcon={isLoading ? <CircularProgress size={20} /> : null}
+              disabled={loading || !condition}
+              startIcon={loading ? <CircularProgress size={20} /> : null}
             >
-              {isLoading ? 'Getting Recommendations...' : 'Get Recommendations'}
+              {loading ? 'Getting Recommendations...' : 'Get Recommendations'}
             </Button>
 
             <Button
@@ -212,26 +225,26 @@ const ExerciseRecommendation: React.FC<ExerciseRecommendationProps> = ({ patient
             </Alert>
           )}
 
-          {recommendedExercises.length > 0 && (
+          {recommendations.length > 0 && (
             <>
               <Divider sx={{ my: 2 }} />
               <Typography variant="subtitle1" gutterBottom>
                 Recommended Exercises
               </Typography>
               <Grid container spacing={2}>
-                {recommendedExercises.map((exercise) => (
-                  <Grid item xs={12} sm={6} md={4} key={exercise._id}>
-                    <Card 
-                      variant="outlined" 
+                {recommendations.map((exercise) => (
+                  <Grid item xs={12} sm={6} md={4} key={getExerciseId(exercise)}>
+                    <Card
+                      variant="outlined"
                       sx={{
                         height: '100%',
                         display: 'flex',
                         flexDirection: 'column',
                         cursor: 'pointer',
-                        borderColor: selectedExercises.includes(exercise._id) ? 'primary.main' : 'divider',
-                        borderWidth: selectedExercises.includes(exercise._id) ? 2 : 1,
+                        borderColor: selectedExercises.includes(getExerciseId(exercise)) ? 'primary.main' : 'divider',
+                        borderWidth: selectedExercises.includes(getExerciseId(exercise)) ? 2 : 1,
                       }}
-                      onClick={() => handleToggleExerciseSelection(exercise._id)}
+                      onClick={() => handleToggleExerciseSelection(getExerciseId(exercise))}
                     >
                       <CardContent sx={{ flexGrow: 1 }}>
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -241,8 +254,8 @@ const ExerciseRecommendation: React.FC<ExerciseRecommendationProps> = ({ patient
                           <Chip
                             label={exercise.difficulty}
                             color={
-                              exercise.difficulty === 'Easy' ? 'success' :
-                              exercise.difficulty === 'Medium' ? 'warning' : 'error'
+                              exercise.difficulty === 'easy' ? 'success' :
+                              exercise.difficulty === 'medium' ? 'warning' : 'error'
                             }
                             size="small"
                           />
@@ -271,13 +284,13 @@ const ExerciseRecommendation: React.FC<ExerciseRecommendationProps> = ({ patient
                 ))}
               </Grid>
 
-              {planId && (
+              {(planId || onAddExercises) && (
                 <Box sx={{ mt: 3, display: 'flex', justifyContent: 'flex-end' }}>
                   <Button
                     variant="contained"
                     color="primary"
                     startIcon={<AddIcon />}
-                    disabled={selectedExercises.length === 0 || isLoading}
+                    disabled={selectedExercises.length === 0 || loading}
                     onClick={handleAddToPlan}
                   >
                     Add Selected to Plan

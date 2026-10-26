@@ -20,6 +20,8 @@ export interface User {
   updatedAt: string;
   is_active: boolean;
   last_login?: string;
+  /** 头像地址(可选) */
+  avatar?: string;
 }
 
 export interface LoginCredentials {

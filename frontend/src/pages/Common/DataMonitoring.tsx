@@ -16,7 +16,8 @@ import {
   Stack,
   Chip,
   Alert,
-  CircularProgress
+  CircularProgress,
+  SelectChangeEvent,
 } from '@mui/material';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -208,7 +209,7 @@ const DataMonitoring: React.FC = () => {
   }, [selectedPatient]);
   
   // 处理选择患者
-  const handlePatientChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handlePatientChange = (event: SelectChangeEvent<string>) => {
     setSelectedPatient(event.target.value as string);
   };
   
@@ -279,7 +280,7 @@ const DataMonitoring: React.FC = () => {
   const labResults = healthData.filter(data => data.data_type === 'lab_result');
   
   // 最新的生命体征数据
-  const latestVitalSigns = {};
+  const latestVitalSigns: Record<string, any> = {};
   vitalSigns.forEach(data => {
     const type = data.vital_sign_type;
     if (!latestVitalSigns[type] || new Date(data.measured_at) > new Date(latestVitalSigns[type].measured_at)) {
@@ -450,7 +451,7 @@ const DataMonitoring: React.FC = () => {
             <HealthDataVisualization 
               data={healthData}
               loading={false}
-              error={null}
+              error={undefined}
               height={400}
             />
           </TabPanel>
@@ -590,9 +591,8 @@ const DataMonitoring: React.FC = () => {
             {showForm ? (
               <HealthDataForm
                 patientId={selectedPatient}
-                onSave={handleHealthDataSubmit}
+                onSubmit={handleHealthDataSubmit}
                 onCancel={() => setShowForm(false)}
-                loading={loading}
               />
             ) : (
               <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>

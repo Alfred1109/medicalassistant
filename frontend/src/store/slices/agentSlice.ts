@@ -1,8 +1,18 @@
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import axios from 'axios';
+import { API_ORIGIN } from '../../config/constants';
+import { ThunkApiConfig } from '../types';
 
-// 使用环境变量获取API基础URL
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5502';
+// API 根地址(不含 /api),由 nginx 反向代理转发
+const BASE_URL = API_ORIGIN;
+
+// 助手可调用的工具
+export interface Tool {
+  name: string;
+  description: string;
+  parameters: Record<string, any>;
+  required_parameters?: string[];
+}
 
 // Define the agent interface
 export interface Agent {
@@ -12,20 +22,30 @@ export interface Agent {
   type?: string;
   model: string;
   system_prompt?: string;
-  tools?: any[];
+  tools?: Tool[];
   metadata?: Record<string, any>;
   parameters?: Record<string, any>;
   created_at: string;
   updated_at: string;
 }
 
+// 助手提问接口的返回结构(对应后端 AgentQueryResponse)
+export interface AgentQueryResult {
+  response: string;
+  thinking?: string | null;
+  tool_calls?: Array<Record<string, any>> | null;
+  metadata?: Record<string, any> | null;
+}
+
 // Define the agent state interface
-interface AgentState {
+export interface AgentState {
   agents: Agent[];
   selectedAgent: Agent | null;
   loading: boolean;
   error: string | null;
   queryResponse: string | null;
+  /** 提问接口返回的附加数据(如推荐动作) */
+  queryMetadata: Record<string, any> | null;
 }
 
 // Define the initial state
@@ -35,10 +55,11 @@ const initialState: AgentState = {
   loading: false,
   error: null,
   queryResponse: null,
+  queryMetadata: null,
 };
 
 // Define async thunks
-export const fetchAgents = createAsyncThunk(
+export const fetchAgents = createAsyncThunk<Agent[], void, ThunkApiConfig>(
   'agents/fetchAgents',
   async (_, { rejectWithValue }) => {
     try {
@@ -50,7 +71,7 @@ export const fetchAgents = createAsyncThunk(
   }
 );
 
-export const fetchAgentById = createAsyncThunk(
+export const fetchAgentById = createAsyncThunk<Agent, string, ThunkApiConfig>(
   'agents/fetchAgentById',
   async (id: string, { rejectWithValue }) => {
     try {
@@ -62,9 +83,9 @@ export const fetchAgentById = createAsyncThunk(
   }
 );
 
-export const createAgent = createAsyncThunk(
+export const createAgent = createAsyncThunk<Agent, Partial<Agent>, ThunkApiConfig>(
   'agents/createAgent',
-  async (agentData: Omit<Agent, 'id' | 'createdAt' | 'updatedAt'>, { rejectWithValue }) => {
+  async (agentData: Partial<Agent>, { rejectWithValue }) => {
     try {
       const response = await axios.post(`${BASE_URL}/api/agents`, agentData);
       return response.data;
@@ -74,7 +95,11 @@ export const createAgent = createAsyncThunk(
   }
 );
 
-export const updateAgent = createAsyncThunk(
+export const updateAgent = createAsyncThunk<
+  Agent,
+  { id: string; agentData: Partial<Agent> },
+  ThunkApiConfig
+>(
   'agents/updateAgent',
   async ({ id, agentData }: { id: string; agentData: Partial<Agent> }, { rejectWithValue }) => {
     try {
@@ -86,7 +111,7 @@ export const updateAgent = createAsyncThunk(
   }
 );
 
-export const deleteAgent = createAsyncThunk(
+export const deleteAgent = createAsyncThunk<string, string, ThunkApiConfig>(
   'agents/deleteAgent',
   async (id: string, { rejectWithValue }) => {
     try {
@@ -98,12 +123,16 @@ export const deleteAgent = createAsyncThunk(
   }
 );
 
-export const queryAgent = createAsyncThunk(
+export const queryAgent = createAsyncThunk<
+  AgentQueryResult,
+  { id: string; query: string },
+  ThunkApiConfig
+>(
   'agents/queryAgent',
   async ({ id, query }: { id: string; query: string }, { rejectWithValue }) => {
     try {
       const response = await axios.post(`${BASE_URL}/api/agents/${id}/query`, { query });
-      return response.data.response;
+      return response.data as AgentQueryResult;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '查询助手失败');
     }
@@ -117,6 +146,7 @@ const agentSlice = createSlice({
   reducers: {
     clearQueryResponse: (state) => {
       state.queryResponse = null;
+      state.queryMetadata = null;
     },
     setSelectedAgent: (state, action: PayloadAction<Agent | null>) => {
       state.selectedAgent = action.payload;
@@ -210,12 +240,14 @@ const agentSlice = createSlice({
       })
       .addCase(queryAgent.fulfilled, (state, action) => {
         state.loading = false;
-        state.queryResponse = action.payload;
+        state.queryResponse = action.payload?.response ?? null;
+        state.queryMetadata = action.payload?.metadata ?? null;
       })
       .addCase(queryAgent.rejected, (state, action) => {
         state.loading = false;
         state.error = action.payload as string;
         state.queryResponse = null;
+        state.queryMetadata = null;
       });
   },
 });

@@ -128,7 +128,7 @@ const StatCard: React.FC<StatCardProps> = ({ title, value, icon, trend, color, o
 };
 
 // 仪表盘统计组件
-const DashboardStatistics: React.FC<{ userRole: 'doctor' | 'patient' | 'healthManager' | 'admin' }> = ({ userRole }) => {
+const DashboardStatistics: React.FC<{ userRole: 'doctor' | 'patient' | 'healthManager' | 'health_manager' | 'admin' }> = ({ userRole }) => {
   const theme = useTheme();
   
   // 折线图数据 - 患者进展
@@ -577,6 +577,7 @@ const DashboardStatistics: React.FC<{ userRole: 'doctor' | 'patient' | 'healthMa
         );
         
       case 'healthManager':
+      case 'health_manager':
         return (
           <>
             <Grid container spacing={3}>

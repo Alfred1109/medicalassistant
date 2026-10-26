@@ -24,6 +24,7 @@ import {
   ListItem,
   ListItemText,
   ListItemSecondaryAction,
+  SelectChangeEvent,
 } from '@mui/material';
 import {
   ArrowBack as ArrowBackIcon,
@@ -34,11 +35,28 @@ import {
 } from '@mui/icons-material';
 
 import { AppDispatch, RootState } from '../../store';
-import { 
-  fetchExerciseById, 
-  createExercise, 
-  updateExercise 
+import {
+  fetchExerciseById,
+  createExercise,
+  updateExercise
 } from '../../store/slices/rehabSlice';
+import { ExerciseFormValues } from '../../types/rehab';
+
+// 表单状态类型:难度使用与后端一致的字面量联合类型
+interface ExerciseFormState {
+  name: string;
+  description: string;
+  body_part: string;
+  difficulty: 'easy' | 'medium' | 'hard';
+  duration_minutes: number;
+  repetitions: number;
+  sets: number;
+  image_url: string;
+  video_url: string;
+  instructions: string[];
+  contraindications: string[];
+  benefits: string[];
+}
 
 // 身体部位选项
 const bodyParts = [
@@ -70,7 +88,7 @@ const ExerciseForm: React.FC = () => {
   const isEditMode = !!id;
   
   // 表单状态
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<ExerciseFormState>({
     name: '',
     description: '',
     body_part: 'shoulder',
@@ -137,7 +155,7 @@ const ExerciseForm: React.FC = () => {
   }, [isEditMode, selectedExercise]);
   
   // 处理文本输入变化
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) => {
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement> | SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     
     setFormData((prev) => ({
@@ -333,7 +351,7 @@ const ExerciseForm: React.FC = () => {
     
     try {
       // 准备提交数据，移除临时URL
-      const submitData = { 
+      const submitData: ExerciseFormValues = {
         ...formData,
       };
       

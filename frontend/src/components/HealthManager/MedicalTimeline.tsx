@@ -28,7 +28,15 @@ import FitnessCenterIcon from '@mui/icons-material/FitnessCenter';
 import HistoryEduIcon from '@mui/icons-material/HistoryEdu';
 
 // 不同类型事件的颜色
-const timelineItemColors = {
+type EventColor = 'default' | 'primary' | 'secondary' | 'success' | 'warning' | 'info' | 'error';
+// TimelineDot 支持的颜色（不含 Chip 专用的 'default'）
+type TimelineDotColor = 'primary' | 'secondary' | 'success' | 'warning' | 'info' | 'error' | 'grey';
+
+// 将 Chip 颜色转换为 TimelineDot 可用的颜色
+const toTimelineDotColor = (color: EventColor): TimelineDotColor =>
+  color === 'default' ? 'grey' : color;
+
+const timelineItemColors: { [key: string]: EventColor } = {
   health_record: 'primary',
   follow_up: 'secondary',
   vital_sign: 'success',
@@ -80,8 +88,8 @@ const MedicalTimeline: React.FC<MedicalTimelineProps> = ({
   onEventClick
 }) => {
   // 获取事件类型对应的颜色
-  const getColorForEventType = (type: string): 'primary' | 'secondary' | 'success' | 'warning' | 'info' | 'error' | 'default' => {
-    return (timelineItemColors[type as keyof typeof timelineItemColors] || timelineItemColors.default) as any;
+  const getColorForEventType = (type: string): EventColor => {
+    return timelineItemColors[type] || timelineItemColors.default;
   };
   
   // 获取事件类型对应的图标
@@ -139,7 +147,7 @@ const MedicalTimeline: React.FC<MedicalTimelineProps> = ({
                     {formatDate(event.timestamp)}
                   </TimelineOppositeContent>
                   <TimelineSeparator>
-                    <TimelineDot color={getColorForEventType(event.item_type)} variant="outlined">
+                    <TimelineDot color={toTimelineDotColor(getColorForEventType(event.item_type))} variant="outlined">
                       {getIconForEventType(event.item_type)}
                     </TimelineDot>
                     {index < events.length - 1 && <TimelineConnector />}

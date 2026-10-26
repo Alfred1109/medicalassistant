@@ -5,7 +5,7 @@ import { Box, Button, Container, Grid, Paper, Typography } from '@mui/material';
 import { Add as AddIcon } from '@mui/icons-material';
 import { createSelector } from 'reselect';
 
-import { RootState } from '../../store';
+import { RootState, AppDispatch } from '../../store';
 import { fetchAgents } from '../../store/slices/agentSlice';
 
 // 创建记忆化选择器
@@ -15,7 +15,7 @@ const selectAgents = createSelector(
 );
 
 const Agents = () => {
-  const dispatch = useDispatch();
+  const dispatch = useDispatch<AppDispatch>();
   
   // 使用记忆化选择器
   const agents = useSelector(selectAgents);

@@ -183,7 +183,7 @@ const RehabPlans: React.FC = () => {
         case 'name':
           return (a.name || a.title || '').localeCompare(b.name || b.title || '');
         case 'startDate':
-          return new Date(a.startDate).getTime() - new Date(b.startDate).getTime();
+          return new Date(a.startDate || a.start_date || 0).getTime() - new Date(b.startDate || b.start_date || 0).getTime();
         case 'exercises':
           return (b.exercises?.length || 0) - (a.exercises?.length || 0);
         default:
@@ -212,7 +212,7 @@ const RehabPlans: React.FC = () => {
   };
   
   // 获取状态芯片样式
-  const getStatusChipColor = (status: string) => {
+  const getStatusChipColor = (status: string): { color: string; icon?: React.ReactElement } => {
     switch (status) {
       case 'active':
         return {
@@ -231,8 +231,7 @@ const RehabPlans: React.FC = () => {
         };
       default:
         return {
-          color: 'default',
-          icon: null
+          color: 'default'
         };
     }
   };

@@ -1,8 +1,5 @@
 import api from './api';
 
-// API基础URL
-const API_URL = import.meta.env.VITE_API_URL || '/api';
-
 // 消息类型
 export interface ChatMessage {
   id: string;

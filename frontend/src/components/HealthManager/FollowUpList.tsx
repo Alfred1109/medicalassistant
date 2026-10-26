@@ -25,7 +25,8 @@ import {
   DialogActions,
   Stack,
   CircularProgress,
-  Alert
+  Alert,
+  Grid
 } from '@mui/material';
 import { format, isAfter, isBefore, parseISO } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -628,15 +629,5 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
     </Paper>
   );
 };
-
-interface Grid {
-  container?: boolean;
-  item?: boolean;
-  xs?: number;
-  sm?: number;
-  md?: number;
-  spacing?: number;
-  alignItems?: string;
-}
 
 export default FollowUpList; 

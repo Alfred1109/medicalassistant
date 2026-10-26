@@ -7,6 +7,7 @@ import { ThemeProvider } from '@mui/material/styles';
 import store from './store';
 import { PersistGate } from 'redux-persist/integration/react';
 import { persistor } from './store';
+import { API_PREFIX } from './config/constants';
 
 // 导入自定义主题
 import theme from './theme';
@@ -46,7 +47,7 @@ const startApp = () => {
       <PersistGate loading={<LoadingFallback />} persistor={persistor}>
         <ThemeProvider theme={theme}>
           <CssBaseline />
-          <BrowserRouter>
+          <BrowserRouter basename={API_PREFIX}>
             <ErrorBoundary fallback={<FallbackIndexPage />}>
               <AppRoutes />
             </ErrorBoundary>

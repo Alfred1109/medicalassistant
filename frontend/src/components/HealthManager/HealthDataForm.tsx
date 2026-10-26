@@ -14,15 +14,25 @@ import {
   Select,
   Stack,
   TextField,
-  Typography
+  Typography,
+  SelectChangeEvent,
 } from '@mui/material';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { LocalizationProvider, DateTimePicker } from '@mui/x-date-pickers';
 import { format, parseISO } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 
+// 健康数据类型配置
+interface DataTypeConfig {
+  name: string;
+  unit: string;
+  hasAdditionalInfo?: boolean;
+  calculated?: boolean;
+  isEnum?: boolean;
+}
+
 // 健康数据类型及其单位
-const dataTypes = {
+const dataTypes: Record<string, DataTypeConfig> = {
   blood_pressure: { name: '血压', unit: 'mmHg', hasAdditionalInfo: true },
   heart_rate: { name: '心率', unit: 'bpm' },
   blood_oxygen: { name: '血氧', unit: '%' },
@@ -183,7 +193,7 @@ const HealthDataForm = ({
   };
 
   // 处理选择变化
-  const handleSelectChange = (e: React.ChangeEvent<{ name?: string; value: unknown }>) => {
+  const handleSelectChange = (e: SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     if (name) {
       setFormData(prev => ({
@@ -312,6 +322,13 @@ const HealthDataForm = ({
     }
   };
 
+  // 日期选择器需要的日期值（转换为 Date 类型）
+  const measuredAtValue = formData.measured_at
+    ? (formData.measured_at instanceof Date
+        ? formData.measured_at
+        : new Date(formData.measured_at))
+    : undefined;
+
   return (
     <Card>
       <CardContent>
@@ -346,7 +363,7 @@ const HealthDataForm = ({
               <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={zhCN}>
                 <DateTimePicker
                   label="测量时间"
-                  value={formData.measured_at}
+                  value={measuredAtValue}
                   onChange={handleDateChange}
                   slotProps={{
                     textField: {

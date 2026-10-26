@@ -63,7 +63,7 @@ interface HealthDataPoint {
 // 处理后的数据点类型
 interface ProcessedDataPoint {
   date: string;
-  value: number;
+  value?: number;
   unit?: string;
   formattedDate?: string;
   [key: string]: any;
@@ -245,7 +245,7 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
     
     // 为每个数据类型创建连续日期序列
     const dateRange = eachDayOfInterval({ start: startDate, end: endDate });
-    const dateMap: { [key: string]: { [key: string]: any } } = {};
+    const dateMap: { [key: string]: ProcessedDataPoint } = {};
     
     // 初始化日期映射
     dateRange.forEach(date => {
@@ -505,12 +505,12 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
               <InputLabel id="time-range-label">时间范围</InputLabel>
               <Select
                 labelId="time-range-label"
-                value={timeRange}
+                value={String(timeRange)}
                 label="时间范围"
                 onChange={handleTimeRangeChange}
               >
                 {timeRangeOptions.map(option => (
-                  <MenuItem key={option.value} value={option.value}>
+                  <MenuItem key={option.value} value={String(option.value)}>
                     {option.label}
                   </MenuItem>
                 ))}

@@ -104,7 +104,7 @@ const RehabPlanDetail: React.FC = () => {
     setDeleteDialogOpen(false);
   };
   
-  const handleToggleExerciseCompletion = (exerciseId: string | undefined, completed: boolean) => {
+  const handleToggleExerciseCompletion = (exerciseId: string | undefined, completed?: boolean) => {
     // 确保计划ID和练习ID都有效
     if (id && exerciseId) {
       dispatch(updateExerciseCompletion({ 
@@ -332,8 +332,8 @@ const RehabPlanDetail: React.FC = () => {
                         '&:last-child': { pb: 2 } 
                       }}>
                         <Checkbox
-                          checked={exercise.completed}
-                          onChange={() => handleToggleExerciseCompletion(exercise.id || exercise._id, exercise.completed)}
+                          checked={!!exercise.completed}
+                          onChange={() => handleToggleExerciseCompletion(exercise.id || exercise._id, !!exercise.completed)}
                           sx={{ mt: -0.5, mr: 1 }}
                         />
                         <Box sx={{ flexGrow: 1 }}>
@@ -349,10 +349,10 @@ const RehabPlanDetail: React.FC = () => {
                           </Typography>
                           
                           <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
-                            {exercise.bodyPart && (
-                              <Chip 
+                            {exercise.body_part && (
+                              <Chip
                                 key={`bodypart-${exercise.id}`}
-                                label={exercise.bodyPart} 
+                                label={exercise.body_part}
                                 size="small" 
                                 variant="outlined"
                               />

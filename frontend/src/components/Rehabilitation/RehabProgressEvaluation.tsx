@@ -104,10 +104,13 @@ const RehabProgressEvaluation: React.FC<RehabProgressEvaluationProps> = ({ plan,
   // 计算训练频率 (每周平均次数)
   const calculateTrainingFrequency = (plan: RehabPlan): number => {
     if (!plan.exercises || plan.exercises.length === 0) return 0;
-    
+
     try {
-      const startDate = parseISO(plan.startDate);
-      const endDate = plan.endDate ? parseISO(plan.endDate) : new Date();
+      const startDateStr = plan.startDate || plan.start_date;
+      const endDateStr = plan.endDate || plan.end_date;
+      if (!startDateStr) return 0;
+      const startDate = parseISO(startDateStr);
+      const endDate = endDateStr ? parseISO(endDateStr) : new Date();
       const totalDays = differenceInDays(endDate, startDate) + 1;
       const totalWeeks = Math.max(1, Math.ceil(totalDays / 7));
       return Math.round((plan.exercises.length / totalWeeks) * 10) / 10; // 保留一位小数
@@ -121,9 +124,10 @@ const RehabProgressEvaluation: React.FC<RehabProgressEvaluationProps> = ({ plan,
   const generateWeeklyProgress = (plan: RehabPlan): WeeklyProgress[] => {
     // 在实际应用中，这些数据应该从后端API获取
     const weeks = [];
-    let startDate;
+    let startDate: Date;
     try {
-      startDate = parseISO(plan.startDate);
+      const startDateStr = plan.startDate || plan.start_date;
+      startDate = startDateStr ? parseISO(startDateStr) : new Date();
     } catch (e) {
       console.error("Invalid date format:", e);
       startDate = new Date();
@@ -160,7 +164,8 @@ const RehabProgressEvaluation: React.FC<RehabProgressEvaluationProps> = ({ plan,
   };
 
   // 格式化日期
-  const formatDate = (dateString: string): string => {
+  const formatDate = (dateString?: string): string => {
+    if (!dateString) return '';
     try {
       return format(parseISO(dateString), 'yyyy年MM月dd日', { locale: zhCN });
     } catch (e) {

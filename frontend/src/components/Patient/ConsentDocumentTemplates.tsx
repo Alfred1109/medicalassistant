@@ -4,7 +4,8 @@ import {
   ListItemText, Button, TextField, Dialog, DialogActions, 
   DialogContent, DialogTitle, FormControl, InputLabel, 
   Select, MenuItem, FormHelperText, Grid, Card, CardContent,
-  CardActions, Divider, Chip, IconButton, Tooltip
+  CardActions, Divider, Chip, IconButton, Tooltip,
+  SelectChangeEvent,
 } from '@mui/material';
 import ArticleIcon from '@mui/icons-material/Article';
 import MedicalServicesIcon from '@mui/icons-material/MedicalServices';
@@ -77,7 +78,7 @@ const ConsentDocumentTemplates: React.FC<ConsentDocumentTemplatesProps> = ({
   };
   
   // 处理类别过滤变更
-  const handleCategoryChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleCategoryChange = (event: SelectChangeEvent<string>) => {
     setCategoryFilter(event.target.value as string);
   };
   
@@ -151,7 +152,7 @@ const ConsentDocumentTemplates: React.FC<ConsentDocumentTemplatesProps> = ({
   };
   
   // 处理下拉选择变更
-  const handleSelectChange = (event: React.ChangeEvent<{ name?: string; value: unknown }>) => {
+  const handleSelectChange = (event: SelectChangeEvent<string>) => {
     const name = event.target.name as string;
     const value = event.target.value as string;
     

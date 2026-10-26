@@ -77,8 +77,7 @@ export const persistor = persistStore(store);
 // 启用RTK Query的监听器，支持自动重新获取等功能
 setupListeners(store.dispatch);
 
-// 导出类型
-export type RootState = ReturnType<typeof store.getState>;
-export type AppDispatch = typeof store.dispatch;
+// 导出类型(定义在 types.ts,避免 slices <-> store/index.ts 的循环依赖)
+export type { RootState, AppDispatch } from './types';
 
 export default store; 

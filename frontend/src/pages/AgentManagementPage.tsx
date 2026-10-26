@@ -65,7 +65,7 @@ const TabPanel = (props: TabPanelProps) => {
 const AgentManagementPage: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
   const navigate = useNavigate();
-  const { agents, loading, error } = useSelector((state: RootState) => state.agent);
+  const { agents, loading, error } = useSelector((state: RootState) => state.agents);
   const { user } = useSelector((state: RootState) => state.auth);
 
   const [openCreateDialog, setOpenCreateDialog] = useState(false);
@@ -233,7 +233,7 @@ const AgentManagementPage: React.FC = () => {
                   </Box>
 
                   <Typography variant="body2" color="text.secondary" gutterBottom>
-                    Created: {formatDate(agent.createdAt)}
+                    Created: {formatDate(agent.created_at)}
                   </Typography>
 
                   <Typography variant="body1" paragraph sx={{ my: 2 }}>
@@ -339,7 +339,8 @@ const AgentManagementPage: React.FC = () => {
         </DialogTitle>
         <DialogContent dividers>
           <AgentForm
-            agent={selectedAgent}
+            initialValues={selectedAgent ?? undefined}
+            mode={selectedAgent ? 'edit' : 'create'}
             onSuccess={handleCloseCreateDialog}
           />
         </DialogContent>
@@ -370,7 +371,6 @@ const AgentManagementPage: React.FC = () => {
           {selectedAgent && (
             <AgentChat
               agentId={selectedAgent._id}
-              agentName={selectedAgent.name}
             />
           )}
         </DialogContent>

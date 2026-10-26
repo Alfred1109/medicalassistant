@@ -71,7 +71,15 @@ const dataTypeIcons: { [key: string]: React.ReactNode } = {
 };
 
 // 健康数据类型颜色映射
-const dataTypeColors: { [key: string]: 'primary' | 'secondary' | 'success' | 'warning' | 'info' | 'error' | 'default' } = {
+type DataTypeColor = 'default' | 'primary' | 'secondary' | 'success' | 'warning' | 'info' | 'error';
+// TimelineDot 支持的颜色（不含 Chip 专用的 'default'）
+type TimelineDotColor = 'primary' | 'secondary' | 'success' | 'warning' | 'info' | 'error' | 'grey';
+
+// 将 Chip 颜色转换为 TimelineDot 可用的颜色
+const toTimelineDotColor = (color: DataTypeColor): TimelineDotColor =>
+  color === 'default' ? 'grey' : color;
+
+const dataTypeColors: { [key: string]: DataTypeColor } = {
   blood_pressure: 'primary',
   heart_rate: 'secondary',
   body_temperature: 'warning',
@@ -193,7 +201,7 @@ const HealthDataTimeline: React.FC<HealthDataTimelineProps> = ({
   };
   
   // 根据数据类型获取颜色
-  const getColorForDataType = (type: string) => {
+  const getColorForDataType = (type: string): DataTypeColor => {
     return dataTypeColors[type] || dataTypeColors.default;
   };
   
@@ -438,7 +446,7 @@ const HealthDataTimeline: React.FC<HealthDataTimelineProps> = ({
         {formatDate(item.timestamp)}
       </TimelineOppositeContent>
       <TimelineSeparator>
-        <TimelineDot color={getColorForDataType(item.data_type)}>
+        <TimelineDot color={toTimelineDotColor(getColorForDataType(item.data_type))}>
           {getIconForDataType(item.data_type)}
         </TimelineDot>
         {index < totalItems - 1 && <TimelineConnector />}

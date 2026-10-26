@@ -348,7 +348,7 @@ function formatDataForChart(
   comparisonMode: boolean
 ): any[] {
   const historyData = data.history.aggregated;
-  const chartData = [...historyData];
+  const chartData: any[] = [...historyData];
   
   // 获取最后一个历史数据点的日期
   const lastDate = new Date(historyData[historyData.length - 1].date);

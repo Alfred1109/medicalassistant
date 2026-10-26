@@ -28,6 +28,7 @@ import {
   Paper,
 } from '@mui/material';
 import { alpha } from '@mui/material/styles';
+import { CSSObject } from '@mui/system';
 import {
   Menu as MenuIcon,
   ChevronLeft as ChevronLeftIcon,
@@ -55,7 +56,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 
 const drawerWidth = 260;
 
-const openedMixin = (theme: Theme) => ({
+const openedMixin = (theme: Theme): CSSObject => ({
   width: drawerWidth,
   transition: theme.transitions.create('width', {
     easing: theme.transitions.easing.sharp,
@@ -64,7 +65,7 @@ const openedMixin = (theme: Theme) => ({
   overflowX: 'hidden',
 });
 
-const closedMixin = (theme: Theme) => ({
+const closedMixin = (theme: Theme): CSSObject => ({
   transition: theme.transitions.create('width', {
     easing: theme.transitions.easing.sharp,
     duration: theme.transitions.duration.leavingScreen,
@@ -488,13 +489,13 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ children }) => {
           
           {/* 用户角色标识 */}
           <Chip
-            label={user?.role === 'doctor' ? '医生' : 
-                  user?.role === 'healthManager' ? '健康管理师' : 
-                  user?.role === 'patient' ? '患者' : 
+            label={user?.role === 'doctor' ? '医生' :
+                  user?.role === 'health_manager' ? '健康管理师' :
+                  user?.role === 'patient' ? '患者' :
                   user?.role === 'admin' ? '管理员' : '未知角色'}
-            color={user?.role === 'doctor' ? 'primary' : 
-                  user?.role === 'healthManager' ? 'secondary' : 
-                  user?.role === 'patient' ? 'info' : 
+            color={user?.role === 'doctor' ? 'primary' :
+                  user?.role === 'health_manager' ? 'secondary' :
+                  user?.role === 'patient' ? 'info' :
                   user?.role === 'admin' ? 'warning' : 'default'}
             size="small"
             sx={{ mr: 2 }}

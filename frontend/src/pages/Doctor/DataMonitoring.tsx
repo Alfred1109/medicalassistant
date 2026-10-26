@@ -18,6 +18,7 @@ import {
   Chip,
   Alert,
   CircularProgress,
+  SelectChangeEvent,
 } from '@mui/material';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -273,12 +274,12 @@ const DataMonitoring: React.FC = () => {
   };
 
   // 处理患者选择变更
-  const handlePatientChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handlePatientChange = (event: SelectChangeEvent<string>) => {
     setSelectedPatient(event.target.value as string);
   };
 
   // 获取状态图标和颜色
-  const getStatusIcon = (status: string) => {
+  const getStatusIcon = (status: string): React.ReactElement | undefined => {
     switch(status) {
       case 'normal':
         return <CheckCircleIcon fontSize="small" color="success" />;
@@ -287,7 +288,7 @@ const DataMonitoring: React.FC = () => {
       case 'alert':
         return <ErrorIcon fontSize="small" color="error" />;
       default:
-        return null;
+        return undefined;
     }
   };
   

@@ -17,6 +17,7 @@ import {
   Snackbar,
   Alert,
   Tooltip,
+  SelectChangeEvent,
 } from '@mui/material';
 import { 
   ArrowBack as ArrowBackIcon, 
@@ -26,11 +27,12 @@ import {
 import axios from 'axios';
 
 // 导入store类型和action
-import { RootState } from '../../store';
+import { RootState, AppDispatch } from '../../store';
 import { fetchAgentById, createAgent, updateAgent } from '../../store/slices/agentSlice';
+import { API_ORIGIN } from '../../config/constants';
 
-// 使用环境变量获取API基础URL
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5502';
+// API 根地址(不含 /api),由 nginx 反向代理转发
+const BASE_URL = API_ORIGIN;
 
 // 助手类型选项
 const AGENT_TYPES = [
@@ -50,7 +52,7 @@ const MODEL_OPTIONS = [
 
 const AgentForm = () => {
   const navigate = useNavigate();
-  const dispatch = useDispatch();
+  const dispatch = useDispatch<AppDispatch>();
   const { id } = useParams<{ id: string }>();
   
   const isEditMode = !!id;
@@ -101,7 +103,7 @@ const AgentForm = () => {
     }
   }, [isEditMode, selectedAgent]);
   
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement> | SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     setFormData(prev => ({
       ...prev,

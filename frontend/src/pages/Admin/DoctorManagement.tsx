@@ -25,7 +25,8 @@ import {
   Tabs,
   Tab,
   Stack,
-  CircularProgress
+  CircularProgress,
+  SelectChangeEvent,
 } from '@mui/material';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -237,11 +238,11 @@ const DoctorManagement: React.FC = () => {
     handleCloseDialog();
   };
 
-  const handleFilterDepartmentChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFilterDepartmentChange = (event: SelectChangeEvent<string>) => {
     setFilterDepartment(event.target.value);
   };
 
-  const handleFilterTitleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFilterTitleChange = (event: SelectChangeEvent<string>) => {
     setFilterTitle(event.target.value);
   };
 
@@ -737,7 +738,9 @@ const DoctorManagement: React.FC = () => {
             color="primary"
             onClick={() => {
               handleCloseDialog();
-              handleEditDoctor(selectedDoctor);
+              if (selectedDoctor) {
+                handleEditDoctor(selectedDoctor);
+              }
             }}
           >
             编辑信息

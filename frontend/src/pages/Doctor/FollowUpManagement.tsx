@@ -81,6 +81,13 @@ const mockFollowUps = [
   }
 ];
 
+// 随访筛选条件
+interface FollowUpFilters {
+  status?: string;
+  follow_up_type?: string;
+  patient_name?: string;
+}
+
 const FollowUpManagement: React.FC = () => {
   const navigate = useNavigate();
   
@@ -91,7 +98,7 @@ const FollowUpManagement: React.FC = () => {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [totalCount, setTotalCount] = useState(0);
-  const [filters, setFilters] = useState({});
+  const [filters, setFilters] = useState<FollowUpFilters>({});
   const [showForm, setShowForm] = useState(false);
   const [currentFollowUp, setCurrentFollowUp] = useState<any>(null);
   const [formMode, setFormMode] = useState<'create' | 'edit'>('create');
@@ -129,8 +136,9 @@ const FollowUpManagement: React.FC = () => {
       
       // 按患者名称过滤
       if (filters.patient_name) {
-        filteredData = filteredData.filter(item => 
-          item.patient_name.toLowerCase().includes(filters.patient_name.toLowerCase())
+        const searchName = filters.patient_name.toLowerCase();
+        filteredData = filteredData.filter(item =>
+          item.patient_name.toLowerCase().includes(searchName)
         );
       }
       
@@ -370,7 +378,6 @@ const FollowUpManagement: React.FC = () => {
           followUp={currentFollowUp}
           onSave={handleFormSubmit}
           onCancel={() => setShowForm(false)}
-          mode={formMode}
           loading={loading}
         />
       ) : (

@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios';
+import axios, { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse, AxiosError } from 'axios';
 import { API_BASE_URL, STORAGE_KEYS } from '../config/constants';
 import { 
   ApiResponse, 
@@ -48,7 +48,7 @@ const api: AxiosInstance = axios.create({
 
 // 请求拦截器
 api.interceptors.request.use(
-  async (config: AxiosRequestConfig) => {
+  async (config: InternalAxiosRequestConfig) => {
     // 从localStorage获取token - 每次请求时重新获取，确保使用最新token
     const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
     const tokenExpiry = localStorage.getItem(STORAGE_KEYS.TOKEN_EXPIRY);
@@ -113,7 +113,7 @@ api.interceptors.request.use(
         }
       } else {
         // 如果正在刷新中，将请求加入队列
-        return new Promise((resolve, reject) => {
+        return new Promise<InternalAxiosRequestConfig>((resolve, reject) => {
           waitingQueue.push({
             onSuccess: (newToken: string) => {
               if (config.headers) {
@@ -251,21 +251,51 @@ export const apiService = {
   
   // 健康记录接口
   healthRecord: {
-    getRecords: (patientId: string): Promise<AxiosResponse<any[]>> => 
+    getRecords: (patientId: string): Promise<AxiosResponse<any[]>> =>
       api.get(`/health-records`, { params: { patient_id: patientId } }),
-    
-    getRecordById: (recordId: string): Promise<AxiosResponse<any>> => 
+
+    getRecordById: (recordId: string): Promise<AxiosResponse<any>> =>
       api.get(`/health-records/${recordId}`),
-    
-    createRecord: (recordData: any): Promise<AxiosResponse<any>> => 
+
+    createRecord: (recordData: any): Promise<AxiosResponse<any>> =>
       api.post('/health-records', recordData),
-    
-    updateRecord: (recordId: string, recordData: any): Promise<AxiosResponse<any>> => 
+
+    updateRecord: (recordId: string, recordData: any): Promise<AxiosResponse<any>> =>
       api.put(`/health-records/${recordId}`, recordData),
-    
-    deleteRecord: (recordId: string): Promise<AxiosResponse<any>> => 
+
+    deleteRecord: (recordId: string): Promise<AxiosResponse<any>> =>
       api.delete(`/health-records/${recordId}`),
   },
+
+  // 健康档案(健康管理师页面直接调用这些方法)
+  getHealthRecords: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<any[]>> =>
+    api.get('/health-records', { params: { patient_id: patientId, ...(params || {}) } }),
+
+  getHealthRecordStats: (patientId: string): Promise<AxiosResponse<any>> =>
+    api.get(`/health-records/stats/${patientId}`),
+
+  createHealthRecord: (recordData: any): Promise<AxiosResponse<any>> =>
+    api.post('/health-records', recordData),
+
+  updateHealthRecord: (recordId: string, recordData: any): Promise<AxiosResponse<any>> =>
+    api.put(`/health-records/${recordId}`, recordData),
+
+  deleteHealthRecord: (recordId: string): Promise<AxiosResponse<any>> =>
+    api.delete(`/health-records/${recordId}`),
+
+  // 随访记录
+  getFollowUps: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<any[]>> =>
+    api.get('/health-records/followups', { params: { patient_id: patientId, ...(params || {}) } }),
+
+  createFollowUp: (followUpData: any): Promise<AxiosResponse<any>> =>
+    api.post('/health-records/followups', followUpData),
+
+  updateFollowUp: (followUpId: string, followUpData: any): Promise<AxiosResponse<any>> =>
+    api.put(`/health-records/followups/${followUpId}`, followUpData),
+
+  // 健康数据(体征、化验结果等)
+  getHealthData: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<any[]>> =>
+    api.get('/health-records/health-data', { params: { patient_id: patientId, ...(params || {}) } }),
   
   // AI助手接口
   agent: {

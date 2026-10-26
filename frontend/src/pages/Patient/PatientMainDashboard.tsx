@@ -38,6 +38,7 @@ const NoteIcon = () => <span>📝</span>;
 const ChatIcon = () => <span>💬</span>;
 
 import { Link } from 'react-router-dom';
+import { API_BASE_URL } from '../../config/constants';
 
 // 模拟健康指标数据
 const healthMetrics = [
@@ -110,7 +111,7 @@ const PatientMainDashboard: React.FC = () => {
         }
         
         // 从API获取通知数据
-        const response = await axios.get('http://localhost:5502/api/notifications?limit=5', {
+        const response = await axios.get(`${API_BASE_URL}/notifications?limit=5`, {
           headers: {
             'Authorization': `Bearer ${token}`
           }

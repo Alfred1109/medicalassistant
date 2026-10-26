@@ -17,6 +17,7 @@ import {
   Select,
   MenuItem,
   Divider,
+  SelectChangeEvent,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import EditIcon from '@mui/icons-material/Edit';
@@ -130,7 +131,7 @@ const TagManagement: React.FC = () => {
     }
   };
 
-  const handleCategoryChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleCategoryChange = (event: SelectChangeEvent<string>) => {
     setCurrentCategory(event.target.value as string);
   };
 
@@ -138,11 +139,11 @@ const TagManagement: React.FC = () => {
     setNewTag({...newTag, name: event.target.value});
   };
 
-  const handleTagCategoryChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleTagCategoryChange = (event: SelectChangeEvent<string>) => {
     setNewTag({...newTag, category: event.target.value as string});
   };
 
-  const handleTagColorChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleTagColorChange = (event: SelectChangeEvent<string>) => {
     setNewTag({...newTag, color: event.target.value as string});
   };
 

@@ -17,6 +17,7 @@ from app.core.exceptions import AppBaseException
 from app.api.routers import agent_router, rehabilitation_router, user_router
 # 导入新增的路由模块
 from app.api.routers import doctor_router, health_manager_router, patient_router, system_admin_router, health_alert_router, notification_router
+from app.api.routers import health_record_router
 # 导入数据库连接函数
 from app.db.mongodb import connect_to_mongodb, close_mongodb_connection, DatabaseConnectionError
 
@@ -206,6 +207,8 @@ app.include_router(doctor_router, prefix="/api/doctors", tags=["doctors"])
 app.include_router(health_manager_router, prefix="/api/health-managers", tags=["health-managers"])
 app.include_router(patient_router, prefix="/api/patients", tags=["patients"])
 app.include_router(system_admin_router, prefix="/api/admin", tags=["admin"])
+# 健康档案 / 随访记录 / 健康数据(路由自带 /health-records 前缀)
+app.include_router(health_record_router, prefix="/api")
 # 健康预警路由
 app.include_router(health_alert_router, tags=["health-alerts"])
 # 添加通知路由

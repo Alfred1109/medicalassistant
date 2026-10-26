@@ -37,7 +37,7 @@ const PatientManagement: React.FC = () => {
     loading,
     error,
     execute: fetchPatients 
-  } = useApi<Patient[]>(apiService.doctor.getPatients, true);
+  } = useApi<Patient[], []>(apiService.doctor.getPatients, true);
   
   // 搜索处理
   useEffect(() => {

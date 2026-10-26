@@ -26,6 +26,7 @@ import {
   MenuItem,
   LinearProgress,
   Alert,
+  SelectChangeEvent,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -37,6 +38,7 @@ import {
 } from '@mui/icons-material';
 import { AppDispatch, RootState } from '../store';
 import { fetchRehabPlans, createRehabPlan, updateRehabPlan, deleteRehabPlan } from '../store/slices/rehabSlice';
+import { RehabPlan } from '../types/rehab';
 import ExerciseRecommendation from '../components/Rehabilitation/ExerciseRecommendation';
 
 const RehabPlanPage: React.FC = () => {
@@ -93,7 +95,7 @@ const RehabPlanPage: React.FC = () => {
     setOpenDialog(false);
   };
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) => {
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement> | SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     setFormData({
       ...formData,
@@ -103,13 +105,23 @@ const RehabPlanPage: React.FC = () => {
 
   const handleSubmit = async () => {
     try {
+      // 转换为后端使用的字段名(snake_case)
+      const planData: Partial<RehabPlan> = {
+        name: formData.name,
+        description: formData.description,
+        duration: Number(formData.duration),
+        frequency: String(formData.frequency),
+        targetBodyPart: formData.targetBodyPart,
+        condition: formData.condition,
+        goal: formData.goal,
+      };
       if (currentPlan) {
         await dispatch(updateRehabPlan({
-          id: currentPlan._id,
-          planData: formData,
+          id: currentPlan._id || currentPlan.id,
+          planData,
         }));
       } else {
-        await dispatch(createRehabPlan(formData));
+        await dispatch(createRehabPlan(planData));
       }
       handleCloseDialog();
     } catch (error) {
@@ -138,7 +150,8 @@ const RehabPlanPage: React.FC = () => {
     return (completedExercises / plan.exercises.length) * 100;
   };
 
-  const formatDate = (dateString: string) => {
+  const formatDate = (dateString?: string) => {
+    if (!dateString) return '';
     return new Date(dateString).toLocaleDateString();
   };
 
@@ -302,7 +315,7 @@ const RehabPlanPage: React.FC = () => {
                 <Button
                   size="small"
                   startIcon={<VisibilityIcon />}
-                  onClick={() => handleViewPlanDetail(plan._id)}
+                  onClick={() => handleViewPlanDetail(plan._id || plan.id || '')}
                 >
                   View Details
                 </Button>
@@ -316,7 +329,7 @@ const RehabPlanPage: React.FC = () => {
                   </IconButton>
                   <IconButton 
                     size="small" 
-                    onClick={() => handleDeletePlan(plan._id)}
+                    onClick={() => handleDeletePlan(plan._id || plan.id || '')}
                     color="error"
                   >
                     <DeleteIcon fontSize="small" />

@@ -388,7 +388,7 @@ start_backend() {
     
     # 启动服务
     echo -e "${YELLOW}启动FastAPI应用(端口5502)...${NC}"
-    python -m uvicorn app.main:app --host 0.0.0.0 --port 5502 --reload > "$BACKEND_LOG" 2>&1 &
+    python -m uvicorn app.main:app --host 127.0.0.1 --port 5502 --reload > "$BACKEND_LOG" 2>&1 &
     
     # 保存PID
     BACKEND_PID=$!

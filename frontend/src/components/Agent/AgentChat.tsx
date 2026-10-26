@@ -36,25 +36,27 @@ interface Message {
 
 const AgentChat: React.FC<AgentChatProps> = ({ agentId, patientId, contextData, onRecommendation }) => {
   const dispatch = useDispatch<AppDispatch>();
-  const { currentAgent, queryResponse, isLoading, error } = useSelector((state: RootState) => state.agent);
+  const { selectedAgent, queryResponse, queryMetadata, loading, error } = useSelector(
+    (state: RootState) => state.agents
+  );
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  
+
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
 
   // Add welcome message when agent is loaded
   useEffect(() => {
-    if (currentAgent && messages.length === 0) {
+    if (selectedAgent && messages.length === 0) {
       setMessages([
         {
           id: '0',
           sender: 'agent',
-          content: `Hello, I'm ${currentAgent.name}. How can I assist with your rehabilitation today?`,
+          content: `Hello, I'm ${selectedAgent.name}. How can I assist with your rehabilitation today?`,
           timestamp: new Date().toISOString(),
         },
       ]);
     }
-  }, [currentAgent, messages.length]);
+  }, [selectedAgent, messages.length]);
 
   // Handle response from agent
   useEffect(() => {
@@ -62,21 +64,21 @@ const AgentChat: React.FC<AgentChatProps> = ({ agentId, patientId, contextData, 
       const newMessage: Message = {
         id: Date.now().toString(),
         sender: 'agent',
-        content: queryResponse.response,
-        timestamp: queryResponse.timestamp,
+        content: queryResponse,
+        timestamp: new Date().toISOString(),
       };
-      
+
       setMessages((prev) => [...prev, newMessage]);
-      
+
       // Process any recommendations
-      if (onRecommendation && queryResponse.metadata?.recommendations) {
-        onRecommendation(queryResponse.metadata.recommendations);
+      if (onRecommendation && queryMetadata?.recommendations) {
+        onRecommendation(queryMetadata.recommendations);
       }
-      
+
       // Clear the query response
       dispatch(clearQueryResponse());
     }
-  }, [queryResponse, dispatch, onRecommendation]);
+  }, [queryResponse, queryMetadata, dispatch, onRecommendation]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -96,18 +98,18 @@ const AgentChat: React.FC<AgentChatProps> = ({ agentId, patientId, contextData, 
     };
     
     setMessages((prev) => [...prev, userMessage]);
-    
-    // Prepare query parameters with context
-    const queryParams = {
-      query: input,
-      parameters: {
-        ...(patientId && { patient_id: patientId }),
-        ...(contextData && contextData),
-      },
-    };
-    
+
+    // 附带患者 / 场景上下文,后端仅接收 query 字段
+    const contextParts = [
+      patientId ? `patient_id: ${patientId}` : '',
+      contextData ? JSON.stringify(contextData) : '',
+    ].filter(Boolean);
+    const queryText = contextParts.length
+      ? `${input}\n\n[上下文] ${contextParts.join(' / ')}`
+      : input;
+
     // Dispatch query to agent
-    dispatch(queryAgent({ agentId, query: queryParams }));
+    dispatch(queryAgent({ id: agentId, query: queryText }));
     
     // Clear input
     setInput('');
@@ -116,10 +118,10 @@ const AgentChat: React.FC<AgentChatProps> = ({ agentId, patientId, contextData, 
   return (
     <Paper sx={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', p: 2 }}>
       <Typography variant="h6" gutterBottom>
-        {currentAgent?.name || 'Agent Chat'}
+        {selectedAgent?.name || 'Agent Chat'}
       </Typography>
       <Typography variant="body2" color="text.secondary" gutterBottom>
-        {currentAgent?.description || 'Interact with the rehabilitation assistant'}
+        {selectedAgent?.description || 'Interact with the rehabilitation assistant'}
       </Typography>
       
       <Divider sx={{ mb: 2 }} />
@@ -173,7 +175,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ agentId, patientId, contextData, 
           placeholder="Type your message..."
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          disabled={isLoading}
+          disabled={loading}
           size="small"
           sx={{ mr: 1 }}
         />
@@ -181,10 +183,10 @@ const AgentChat: React.FC<AgentChatProps> = ({ agentId, patientId, contextData, 
           type="submit"
           variant="contained"
           color="primary"
-          disabled={isLoading || !input.trim()}
-          endIcon={isLoading ? <CircularProgress size={20} /> : <SendIcon />}
+          disabled={loading || !input.trim()}
+          endIcon={loading ? <CircularProgress size={20} /> : <SendIcon />}
         >
-          {isLoading ? 'Sending...' : 'Send'}
+          {loading ? 'Sending...' : 'Send'}
         </Button>
       </Box>
       

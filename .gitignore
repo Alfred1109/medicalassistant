@@ -52,3 +52,5 @@ data/
 
 # MongoDB files
 mongodb-* 
+# 手工测试遗留(含真实 JWT),不再入库
+token.json

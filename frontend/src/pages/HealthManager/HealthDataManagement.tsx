@@ -21,7 +21,8 @@ import {
   TextField,
   Stack,
   Alert,
-  Snackbar
+  Snackbar,
+  SelectChangeEvent,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import VisibilityIcon from '@mui/icons-material/Visibility';
@@ -653,7 +654,7 @@ const HealthDataManagement = () => {
                   <Select
                     value={filters.data_type || ''}
                     label="数据类型"
-                    onChange={(e: React.ChangeEvent<{ value: unknown }>) => setFilters({ ...filters, data_type: e.target.value as string })}
+                    onChange={(e: SelectChangeEvent<string>) => setFilters({ ...filters, data_type: e.target.value as string })}
                   >
                     <MenuItem value="">全部类型</MenuItem>
                     {Object.entries(dataTypeMap).map(([value, label]) => (

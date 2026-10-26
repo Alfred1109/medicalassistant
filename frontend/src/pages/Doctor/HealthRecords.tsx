@@ -82,7 +82,7 @@ const HealthRecords: React.FC = () => {
     loading, 
     error,
     execute: fetchHealthRecord
-  } = useApi<PatientHealthRecord>(
+  } = useApi<PatientHealthRecord, [string]>(
     () => apiService.doctor.getPatientHealthRecord(patientId || ''),
     true
   );
@@ -106,7 +106,7 @@ const HealthRecords: React.FC = () => {
 
   // 处理重试请求
   const handleRetry = () => {
-    fetchHealthRecord();
+    fetchHealthRecord(patientId || '');
   };
 
   // 使用实际的健康记录或使用空记录（而不是模拟数据）

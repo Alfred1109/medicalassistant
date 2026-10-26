@@ -81,7 +81,7 @@ const StatusChip: React.FC<StatusChipProps> = ({
       label={label}
       color={isMuiColor ? (color as ChipColor) : undefined}
       size={small ? 'small' : 'medium'}
-      icon={icon}
+      icon={icon as React.ReactElement | undefined}
       variant={variant}
       sx={{
         height: small ? 20 : 24,

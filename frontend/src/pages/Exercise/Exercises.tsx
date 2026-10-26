@@ -22,6 +22,7 @@ import {
   CircularProgress,
   Divider,
   Alert,
+  SelectChangeEvent,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -92,12 +93,12 @@ const Exercises: React.FC = () => {
   };
   
   // 处理身体部位过滤变化
-  const handleBodyPartChange = (e: React.ChangeEvent<{ value: unknown }>) => {
+  const handleBodyPartChange = (e: SelectChangeEvent<string>) => {
     setBodyPartFilter(e.target.value as string);
   };
   
   // 处理难度级别过滤变化
-  const handleDifficultyChange = (e: React.ChangeEvent<{ value: unknown }>) => {
+  const handleDifficultyChange = (e: SelectChangeEvent<string>) => {
     setDifficultyFilter(e.target.value as string);
   };
   

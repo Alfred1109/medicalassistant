@@ -339,7 +339,34 @@ class RehabilitationService:
         except Exception:
             return None
         return None
-        
+
+    async def update_exercise(
+        self, exercise_id: str, exercise_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Update an exercise. Only the fields present in exercise_data are changed."""
+        try:
+            updates = {k: v for k, v in exercise_data.items() if v is not None}
+            if not updates:
+                return await self.get_exercise(exercise_id)
+
+            updates["updated_at"] = datetime.utcnow()
+            result = await self.exercises_collection.update_one(
+                {"_id": ObjectId(exercise_id)}, {"$set": updates}
+            )
+            if result.matched_count == 0:
+                return None
+            return await self.get_exercise(exercise_id)
+        except Exception:
+            return None
+
+    async def delete_exercise(self, exercise_id: str) -> bool:
+        """Delete an exercise by ID"""
+        try:
+            result = await self.exercises_collection.delete_one({"_id": ObjectId(exercise_id)})
+            return result.deleted_count > 0
+        except Exception:
+            return False
+
     async def get_recommendations(
         self, patient_id: str, condition: Optional[str] = None, 
         goal: Optional[str] = None, agent_id: Optional[str] = None

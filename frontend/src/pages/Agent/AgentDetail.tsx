@@ -28,13 +28,13 @@ import {
 import MarkdownRenderer from '../../components/Common/MarkdownRenderer';
 
 // 导入store类型
-import { RootState } from '../../store';
+import { RootState, AppDispatch } from '../../store';
 import { fetchAgentById, deleteAgent, queryAgent } from '../../store/slices/agentSlice';
 
 const AgentDetail = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const dispatch = useDispatch();
+  const dispatch = useDispatch<AppDispatch>();
   
   const { selectedAgent, loading, error, queryResponse } = useSelector((state: RootState) => state.agents);
   
@@ -160,11 +160,11 @@ const AgentDetail = () => {
             </Typography>
             
             <Typography variant="body1" gutterBottom>
-              <strong>创建时间：</strong> {new Date(selectedAgent.createdAt).toLocaleString()}
+              <strong>创建时间：</strong> {new Date(selectedAgent.created_at).toLocaleString()}
             </Typography>
             
             <Typography variant="body1" gutterBottom>
-              <strong>更新时间：</strong> {new Date(selectedAgent.updatedAt).toLocaleString()}
+              <strong>更新时间：</strong> {new Date(selectedAgent.updated_at).toLocaleString()}
             </Typography>
           </Paper>
           

@@ -13,7 +13,8 @@ import {
   Paper,
   CircularProgress,
   FormHelperText,
-  Divider
+  Divider,
+  SelectChangeEvent,
 } from '@mui/material';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
@@ -50,6 +51,18 @@ interface HealthRecordFormProps {
   loading?: boolean;
 }
 
+// 表单数据
+interface HealthRecordFormData {
+  title: string;
+  record_type: string;
+  content: Record<string, any>;
+  visibility: string;
+  tags: string[];
+  created_by: string;
+  metadata: Record<string, any>;
+  changeDescription: string;
+}
+
 const HealthRecordForm: React.FC<HealthRecordFormProps> = ({
   record,
   patientId,
@@ -59,7 +72,7 @@ const HealthRecordForm: React.FC<HealthRecordFormProps> = ({
   loading = false
 }) => {
   // 表单状态
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<HealthRecordFormData>({
     title: '',
     record_type: 'medical_record',
     content: {},
@@ -231,7 +244,7 @@ const HealthRecordForm: React.FC<HealthRecordFormProps> = ({
   };
   
   // 处理下拉框变化
-  const handleSelectChange = (e: React.ChangeEvent<{ name?: string; value: unknown }>) => {
+  const handleSelectChange = (e: SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     if (name) {
       setFormData(prev => ({

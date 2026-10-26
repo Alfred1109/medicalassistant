@@ -68,6 +68,27 @@ const priorityColorMap: Record<NotificationPriority, string> = {
   urgent: 'error'
 };
 
+// 格式化时间
+const formatTime = (date: Date | string) => {
+  const notificationDate = typeof date === 'string' ? new Date(date) : date;
+  const now = new Date();
+  const diffMs = now.getTime() - notificationDate.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  const diffMin = Math.floor(diffSec / 60);
+  const diffHour = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHour / 24);
+
+  if (diffDay > 0) {
+    return diffDay === 1 ? '昨天' : `${diffDay}天前`;
+  } else if (diffHour > 0) {
+    return `${diffHour}小时前`;
+  } else if (diffMin > 0) {
+    return `${diffMin}分钟前`;
+  } else {
+    return '刚刚';
+  }
+};
+
 const NotificationCenter: React.FC<NotificationCenterProps> = ({
   notifications,
   loading = false,
@@ -190,27 +211,6 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
       onSettingsClick();
     }
     handleMenuClose();
-  };
-  
-  // 格式化时间
-  const formatTime = (date: Date | string) => {
-    const notificationDate = typeof date === 'string' ? new Date(date) : date;
-    const now = new Date();
-    const diffMs = now.getTime() - notificationDate.getTime();
-    const diffSec = Math.floor(diffMs / 1000);
-    const diffMin = Math.floor(diffSec / 60);
-    const diffHour = Math.floor(diffMin / 60);
-    const diffDay = Math.floor(diffHour / 24);
-    
-    if (diffDay > 0) {
-      return diffDay === 1 ? '昨天' : `${diffDay}天前`;
-    } else if (diffHour > 0) {
-      return `${diffHour}小时前`;
-    } else if (diffMin > 0) {
-      return `${diffMin}分钟前`;
-    } else {
-      return '刚刚';
-    }
   };
   
   // 通知分组

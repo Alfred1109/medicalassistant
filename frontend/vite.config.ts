@@ -8,6 +8,8 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd());
   
   return {
+    // 部署在 nginx 的路径前缀下,与 VITE_API_PREFIX 保持一致
+    base: env.VITE_API_PREFIX ? `${env.VITE_API_PREFIX}/` : '/',
     plugins: [react()],
     resolve: {
       alias: {
@@ -17,7 +19,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5501, // 前端端口
       open: false,
-      host: '0.0.0.0',
+      host: '127.0.0.1', // 只监听回环,对外统一由 nginx :80 转发
       proxy: {
         '/api': {
           target: 'http://localhost:5502',

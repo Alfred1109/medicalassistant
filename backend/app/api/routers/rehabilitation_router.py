@@ -7,6 +7,7 @@ from app.schemas.rehabilitation import (
     RehabPlanUpdate, 
     RehabPlanResponse,
     ExerciseCreate,
+    ExerciseUpdate,
     ExerciseResponse,
     AssessmentCreate,
     AssessmentUpdate,
@@ -173,6 +174,45 @@ async def get_exercise_recommendations(
 ):
     """Get personalized rehabilitation exercise recommendations"""
     return await rehab_service.get_recommendations(patient_id, condition, goal, agent_id)
+
+# 注意:下面带路径参数的路由必须声明在 /exercises/list、/exercises/recommendations 之后,
+# 否则 FastAPI 会先匹配到 "/exercises/{exercise_id}"
+@router.get("/exercises/{exercise_id}", response_model=Dict[str, Any])
+async def get_exercise(
+    exercise_id: str,
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
+):
+    """Get a single rehabilitation exercise by ID"""
+    exercise = await rehab_service.get_exercise(exercise_id)
+    if not exercise:
+        raise HTTPException(status_code=404, detail="Exercise not found")
+    return exercise
+
+
+@router.put("/exercises/{exercise_id}", response_model=Dict[str, Any])
+async def update_exercise(
+    exercise_id: str,
+    exercise_data: ExerciseUpdate,
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
+):
+    """Update a rehabilitation exercise"""
+    updated = await rehab_service.update_exercise(
+        exercise_id, exercise_data.dict(exclude_unset=True)
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Exercise not found")
+    return updated
+
+
+@router.delete("/exercises/{exercise_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_exercise(
+    exercise_id: str,
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
+):
+    """Delete a rehabilitation exercise"""
+    success = await rehab_service.delete_exercise(exercise_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Exercise not found")
 
 # 康复评估相关路由
 @router.post("/assessments", response_model=Dict[str, Any])

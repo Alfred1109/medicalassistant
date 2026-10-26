@@ -206,7 +206,7 @@ const ProfilePage: React.FC = () => {
                   mt: 1 
                 }}
               >
-                {user?.role === 'practitioner' ? 'Practitioner' : 'Patient'}
+                {user?.role === 'doctor' ? 'Practitioner' : 'Patient'}
               </Box>
               
               <Divider sx={{ my: 3 }} />

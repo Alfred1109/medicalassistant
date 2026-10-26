@@ -17,7 +17,8 @@ import {
   List,
   ListItem,
   ListItemText,
-  ListItemSecondaryAction
+  ListItemSecondaryAction,
+  SelectChangeEvent,
 } from '@mui/material';
 import { LocalizationProvider, DateTimePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
@@ -46,8 +47,8 @@ const followUpStatusOptions = [
 
 interface FollowUpFormProps {
   followUp?: any;
-  patientId: string;
-  currentUserId: string;
+  patientId?: string;
+  currentUserId?: string;
   onSave: (formData: any) => void;
   onCancel: () => void;
   loading?: boolean;
@@ -65,8 +66,8 @@ interface QuestionItem {
 
 const FollowUpForm: React.FC<FollowUpFormProps> = ({
   followUp,
-  patientId,
-  currentUserId,
+  patientId = '',
+  currentUserId = '',
   onSave,
   onCancel,
   loading = false,
@@ -145,7 +146,7 @@ const FollowUpForm: React.FC<FollowUpFormProps> = ({
   };
   
   // 处理下拉框变化
-  const handleSelectChange = (e: React.ChangeEvent<{ name?: string; value: unknown }>) => {
+  const handleSelectChange = (e: SelectChangeEvent<string>) => {
     const { name, value } = e.target;
     if (name) {
       setFormData(prev => ({

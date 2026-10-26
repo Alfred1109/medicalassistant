@@ -1,4 +1,4 @@
-。、import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -46,6 +46,8 @@ const DEFAULT_SYSTEM_PROMPTS = {
 interface AgentFormProps {
   initialValues?: Partial<Agent>;
   mode: 'create' | 'edit';
+  /** 保存成功后的回调(例如关闭弹窗) */
+  onSuccess?: () => void;
 }
 
 // Validation schema
@@ -74,10 +76,10 @@ const defaultInitialValues = {
   metadata: {},
 };
 
-const AgentForm: React.FC<AgentFormProps> = ({ initialValues, mode }) => {
+const AgentForm: React.FC<AgentFormProps> = ({ initialValues, mode, onSuccess }) => {
   const dispatch = useDispatch<AppDispatch>();
   const navigate = useNavigate();
-  const { isLoading, error } = useSelector((state: RootState) => state.agent);
+  const { loading, error } = useSelector((state: RootState) => state.agents);
   
   const formInitialValues = {
     ...defaultInitialValues,
@@ -90,12 +92,13 @@ const AgentForm: React.FC<AgentFormProps> = ({ initialValues, mode }) => {
         const result = await dispatch(createAgent(values)).unwrap();
         navigate(`/app/agents/${result._id}`);
       } else if (mode === 'edit' && initialValues?._id) {
-        await dispatch(updateAgent({ 
-          agentId: initialValues._id, 
-          agentData: values 
+        await dispatch(updateAgent({
+          id: initialValues._id,
+          agentData: values
         })).unwrap();
         navigate(`/app/agents/${initialValues._id}`);
       }
+      onSuccess?.();
     } catch (err) {
       // Error is handled by Redux
       console.error('Failed to save agent:', err);
@@ -312,17 +315,17 @@ const AgentForm: React.FC<AgentFormProps> = ({ initialValues, mode }) => {
                     <Button 
                       variant="outlined" 
                       onClick={() => navigate(-1)}
-                      disabled={isLoading}
+                      disabled={loading}
                     >
                       Cancel
                     </Button>
                     <Button 
                       type="submit" 
                       variant="contained" 
-                      disabled={isLoading}
-                      startIcon={isLoading ? <CircularProgress size={20} /> : null}
+                      disabled={loading}
+                      startIcon={loading ? <CircularProgress size={20} /> : null}
                     >
-                      {isLoading ? 'Saving...' : mode === 'create' ? 'Create Agent' : 'Update Agent'}
+                      {loading ? 'Saving...' : mode === 'create' ? 'Create Agent' : 'Update Agent'}
                     </Button>
                   </Box>
                   

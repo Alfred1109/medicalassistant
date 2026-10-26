@@ -11,6 +11,10 @@ import { ChartType } from '../../types/dataAnalysis';
 // 默认颜色
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d', '#ffc658'];
 
+// recharts 的 Formatter 签名: (value, name, item, index, payload) => ReactNode
+// 这里只使用前两个参数，name 的类型与 recharts 的 NameType (string | number) 保持一致
+type TooltipFormatter = (value: any, name: string | number) => string;
+
 interface AnalyticsChartProps {
   title?: string;
   data: any[];
@@ -22,7 +26,7 @@ interface AnalyticsChartProps {
   colors?: Record<string, string>;
   nameKey?: string;
   valueKey?: string;
-  tooltipFormatter?: (value: any, name?: string) => string;
+  tooltipFormatter?: TooltipFormatter;
 }
 
 /**
@@ -61,7 +65,7 @@ const AnalyticsChart: React.FC<AnalyticsChartProps> = ({
   const actualYKeys = getYKeys();
   
   // 默认的tooltip格式化函数
-  const defaultTooltipFormatter = (value: any) => {
+  const defaultTooltipFormatter: TooltipFormatter = (value: any) => {
     if (typeof value === 'number') {
       return value.toFixed(1);
     }

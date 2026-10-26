@@ -116,7 +116,7 @@ async def delete_health_record(
     record_id: str = Path(..., description="健康档案ID"),
     current_user: User = Depends(get_current_user),
     health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(check_permission(Permission.DELETE_HEALTH_RECORD))
+    _: bool = Depends(check_permission(Permission.HEALTH_RECORD_DELETE))
 ):
     """
     删除健康档案

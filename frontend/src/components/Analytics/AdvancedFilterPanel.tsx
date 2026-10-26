@@ -395,12 +395,12 @@ const AdvancedFilterPanel: React.FC<AdvancedFilterPanelProps> = ({
           <FormControl fullWidth size="small" sx={{ mt: 1 }}>
             <InputLabel>值</InputLabel>
             <Select
-              value={condition.value === '' ? '' : Boolean(condition.value)}
-              onChange={(e) => handleUpdateCondition(condition.id, 'value', e.target.value)}
+              value={condition.value === '' ? '' : String(Boolean(condition.value))}
+              onChange={(e) => handleUpdateCondition(condition.id, 'value', e.target.value === 'true')}
               label="值"
             >
-              <MenuItem value={true}>是</MenuItem>
-              <MenuItem value={false}>否</MenuItem>
+              <MenuItem value="true">是</MenuItem>
+              <MenuItem value="false">否</MenuItem>
             </Select>
           </FormControl>
         );

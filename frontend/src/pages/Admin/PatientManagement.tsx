@@ -25,6 +25,7 @@ import {
   MenuItem,
   Tabs,
   Tab,
+  SelectChangeEvent,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
@@ -197,7 +198,7 @@ const PatientManagement: React.FC = () => {
     handleCloseDialog();
   };
 
-  const handleFilterStatusChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleFilterStatusChange = (event: SelectChangeEvent<string>) => {
     setFilterStatus(event.target.value as string);
   };
 

@@ -14,7 +14,8 @@ import {
   Tabs,
   Tab,
   Button,
-  CircularProgress
+  CircularProgress,
+  SelectChangeEvent,
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import { 
@@ -84,12 +85,12 @@ const DataVisualization: React.FC = () => {
   const [exportLoading, setExportLoading] = useState(false);
 
   // 处理类型变更
-  const handleDataTypeChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleDataTypeChange = (event: SelectChangeEvent<string>) => {
     setDataType(event.target.value as ChartDataType);
   };
 
   // 处理时间范围变更
-  const handleTimeRangeChange = (event: React.ChangeEvent<{ value: unknown }>) => {
+  const handleTimeRangeChange = (event: SelectChangeEvent<string>) => {
     setTimeRange(event.target.value as TimeRange);
   };
 

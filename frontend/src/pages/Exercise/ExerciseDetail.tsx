@@ -249,7 +249,7 @@ const ExerciseDetail: React.FC = () => {
                   身体部位
                 </Typography>
                 <Chip 
-                  label={bodyPartMap[selectedExercise.body_part] || selectedExercise.body_part}
+                  label={bodyPartMap[selectedExercise.body_part ?? ''] || selectedExercise.body_part}
                   variant="outlined"
                   size="small"
                   icon={<FitnessCenterIcon />}
@@ -261,8 +261,8 @@ const ExerciseDetail: React.FC = () => {
                   难度级别
                 </Typography>
                 <Chip 
-                  label={difficultyMap[selectedExercise.difficulty.toLowerCase()] || selectedExercise.difficulty}
-                  color={getDifficultyColor(selectedExercise.difficulty) as any}
+                  label={difficultyMap[(selectedExercise.difficulty ?? '').toLowerCase()] || selectedExercise.difficulty}
+                  color={getDifficultyColor(selectedExercise.difficulty ?? '') as any}
                   size="small"
                   sx={{ mt: 0.5 }}
                 />
@@ -303,9 +303,9 @@ const ExerciseDetail: React.FC = () => {
               执行步骤
             </Typography>
             <Divider sx={{ mb: 2 }} />
-            {selectedExercise.instructions?.length > 0 ? (
+            {(selectedExercise.instructions ?? []).length > 0 ? (
               <List>
-                {selectedExercise.instructions.map((instruction: string, index: number) => (
+                {(selectedExercise.instructions ?? []).map((instruction: string, index: number) => (
                   <ListItem key={index}>
                     <ListItemIcon sx={{ minWidth: 32 }}>
                       <Typography variant="body1" fontWeight="bold">
@@ -331,9 +331,9 @@ const ExerciseDetail: React.FC = () => {
                   康复获益
                 </Typography>
                 <Divider sx={{ mb: 2 }} />
-                {selectedExercise.benefits?.length > 0 ? (
+                {(selectedExercise.benefits ?? []).length > 0 ? (
                   <List dense>
-                    {selectedExercise.benefits.map((benefit: string, index: number) => (
+                    {(selectedExercise.benefits ?? []).map((benefit: string, index: number) => (
                       <ListItem key={index}>
                         <ListItemIcon sx={{ minWidth: 32 }}>
                           <CheckCircleIcon color="success" fontSize="small" />
@@ -356,9 +356,9 @@ const ExerciseDetail: React.FC = () => {
                   禁忌症
                 </Typography>
                 <Divider sx={{ mb: 2 }} />
-                {selectedExercise.contraindications?.length > 0 ? (
+                {(selectedExercise.contraindications ?? []).length > 0 ? (
                   <List dense>
-                    {selectedExercise.contraindications.map((contraindication: string, index: number) => (
+                    {(selectedExercise.contraindications ?? []).map((contraindication: string, index: number) => (
                       <ListItem key={index}>
                         <ListItemIcon sx={{ minWidth: 32 }}>
                           <WarningIcon color="error" fontSize="small" />

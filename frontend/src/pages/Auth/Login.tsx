@@ -143,12 +143,9 @@ const Login: React.FC = () => {
       // .unwrap() 会在成功时返回 action.payload，失败时抛出错误
       const result = await dispatch(login(formData)).unwrap(); 
       
-      // 如果登录成功 (真实登录，非模拟登录的 _handled case)
-      // 实际上，跳转现在由上面的 useEffect 处理
-      // 所以这里只需要知道操作已完成即可
-      if (result && result._handled) {
-        console.log('Login.tsx: 模拟登录流程已由thunk处理.');
-      } else if (result && result.user) {
+      // 登录成功后跳转由上面的 useEffect 处理
+      // 这里只需要知道操作已完成即可
+      if (result && result.user) {
         console.log('Login.tsx: 真实登录成功，等待useEffect跳转.', result);
       } else {
         console.log('Login.tsx: 登录操作完成，但未识别明确的成功结果用于立即跳转:', result);

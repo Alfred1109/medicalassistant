@@ -1,6 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { useRoutes } from 'react-router';
+import { BrowserRouter } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState, AppDispatch } from './store';
 import { checkAuthStatus } from './store/slices/authSlice';
@@ -8,7 +7,8 @@ import { closeSnackbar } from './store/slices/uiSlice';
 import { Box, Snackbar, Alert, CircularProgress, Typography, Paper, Container } from '@mui/material';
 
 // 导入路由配置
-import routes from './routes';
+import AppRoutes from './routes';
+import { API_PREFIX } from './config/constants';
 
 // 核心页面导入
 import IndexPage from './pages/IndexPage';
@@ -83,12 +83,6 @@ const UnderDevelopment = ({ pageName }: { pageName: string }) => (
   />
 );
 
-// 使用路由配置的组件
-const AppRoutes = () => {
-  const routeElements = useRoutes(routes);
-  return routeElements;
-};
-
 const App: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
   const { checking } = useSelector((state: RootState) => state.auth);
@@ -114,7 +108,7 @@ const App: React.FC = () => {
   }
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={API_PREFIX}>
       <AppRoutes />
       <Snackbar
         open={snackbar.open}

@@ -1,9 +1,7 @@
-import { createSlice, createAsyncThunk, PayloadAction, Dispatch } from '@reduxjs/toolkit';
+import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import axios, { AxiosResponse } from 'axios';
-import { RootState } from '..';
-
-// Base API URL - 使用代理配置，不需要完整URL
-// const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+import { ThunkApiConfig } from '../types';
+import { API_BASE_URL } from '../../config/constants';
 
 // User interface
 export interface User {
@@ -13,6 +11,8 @@ export interface User {
   role: 'patient' | 'doctor' | 'health_manager' | 'admin';
   createdAt: string;
   updatedAt: string;
+  /** 头像地址(可选) */
+  avatar?: string;
 }
 
 // Auth state interface
@@ -49,13 +49,6 @@ interface LoginSuccessPayload {
   token: string;
 }
 
-// Typed ThunkAPI
-interface ThunkApiConfig {
-  dispatch: Dispatch;
-  getState: () => RootState;
-  rejectValue: string;
-}
-
 // Register user
 export const register = createAsyncThunk<
   { user: User; token: string }, // Returned
@@ -65,8 +58,8 @@ export const register = createAsyncThunk<
   'auth/register',
   async (userData, { rejectWithValue }) => {
     try {
-      const response: AxiosResponse<{ user: User; token: string }> = await (axios as any).post(
-        `/api/users/register`,
+      const response: AxiosResponse<{ user: User; token: string }> = await axios.post(
+        `${API_BASE_URL}/users/register`,
         {
           email: userData.email,
           password: userData.password,
@@ -101,9 +94,9 @@ export const login = createAsyncThunk<
         setTimeout(() => reject(new Error('请求超时，请检查网络连接或服务器状态')), 8000);
       });
 
-      const requestPromise: Promise<AxiosResponse<LoginSuccessPayload & { access_token: string }>> = (axios as any).post(
-        '/api/users/login', 
-        params, 
+      const requestPromise: Promise<AxiosResponse<LoginSuccessPayload & { access_token: string }>> = axios.post(
+        `${API_BASE_URL}/users/login`,
+        params,
         {
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -139,7 +132,7 @@ export const login = createAsyncThunk<
       let errorMessage = '登录失败，请稍后重试';
       if (error.message && error.message.includes('超时')) {
         errorMessage = error.message;
-      } else if ((axios as any).isAxiosError(error) && error.response) {
+      } else if (axios.isAxiosError(error) && error.response) {
         console.error('Error response data:', error.response.data);
         console.error('Error response status:', error.response.status);
         if (error.response.status === 401) {
@@ -154,7 +147,7 @@ export const login = createAsyncThunk<
         } else {
           errorMessage = error.response.data?.detail || error.response.statusText || '登录请求失败';
         }
-      } else if ((axios as any).isAxiosError(error) && error.request) {
+      } else if (axios.isAxiosError(error) && error.request) {
         errorMessage = '无法连接到服务器，请检查网络连接';
       } else {
         // This will catch the TypeError if isAxiosError itself is the problem on a non-Axios error
@@ -178,7 +171,7 @@ export const checkAuthStatus = createAsyncThunk<
       return rejectWithValue('No token found');
     }
     try {
-      const response: AxiosResponse<User> = await (axios as any).get(`/api/users/me`, {
+      const response: AxiosResponse<User> = await axios.get(`${API_BASE_URL}/users/me`, {
         headers: { Authorization: `Bearer ${auth.token}` }
       });
       return response.data;
@@ -209,7 +202,7 @@ export const updateUserProfile = createAsyncThunk<
       return rejectWithValue('No token found');
     }
     try {
-      const response: AxiosResponse<User> = await axios.put(`/api/users/profile`, userData, {
+      const response: AxiosResponse<User> = await axios.put(`${API_BASE_URL}/users/profile`, userData, {
         headers: { Authorization: `Bearer ${auth.token}` }
       });
       return response.data;

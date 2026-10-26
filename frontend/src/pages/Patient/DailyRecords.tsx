@@ -295,7 +295,7 @@ const DailyRecords: React.FC = () => {
                 <DatePicker
                   label="日期"
                   value={newRecord.date}
-                  onChange={(newValue) => setNewRecord({...newRecord, date: newValue})}
+                  onChange={(newValue) => setNewRecord({...newRecord, date: newValue ?? undefined})}
                 />
               </Grid>
               <Grid item xs={12} md={6}>
