@@ -6,6 +6,7 @@ from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 import asyncio
 import logging
 
@@ -20,7 +21,8 @@ class CommunicationService:
 
     # 统一契约基准（WS01）：时间一律使用 UTC（datetime.utcnow，与全库其余模型一致）。
     # 历史文档中的 timestamp 为服务器本地时区（datetime.now 时代写入），不做回写；
-    # 只影响新旧数据交界处的排序，见 get_messages 的 before_id 分页说明。
+    # 消息读取/分页/离线同步一律改按 _id（ObjectId 单调，真实插入时刻有序），
+    # 彻底免疫历史时区漂移，见 get_messages / sync_offline_messages。
     @staticmethod
     async def is_conversation_participant(
         db: AsyncIOMotorClient,
@@ -215,19 +217,17 @@ class CommunicationService:
         
         # 构建查询
         query = {"conversation_id": conversation_id}
-        if before_id:
+        if before_id and ObjectId.is_valid(before_id):
             # 获取指定消息之前的消息（向上加载历史消息）。
-            # 分页以消息自身 timestamp 字段做 $lt 比较，两侧都是库内存储值，
-            # 同一批（同写入时代）文档内分页正确；新旧时区交界处（本地时区→UTC
-            # 切换后约一个时区偏移窗口内）排序可能漂移，属已知限制，
-            # WS01-c 迁移时统一回填 UTC 或改按 _id（ObjectId 单调）分页后消除。
-            before_message = await db.messages.find_one({"_id": ObjectId(before_id)})
-            if before_message:
-                query["timestamp"] = {"$lt": before_message["timestamp"]}
-        
-        # 获取消息
+            # 分页游标用消息 _id（ObjectId 单调递增，与插入时间有序一致）做 $lt
+            # 比较：新写入已统一 UTC，但历史文档 timestamp 是本地时区时代写入，
+            # 按 timestamp 分页在切换交界处会排序漂移；_id 永远按真实插入时刻
+            # 生成，天然免疫该漂移。前端以响应里的 id 字符串回传即可。
+            query["_id"] = {"$lt": ObjectId(before_id)}
+
+        # 获取消息（按 _id 降序取最近 limit 条）
         cursor = db.messages.find(query)
-        cursor = cursor.sort("timestamp", -1).limit(limit)
+        cursor = cursor.sort("_id", -1).limit(limit)
         
         messages = await cursor.to_list(length=limit)
         messages.reverse()  # 将消息按时间正序排列
@@ -264,8 +264,10 @@ class CommunicationService:
 
         client_message_id 为可选幂等键（WS01/WS03）：HTTP 与 WS 入站共用。
         同一发送者在同一会话内重复投递同一 client_message_id 时，直接返回
-        既有消息（不重复落库、不重复广播）。DB 层的 (sender_id, client_message_id)
-        唯一索引留待 WS01-c 迁移统一创建，当前依赖应用层先查后插。
+        既有消息（不重复落库、不重复广播）。快路径为应用层先查后插；并发
+        窗口内的重复投递由 DB 层 (conversation_id, sender_id, client_message_id)
+        partial unique 索引（见 app/db/indexes.py）以 DuplicateKeyError 拦截，
+        捕获后重查返回既有消息，语义与快路径一致（不重复产生副作用）。
         """
         # 验证用户是否为对话参与者（HTTP/WS 共用的成员校验语义）
         conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
@@ -303,8 +305,21 @@ class CommunicationService:
         if client_message_id:
             message["client_message_id"] = client_message_id
 
-        # 保存消息（落库成功后才允许广播——数据库失败绝不广播）
-        await db.messages.insert_one(message)
+        # 保存消息（落库成功后才允许广播——数据库失败绝不广播）。
+        # DuplicateKeyError：并发投递通过了先查后插的检查窗口，被唯一索引兜底
+        # 拦截——重查返回既有消息，等价于幂等快路径（不更新会话摘要、不广播、
+        # 不发通知，避免重复副作用）。
+        try:
+            await db.messages.insert_one(message)
+        except DuplicateKeyError:
+            existing = await db.messages.find_one({
+                "conversation_id": conversation_id,
+                "sender_id": sender_id,
+                "client_message_id": client_message_id,
+            })
+            if existing:
+                return CommunicationService._format_message(existing)
+            raise
 
         # 更新对话最后消息信息
         await db.conversations.update_one(
@@ -533,15 +548,18 @@ class CommunicationService:
         }).to_list(length=100)  # 限制同步的对话数量
         
         conversation_ids = [str(conv["_id"]) for conv in conversations]
-        
-        # 查询离线期间的新消息
+
+        # 查询离线期间的新消息：与 get_messages 一致改按 _id 比较（ObjectId
+        # 单调，from_datetime 把 last_sync_time 视为 UTC 生成游标），历史文档
+        # timestamp 为本地时区时代写入，按 timestamp 比较会在切换交界处漂移。
+        cursor_id = ObjectId.from_datetime(last_sync_time)
         query = {
             "conversation_id": {"$in": conversation_ids},
             "recipient_id": user_id,
-            "timestamp": {"$gt": last_sync_time}
+            "_id": {"$gt": cursor_id}
         }
-        
-        cursor = db.messages.find(query).sort("timestamp", 1)
+
+        cursor = db.messages.find(query).sort("_id", 1)
         offline_messages = await cursor.to_list(length=1000)  # 限制同步的消息数量
         
         # 格式化消息

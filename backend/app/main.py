@@ -19,7 +19,9 @@ from app.api.routers import agent_router, rehabilitation_router, user_router
 from app.api.routers import doctor_router, health_manager_router, patient_router, system_admin_router, health_alert_router, notification_router
 from app.api.routers import health_record_router
 # 导入数据库连接函数
-from app.db.mongodb import connect_to_mongodb, close_mongodb_connection, DatabaseConnectionError
+from app.db.mongodb import connect_to_mongodb, close_mongodb_connection, DatabaseConnectionError, db as mongodb_state
+# 启动期索引基建（通信域唯一索引等）
+from app.db.indexes import ensure_communication_indexes
 
 # 导入WebSocket服务
 from app.api.websockets import setup_websockets
@@ -124,6 +126,9 @@ async def startup_db_client():
         # 初始化WebSocket服务
         setup_websockets(app)
         logger.info("WebSocket服务已初始化")
+
+        # 启动期声明通信域索引（幂等；失败仅告警，不阻断启动）
+        await ensure_communication_indexes(mongodb_state.db)
     except DatabaseConnectionError as e:
         logger.critical(f"Failed to connect to database: {str(e)}")
         # 不启动无法访问数据库的服务。

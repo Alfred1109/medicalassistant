@@ -12,16 +12,18 @@ import asyncio
 import os
 import re
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
 from bson import ObjectId
 from fastapi.testclient import TestClient
+from pymongo.errors import DuplicateKeyError
 from starlette.testclient import WebSocketDisconnect
 
 from app.core.auth import get_current_active_user
+from app.db.indexes import ensure_communication_indexes
 from app.db.mongodb import get_database
 from app.main import app
 from app.services.communication_service import CommunicationService
@@ -112,6 +114,11 @@ class FakeCursor:
 class FakeCollection:
     def __init__(self):
         self.docs = []
+        self.indexes = []  # create_index 调用记录：(keys, kwargs)
+
+    async def create_index(self, keys, **kwargs):
+        self.indexes.append((list(keys), dict(kwargs)))
+        return kwargs.get("name", "_".join(f"{k}_{d}" for k, d in keys))
 
     async def find_one(self, query):
         for doc in self.docs:
@@ -182,6 +189,34 @@ def seed_conversation(db, user_a, user_b):
         "metadata": {},
     })
     return conversation_id
+
+
+class UniqueRaceCollection(FakeCollection):
+    """模拟并发窗口下的唯一索引行为：
+
+    - 先查后插的幂等快路径 find_one 可被并发写绕过（suppress_next_find_one）；
+    - insert_one 撞 (conversation_id, sender_id, client_message_id) 唯一索引时
+      抛 DuplicateKeyError（仅对携带 client_message_id 的文档约束，对应 partial 谓词）。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.suppress_next_find_one = False
+
+    async def find_one(self, query):
+        if self.suppress_next_find_one:
+            self.suppress_next_find_one = False
+            return None
+        return await super().find_one(query)
+
+    async def insert_one(self, doc):
+        if doc.get("client_message_id"):
+            for existing in self.docs:
+                if (existing.get("conversation_id"), existing.get("sender_id"),
+                        existing.get("client_message_id")) == \
+                        (doc["conversation_id"], doc["sender_id"], doc["client_message_id"]):
+                    raise DuplicateKeyError("E11000 duplicate key")
+        return await super().insert_one(doc)
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +367,148 @@ class ClientMessageIdIdempotencyTests(unittest.IsolatedAsyncioTestCase):
                 db, conversation_id, str(mallory["_id"]), "intrude",
             )
         self.assertEqual(len(db.messages.docs), 0)
+
+
+# ---------------------------------------------------------------------------
+# WS01-c：唯一索引基建 / _id 分页 / DuplicateKeyError 兜底
+# ---------------------------------------------------------------------------
+
+def make_message_doc(conversation_id, sender_id, recipient_id, content,
+                     cmid=None, timestamp=None, oid=None):
+    doc = {
+        "_id": oid or ObjectId(),
+        "conversation_id": conversation_id,
+        "sender_id": sender_id,
+        "recipient_id": recipient_id,
+        "content": content,
+        "type": "text",
+        "timestamp": timestamp or datetime.utcnow(),
+        "read": False,
+        "deleted": False,
+        "attachments": [],
+        "metadata": {},
+    }
+    if cmid:
+        doc["client_message_id"] = cmid
+    return doc
+
+
+class CommunicationIndexDefinitionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_idempotency_index_is_partial_unique_on_triple_key(self):
+        db = FakeDB()
+        await ensure_communication_indexes(db)
+
+        (keys, kwargs), = db.messages.indexes
+        self.assertEqual(
+            keys,
+            [("conversation_id", 1), ("sender_id", 1), ("client_message_id", 1)],
+        )
+        self.assertTrue(kwargs["unique"])
+        # partial 谓词：仅对携带 client_message_id 的文档生效，无键历史文档不受约束
+        self.assertEqual(
+            kwargs["partialFilterExpression"],
+            {"client_message_id": {"$exists": True}},
+        )
+        self.assertEqual(kwargs["name"], "uniq_conversation_sender_client_message_id")
+
+    async def test_index_creation_is_mounted_in_startup(self):
+        import inspect
+        import app.main as main_module
+        source = inspect.getsource(main_module.startup_db_client)
+        self.assertIn("ensure_communication_indexes", source)
+
+
+class UniqueIndexRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_key_error_returns_existing_message_without_reinsert(self):
+        db = FakeDB()
+        db.messages = UniqueRaceCollection()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        conversation_id = seed_conversation(db, alice, bob)
+
+        # 并发窗口：另一请求已落库同键消息，本请求的先查后插被绕过
+        concurrent_doc = make_message_doc(
+            conversation_id, str(alice["_id"]), str(bob["_id"]), "race",
+            cmid="race-1",
+        )
+        db.messages.docs.append(concurrent_doc)
+        db.messages.suppress_next_find_one = True
+
+        replay = await CommunicationService.send_message(
+            db, conversation_id, str(alice["_id"]), "race",
+            client_message_id="race-1",
+        )
+
+        self.assertEqual(replay["id"], str(concurrent_doc["_id"]))
+        self.assertEqual(replay["client_message_id"], "race-1")
+        self.assertEqual(len(db.messages.docs), 1)  # 不重复落库
+        self.assertEqual(len(db.notifications.docs), 0)  # 重放不产生通知副作用
+        # 不更新会话摘要
+        self.assertEqual(db.conversations.docs[0]["last_message_preview"], "")
+
+
+class ObjectIdPaginationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_before_id_pagination_orders_by_objectid_immune_to_timestamp_drift(self):
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        conversation_id = seed_conversation(db, alice, bob)
+
+        # 时间戳故意与 _id 顺序相反：模拟历史本地时区文档与 UTC 文档交界处的漂移。
+        # 按 _id 分页必须完全无视 timestamp 值。
+        for i in range(5):
+            db.messages.docs.append(make_message_doc(
+                conversation_id, str(alice["_id"]), str(bob["_id"]), f"m{i}",
+                timestamp=datetime(2026, 1, 1) + timedelta(minutes=100 - i),
+                oid=ObjectId(),
+            ))
+
+        collected = []
+        before = None
+        while True:
+            page = await CommunicationService.get_messages(
+                db, conversation_id, str(alice["_id"]), limit=2, before_id=before,
+            )
+            if not page:
+                break
+            # 页内按 _id 升序
+            page_ids = [ObjectId(m["id"]) for m in page]
+            self.assertEqual(page_ids, sorted(page_ids))
+            collected.extend(page)
+            before = page[0]["id"]  # 页首（最早一条）作为下一页游标
+            self.assertLessEqual(len(collected), 5)
+
+        self.assertEqual(len(collected), 5)
+        collected.sort(key=lambda m: ObjectId(m["id"]))
+        self.assertEqual([m["content"] for m in collected],
+                         ["m0", "m1", "m2", "m3", "m4"])
+
+    async def test_sync_offline_messages_uses_objectid_cursor(self):
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        conversation_id = seed_conversation(db, alice, bob)
+
+        cutoff = datetime(2026, 1, 1, 12, 0, 0)
+        # _id 早于游标但 timestamp 晚于 cutoff：按 timestamp 会误判为"新消息"
+        old_id_early = make_message_doc(
+            conversation_id, str(alice["_id"]), str(bob["_id"]), "old",
+            timestamp=datetime(2026, 3, 1),
+            oid=ObjectId.from_datetime(cutoff - timedelta(hours=1)),
+        )
+        # _id 晚于游标但 timestamp 早于 cutoff：按 timestamp 会漏掉
+        new_id_late = make_message_doc(
+            conversation_id, str(alice["_id"]), str(bob["_id"]), "new",
+            timestamp=datetime(2025, 12, 1),
+            oid=ObjectId.from_datetime(cutoff + timedelta(hours=1)),
+        )
+        db.messages.docs.extend([old_id_early, new_id_late])
+
+        result = await CommunicationService.sync_offline_messages(
+            db, str(bob["_id"]), cutoff,
+        )
+
+        self.assertEqual([m["content"] for m in result], ["new"])
 
 
 # ---------------------------------------------------------------------------
