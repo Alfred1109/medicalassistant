@@ -6,6 +6,14 @@
 - 幂等：重复执行第二次复制数为 0；
 - 不改动遗留集合本身（复制而非移动）；
 - REPORT_ONLY 集合只统计不复制。
+
+FU01 S3 扩展（follow_ups -> followup_records 字段级映射 + 打标）：
+- status 映射（completed_date 推导 / cancelled 拼写归一 / 默认 scheduled）；
+- scheduled_date 缺失回填；
+- title 并入 notes；
+- legacy_source 打标（来源集合名 + 迁移批次）；
+- 重复 apply 不重复打标、不改值；
+- dry-run 报告含映射前后差异示例且不写库。
 """
 import unittest
 
@@ -14,6 +22,7 @@ from scripts.migrate_legacy_collections import (
     REPORT_ONLY,
     print_report,
     run,
+    transform_followup_doc,
 )
 
 
@@ -168,3 +177,144 @@ class MigrateLegacyCollectionsTests(unittest.IsolatedAsyncioTestCase):
         report = await run(db, apply=False)
         # print_report 只打印不抛错（冒烟）
         print_report(report, apply=False)
+
+    # -------- FU01 S3：follow_ups 字段级映射 + 打标 --------
+
+    BATCH = "batch-test-001"
+
+    def _seed_legacy_followups(self, db):
+        """第一代造数形状：title/content/doctor_id/completed_date，缺 status/scheduled_date。"""
+        db["follow_ups"].docs = {
+            "g1": _doc("g1", doctor_id="d1", title="术后回访", content="一周后",
+                       completed_date="2026-01-01T08:00:00"),
+            "g2": _doc("g2", doctor_id="d2", title="取消的随访", status="cancelled"),
+            "g3": _doc("g3", doctor_id="d3", status="missed"),
+            "g4": _doc("g4", doctor_id="d4", title="有备注", notes="原有备注"),
+        }
+
+    def _followup_item(self, report):
+        return next(i for i in report["migrations"] if i["legacy"] == "follow_ups")
+
+    async def test_status_mapping_completed_date_derives_completed(self):
+        db = FakeDatabase()
+        self._seed_legacy_followups(db)
+
+        report = await run(db, apply=True, batch_id=self.BATCH)
+        target = db["followup_records"]
+
+        # 无 status 但有 completed_date -> completed，且 scheduled_date 回填
+        self.assertEqual(target.docs["g1"]["status"], "completed")
+        self.assertEqual(target.docs["g1"]["scheduled_date"], "2026-01-01T08:00:00")
+        # g1(completed 推导) + g2(拼写归一) + g4(默认 scheduled) 命中；g3 保持 missed 不计
+        self.assertEqual(self._followup_item(report)["mapped"]["status"], 3)
+        self.assertEqual(self._followup_item(report)["mapped"]["scheduled_date"], 1)
+
+    async def test_status_spelling_normalized_to_canceled(self):
+        db = FakeDatabase()
+        self._seed_legacy_followups(db)
+
+        await run(db, apply=True, batch_id=self.BATCH)
+
+        # cancelled -> canceled（与 FollowUpStatus.CANCELED 枚举拼写一致）
+        self.assertEqual(db["followup_records"].docs["g2"]["status"], "canceled")
+        # 其他已知状态值原样保留
+        self.assertEqual(db["followup_records"].docs["g3"]["status"], "missed")
+
+    async def test_status_defaults_to_scheduled_when_no_signal(self):
+        doc, changes = transform_followup_doc(
+            _doc("x1", doctor_id="d1"), "follow_ups", self.BATCH)
+        self.assertEqual(doc["status"], "scheduled")
+        self.assertEqual(changes["status"], {"before": None, "after": "scheduled"})
+        # scheduled_date 无 completed_date 可回填 -> 保持缺失
+        self.assertNotIn("scheduled_date", doc)
+
+    async def test_title_merged_into_notes(self):
+        db = FakeDatabase()
+        self._seed_legacy_followups(db)
+
+        await run(db, apply=True, batch_id=self.BATCH)
+        target = db["followup_records"]
+
+        # 无 notes 有 title -> notes = title
+        self.assertEqual(target.docs["g1"]["notes"], "术后回访")
+        # 两者皆有 -> title 前置并入，原 notes 保留
+        self.assertEqual(target.docs["g4"]["notes"], "有备注\n原有备注")
+
+    async def test_legacy_source_tag_written_on_copy(self):
+        db = FakeDatabase()
+        self._seed_legacy_followups(db)
+
+        report = await run(db, apply=True, batch_id=self.BATCH)
+        target = db["followup_records"]
+
+        for doc_id in ("g1", "g2", "g3", "g4"):
+            tag = target.docs[doc_id]["legacy_source"]
+            self.assertEqual(tag["collection"], "follow_ups")
+            self.assertEqual(tag["batch"], self.BATCH)
+        # 批次标识回传报告
+        self.assertEqual(report["batch_id"], self.BATCH)
+        self.assertEqual(self._followup_item(report)["mapped"]["legacy_source"], 4)
+
+    async def test_other_collections_not_tagged_or_transformed(self):
+        db = FakeDatabase()
+        db["rehabilitation_plans"].docs = {"r1": _doc("r1", name="plan-a", title="t")}
+
+        await run(db, apply=True, batch_id=self.BATCH)
+
+        doc = db["rehab_plans"].docs["r1"]
+        self.assertNotIn("legacy_source", doc)
+        self.assertNotIn("status", doc)
+
+    async def test_apply_idempotent_no_retag_no_mutation(self):
+        db = FakeDatabase()
+        self._seed_legacy_followups(db)
+
+        await run(db, apply=True, batch_id=self.BATCH)
+        snapshot = {k: dict(v) for k, v in db["followup_records"].docs.items()}
+
+        second = await run(db, apply=True, batch_id="batch-second")
+
+        # 第二次全部跳过：不复制、不重复打标、值不变
+        item = self._followup_item(second)
+        self.assertEqual(item["copied"], 0)
+        self.assertEqual(item["already_migrated"], item["legacy_count"])
+        self.assertEqual(item["mapped"]["legacy_source"], 0)
+        for doc_id, doc in snapshot.items():
+            self.assertEqual(db["followup_records"].docs[doc_id], doc)
+            self.assertEqual(db["followup_records"].docs[doc_id]
+                             ["legacy_source"]["batch"], self.BATCH)
+
+    async def test_dry_run_reports_diffs_and_writes_nothing(self):
+        db = FakeDatabase()
+        self._seed_legacy_followups(db)
+        legacy_snapshot = {k: dict(v) for k, v in db["follow_ups"].docs.items()}
+
+        report = await run(db, apply=False, batch_id=self.BATCH)
+        item = self._followup_item(report)
+
+        # 目标集合未被写入
+        self.assertEqual(db["followup_records"].docs, {})
+        # 遗留集合文档内容未被转换改动
+        for doc_id, doc in legacy_snapshot.items():
+            self.assertEqual(db["follow_ups"].docs[doc_id], doc)
+        # would_copy 覆盖全部 4 条，映射计数已统计
+        self.assertEqual(item["would_copy"], 4)
+        self.assertEqual(item["mapped"]["status"], 3)
+        # dry-run 报告含映射前后差异示例（含 before/after）
+        self.assertTrue(item["sample_diffs"])
+        first = item["sample_diffs"][0]
+        self.assertIn("status", first["changes"])
+        self.assertIsNone(first["changes"]["status"]["before"])
+        self.assertEqual(first["changes"]["status"]["after"], "completed")
+
+        # print_report dry-run 分支（差异示例展示）只打印不抛错
+        print_report(report, apply=False)
+
+    async def test_legacy_documents_never_mutated_by_transform_helper(self):
+        original = _doc("x1", doctor_id="d1", title="标题", status="cancelled")
+
+        transformed, _ = transform_followup_doc(original, "follow_ups", self.BATCH)
+
+        self.assertEqual(original["status"], "cancelled")  # 入参未被改动
+        self.assertEqual(transformed["status"], "canceled")
+        self.assertIsNot(original, transformed)

@@ -153,6 +153,17 @@ class FollowUpRecordDB(FollowUpBase, TimestampModel):
     reminder_before: Optional[int] = None
     completion_data: Optional[Dict[str, Any]] = None
     cancellation_data: Optional[Dict[str, Any]] = None
+    # FU01 S3 节点字段增强（设计稿 §2.1 ①、§五 S3 清单）：全部 Optional，
+    # 存量文档缺省免回填。与 S1 已做字段并集核对：provider_id（上）已有不重复；
+    # next_visit_id 与 S1 的 next_follow_up_id 暂并存（语义同为链后继，
+    # FU02 S6 复评链落地时收敛，避免本切片改写 S1 读取回退链）。
+    visit_code: Optional[str] = None                      # 节点↔任务↔远端访视关联键（S4 confirm 核验）
+    form_binding: Optional[Dict[str, Any]] = None         # 外部表单绑定（FU01 直传 remote_refs，WP2 升级 binding_id）
+    fill_task_ids: List[PyObjectId] = []                  # 关联填报任务反向索引（1..N，多次填报全保留）
+    effective_response: Optional[Dict[str, Any]] = None   # 有效答卷选定 {task_id, response_id, revision, submitted_at}（S4 回写）
+    review: Optional[Dict[str, Any]] = None               # 审阅证据链（含 history[]，FU02 S5 启用）
+    previous_visit_id: Optional[PyObjectId] = None        # 复评链前驱节点（FU02 S6）
+    next_visit_id: Optional[PyObjectId] = None            # 复评链后继节点（FU02 S6）
     deleted: bool = False
     deleted_at: Optional[datetime] = None
     deleted_by: Optional[str] = None

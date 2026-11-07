@@ -28,6 +28,11 @@ _FOLLOWUP_FORMAL_FIELDS = (
     "provider_id", "template_id", "reminder_before",
     "completion_data", "cancellation_data", "next_follow_up_id",
     "follow_up_result",
+    # FU01 S3 节点字段增强（schemas/followup.py FollowUpRecordDB）+ 迁移打标，
+    # 同样只在读取侧摘出挂回，models.FollowUpRecord 构造器不认识这些顶层键
+    "visit_code", "form_binding", "fill_task_ids", "effective_response",
+    "review", "previous_visit_id", "next_visit_id",
+    "legacy_source",
 )
 
 
