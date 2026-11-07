@@ -8,4 +8,6 @@ from .health_record import HealthRecord, FollowUpRecord
 from .rehabilitation import RehabilitationPlan, Exercise
 from .device import Device, DeviceData
 from .agent import Agent, AgentTool
-from .communication import Message, Conversation 
+# WS01 统一后：原 Message/Conversation 模型类（结构 A）已删除，
+# 通信域唯一真实结构见 app/services/communication_service.py。
+from .communication import Notification

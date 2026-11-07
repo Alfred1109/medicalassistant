@@ -8,15 +8,56 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import asyncio
 import logging
-import json
 
 from app.services.notification_service import NotificationService
 
 # 配置日志
 logger = logging.getLogger(__name__)
 
+
 class CommunicationService:
     """通信服务类"""
+
+    # 统一契约基准（WS01）：时间一律使用 UTC（datetime.utcnow，与全库其余模型一致）。
+    # 历史文档中的 timestamp 为服务器本地时区（datetime.now 时代写入），不做回写；
+    # 只影响新旧数据交界处的排序，见 get_messages 的 before_id 分页说明。
+    @staticmethod
+    async def is_conversation_participant(
+        db: AsyncIOMotorClient,
+        conversation_id: str,
+        user_id: str,
+    ) -> bool:
+        """校验 user_id 是否为会话参与者（WS 入房/入站与 HTTP 复用同一判定）。
+
+        无效的 conversation_id / user_id 一律视为非成员，不抛异常，
+        供 WebSocket 层在握手阶段安全调用。
+        """
+        if not ObjectId.is_valid(conversation_id) or not ObjectId.is_valid(user_id):
+            return False
+        conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
+        if not conversation:
+            return False
+        return user_id in (conversation.get("participant1_id"), conversation.get("participant2_id"))
+
+    @staticmethod
+    def _format_message(message: Dict[str, Any]) -> Dict[str, Any]:
+        """将 messages 集合文档格式化为对外响应（唯一真实结构：participant1/2 + read/deleted）"""
+        formatted = {
+            "id": str(message["_id"]),
+            "conversation_id": message["conversation_id"],
+            "sender_id": message["sender_id"],
+            "recipient_id": message["recipient_id"],
+            "content": message["content"],
+            "type": message["type"],
+            "timestamp": message["timestamp"].isoformat(),
+            "read": message.get("read", False),
+            "deleted": message.get("deleted", False),
+            "attachments": message.get("attachments", []),
+            "metadata": message.get("metadata", {}),
+        }
+        if message.get("client_message_id"):
+            formatted["client_message_id"] = message["client_message_id"]
+        return formatted
     
     @staticmethod
     async def get_conversations(
@@ -141,15 +182,16 @@ class CommunicationService:
         if existing:
             return str(existing["_id"])
         
-        # 创建新对话
+        # 创建新对话（时间统一 UTC）
+        now = datetime.utcnow()
         conversation = {
             "_id": ObjectId(),
             "participant1_id": participant1_id,
             "participant2_id": participant2_id,
             "type": conversation_type,
             "status": "active",
-            "created_at": datetime.now(),
-            "last_message_time": datetime.now(),
+            "created_at": now,
+            "last_message_time": now,
             "last_message_preview": "",
             "metadata": {}
         }
@@ -174,7 +216,11 @@ class CommunicationService:
         # 构建查询
         query = {"conversation_id": conversation_id}
         if before_id:
-            # 获取指定消息之前的消息（向上加载历史消息）
+            # 获取指定消息之前的消息（向上加载历史消息）。
+            # 分页以消息自身 timestamp 字段做 $lt 比较，两侧都是库内存储值，
+            # 同一批（同写入时代）文档内分页正确；新旧时区交界处（本地时区→UTC
+            # 切换后约一个时区偏移窗口内）排序可能漂移，属已知限制，
+            # WS01-c 迁移时统一回填 UTC 或改按 _id（ObjectId 单调）分页后消除。
             before_message = await db.messages.find_one({"_id": ObjectId(before_id)})
             if before_message:
                 query["timestamp"] = {"$lt": before_message["timestamp"]}
@@ -196,10 +242,10 @@ class CommunicationService:
             if message["sender_id"] != user_id and not message.get("read", False):
                 await db.messages.update_one(
                     {"_id": ObjectId(message["id"])},
-                    {"$set": {"read": True, "read_at": datetime.now()}}
+                    {"$set": {"read": True, "read_at": datetime.utcnow()}}
                 )
                 message["read"] = True
-                message["read_at"] = datetime.now().isoformat()
+                message["read_at"] = datetime.utcnow().isoformat()
         
         return messages
     
@@ -211,19 +257,36 @@ class CommunicationService:
         content: str,
         message_type: str = "text",
         attachments: Optional[List[Dict[str, Any]]] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        client_message_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """发送新消息"""
-        # 验证用户是否为对话参与者
+        """发送新消息。
+
+        client_message_id 为可选幂等键（WS01/WS03）：HTTP 与 WS 入站共用。
+        同一发送者在同一会话内重复投递同一 client_message_id 时，直接返回
+        既有消息（不重复落库、不重复广播）。DB 层的 (sender_id, client_message_id)
+        唯一索引留待 WS01-c 迁移统一创建，当前依赖应用层先查后插。
+        """
+        # 验证用户是否为对话参与者（HTTP/WS 共用的成员校验语义）
         conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
         if not conversation or (sender_id != conversation["participant1_id"] and sender_id != conversation["participant2_id"]):
             raise ValueError("用户不是对话参与者")
-        
+
+        # 幂等去重：重复投递返回既有消息
+        if client_message_id:
+            existing = await db.messages.find_one({
+                "conversation_id": conversation_id,
+                "sender_id": sender_id,
+                "client_message_id": client_message_id,
+            })
+            if existing:
+                return CommunicationService._format_message(existing)
+
         # 确定接收者ID
         recipient_id = conversation["participant1_id"] if sender_id == conversation["participant2_id"] else conversation["participant2_id"]
-        
-        # 创建消息
-        now = datetime.now()
+
+        # 创建消息（时间统一 UTC）
+        now = datetime.utcnow()
         message = {
             "_id": ObjectId(),
             "conversation_id": conversation_id,
@@ -237,10 +300,12 @@ class CommunicationService:
             "attachments": attachments or [],
             "metadata": metadata or {}
         }
-        
-        # 保存消息
+        if client_message_id:
+            message["client_message_id"] = client_message_id
+
+        # 保存消息（落库成功后才允许广播——数据库失败绝不广播）
         await db.messages.insert_one(message)
-        
+
         # 更新对话最后消息信息
         await db.conversations.update_one(
             {"_id": ObjectId(conversation_id)},
@@ -251,21 +316,9 @@ class CommunicationService:
                 }
             }
         )
-        
-        # 准备返回的消息格式
-        message_response = {
-            "id": str(message["_id"]),
-            "conversation_id": message["conversation_id"],
-            "sender_id": message["sender_id"],
-            "recipient_id": message["recipient_id"],
-            "content": message["content"],
-            "type": message["type"],
-            "timestamp": message["timestamp"].isoformat(),
-            "read": message["read"],
-            "deleted": message["deleted"],
-            "attachments": message["attachments"],
-            "metadata": message["metadata"]
-        }
+
+        # 准备返回的消息格式（广播载荷与响应共用，携带真实服务端 id/时间戳）
+        message_response = CommunicationService._format_message(message)
         
         # 通过WebSocket推送消息（如果有连接管理器）
         try:
@@ -352,7 +405,7 @@ class CommunicationService:
         
         result = await db.messages.update_one(
             {"_id": ObjectId(message_id)},
-            {"$set": {"read": True, "read_at": datetime.now()}}
+            {"$set": {"read": True, "read_at": datetime.utcnow()}}
         )
         
         # 通过WebSocket推送消息状态更新
@@ -388,9 +441,9 @@ class CommunicationService:
                 "recipient_id": user_id,
                 "read": False
             },
-            {"$set": {"read": True, "read_at": datetime.now()}}
+            {"$set": {"read": True, "read_at": datetime.utcnow()}}
         )
-        
+
         # 通过WebSocket推送消息状态更新
         if result.modified_count > 0:
             try:
@@ -399,7 +452,7 @@ class CommunicationService:
                     "conversation_id": conversation_id,
                     "recipient_id": user_id,
                     "read": True,
-                    "read_at": {"$gte": datetime.now().replace(microsecond=0)}  # 近似查询刚被标记为已读的消息
+                    "read_at": {"$gte": datetime.utcnow().replace(microsecond=0)}  # 近似查询刚被标记为已读的消息
                 })
                 
                 message_ids = []
@@ -441,7 +494,7 @@ class CommunicationService:
         
         result = await db.messages.update_one(
             {"_id": ObjectId(message_id)},
-            {"$set": {"deleted": True, "deleted_at": datetime.now()}}
+            {"$set": {"deleted": True, "deleted_at": datetime.utcnow()}}
         )
         
         # 通过WebSocket推送消息删除通知

@@ -11,7 +11,7 @@ from app.db.crud_services import (
     get_crud_services, UserCRUD, DoctorCRUD, PatientCRUD, HealthManagerCRUD,
     OrganizationCRUD, HealthRecordCRUD, FollowUpRecordCRUD,
     RehabilitationPlanCRUD, ExerciseCRUD, ProgressRecordCRUD,
-    DeviceCRUD, DeviceDataCRUD, AgentCRUD, MessageCRUD, ConversationCRUD
+    DeviceCRUD, DeviceDataCRUD, AgentCRUD
 )
 from app.services.user_service import UserService
 from app.services.agent_service import AgentService
@@ -91,14 +91,8 @@ async def get_agent_crud(crud=Depends(get_crud)):
     """获取代理CRUD服务"""
     return crud["agent"]
 
-# 通信相关CRUD依赖
-async def get_message_crud(crud=Depends(get_crud)):
-    """获取消息CRUD服务"""
-    return crud["message"]
-
-async def get_conversation_crud(crud=Depends(get_crud)):
-    """获取对话CRUD服务"""
-    return crud["conversation"]
+# 注：原 get_message_crud / get_conversation_crud 已随 WS01 死代码清理删除
+# （全仓库无调用方）；通信域统一走 CommunicationService。
 
 # 业务服务依赖
 async def get_user_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> UserService:

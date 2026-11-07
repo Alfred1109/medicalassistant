@@ -17,6 +17,9 @@ class MessageCreate(BaseModel):
     type: str = Field("text", description="消息类型，默认为文本")
     attachments: Optional[List[Dict[str, Any]]] = Field(None, description="附件列表")
     metadata: Optional[Dict[str, Any]] = Field(None, description="元数据")
+    client_message_id: Optional[str] = Field(
+        None, description="客户端幂等键：同一发送者在同一会话内重复投递时返回既有消息"
+    )
 
 class ConversationCreate(BaseModel):
     participant_id: str = Field(..., description="对话参与者ID")
@@ -115,7 +118,8 @@ async def send_message(
     try:
         message_response = await CommunicationService.send_message(
             db, conversation_id, user_id, message.content, message.type,
-            message.attachments, message.metadata
+            message.attachments, message.metadata,
+            client_message_id=message.client_message_id
         )
         return message_response
     except ValueError as e:

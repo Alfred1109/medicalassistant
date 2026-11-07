@@ -9,6 +9,7 @@ import logging
 from app.core.auth import get_current_user_ws
 from app.db.mongodb import get_database
 from app.models.user import User
+from app.services.communication_service import CommunicationService
 from app.services.notification_service import NotificationService
 
 # 配置日志
@@ -128,6 +129,10 @@ class ConnectionManager:
         return set()
 
 # 创建连接管理器实例
+# 多 worker 限制（WS04 待办）：ConnectionManager 为进程内存单例，多 uvicorn worker
+# 部署时各进程各持一份连接表，跨 worker 的聊天室广播与在线判定会失效（离线判定
+# 也只对本进程准确）。本轮（WS01）仅统一消息结构与落库，不引入 broker/change
+# stream，跨 worker 分发留待 WS04。
 manager = ConnectionManager()
 
 # 在应用中注册WebSocket路由
@@ -150,7 +155,22 @@ def setup_websockets(app: FastAPI):
                 return
             
             user_id = str(user["_id"])
-            
+
+            # 会话成员校验（WS02 前置）：非会话参与者拒绝入房。
+            # 房间名即会话 id（/ws/chat/{conversation_id}，Mongo ObjectId 字符串），
+            # 沿用现有约定，不做别名映射。
+            if not await CommunicationService.is_conversation_participant(db, conversation_id, user_id):
+                # 先 accept 以便投递明确错误码，再以 4403（应用定义：非会话成员）断连
+                await websocket.accept()
+                await websocket.send_json({
+                    "type": "error",
+                    "error_code": "NOT_CONVERSATION_PARTICIPANT",
+                    "message": "用户不是该会话参与者",
+                })
+                await websocket.close(code=4403)
+                logger.warning(f"User {user_id} denied joining chat room {conversation_id}: not a participant")
+                return
+
             # 建立连接
             await manager.connect_to_chat(websocket, user_id, conversation_id, connection_id)
             
@@ -176,23 +196,56 @@ def setup_websockets(app: FastAPI):
                     
                     # 根据消息类型处理
                     if message_data.get("type") == "message":
-                        # 保存消息到数据库
+                        # 先持久化、再广播（落库失败不广播，WS03）。
+                        # 广播由 CommunicationService.send_message 在落库成功后完成，
+                        # 载荷携带落库文档的真实 _id 与 UTC 时间戳（不再用时间戳冒充 id）。
                         message_content = message_data.get("content", "")
-                        
-                        # 广播消息到聊天室
-                        await manager.send_chat_message(
-                            {
-                                "type": "message",
-                                "message": {
-                                    "id": str(datetime.now().timestamp()),
-                                    "sender_id": user_id,
-                                    "sender_name": user.get("name", "Unknown"),
-                                    "content": message_content,
-                                    "timestamp": datetime.now().isoformat()
-                                }
-                            },
-                            conversation_id
-                        )
+                        client_message_id = message_data.get("client_message_id")  # 幂等键，可选
+                        if not message_content:
+                            await websocket.send_json({
+                                "type": "error",
+                                "error_code": "INVALID_PAYLOAD",
+                                "message": "content is required",
+                            })
+                            continue
+                        try:
+                            message_response = await CommunicationService.send_message(
+                                db,
+                                conversation_id,
+                                user_id,
+                                message_content,
+                                message_data.get("message_type", "text"),
+                                message_data.get("attachments"),
+                                message_data.get("metadata"),
+                                client_message_id=client_message_id,
+                            )
+                        except ValueError:
+                            # 非会话成员（连接期间被移出/会话不存在）：拒绝并断连
+                            await websocket.send_json({
+                                "type": "error",
+                                "error_code": "NOT_CONVERSATION_PARTICIPANT",
+                                "message": "用户不是该会话参与者",
+                            })
+                            manager.disconnect(user_id, connection_id)
+                            await websocket.close(code=4403)
+                            return
+                        except Exception as e:
+                            # 数据库失败：向发送者回错误帧，不广播
+                            logger.error(f"Failed to persist chat message in conversation {conversation_id}: {str(e)}")
+                            await websocket.send_json({
+                                "type": "error",
+                                "error_code": "MESSAGE_PERSIST_FAILED",
+                                "message": "消息落库失败，请重试",
+                            })
+                            continue
+
+                        # 幂等回执：告知发送者该 client_message_id 对应的服务端消息
+                        # （重复投递时 message 为既有文档，载荷 id 不变）
+                        await websocket.send_json({
+                            "type": "message_ack",
+                            "client_message_id": client_message_id,
+                            "message": message_response,
+                        })
                     elif message_data.get("type") == "typing":
                         # 广播用户正在输入状态
                         await manager.send_chat_message(

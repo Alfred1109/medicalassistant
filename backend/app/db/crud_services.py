@@ -14,7 +14,8 @@ from app.models.health_record import HealthRecord, FollowUpRecord
 from app.models.rehabilitation import RehabilitationPlan, Exercise, ProgressRecord
 from app.models.device import Device, DeviceData, DeviceCalibration
 from app.models.agent import Agent, AgentInteraction
-from app.models.communication import Message, Conversation
+# 注：原 Message/Conversation 模型类及其 CRUD（结构 A）已随 WS01 统一删除，
+# 通信域唯一真实实现见 app/services/communication_service.py（结构 B）。
 
 
 class CRUDServiceException(Exception):
@@ -356,72 +357,6 @@ class AgentCRUD(CRUDBase[Agent]):
         return await self.find({"model": model}, skip, limit)
 
 
-class MessageCRUD(CRUDBase[Message]):
-    """消息CRUD服务"""
-    
-    async def find_by_conversation(self, conversation_id: str, skip: int = 0, limit: int = 100) -> List[Message]:
-        """查找对话的消息"""
-        return await self.find({"conversation_id": conversation_id}, skip, limit)
-    
-    async def find_by_sender(self, sender_id: str, skip: int = 0, limit: int = 100) -> List[Message]:
-        """查找由特定发送者发送的消息"""
-        return await self.find({"sender_id": sender_id}, skip, limit)
-    
-    async def mark_as_read(self, message_id: str) -> bool:
-        """标记消息为已读"""
-        try:
-            result = await self.collection.update_one(
-                {"_id": ObjectId(message_id)},
-                {"$set": {"is_read": True, "read_at": datetime.utcnow()}}
-            )
-            return result.modified_count > 0
-        except Exception:
-            return False
-    
-    async def count_unread(self, conversation_id: str, user_id: str) -> int:
-        """计算用户在对话中的未读消息数"""
-        try:
-            return await self.collection.count_documents({
-                "conversation_id": conversation_id,
-                "sender_id": {"$ne": user_id},
-                "is_read": False
-            })
-        except Exception:
-            return 0
-
-
-class ConversationCRUD(CRUDBase[Conversation]):
-    """对话CRUD服务"""
-    
-    async def find_by_participant(self, user_id: str, skip: int = 0, limit: int = 100) -> List[Conversation]:
-        """查找用户参与的对话"""
-        return await self.find({"participants.user_id": user_id}, skip, limit)
-    
-    async def find_by_participants(self, user_ids: List[str], is_group: bool = False, skip: int = 0, limit: int = 100) -> List[Conversation]:
-        """查找特定用户之间的对话"""
-        # 根据是否为群组构建不同查询条件
-        if is_group:
-            query = {"participants.user_id": {"$all": user_ids}, "is_group": True}
-        else:
-            query = {
-                "$and": [
-                    {"participants.user_id": {"$all": user_ids}},
-                    {"$expr": {"$eq": [{"$size": "$participants"}, len(user_ids)]}},
-                    {"is_group": False}
-                ]
-            }
-        
-        return await self.find(query, skip, limit)
-    
-    async def find_active(self, user_id: str = None, skip: int = 0, limit: int = 100) -> List[Conversation]:
-        """查找活跃的对话"""
-        query = {"status": "active"}
-        if user_id:
-            query["participants.user_id"] = user_id
-        
-        return await self.find(query, skip, limit)
-
-
 # 创建CRUD服务工厂函数
 def get_crud_services(db: AsyncIOMotorDatabase):
     """获取所有CRUD服务"""
@@ -439,6 +374,4 @@ def get_crud_services(db: AsyncIOMotorDatabase):
         "device": DeviceCRUD(db, Device),
         "device_data": DeviceDataCRUD(db, DeviceData),
         "agent": AgentCRUD(db, Agent),
-        "message": MessageCRUD(db, Message),
-        "conversation": ConversationCRUD(db, Conversation),
     } 
