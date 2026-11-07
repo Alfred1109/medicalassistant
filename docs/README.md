@@ -13,6 +13,7 @@ Medical Rehabilitation Assistant是一个医疗康复辅助系统，旨在帮助
 - [项目架构说明](./structure.md)：详细描述系统架构和功能模块
 - [本轮开发计划](./development-plan-2026-11-07.md)：范围、工作包、依赖、待确认决策与验收标准
 - [统一身份接入契约草案](./identity-integration-contract.md)：注册审核、跨平台身份与授权、嵌入会话及撤权边界
+- [医护填报首轮隔离联调](./first-integration-pilot.md)：当前线上能力、合成测试边界及正式接入前提
 - [隔离演示账号初始化](./isolated-demo-accounts.md)：不在普通启动时创建默认账号，演示数据需显式初始化到新的本地隔离库
 - [开发基线核查记录](./baseline-2026-11-07.md)：已验证内容、领域断点和待修复事项
 - [设备 SDK 接入评估](./device-sdk-assessment-2026-11-07.md)：原生蓝牙SDK、当前模拟数据边界与实机验收前提
