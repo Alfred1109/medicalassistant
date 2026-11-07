@@ -27,10 +27,9 @@ import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import InfoIcon from '@mui/icons-material/Info';
 
 import { AppDispatch, RootState } from '../../store';
-import { 
-  login, clearAuthError, User, 
-  mockDoctorLogin, mockHealthManagerLogin, mockAdminLogin, mockPatientLogin 
-} from '../../store/slices/authSlice';
+import { login, clearAuthError, User } from '../../store/slices/authSlice';
+
+const DEMO_LOGIN_ENABLED = import.meta.env.DEV;
 
 // 管理员账号信息
 const ADMIN_CREDENTIALS = {
@@ -73,7 +72,7 @@ const Login: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
   const { loading, loginLoading, error, user, token } = useSelector((state: RootState) => state.auth);
-  
+
   // 添加上一次用户状态的引用，用于比较
   const prevUserRef = useRef<User | null>(null);
   const prevTokenRef = useRef<string | null>(null);
@@ -82,8 +81,8 @@ const Login: React.FC = () => {
   const isLoading = loginLoading !== undefined ? loginLoading : loading;
 
   const [formData, setFormData] = useState({
-    email: ADMIN_CREDENTIALS.email, // Default to admin email
-    password: ADMIN_CREDENTIALS.password, // Default to admin password
+    email: DEMO_LOGIN_ENABLED ? ADMIN_CREDENTIALS.email : '',
+    password: DEMO_LOGIN_ENABLED ? ADMIN_CREDENTIALS.password : ''
   });
   const [showPassword, setShowPassword] = useState(false);
   // 定义FormErrors接口
@@ -97,12 +96,12 @@ const Login: React.FC = () => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
     setFormData({ ...formData, [name]: value });
-    
+
     // 清除相关字段的错误
     if (formErrors[name as keyof FormErrors]) {
       setFormErrors((prev: FormErrors) => ({ ...prev, [name]: undefined }));
     }
-    
+
     // 清除Redux错误状态
     if (error) dispatch(clearAuthError());
   };
@@ -110,47 +109,35 @@ const Login: React.FC = () => {
   // 验证表单
   const validateForm = (): boolean => {
     const errors: FormErrors = {};
-    
+
     // 验证邮箱
     if (!formData.email) {
       errors.email = '请输入邮箱地址';
     } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
       errors.email = '请输入有效的邮箱地址';
     }
-    
+
     // 验证密码
     if (!formData.password) {
       errors.password = '请输入密码';
     } else if (formData.password.length < 6) {
       errors.password = '密码长度至少为6个字符';
     }
-    
+
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     // 表单验证
     if (!validateForm()) {
       return;
     }
-    
-    try {
-      console.log('Login.tsx: 开始登录，用户邮箱:', formData.email);
-      // 尝试登录，等待完成或错误
-      // .unwrap() 会在成功时返回 action.payload，失败时抛出错误
-      const result = await dispatch(login(formData)).unwrap(); 
-      
-      // 登录成功后跳转由上面的 useEffect 处理
-      // 这里只需要知道操作已完成即可
-      if (result && result.user) {
-        console.log('Login.tsx: 真实登录成功，等待useEffect跳转.', result);
-      } else {
-        console.log('Login.tsx: 登录操作完成，但未识别明确的成功结果用于立即跳转:', result);
-      }
 
+    try {
+      await dispatch(login(formData)).unwrap();
     } catch (err: any) {
       console.error('Login.tsx: 登录 dispatch/unwrap 失败:', err);
       // 错误状态 (err) 会被 authSlice 的 rejected case 更新到 Redux store 的 error 字段
@@ -164,7 +151,7 @@ const Login: React.FC = () => {
   // 根据用户角色进行跳转，使用useCallback避免无限重渲染
   const redirectBasedOnRole = useCallback((role: string) => {
     let targetPath = '/app/dashboard'; // 默认路径
-    
+
     switch (role) {
       case 'admin':
         targetPath = '/app/admin/doctors';
@@ -179,7 +166,7 @@ const Login: React.FC = () => {
         targetPath = '/app/patient/main-dashboard';
         break;
     }
-    
+
     // 避免重复导航到相同路径
     if (window.location.pathname !== targetPath) {
       console.log(`Login.tsx: 跳转到 ${targetPath}`);
@@ -195,18 +182,17 @@ const Login: React.FC = () => {
     [redirectBasedOnRole]
   );
 
-  // Effect to handle redirection after login (real or mock)
+  // 根据已认证用户的角色处理登录后导航
   useEffect(() => {
     // 只有当用户或令牌状态实际变化时才执行重定向
     const userChanged = user !== prevUserRef.current;
     const tokenChanged = token !== prevTokenRef.current;
-    
+
     if (user && token && (userChanged || tokenChanged)) {
-      console.log('Login.tsx: User/token state changed, attempting to redirect.', user);
       // 更新引用值
       prevUserRef.current = user;
       prevTokenRef.current = token;
-      
+
       // 使用防抖函数来避免短时间内多次导航
       debouncedRedirect(user.role);
     }
@@ -240,31 +226,21 @@ const Login: React.FC = () => {
     if (error) dispatch(clearAuthError());
   };
 
-  // 模拟登录处理函数
-  const handleMockLogin = async (type: 'admin' | 'doctor' | 'health_manager' | 'patient') => {
+  // 开发演示使用与普通登录相同的后端认证，不生成模拟令牌或角色。
+  const handleQuickLogin = async (type: 'admin' | 'doctor' | 'health_manager' | 'patient') => {
+    if (!DEMO_LOGIN_ENABLED) return;
+    const credentials = {
+      admin: ADMIN_CREDENTIALS,
+      doctor: DOCTOR_CREDENTIALS,
+      health_manager: HEALTH_MANAGER_CREDENTIALS,
+      patient: PATIENT_CREDENTIALS,
+    }[type];
+    setFormData(credentials);
+    if (error) dispatch(clearAuthError());
     try {
-      // 清除之前的错误
-      if (error) dispatch(clearAuthError());
-      
-      // 根据类型调用不同的模拟登录函数
-      switch (type) {
-        case 'admin':
-          await dispatch(mockAdminLogin()).unwrap();
-          break;
-        case 'doctor':
-          await dispatch(mockDoctorLogin()).unwrap();
-          break;
-        case 'health_manager':
-          await dispatch(mockHealthManagerLogin()).unwrap();
-          break;
-        case 'patient':
-          await dispatch(mockPatientLogin()).unwrap();
-          break;
-      }
-      
-      console.log(`Login.tsx: 模拟${type}登录成功`);
-    } catch (err) {
-      console.error(`Login.tsx: 模拟${type}登录失败:`, err);
+      await dispatch(login(credentials)).unwrap();
+    } catch {
+      // 真实认证错误由authSlice显示；不回退到模拟登录。
     }
   };
 
@@ -285,44 +261,45 @@ const Login: React.FC = () => {
         </Alert>
       )}
 
-      {/* 快速登录按钮组 */}
+      {DEMO_LOGIN_ENABLED && <>
+      {/* 快速演示登录按钮组 */}
       <Box sx={{ mb: 3 }}>
         <Typography variant="subtitle2" gutterBottom>
-          快速登录:
+          快速演示登录（后端认证）:
         </Typography>
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-          <Button 
-            variant="contained" 
-            color="primary" 
+          <Button
+            variant="contained"
+            color="primary"
             size="small"
-            onClick={() => handleMockLogin('admin')}
+            onClick={() => handleQuickLogin('admin')}
             disabled={isLoading}
           >
             管理员登录
           </Button>
-          <Button 
-            variant="contained" 
-            color="secondary" 
+          <Button
+            variant="contained"
+            color="secondary"
             size="small"
-            onClick={() => handleMockLogin('doctor')}
+            onClick={() => handleQuickLogin('doctor')}
             disabled={isLoading}
           >
             医生登录
           </Button>
-          <Button 
-            variant="contained" 
-            color="warning" 
+          <Button
+            variant="contained"
+            color="warning"
             size="small"
-            onClick={() => handleMockLogin('health_manager')}
+            onClick={() => handleQuickLogin('health_manager')}
             disabled={isLoading}
           >
             健康管理师登录
           </Button>
-          <Button 
-            variant="contained" 
-            color="success" 
+          <Button
+            variant="contained"
+            color="success"
             size="small"
-            onClick={() => handleMockLogin('patient')}
+            onClick={() => handleQuickLogin('patient')}
             disabled={isLoading}
           >
             患者登录
@@ -331,11 +308,11 @@ const Login: React.FC = () => {
       </Box>
 
       {/* 账号提示 */}
-      <Paper 
-        variant="outlined" 
-        sx={{ 
-          p: 2, 
-          mb: 3, 
+      <Paper
+        variant="outlined"
+        sx={{
+          p: 2,
+          mb: 3,
           backgroundColor: '#f5f8ff',
           borderColor: '#c2d6ff'
         }}
@@ -347,7 +324,7 @@ const Login: React.FC = () => {
               演示账号
             </Typography>
           </Box>
-          
+
           <Box sx={{ mt: 1 }}>
             <Typography variant="subtitle2" color="text.primary">
               管理员账号:
@@ -356,9 +333,9 @@ const Login: React.FC = () => {
               邮箱: {ADMIN_CREDENTIALS.email} <br />
               密码: {ADMIN_CREDENTIALS.password}
             </Typography>
-            <Button 
-              size="small" 
-              variant="outlined" 
+            <Button
+              size="small"
+              variant="outlined"
               color="primary"
               sx={{ mt: 1 }}
               onClick={fillAdminCredentials}
@@ -366,9 +343,9 @@ const Login: React.FC = () => {
               使用此账号
             </Button>
           </Box>
-          
+
           <Divider sx={{ my: 1 }} />
-          
+
           <Box>
             <Typography variant="subtitle2" color="text.primary">
               医生账号:
@@ -377,9 +354,9 @@ const Login: React.FC = () => {
               邮箱: {DOCTOR_CREDENTIALS.email} <br />
               密码: {DOCTOR_CREDENTIALS.password}
             </Typography>
-            <Button 
-              size="small" 
-              variant="outlined" 
+            <Button
+              size="small"
+              variant="outlined"
               color="secondary"
               sx={{ mt: 1 }}
               onClick={fillDoctorCredentials}
@@ -398,9 +375,9 @@ const Login: React.FC = () => {
               邮箱: {HEALTH_MANAGER_CREDENTIALS.email} <br />
               密码: {HEALTH_MANAGER_CREDENTIALS.password}
             </Typography>
-            <Button 
-              size="small" 
-              variant="outlined" 
+            <Button
+              size="small"
+              variant="outlined"
               color="warning"
               sx={{ mt: 1 }}
               onClick={fillHealthManagerCredentials}
@@ -419,9 +396,9 @@ const Login: React.FC = () => {
               邮箱: {PATIENT_CREDENTIALS.email} <br />
               密码: {PATIENT_CREDENTIALS.password}
             </Typography>
-            <Button 
-              size="small" 
-              variant="outlined" 
+            <Button
+              size="small"
+              variant="outlined"
               color="success"
               sx={{ mt: 1 }}
               onClick={fillPatientCredentials}
@@ -431,6 +408,7 @@ const Login: React.FC = () => {
           </Box>
         </Box>
       </Paper>
+      </>}
 
       <Grid container spacing={2}>
         <Grid item xs={12}>
@@ -541,4 +519,4 @@ const Login: React.FC = () => {
   );
 };
 
-export default Login; 
+export default Login;

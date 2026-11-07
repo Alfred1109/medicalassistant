@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { useSelector } from 'react-redux';
+import { RootState } from '../../store';
 import {
   Box,
   Container,
@@ -91,7 +93,7 @@ const SystemSettings: React.FC = () => {
   });
 
   // 获取用户角色
-  const userRole = localStorage.getItem('userRole') || 'patient';
+  const userRole = useSelector((state: RootState) => state.auth.user?.role);
 
   // 界面设置状态
   const [uiSettings, setUiSettings] = useState({

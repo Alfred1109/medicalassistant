@@ -8,7 +8,7 @@ const baseUrl = API_BASE_URL;
 export const api = createApi({
   reducerPath: 'api',
   baseQuery: fetchBaseQuery({ 
-    baseUrl,
+    baseUrl: API_BASE_URL,
     prepareHeaders: (headers, { getState }) => {
       // 从state中获取token
       const token = (getState() as any).auth.token;
@@ -142,4 +142,4 @@ export const {
   useCreateAgentMutation,
   useGetExercisesQuery,
   useGetExerciseByIdQuery,
-} = api; 
+} = api;

@@ -23,8 +23,10 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  CircularProgress
+  CircularProgress,
+  Alert
 } from '@mui/material';
+import type { ChipProps } from '@mui/material';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import {
@@ -34,20 +36,20 @@ import {
   Search as SearchIcon,
   Clear as ClearIcon
 } from '@mui/icons-material';
-import { format, parseISO } from 'date-fns';
+import { endOfDay, format, isAfter, isValid, parseISO, startOfDay } from 'date-fns';
 import zhCN from 'date-fns/locale/zh-CN';
 
 import { AuditService } from '../../services/audit-service';
 import { AuditLog, AuditLogFilter, AuditAction, AuditResourceType } from '../../types/audit';
 
 // 状态类型颜色映射
-const statusColors = {
+const statusColors: Record<AuditLog['status'], NonNullable<ChipProps['color']>> = {
   success: 'success',
   failure: 'error'
 } as const;
 
 // 操作类型颜色映射
-const actionColors: Record<string, 'default' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning'> = {
+const actionColors: Record<string, NonNullable<ChipProps['color']>> = {
   access: 'info',
   login: 'success',
   logout: 'default',
@@ -79,6 +81,14 @@ const AuditLogList: React.FC = () => {
   // 临时过滤器状态（用于对话框）
   const [tempFilter, setTempFilter] = useState<AuditLogFilter>({});
   
+  // DatePicker uses Date values; the API receives an inclusive ISO time range.
+  const [startDate, setStartDate] = useState<Date | null>(null);
+  const [endDate, setEndDate] = useState<Date | null>(null);
+  const invalidDate = (startDate !== null && !isValid(startDate)) ||
+    (endDate !== null && !isValid(endDate));
+  const reversedRange = !invalidDate && startDate !== null && endDate !== null &&
+    isAfter(startOfDay(startDate), endOfDay(endDate));
+
   // 加载审计日志
   const loadAuditLogs = async () => {
     setLoading(true);
@@ -127,12 +137,19 @@ const AuditLogList: React.FC = () => {
   // 打开过滤器对话框
   const handleOpenFilterDialog = () => {
     setTempFilter({ ...filter });
+    setStartDate(filter.start_date ? parseISO(filter.start_date) : null);
+    setEndDate(filter.end_date ? parseISO(filter.end_date) : null);
     setFilterDialogOpen(true);
   };
   
   // 应用过滤器
   const handleApplyFilter = () => {
-    setFilter({ ...tempFilter });
+    if (invalidDate || reversedRange) return;
+    setFilter({
+      ...tempFilter,
+      start_date: startDate ? startOfDay(startDate).toISOString() : undefined,
+      end_date: endDate ? endOfDay(endDate).toISOString() : undefined
+    });
     setPage(0);
     setFilterDialogOpen(false);
   };
@@ -140,6 +157,8 @@ const AuditLogList: React.FC = () => {
   // 清除过滤器
   const handleClearFilter = () => {
     setTempFilter({});
+    setStartDate(null);
+    setEndDate(null);
   };
   
   // 刷新数据
@@ -191,7 +210,7 @@ const AuditLogList: React.FC = () => {
                   <Chip 
                     size="small" 
                     label={log.status} 
-                    color={statusColors[log.status as keyof typeof statusColors]} 
+                    color={statusColors[log.status] || 'default'}
                   />
                 </TableCell>
                 <TableCell>{log.ip_address || '-'}</TableCell>
@@ -306,37 +325,38 @@ const AuditLogList: React.FC = () => {
           </Grid>
           <Grid item xs={12} md={6}>
             <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={zhCN}>
-              <DatePicker
+              <DatePicker<Date>
                 label="开始日期"
-                value={tempFilter.start_date ? new Date(tempFilter.start_date) : null}
-                onChange={(date) => setTempFilter({ 
-                  ...tempFilter, 
-                  start_date: date ? date.toISOString() : undefined 
-                })}
+                format="yyyy-MM-dd"
+                value={startDate}
+                onChange={setStartDate}
                 slotProps={{ textField: { fullWidth: true, size: 'small', margin: 'normal' } }}
               />
             </LocalizationProvider>
           </Grid>
           <Grid item xs={12} md={6}>
             <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={zhCN}>
-              <DatePicker
+              <DatePicker<Date>
                 label="结束日期"
-                value={tempFilter.end_date ? new Date(tempFilter.end_date) : null}
-                onChange={(date) => setTempFilter({ 
-                  ...tempFilter, 
-                  end_date: date ? date.toISOString() : undefined 
-                })}
+                format="yyyy-MM-dd"
+                value={endDate}
+                onChange={setEndDate}
                 slotProps={{ textField: { fullWidth: true, size: 'small', margin: 'normal' } }}
               />
             </LocalizationProvider>
           </Grid>
         </Grid>
+        {(invalidDate || reversedRange) && (
+          <Alert severity="error" sx={{ mt: 2 }}>
+            {invalidDate ? '请输入有效日期' : '结束日期不能早于开始日期'}
+          </Alert>
+        )}
       </DialogContent>
       <DialogActions>
         <Button startIcon={<ClearIcon />} onClick={handleClearFilter} color="inherit">
           清除
         </Button>
-        <Button startIcon={<SearchIcon />} onClick={handleApplyFilter} color="primary" variant="contained">
+        <Button startIcon={<SearchIcon />} onClick={handleApplyFilter} disabled={invalidDate || reversedRange} color="primary" variant="contained">
           应用
         </Button>
       </DialogActions>
@@ -388,7 +408,7 @@ const AuditLogList: React.FC = () => {
               <Chip 
                 size="small" 
                 label={selectedLog.status} 
-                color={statusColors[selectedLog.status as keyof typeof statusColors]} 
+                color={statusColors[selectedLog.status] || 'default'}
               />
             </Grid>
             <Grid item xs={12} md={6}>
@@ -496,4 +516,4 @@ const AuditLogList: React.FC = () => {
   );
 };
 
-export default AuditLogList; 
+export default AuditLogList;

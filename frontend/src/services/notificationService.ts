@@ -124,4 +124,4 @@ export const notificationApi = {
       throw error;
     }
   }
-}; 
+};

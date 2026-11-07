@@ -1,5 +1,6 @@
 import React from 'react';
 import axios from 'axios';
+import { API_BASE_URL } from '../../config/constants';
 import { 
   Box, 
   Typography, 
@@ -38,7 +39,6 @@ const NoteIcon = () => <span>📝</span>;
 const ChatIcon = () => <span>💬</span>;
 
 import { Link } from 'react-router-dom';
-import { API_BASE_URL } from '../../config/constants';
 
 // 模拟健康指标数据
 const healthMetrics = [
@@ -558,4 +558,4 @@ const CircleIcon = ({ color, fontSize }: { color: 'disabled' | 'primary' | 'seco
   );
 };
 
-export default PatientMainDashboard; 
+export default PatientMainDashboard;

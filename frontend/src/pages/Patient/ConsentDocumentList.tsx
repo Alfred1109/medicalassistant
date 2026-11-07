@@ -158,12 +158,12 @@ const ConsentDocumentList: React.FC = () => {
   
   // 查看文档详情
   const handleViewDocument = (id: string) => {
-    navigate(`/patient/documents/${id}`);
+    navigate(`/app/patient/documents/${id}`);
   };
   
   // 签署文档
   const handleSignDocument = (id: string) => {
-    navigate(`/patient/documents/${id}/sign`);
+    navigate(`/app/patient/documents/${id}/sign`);
   };
   
   // 获取文档状态标签

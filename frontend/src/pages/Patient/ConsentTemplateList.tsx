@@ -168,7 +168,7 @@ const ConsentTemplateList: React.FC = () => {
       const document = await consentApi.generateConsentDocument(templateId, variables);
       
       // 跳转到文档查看页面
-      navigate(`/patient/documents/${document.id}`);
+      navigate(`/app/patient/documents/${document.id}`);
     } catch (err) {
       console.error('生成知情同意文档失败:', err);
       setError('生成文档失败，请稍后重试');
@@ -191,7 +191,7 @@ const ConsentTemplateList: React.FC = () => {
         <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
           <IconButton 
             edge="start" 
-            onClick={() => navigate('/patient/documents')} 
+            onClick={() => navigate('/app/patient/documents')}
             sx={{ mr: 2 }}
             aria-label="返回"
           >

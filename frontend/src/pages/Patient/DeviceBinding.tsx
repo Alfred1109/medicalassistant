@@ -898,7 +898,7 @@ const DeviceBinding: React.FC = () => {
                       <Button
                         variant="outlined"
                         component={Link}
-                        to="/patient/health-records"
+                        to="/app/patient/health-records"
                         size="small"
                       >
                         查看更多健康数据

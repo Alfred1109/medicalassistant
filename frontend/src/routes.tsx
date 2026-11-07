@@ -1,5 +1,7 @@
 import React from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
+import { useSelector } from 'react-redux';
+import { RootState } from './store';
 import { CircularProgress, Box } from '@mui/material';
 
 // Layout
@@ -86,31 +88,6 @@ import FeatureDemoPage from './pages/Common/FeatureDemoPage';
 // 系统设置页面
 import SystemSettings from './pages/Settings/SystemSettings';
 
-// 导入备用页面组件
-import {
-  FallbackIndexPage,
-  FallbackAuthPage,
-  FallbackDashboard,
-  FallbackRehabPlans,
-  FallbackRehabPlanDetail,
-  FallbackRehabPlanForm,
-  FallbackExercises,
-  FallbackExerciseDetail,
-  FallbackExerciseForm,
-  FallbackAgents,
-  FallbackAgentDetail,
-  FallbackAgentForm,
-  FallbackDoctorDashboard,
-  FallbackPatientDashboard,
-  FallbackHealthManagerDashboard,
-  FallbackAdminDashboard,
-  FallbackRehabAssessment,
-  FallbackRehabProgress,
-  FallbackExerciseRecommendations,
-  FallbackProfile,
-  FallbackNotFoundPage
-} from './fallbackPages';
-
 // 加载中组件
 export const LoadingFallback = () => (
   <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
@@ -129,11 +106,6 @@ export class ErrorBoundary extends React.Component<
   }
 
   static getDerivedStateFromError(error: Error) {
-    // 在开发环境下不捕获错误，方便调试
-    if (import.meta.env.DEV) {
-      console.error('开发环境下错误:', error);
-      return { hasError: false, error };
-    }
     return { hasError: true, error };
   }
 
@@ -143,7 +115,6 @@ export class ErrorBoundary extends React.Component<
 
   render() {
     if (this.state.hasError) {
-      console.log('使用备用页面:', this.state.error?.message);
       return this.props.fallback;
     }
 
@@ -178,8 +149,9 @@ export const ForceLoadComponent = (
 
 // Protected Route Component
 export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Check if user is authenticated
-  const isAuthenticated = localStorage.getItem('token') !== null;
+  const { token, user, checking } = useSelector((state: RootState) => state.auth);
+  if (checking && token) return <LoadingFallback />;
+  const isAuthenticated = Boolean(token && user);
   
   if (!isAuthenticated) {
     // Redirect to login if not authenticated
@@ -191,7 +163,9 @@ export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ childr
 
 // Public Route Component (accessible only if NOT authenticated)
 export const PublicRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const isAuthenticated = localStorage.getItem('token') !== null;
+  const { token, user, checking } = useSelector((state: RootState) => state.auth);
+  if (checking && token) return <LoadingFallback />;
+  const isAuthenticated = Boolean(token && user);
   
   if (isAuthenticated) {
     // Redirect to dashboard if already authenticated
@@ -203,18 +177,27 @@ export const PublicRoute: React.FC<{ children: React.ReactNode }> = ({ children 
 
 // 角色路由守卫组件
 export const RoleRoute: React.FC<{ children: React.ReactNode, allowedRoles: string[] }> = ({ children, allowedRoles }) => {
-  const userRole = localStorage.getItem('userRole');
-  const isAuthenticated = localStorage.getItem('token') !== null;
+  const { token, user, checking } = useSelector((state: RootState) => state.auth);
+  if (checking && token) return <LoadingFallback />;
+  const isAuthenticated = Boolean(token && user);
   
   if (!isAuthenticated) {
     return <Navigate to="/auth" replace />;
   }
   
-  if (!userRole || !allowedRoles.includes(userRole)) {
+  if (!user || !allowedRoles.includes(user.role)) {
     return <Navigate to="/app/dashboard" replace />;
   }
   
   return <>{children}</>;
+};
+
+// Legacy paths remain inside the same authenticated and role-guarded /app tree.
+const LegacyRedirect: React.FC<{ to: string }> = ({ to }) => {
+  const params = useParams();
+  const location = useLocation();
+  const rest = params['*'] || '';
+  return <Navigate to={{ pathname: rest ? `${to}/${rest}` : to, search: location.search, hash: location.hash }} replace />;
 };
 
 // 创建应用路由组件
@@ -222,6 +205,14 @@ const AppRoutes: React.FC = () => (
   <Routes>
     {/* 主入口页面 - 重定向到登录页面 */}
     <Route path="/" element={<Navigate to="/auth/login" replace />} />
+
+    {/* 兼容线上历史链接，目标仍受 /app 身份和角色检查。 */}
+    <Route path="/rehab-plans/*" element={<LegacyRedirect to="/app/rehab-plans" />} />
+    <Route path="/exercises/*" element={<LegacyRedirect to="/app/exercises" />} />
+    <Route path="/agents/*" element={<LegacyRedirect to="/app/agents" />} />
+    <Route path="/patient/*" element={<LegacyRedirect to="/app/patient" />} />
+    <Route path="/doctor/*" element={<LegacyRedirect to="/app/doctor" />} />
+    <Route path="/health-manager/*" element={<LegacyRedirect to="/app/health-manager" />} />
 
     {/* Public routes (Auth) */}
     <Route 
@@ -292,6 +283,9 @@ const AppRoutes: React.FC = () => (
       {/* Settings route */}
       <Route path="settings" element={<SystemSettings />} />
       
+      {/* 已登录用户访问不存在的 /app 路径时显示 404。 */}
+      <Route path="*" element={<NotFound />} />
+
       {/* 医生专属路由 */}
       <Route 
         path="doctor" 
@@ -376,4 +370,4 @@ const AppRoutes: React.FC = () => (
 
 // 导出路由组件
 export { AppRoutes };
-export default AppRoutes; 
+export default AppRoutes;

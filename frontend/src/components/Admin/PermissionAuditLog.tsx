@@ -25,8 +25,10 @@ import {
   DialogActions,
   CircularProgress,
   Stack,
-  Badge
+  Badge,
+  Alert
 } from '@mui/material';
+import type { ChipProps } from '@mui/material';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import {
@@ -38,15 +40,15 @@ import {
   Clear as ClearIcon,
   VerifiedUser as VerifiedUserIcon
 } from '@mui/icons-material';
-import { format, parseISO } from 'date-fns';
+import { endOfDay, format, isAfter, isValid, parseISO, startOfDay } from 'date-fns';
 import zhCN from 'date-fns/locale/zh-CN';
-import ReactJson from 'react-json-view';
+import ReactJson from '@microlink/react-json-view';
 
 import { AuditService } from '../../services/audit-service';
 import { AuditLog, AuditLogFilter } from '../../types/audit';
 
 // 权限操作类型映射颜色
-const actionColors = {
+const actionColors: Record<string, NonNullable<ChipProps['color']>> = {
   grant: 'success',
   revoke: 'error',
   access: 'info',
@@ -55,6 +57,15 @@ const actionColors = {
   assign: 'warning',
   remove: 'default'
 } as const;
+
+const detailText = (details: unknown, field: string): string => {
+  if (details === null || typeof details !== 'object') return '-';
+  const entry = Object.entries(details).find(([key]) => key === field);
+  return typeof entry?.[1] === 'string' ? entry[1] : '-';
+};
+
+const isDetailObject = (details: unknown): details is object =>
+  details !== null && typeof details === 'object';
 
 /**
  * 权限审计日志组件
@@ -81,6 +92,14 @@ const PermissionAuditLog: React.FC = () => {
     resource_type: 'permission'
   });
   
+  // DatePicker uses Date values; the API receives an inclusive ISO time range.
+  const [startDate, setStartDate] = useState<Date | null>(null);
+  const [endDate, setEndDate] = useState<Date | null>(null);
+  const invalidDate = (startDate !== null && !isValid(startDate)) ||
+    (endDate !== null && !isValid(endDate));
+  const reversedRange = !invalidDate && startDate !== null && endDate !== null &&
+    isAfter(startOfDay(startDate), endOfDay(endDate));
+
   // 加载审计日志
   const loadLogs = useCallback(async () => {
     setLoading(true);
@@ -136,12 +155,19 @@ const PermissionAuditLog: React.FC = () => {
   // 打开过滤器对话框
   const handleOpenFilterDialog = () => {
     setTempFilter({ ...filter });
+    setStartDate(filter.start_date ? parseISO(filter.start_date) : null);
+    setEndDate(filter.end_date ? parseISO(filter.end_date) : null);
     setFilterDialogOpen(true);
   };
   
   // 应用过滤器
   const handleApplyFilter = () => {
-    setFilter({ ...tempFilter });
+    if (invalidDate || reversedRange) return;
+    setFilter({
+      ...tempFilter,
+      start_date: startDate ? startOfDay(startDate).toISOString() : undefined,
+      end_date: endDate ? endOfDay(endDate).toISOString() : undefined
+    });
     setPage(0);
     setFilterDialogOpen(false);
   };
@@ -149,6 +175,8 @@ const PermissionAuditLog: React.FC = () => {
   // 清除过滤器（除了resource_type保持为permission）
   const handleClearFilter = () => {
     setTempFilter({ resource_type: 'permission' });
+    setStartDate(null);
+    setEndDate(null);
   };
   
   // 获取用户名称的辅助函数（实际应用中可能需要从API获取）
@@ -212,14 +240,14 @@ const PermissionAuditLog: React.FC = () => {
                   <Chip
                     size="small"
                     label={log.action}
-                    color={actionColors[log.action as keyof typeof actionColors] || 'default'}
+                    color={actionColors[log.action] || 'default'}
                   />
                 </TableCell>
                 <TableCell>
-                  {formatPermissionName(log.details?.permission || '-')}
+                  {formatPermissionName(detailText(log.details, 'permission'))}
                 </TableCell>
-                <TableCell>{getUserName(log.details?.target_user_id || '-')}</TableCell>
-                <TableCell>{log.details?.role || '-'}</TableCell>
+                <TableCell>{getUserName(detailText(log.details, 'target_user_id'))}</TableCell>
+                <TableCell>{detailText(log.details, 'role')}</TableCell>
                 <TableCell>
                   <Tooltip title="查看详情">
                     <IconButton size="small" onClick={() => handleViewDetails(log.id)}>
@@ -339,43 +367,32 @@ const PermissionAuditLog: React.FC = () => {
           </Grid>
           <Grid item xs={12} md={6}>
             <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={zhCN}>
-              <DatePicker
+              <DatePicker<Date>
                 label="开始日期"
-                value={tempFilter.start_date ? new Date(tempFilter.start_date) : null}
-                onChange={(date) => setTempFilter({
-                  ...tempFilter,
-                  start_date: date ? date.toISOString() : undefined
-                })}
-                slotProps={{
-                  textField: {
-                    fullWidth: true,
-                    size: "small",
-                    margin: "normal"
-                  }
-                }}
+                format="yyyy-MM-dd"
+                value={startDate}
+                onChange={setStartDate}
+                slotProps={{ textField: { fullWidth: true, size: 'small', margin: 'normal' } }}
               />
             </LocalizationProvider>
           </Grid>
           <Grid item xs={12} md={6}>
             <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={zhCN}>
-              <DatePicker
+              <DatePicker<Date>
                 label="结束日期"
-                value={tempFilter.end_date ? new Date(tempFilter.end_date) : null}
-                onChange={(date) => setTempFilter({
-                  ...tempFilter,
-                  end_date: date ? date.toISOString() : undefined
-                })}
-                slotProps={{
-                  textField: {
-                    fullWidth: true,
-                    size: "small",
-                    margin: "normal"
-                  }
-                }}
+                format="yyyy-MM-dd"
+                value={endDate}
+                onChange={setEndDate}
+                slotProps={{ textField: { fullWidth: true, size: 'small', margin: 'normal' } }}
               />
             </LocalizationProvider>
           </Grid>
         </Grid>
+        {(invalidDate || reversedRange) && (
+          <Alert severity="error" sx={{ mt: 2 }}>
+            {invalidDate ? '请输入有效日期' : '结束日期不能早于开始日期'}
+          </Alert>
+        )}
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClearFilter} startIcon={<ClearIcon />}>
@@ -384,7 +401,7 @@ const PermissionAuditLog: React.FC = () => {
         <Button onClick={() => setFilterDialogOpen(false)}>
           取消
         </Button>
-        <Button onClick={handleApplyFilter} variant="contained" color="primary">
+        <Button onClick={handleApplyFilter} disabled={invalidDate || reversedRange} variant="contained" color="primary">
           应用
         </Button>
       </DialogActions>
@@ -416,7 +433,7 @@ const PermissionAuditLog: React.FC = () => {
             </Grid>
             <Grid item xs={12} md={6}>
               <Typography variant="subtitle2">操作者</Typography>
-              <Typography variant="body2">
+              <Typography variant="body2" component="div">
                 <Stack direction="row" alignItems="center" spacing={1}>
                   <PersonIcon fontSize="small" />
                   {getUserName(selectedLog.user_id)}
@@ -425,11 +442,11 @@ const PermissionAuditLog: React.FC = () => {
             </Grid>
             <Grid item xs={12} md={6}>
               <Typography variant="subtitle2">操作类型</Typography>
-              <Typography variant="body2">
+              <Typography variant="body2" component="div">
                 <Chip
                   size="small"
                   label={selectedLog.action}
-                  color={actionColors[selectedLog.action as keyof typeof actionColors] || 'default'}
+                  color={actionColors[selectedLog.action] || 'default'}
                 />
               </Typography>
             </Grid>
@@ -448,7 +465,7 @@ const PermissionAuditLog: React.FC = () => {
             <Grid item xs={12}>
               <Typography variant="subtitle2">详细信息</Typography>
               <Paper sx={{ p: 2, mt: 1, maxHeight: '300px', overflow: 'auto' }}>
-                {selectedLog.details ? (
+                {isDetailObject(selectedLog.details) ? (
                   <ReactJson
                     src={selectedLog.details}
                     name={false}
@@ -483,4 +500,4 @@ const PermissionAuditLog: React.FC = () => {
   );
 };
 
-export default PermissionAuditLog; 
+export default PermissionAuditLog;

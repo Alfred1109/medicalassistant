@@ -240,7 +240,7 @@ const Layout: React.FC = () => {
   
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [openSubmenu, setOpenSubmenu] = useState<string | null>(null);
-  const userRole = localStorage.getItem('userRole') || '';
+  const userRole = user?.role || '';
   
   // 新增：记录最近访问页面历史
   const [recentPages, setRecentPages] = useState<MenuItem[]>(() => {
@@ -1047,4 +1047,4 @@ const Layout: React.FC = () => {
   );
 };
 
-export default Layout; 
+export default Layout;

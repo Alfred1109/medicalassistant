@@ -140,7 +140,7 @@ const RehabPlanPage: React.FC = () => {
   };
 
   const handleViewPlanDetail = (planId: string) => {
-    navigate(`/rehab-plans/${planId}`);
+    navigate(`/app/rehab-plans/${planId}`);
   };
 
   const calculateProgress = (plan: any) => {

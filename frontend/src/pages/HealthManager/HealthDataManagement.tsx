@@ -496,7 +496,7 @@ const HealthDataManagement = () => {
             variant="outlined"
             startIcon={<TimelineIcon />}
             component={Link}
-            to={`/health-manager/health-data-timeline/${selectedPatientId}`}
+            to={`/app/health-manager/health-data-timeline/${selectedPatientId}`}
           >
             查看时间线
           </Button>

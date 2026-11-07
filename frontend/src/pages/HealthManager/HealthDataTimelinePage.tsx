@@ -612,7 +612,7 @@ const HealthDataTimelinePage: React.FC = () => {
         <Stack direction="row" spacing={2}>
           <Button 
             color="primary"
-            onClick={() => navigate(`/health-manager/health-data/${patientId}`)}
+            onClick={() => navigate(`/app/health-manager/health-data/${patientId}`)}
           >
             查看健康数据管理
           </Button>

@@ -383,7 +383,7 @@ const DataMonitoring: React.FC = () => {
             {selectedPatient && (
               <Button
                 component={Link}
-                to={`/health-manager/health-data-timeline/${selectedPatient}`}
+                to={`/app/health-manager/health-data-timeline/${selectedPatient}`}
                 variant="outlined"
                 startIcon={<TimelineIcon />}
               >
@@ -572,7 +572,7 @@ const DataMonitoring: React.FC = () => {
                       variant="outlined" 
                       size="small"
                       component={Link}
-                      to={`/doctor/health-records/${selectedPatient}`}
+                      to={`/app/doctor/health-records/${selectedPatient}`}
                     >
                       查看完整用药史
                     </Button>
@@ -676,7 +676,7 @@ const DataMonitoring: React.FC = () => {
                         variant="outlined" 
                         size="small"
                         component={Link}
-                        to={`/rehab-plans`}
+                        to={`/app/rehab-plans`}
                       >
                         查看完整计划
                       </Button>

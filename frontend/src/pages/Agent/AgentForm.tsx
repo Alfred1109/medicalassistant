@@ -29,10 +29,8 @@ import axios from 'axios';
 // 导入store类型和action
 import { RootState, AppDispatch } from '../../store';
 import { fetchAgentById, createAgent, updateAgent } from '../../store/slices/agentSlice';
-import { API_ORIGIN } from '../../config/constants';
+import { API_BASE_URL } from '../../config/constants';
 
-// API 根地址(不含 /api),由 nginx 反向代理转发
-const BASE_URL = API_ORIGIN;
 
 // 助手类型选项
 const AGENT_TYPES = [
@@ -137,7 +135,7 @@ const AgentForm = () => {
       
       // 调用API生成参数
       const response = await axios.post(
-        `${BASE_URL}/api/agents/generate-parameters`, 
+        `${API_BASE_URL}/agents/generate-parameters`,
         requestData
       );
       
@@ -390,4 +388,4 @@ const AgentForm = () => {
   );
 };
 
-export default AgentForm; 
+export default AgentForm;

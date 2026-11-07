@@ -192,7 +192,7 @@ const RehabPlanDetail: React.FC = () => {
           <Box>
             <IconButton 
               color="primary" 
-              onClick={() => navigate(`/rehab-plans/edit/${id}`)}
+              onClick={() => navigate(`/app/rehab-plans/edit/${id}`)}
               sx={{ mr: 1 }}
             >
               <EditIcon />

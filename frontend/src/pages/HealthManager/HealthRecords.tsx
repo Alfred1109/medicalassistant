@@ -111,7 +111,7 @@ const HealthRecords: React.FC = () => {
   
   // 返回患者列表
   const handleBack = () => {
-    navigate('/health-manager/patients');
+    navigate('/app/health-manager/patients');
   };
   
   // 获取患者健康档案

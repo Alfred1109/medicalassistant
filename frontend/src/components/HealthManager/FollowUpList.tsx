@@ -24,11 +24,12 @@ import {
   DialogContent,
   DialogActions,
   Stack,
+  Grid,
   CircularProgress,
-  Alert,
-  Grid
+  Alert
 } from '@mui/material';
-import { format, isAfter, isBefore, parseISO } from 'date-fns';
+import type { ChipProps } from '@mui/material';
+import { format, isAfter, isValid, parseISO } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
@@ -63,7 +64,15 @@ const followUpStatuses = [
   { value: 'canceled', label: '已取消', color: 'error' },
   { value: 'missed', label: '已错过', color: 'warning' },
   { value: 'rescheduled', label: '已重新安排', color: 'info' },
-];
+] as const;
+
+interface FollowUpFilters {
+  follow_up_type?: string;
+  status?: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  patient_name?: string;
+}
 
 // 随访记录类型
 interface FollowUpRecord {
@@ -72,9 +81,9 @@ interface FollowUpRecord {
   patient_name?: string;
   follow_up_type: string;
   scheduled_date: string;
-  actual_date?: string;
+  actual_date?: string | null;
   status: string;
-  notes: string;
+  notes?: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -96,9 +105,9 @@ interface FollowUpListProps {
   onCancel?: (id: string) => void;
   onReschedule?: (id: string) => void;
   onDelete?: (id: string) => void;
-  onFilterChange?: (filters: any) => void;
+  onFilterChange?: (filters: FollowUpFilters) => void;
   onRefresh?: () => void;
-  currentFilters?: any;
+  currentFilters?: FollowUpFilters;
 }
 
 const FollowUpList: React.FC<FollowUpListProps> = ({
@@ -129,7 +138,7 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   const [actionType, setActionType] = useState<'complete' | 'cancel' | 'reschedule' | null>(null);
   
   // 过滤器变更处理
-  const handleFilterChange = (field: string, value: any) => {
+  const handleFilterChange = <K extends keyof FollowUpFilters>(field: K, value: FollowUpFilters[K]) => {
     const newFilters = { ...filters, [field]: value };
     setFilters(newFilters);
   };
@@ -224,7 +233,7 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   };
   
   // 获取状态标签和颜色
-  const getStatusInfo = (status: string) => {
+  const getStatusInfo = (status: string): { label: string; color: ChipProps['color'] } => {
     const foundStatus = followUpStatuses.find(s => s.value === status);
     return {
       label: foundStatus ? foundStatus.label : status,
@@ -417,20 +426,30 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
                 <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={zhCN}>
-                  <DatePicker
+                  <DatePicker<Date>
                     label="开始日期"
+                    format="yyyy-MM-dd"
                     value={filters.start_date ? parseISO(filters.start_date) : null}
-                    onChange={(date) => handleFilterChange('start_date', date ? format(date, 'yyyy-MM-dd') : null)}
+                    onChange={(date) => {
+                      if (date === null || isValid(date)) {
+                        handleFilterChange('start_date', date ? format(date, 'yyyy-MM-dd') : null);
+                      }
+                    }}
                     slotProps={{ textField: { size: 'small', fullWidth: true } }}
                   />
                 </LocalizationProvider>
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
                 <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={zhCN}>
-                  <DatePicker
+                  <DatePicker<Date>
                     label="结束日期"
+                    format="yyyy-MM-dd"
                     value={filters.end_date ? parseISO(filters.end_date) : null}
-                    onChange={(date) => handleFilterChange('end_date', date ? format(date, 'yyyy-MM-dd') : null)}
+                    onChange={(date) => {
+                      if (date === null || isValid(date)) {
+                        handleFilterChange('end_date', date ? format(date, 'yyyy-MM-dd') : null);
+                      }
+                    }}
                     slotProps={{ textField: { size: 'small', fullWidth: true } }}
                   />
                 </LocalizationProvider>
@@ -534,7 +553,7 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
                           <Chip 
                             label={statusInfo.label} 
                             size="small" 
-                            color={statusInfo.color as any}
+                            color={statusInfo.color}
                           />
                         </TableCell>
                         <TableCell>
@@ -630,4 +649,4 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   );
 };
 
-export default FollowUpList; 
+export default FollowUpList;

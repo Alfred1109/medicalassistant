@@ -1,7 +1,7 @@
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import axios, { AxiosResponse } from 'axios';
-import { ThunkApiConfig } from '../types';
-import { API_BASE_URL } from '../../config/constants';
+import type { ThunkApiConfig } from '../types';
+import { API_BASE_URL } from '../../config/api';
 
 // User interface
 export interface User {
@@ -11,7 +11,6 @@ export interface User {
   role: 'patient' | 'doctor' | 'health_manager' | 'admin';
   createdAt: string;
   updatedAt: string;
-  /** 头像地址(可选) */
   avatar?: string;
 }
 
@@ -20,6 +19,8 @@ export interface AuthState {
   user: User | null;
   token: string | null;
   checking: boolean;
+  sessionCheckRequestId: string | null;
+  sessionCheckToken: string | null;
   loading: boolean;
   loginLoading: boolean;  // 专门用于登录操作的loading状态
   registerLoading: boolean;  // 专门用于注册操作的loading状态
@@ -32,6 +33,8 @@ const initialState: AuthState = {
   user: null,
   token: localStorage.getItem('token'),
   checking: true,
+  sessionCheckRequestId: null,
+  sessionCheckToken: null,
   loading: false,
   loginLoading: false,
   registerLoading: false,
@@ -84,11 +87,9 @@ export const login = createAsyncThunk<
   'auth/login',
   async (credentials, { rejectWithValue }) => {
     try {
-      console.log('Attempting login with:', credentials.email);
       const params = new URLSearchParams();
       params.append('username', credentials.email);
       params.append('password', credentials.password);
-      console.log('Sending login request to API...');
 
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('请求超时，请检查网络连接或服务器状态')), 8000);
@@ -124,17 +125,15 @@ export const login = createAsyncThunk<
         }
       }
       // If the structure is not as expected, or if it somehow wasn't a timeout but also not a valid success
-      console.error('Login response format error or unexpected issue:', responseOrError);
+      console.error('登录响应格式错误');
       return rejectWithValue('登录响应格式错误或请求被中断');
 
     } catch (error: any) {
-      console.error('Login error (outer catch):', error);
+      console.error('登录请求失败');
       let errorMessage = '登录失败，请稍后重试';
       if (error.message && error.message.includes('超时')) {
         errorMessage = error.message;
       } else if (axios.isAxiosError(error) && error.response) {
-        console.error('Error response data:', error.response.data);
-        console.error('Error response status:', error.response.status);
         if (error.response.status === 401) {
           errorMessage = '用户名或密码不正确';
         } else if (error.response.status === 400) {
@@ -166,7 +165,7 @@ export const checkAuthStatus = createAsyncThunk<
 >(
   'auth/checkStatus',
   async (_, { rejectWithValue, getState }) => {
-    const { auth } = getState(); 
+    const { auth } = getState();
     if (!auth.token) {
       return rejectWithValue('No token found');
     }
@@ -176,7 +175,6 @@ export const checkAuthStatus = createAsyncThunk<
       });
       return response.data;
     } catch (error: any) {
-      localStorage.removeItem('token');
       return rejectWithValue(error.response?.data?.detail || 'Session expired');
     }
   }
@@ -212,149 +210,32 @@ export const updateUserProfile = createAsyncThunk<
   }
 );
 
-// 模拟医生登录函数
-export const mockDoctorLogin = createAsyncThunk<
-  LoginSuccessPayload,
-  void,
-  ThunkApiConfig
->(
-  'auth/mockDoctorLogin',
-  async (_, { rejectWithValue }) => {
-    try {
-      // 模拟的医生用户数据
-      const mockUser: User = {
-        id: 'mock-doctor-id',
-        email: 'doctor@example.com',
-        name: '张医生',
-        role: 'doctor',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
-      // 模拟的token
-      const mockToken = 'mock-doctor-token-' + Date.now();
-      
-      // 存储到localStorage
-      localStorage.setItem('token', mockToken);
-      localStorage.setItem('userRole', mockUser.role);
-      
-      return {
-        user: mockUser,
-        token: mockToken
-      };
-    } catch (error: any) {
-      return rejectWithValue('模拟医生登录失败');
-    }
+// Legacy demo exports use the same backend authentication as ordinary login.
+// They cannot manufacture a principal or a token, and require explicitly seeded accounts.
+const demoLogin = (kind: string, email: string, password: string) => createAsyncThunk<
+  LoginSuccessPayload, void, ThunkApiConfig
+>(`auth/${kind}`, async (_, { dispatch, rejectWithValue }) => {
+  try {
+    return await dispatch(login({ email, password })).unwrap();
+  } catch (error) {
+    return rejectWithValue(typeof error === 'string' ? error : '演示账号登录失败');
   }
-);
+});
+export const mockDoctorLogin = demoLogin('mockDoctorLogin', 'doctor@example.com', 'Doctor123!');
+export const mockHealthManagerLogin = demoLogin('mockHealthManagerLogin', 'liujk@example.com', 'Manager123!');
+export const mockAdminLogin = demoLogin('mockAdminLogin', 'admin@example.com', 'Admin123!');
+export const mockPatientLogin = demoLogin('mockPatientLogin', 'zhangsan@example.com', 'Patient123!');
 
-// 模拟健康管理师登录函数
-export const mockHealthManagerLogin = createAsyncThunk<
-  LoginSuccessPayload,
-  void,
-  ThunkApiConfig
->(
-  'auth/mockHealthManagerLogin',
-  async (_, { rejectWithValue }) => {
-    try {
-      // 模拟的健康管理师用户数据
-      const mockUser: User = {
-        id: 'mock-health-manager-id',
-        email: 'health-manager@example.com',
-        name: '李健康管理师',
-        role: 'health_manager',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
-      // 模拟的token
-      const mockToken = 'mock-health-manager-token-' + Date.now();
-      
-      // 存储到localStorage
-      localStorage.setItem('token', mockToken);
-      localStorage.setItem('userRole', mockUser.role);
-      
-      return {
-        user: mockUser,
-        token: mockToken
-      };
-    } catch (error: any) {
-      return rejectWithValue('模拟健康管理师登录失败');
-    }
-  }
-);
+// A token replacement or logout invalidates every validation of the previous session.
+function invalidateSessionCheck(state: AuthState) {
+  state.checking = false;
+  state.sessionCheckRequestId = null;
+  state.sessionCheckToken = null;
+}
 
-// 模拟管理员登录函数
-export const mockAdminLogin = createAsyncThunk<
-  LoginSuccessPayload,
-  void,
-  ThunkApiConfig
->(
-  'auth/mockAdminLogin',
-  async (_, { rejectWithValue }) => {
-    try {
-      // 模拟的管理员用户数据
-      const mockUser: User = {
-        id: 'mock-admin-id',
-        email: 'admin@example.com',
-        name: '管理员',
-        role: 'admin',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
-      // 模拟的token
-      const mockToken = 'mock-admin-token-' + Date.now();
-      
-      // 存储到localStorage
-      localStorage.setItem('token', mockToken);
-      localStorage.setItem('userRole', mockUser.role);
-      
-      return {
-        user: mockUser,
-        token: mockToken
-      };
-    } catch (error: any) {
-      return rejectWithValue('模拟管理员登录失败');
-    }
-  }
-);
-
-// 模拟患者登录函数
-export const mockPatientLogin = createAsyncThunk<
-  LoginSuccessPayload,
-  void,
-  ThunkApiConfig
->(
-  'auth/mockPatientLogin',
-  async (_, { rejectWithValue }) => {
-    try {
-      // 模拟的患者用户数据
-      const mockUser: User = {
-        id: 'mock-patient-id',
-        email: 'zhangsan@example.com',
-        name: '张三',
-        role: 'patient',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
-      // 模拟的token
-      const mockToken = 'mock-patient-token-' + Date.now();
-      
-      // 存储到localStorage
-      localStorage.setItem('token', mockToken);
-      localStorage.setItem('userRole', mockUser.role);
-      
-      return {
-        user: mockUser,
-        token: mockToken
-      };
-    } catch (error: any) {
-      return rejectWithValue('模拟患者登录失败');
-    }
-  }
-);
+function isCurrentSessionCheck(state: AuthState, requestId: string) {
+  return state.sessionCheckRequestId === requestId && state.sessionCheckToken === state.token;
+}
 
 // Auth slice
 const authSlice = createSlice({
@@ -362,6 +243,7 @@ const authSlice = createSlice({
   initialState,
   reducers: {
     logout: (state: AuthState) => {
+      invalidateSessionCheck(state);
       state.user = null;
       state.token = null;
       state.error = null;
@@ -381,6 +263,7 @@ const authSlice = createSlice({
         state.error = null;
       })
       .addCase(register.fulfilled, (state: AuthState, action: PayloadAction<{ user: User; token: string }>) => {
+        invalidateSessionCheck(state);
         state.registerLoading = false;
         state.loading = false;
         state.checking = false;
@@ -393,13 +276,14 @@ const authSlice = createSlice({
         state.checking = false;
         state.error = action.payload as string;
       })
-      
+
       // Login cases
       .addCase(login.pending, (state: AuthState) => {
         state.loginLoading = true;
         state.error = null;
       })
       .addCase(login.fulfilled, (state: AuthState, action: PayloadAction<LoginSuccessPayload>) => {
+        invalidateSessionCheck(state);
         state.loginLoading = false;
         state.checking = false;
         state.user = action.payload.user;
@@ -410,23 +294,32 @@ const authSlice = createSlice({
         state.loginLoading = false;
         state.error = action.payload as string;
       })
-      
+
       // Check auth status cases
-      .addCase(checkAuthStatus.pending, (state: AuthState) => {
+      .addCase(checkAuthStatus.pending, (state: AuthState, action) => {
         state.checking = true;
+        state.sessionCheckRequestId = action.meta.requestId;
+        state.sessionCheckToken = state.token;
         state.error = null;
       })
-      .addCase(checkAuthStatus.fulfilled, (state: AuthState, action: PayloadAction<User>) => {
-        state.checking = false;
+      .addCase(checkAuthStatus.fulfilled, (state: AuthState, action) => {
+        if (!isCurrentSessionCheck(state, action.meta.requestId)) return;
+        invalidateSessionCheck(state);
         state.user = action.payload;
       })
       .addCase(checkAuthStatus.rejected, (state: AuthState, action) => {
-        state.checking = false;
+        if (!isCurrentSessionCheck(state, action.meta.requestId)) return;
+        // A stale validation must not erase a newer token (including another tab's).
+        if (localStorage.getItem('token') === state.token) {
+          localStorage.removeItem('token');
+          localStorage.removeItem('userRole');
+        }
+        invalidateSessionCheck(state);
         state.user = null;
         state.token = null;
         state.error = action.payload as string;
       })
-      
+
       // Update user profile cases
       .addCase(updateUserProfile.pending, (state: AuthState) => {
         state.profileLoading = true;
@@ -441,7 +334,7 @@ const authSlice = createSlice({
         state.profileLoading = false;
         state.error = action.payload as string;
       })
-      
+
       // 添加模拟医生登录处理
       .addCase(mockDoctorLogin.pending, (state) => {
         state.loading = true;
@@ -449,6 +342,7 @@ const authSlice = createSlice({
         state.error = null;
       })
       .addCase(mockDoctorLogin.fulfilled, (state, action) => {
+        invalidateSessionCheck(state);
         state.loading = false;
         state.loginLoading = false;
         state.user = action.payload.user;
@@ -468,6 +362,7 @@ const authSlice = createSlice({
         state.error = null;
       })
       .addCase(mockHealthManagerLogin.fulfilled, (state, action) => {
+        invalidateSessionCheck(state);
         state.loading = false;
         state.loginLoading = false;
         state.user = action.payload.user;
@@ -487,6 +382,7 @@ const authSlice = createSlice({
         state.error = null;
       })
       .addCase(mockAdminLogin.fulfilled, (state, action) => {
+        invalidateSessionCheck(state);
         state.loading = false;
         state.loginLoading = false;
         state.user = action.payload.user;
@@ -506,6 +402,7 @@ const authSlice = createSlice({
         state.error = null;
       })
       .addCase(mockPatientLogin.fulfilled, (state, action) => {
+        invalidateSessionCheck(state);
         state.loading = false;
         state.loginLoading = false;
         state.user = action.payload.user;
@@ -521,4 +418,4 @@ const authSlice = createSlice({
 });
 
 export const { logout, clearAuthError } = authSlice.actions;
-export default authSlice.reducer; 
+export default authSlice.reducer;

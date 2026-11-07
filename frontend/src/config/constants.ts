@@ -1,12 +1,7 @@
-// API配置
-// nginx 反向代理的路径前缀。部署在根路径(/)时,把 VITE_API_PREFIX 设为空字符串。
-export const API_PREFIX = import.meta.env.VITE_API_PREFIX ?? '/medical';
-
-// 用于 `${API_ORIGIN}/api/xxx` 这种拼接方式
+// 同源部署前缀；浏览器路由与旧的 /api 拼接调用共用该前缀。
+export const API_PREFIX = (import.meta.env.VITE_API_PREFIX ?? '').replace(/\/+$/, '');
 export const API_ORIGIN = API_PREFIX;
-
-// 用于 `${API_BASE_URL}/xxx` 这种拼接方式(已包含 /api 前缀)
-export const API_BASE_URL = `${API_PREFIX}/api`;
+export { API_BASE_URL } from './api';
 
 // 文件上传限制大小（单位：字节）
 export const MAX_UPLOAD_FILE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -120,4 +115,4 @@ export const ONLINE_STATUS = {
   OFFLINE: 'offline',
   AWAY: 'away',
   BUSY: 'busy'
-}; 
+};

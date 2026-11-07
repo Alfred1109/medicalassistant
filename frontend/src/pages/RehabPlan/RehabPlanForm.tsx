@@ -53,10 +53,8 @@ import {
 } from '../../store/slices/rehabSlice';
 import { RehabPlan } from '../../types/rehab';
 import axios from 'axios';
-import { API_ORIGIN } from '../../config/constants';
+import { API_BASE_URL } from '../../config/constants';
 
-// 添加BASE_URL常量(API 根地址,不含 /api)
-const BASE_URL = API_ORIGIN;
 
 // 生成计划所需的患者信息类型
 interface PatientInfo {
@@ -203,7 +201,7 @@ const RehabPlanForm: React.FC = () => {
     try {
       // 调用后端API生成计划
       const response = await axios.post(
-        `${BASE_URL}/api/rehabilitation/plans/generate`,
+        `${API_BASE_URL}/rehabilitation/plans/generate`,
         patientInfo
       );
       
@@ -282,12 +280,12 @@ const RehabPlanForm: React.FC = () => {
       
       // 调用后端API确认计划
       const response = await axios.post(
-        `${BASE_URL}/api/rehabilitation/plans/${modifiedPlan._id}/approve`,
+        `${API_BASE_URL}/rehabilitation/plans/${modifiedPlan._id}/approve`,
         { modifications }
       );
       
       // 导航到计划详情页面
-      navigate(`/rehab-plans/${modifiedPlan._id}`);
+      navigate(`/app/rehab-plans/${modifiedPlan._id}`);
     } catch (err: any) {
       setError(err.response?.data?.detail || '确认康复计划失败');
     } finally {
@@ -334,7 +332,7 @@ const RehabPlanForm: React.FC = () => {
       dispatch(updateRehabPlan({ id: id!, planData }))
         .unwrap()
         .then(() => {
-          navigate(`/rehab-plans/${id}`);
+          navigate(`/app/rehab-plans/${id}`);
         })
         .catch(err => {
           setError(err.message || '更新康复计划失败');
@@ -344,7 +342,7 @@ const RehabPlanForm: React.FC = () => {
       dispatch(createRehabPlan(planData))
         .unwrap()
         .then((response) => {
-          navigate(`/rehab-plans/${response._id}`);
+          navigate(`/app/rehab-plans/${response._id}`);
         })
         .catch(err => {
           setError(err.message || '创建康复计划失败');

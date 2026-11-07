@@ -508,7 +508,7 @@ const ConsentDocumentView: React.FC = () => {
             <Box sx={{ mt: 4 }}>
               <Button
                 variant="contained"
-                onClick={() => navigate('/patient/documents')}
+                onClick={() => navigate('/app/patient/documents')}
               >
                 返回文档列表
               </Button>

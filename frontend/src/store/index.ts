@@ -46,15 +46,10 @@ const rootReducer = combineReducers({
 // 创建持久化reducer
 const persistedReducer = persistReducer(persistConfig, rootReducer);
 
-// 自定义中间件，用于开发环境日志
-const logger: Middleware = (store: any) => (next: any) => (action: any) => {
-  if (process.env.NODE_ENV !== 'production') {
-    console.group(`Action: ${action.type}`);
-    console.info('dispatched', action);
-    const result = next(action);
-    console.log('next state', store.getState());
-    console.groupEnd();
-    return result;
+// 仅记录动作类型，避免在开发者控制台泄露患者数据、答卷或身份凭据。
+const logger: Middleware = () => (next) => (action) => {
+  if (import.meta.env.DEV && typeof action?.type === 'string') {
+    console.debug(`Action: ${action.type}`);
   }
   return next(action);
 };
@@ -62,13 +57,13 @@ const logger: Middleware = (store: any) => (next: any) => (action: any) => {
 // 创建store
 export const store = configureStore({
   reducer: persistedReducer,
-  middleware: (getDefaultMiddleware: any) =>
+  middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
         ignoredActions: [FLUSH, REHYDRATE, PAUSE, PERSIST, PURGE, REGISTER],
       },
-    }).concat(process.env.NODE_ENV !== 'production' ? [logger, api.middleware] : [api.middleware]),
-  devTools: process.env.NODE_ENV !== 'production',
+    }).concat(logger, api.middleware),
+  devTools: import.meta.env.DEV,
 });
 
 // 创建持久化store
@@ -80,4 +75,4 @@ setupListeners(store.dispatch);
 // 导出类型(定义在 types.ts,避免 slices <-> store/index.ts 的循环依赖)
 export type { RootState, AppDispatch } from './types';
 
-export default store; 
+export default store;

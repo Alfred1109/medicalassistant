@@ -2,25 +2,23 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { Provider } from 'react-redux';
-import { CssBaseline } from '@mui/material';
+import { Alert, Box, CssBaseline } from '@mui/material';
+import App from './App';
+import { API_PREFIX } from './config/constants';
 import { ThemeProvider } from '@mui/material/styles';
 import store from './store';
 import { PersistGate } from 'redux-persist/integration/react';
 import { persistor } from './store';
-import { API_PREFIX } from './config/constants';
 
 // 导入自定义主题
 import theme from './theme';
 
 // 导入路由配置和工具函数
-import { 
-  AppRoutes,
-  LoadingFallback, 
+import {
+  LoadingFallback,
   ErrorBoundary
 } from './routes';
 
-// 导入备用页面组件，用于顶级错误边界
-import { FallbackIndexPage } from './fallbackPages';
 
 import './index.css';
 // 导入highlight.js样式用于代码高亮
@@ -32,24 +30,28 @@ console.log('🔧 调试: 检查是否到达了主文件入口');
 // 等待DOM加载完成
 const startApp = () => {
   console.log('📋 DOM已准备好，开始渲染应用...');
-  
+
   const rootElement = document.getElementById('root');
   if (!rootElement) {
     console.error('❌ 未找到根元素');
     return;
   }
-  
+
   console.log('✅ 找到root元素，开始渲染React应用');
 
   // 应用组件
-  const App = () => (
+  const ApplicationRoot = () => (
     <Provider store={store}>
       <PersistGate loading={<LoadingFallback />} persistor={persistor}>
         <ThemeProvider theme={theme}>
           <CssBaseline />
-          <BrowserRouter basename={API_PREFIX}>
-            <ErrorBoundary fallback={<FallbackIndexPage />}>
-              <AppRoutes />
+          <BrowserRouter basename={API_PREFIX || undefined}>
+            <ErrorBoundary fallback={
+              <Box sx={{ p: 3 }}>
+                <Alert severity="error">页面加载失败，请刷新页面后重试。</Alert>
+              </Box>
+            }>
+              <App />
             </ErrorBoundary>
           </BrowserRouter>
         </ThemeProvider>
@@ -62,7 +64,7 @@ const startApp = () => {
     const root = ReactDOM.createRoot(rootElement);
     root.render(
       <React.StrictMode>
-        <App />
+        <ApplicationRoot />
       </React.StrictMode>
     );
     console.log('✅ 医疗助手应用渲染完成');

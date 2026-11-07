@@ -23,7 +23,7 @@ const HealthThresholdPage = () => {
       <Breadcrumbs aria-label="breadcrumb" sx={{ mb: 2 }}>
         <Link
           component={RouterLink}
-          to="/health-manager/dashboard"
+          to="/app/health-manager/patients"
           underline="hover"
           sx={{ display: 'flex', alignItems: 'center' }}
         >
@@ -32,7 +32,7 @@ const HealthThresholdPage = () => {
         </Link>
         <Link
           component={RouterLink}
-          to="/health-manager/monitoring"
+          to="/app/health-manager/monitoring"
           underline="hover"
           sx={{ display: 'flex', alignItems: 'center' }}
         >

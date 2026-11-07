@@ -36,10 +36,8 @@ import InfoIcon from '@mui/icons-material/Info';
 import WarningIcon from '@mui/icons-material/Warning';
 import ErrorIcon from '@mui/icons-material/Error';
 import axios from 'axios';
-import { API_ORIGIN } from '../../config/constants';
+import { API_BASE_URL } from '../../config/constants';
 
-// API 根地址(不含 /api),由 nginx 反向代理转发
-const API_BASE_URL = API_ORIGIN;
 
 // 健康数据阈值接口
 interface HealthDataThreshold {
@@ -180,7 +178,7 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       setError(null);
 
       // 构建查询参数
-      let url = `${API_BASE_URL}/api/health/alerts/thresholds`;
+      let url = `${API_BASE_URL}/health/alerts/thresholds`;
       if (patientId) {
         url += `?patient_id=${patientId}`;
       }
@@ -323,7 +321,7 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       if (currentThresholdId) {
         // 更新现有阈值
         response = await axios.put(
-          `${API_BASE_URL}/api/health/alerts/thresholds/${currentThresholdId}`,
+          `${API_BASE_URL}/health/alerts/thresholds/${currentThresholdId}`,
           submitData
         );
         setSnackbar({
@@ -334,7 +332,7 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       } else {
         // 创建新阈值
         response = await axios.post(
-          `${API_BASE_URL}/api/health/alerts/thresholds`,
+          `${API_BASE_URL}/health/alerts/thresholds`,
           submitData
         );
         setSnackbar({
@@ -376,7 +374,7 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       setLoading(true);
       
       // 获取阈值详情
-      const response = await axios.get(`${API_BASE_URL}/api/health/alerts/thresholds/${id}`);
+      const response = await axios.get(`${API_BASE_URL}/health/alerts/thresholds/${id}`);
       const threshold = response.data;
       
       // 转换为表单数据格式
@@ -433,7 +431,7 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       setLoading(true);
       
       // 调用删除API
-      await axios.delete(`${API_BASE_URL}/api/health/alerts/thresholds/${currentThresholdId}`);
+      await axios.delete(`${API_BASE_URL}/health/alerts/thresholds/${currentThresholdId}`);
       
       setSnackbar({
         open: true,
