@@ -529,7 +529,8 @@ async def get_detailed_rehab_plan(
 @router.get("/plans/{plan_id}/statistics", response_model=Dict[str, Any])
 async def get_plan_statistics(
     plan_id: str = Path(..., description="康复计划ID"),
-    time_range: str = Query("all", description="时间范围：all/week/month"),
+    time_range: str = Query("all", pattern="^(all|week|month)$",
+                            description="时间范围：all/week/month"),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
@@ -550,8 +551,9 @@ async def get_plan_statistics(
 async def get_exercise_trends(
     plan_id: str = Path(..., description="康复计划ID"),
     exercise_id: Optional[str] = Query(None, description="特定运动ID，不提供则返回所有运动"),
-    metric: str = Query("difficulty", description="趋势指标：difficulty/pain/completion"),
-    days: int = Query(30, description="查看天数"),
+    metric: str = Query("difficulty", pattern="^(difficulty|pain|completion)$",
+                        description="趋势指标：difficulty/pain/completion"),
+    days: int = Query(30, ge=1, le=730, description="查看天数"),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)

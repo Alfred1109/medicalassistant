@@ -821,8 +821,232 @@ class RehabilitationService:
                         }
                     }
                 )
-                
+
                 # 获取更新后的计划
                 return await self.get_rehab_plan(plan_id)
-                
+
         return {"error": "Adjustment not found"}
+
+    # ── 计划统计与趋势（statistics/trends 端点服务层实现）───────────────────
+    # 数据来源：rehab_plans 文档内嵌的 exercises[].progress[]。这是生产代码中
+    # 唯一的真实进度写入路径（log_exercise_progress，见本文件上方），字段为
+    # date（ISO 字符串或 datetime）/ completed / pain_level / difficulty_rating / notes。
+    # rehab_progress 集合在生产代码中无写入方（仅 mock 数据脚本与迁移脚本），
+    # 读取它只会混入模拟数据，故统计与趋势不读该集合。
+    # 无对应字段的指标（关节活动度、肌肉力量）如实返回 null，并在
+    # unsupported_metrics 中标注，不猜测、不模拟。
+    STATISTICS_DATA_SOURCE = "rehab_plans.exercises[].progress"
+    UNSUPPORTED_METRICS = ["range_of_motion", "muscle_strength"]
+
+    @staticmethod
+    def _parse_progress_date(value: Any) -> Optional[datetime]:
+        """解析进度记录的 date 字段（兼容 ISO 字符串与 datetime）。"""
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    def _iter_plan_progress(self, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """展平计划文档内嵌的运动进度记录，附运动标识。"""
+        entries = []
+        for exercise in plan.get("exercises") or []:
+            exercise_id = exercise.get("id") or exercise.get("exercise_id") \
+                or exercise.get("name")
+            for entry in exercise.get("progress") or []:
+                entries.append({
+                    "exercise_id": exercise_id,
+                    "exercise_name": exercise.get("name", ""),
+                    "date": self._parse_progress_date(entry.get("date")),
+                    "completed": bool(entry.get("completed", False)),
+                    "pain_level": entry.get("pain_level"),
+                    "difficulty_rating": entry.get("difficulty_rating"),
+                })
+        return entries
+
+    @staticmethod
+    def _mean(values: List[float]) -> Optional[float]:
+        """非空数值列表均值（保留 1 位小数），空列表返回 None。"""
+        if not values:
+            return None
+        return round(sum(values) / len(values), 1)
+
+    async def calculate_plan_statistics(
+        self, plan_id: str, time_range: str = "all"
+    ) -> Optional[Dict[str, Any]]:
+        """计算康复计划的进度统计（从内嵌 exercises[].progress 聚合）。
+
+        time_range：all / week（近 7 天）/ month（近 30 天），
+        其他取值按 all 处理并在响应 data_notes 中标注。
+        """
+        plan = await self.get_rehab_plan(plan_id)
+        if not plan:
+            return None
+
+        range_days = {"all": None, "week": 7, "month": 30}.get(time_range)
+        data_notes = []
+        if range_days is None and time_range != "all":
+            data_notes.append(f"未知 time_range={time_range}，按 all 处理")
+
+        entries = self._iter_plan_progress(plan)
+        if range_days is not None:
+            cutoff = datetime.utcnow() - timedelta(days=range_days)
+            entries = [e for e in entries if e["date"] and e["date"] >= cutoff]
+
+        total_records = len(entries)
+        completed_records = sum(1 for e in entries if e["completed"])
+        completion_rate = (
+            round(completed_records / total_records * 100, 1)
+            if total_records else None
+        )
+        avg_pain_level = self._mean([
+            e["pain_level"] for e in entries if e["pain_level"] is not None])
+        avg_difficulty_rating = self._mean([
+            e["difficulty_rating"] for e in entries
+            if e["difficulty_rating"] is not None])
+
+        # 周完成率：按自然周（周一为周起点）分桶，仅统计可解析日期的记录
+        weekly: Dict[str, Dict[str, Any]] = {}
+        for entry in entries:
+            if not entry["date"]:
+                continue
+            day = entry["date"].date()
+            week_start = day - timedelta(days=day.weekday())
+            bucket = weekly.setdefault(week_start.isoformat(),
+                                       {"total": 0, "completed": 0})
+            bucket["total"] += 1
+            if entry["completed"]:
+                bucket["completed"] += 1
+        weekly_completion = [
+            {
+                "week_start": week_start,
+                "total": bucket["total"],
+                "completed": bucket["completed"],
+                "completion_rate": round(
+                    bucket["completed"] / bucket["total"] * 100, 1),
+            }
+            for week_start, bucket in sorted(weekly.items())
+        ]
+
+        # 按运动拆分
+        per_exercise_map: Dict[Any, Dict[str, Any]] = {}
+        for entry in entries:
+            key = entry["exercise_id"]
+            bucket = per_exercise_map.setdefault(key, {
+                "exercise_id": entry["exercise_id"],
+                "exercise_name": entry["exercise_name"],
+                "total": 0, "completed": 0,
+                "pain_levels": [], "difficulty_ratings": [],
+            })
+            bucket["total"] += 1
+            if entry["completed"]:
+                bucket["completed"] += 1
+            if entry["pain_level"] is not None:
+                bucket["pain_levels"].append(entry["pain_level"])
+            if entry["difficulty_rating"] is not None:
+                bucket["difficulty_ratings"].append(entry["difficulty_rating"])
+        per_exercise = []
+        for bucket in per_exercise_map.values():
+            per_exercise.append({
+                "exercise_id": bucket["exercise_id"],
+                "exercise_name": bucket["exercise_name"],
+                "total": bucket["total"],
+                "completed": bucket["completed"],
+                "completion_rate": round(
+                    bucket["completed"] / bucket["total"] * 100, 1)
+                if bucket["total"] else None,
+                "avg_pain_level": self._mean(bucket["pain_levels"]),
+                "avg_difficulty_rating": self._mean(bucket["difficulty_ratings"]),
+            })
+
+        if not entries:
+            data_notes.append("计划内暂无进度记录，统计字段为空/null")
+
+        return {
+            "plan_id": plan_id,
+            "time_range": time_range,
+            "total_records": total_records,
+            "completed_records": completed_records,
+            "completion_rate": completion_rate,
+            "avg_pain_level": avg_pain_level,
+            "avg_difficulty_rating": avg_difficulty_rating,
+            # 无对应字段的指标（关节活动度/肌肉力量）如实为 null
+            "range_of_motion": None,
+            "muscle_strength": None,
+            "weekly_completion": weekly_completion,
+            "per_exercise": per_exercise,
+            "unsupported_metrics": list(self.UNSUPPORTED_METRICS),
+            "data_source": self.STATISTICS_DATA_SOURCE,
+            "data_notes": data_notes,
+        }
+
+    async def get_exercise_trends(
+        self, plan_id: str, exercise_id: Optional[str] = None,
+        metric: str = "difficulty", days: int = 30
+    ) -> Optional[Dict[str, Any]]:
+        """获取康复运动的趋势数据（从内嵌 exercises[].progress 按天聚合）。
+
+        metric=difficulty/pain：当日该指标非空值的均值；
+        metric=completion：当日完成率（completed/total）。
+        """
+        if metric not in ("difficulty", "pain", "completion"):
+            return {"error": f"Unsupported metric: {metric}"}
+
+        plan = await self.get_rehab_plan(plan_id)
+        if not plan:
+            return None
+
+        entries = self._iter_plan_progress(plan)
+        if exercise_id:
+            # 与 log_exercise_progress 的匹配口径一致：运动 id 或名称
+            entries = [
+                e for e in entries
+                if e["exercise_id"] == exercise_id
+                or e["exercise_name"] == exercise_id
+            ]
+
+        if days is not None and days > 0:
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            entries = [e for e in entries if e["date"] and e["date"] >= cutoff]
+
+        # 按天分桶
+        daily: Dict[str, Dict[str, Any]] = {}
+        for entry in entries:
+            if not entry["date"]:
+                continue
+            day_key = entry["date"].date().isoformat()
+            bucket = daily.setdefault(day_key, {
+                "total": 0, "completed": 0, "values": []})
+            bucket["total"] += 1
+            if entry["completed"]:
+                bucket["completed"] += 1
+            if metric == "pain" and entry["pain_level"] is not None:
+                bucket["values"].append(entry["pain_level"])
+            elif metric == "difficulty" and entry["difficulty_rating"] is not None:
+                bucket["values"].append(entry["difficulty_rating"])
+
+        series = []
+        for day_key, bucket in sorted(daily.items()):
+            point: Dict[str, Any] = {"date": day_key}
+            if metric == "completion":
+                point["total"] = bucket["total"]
+                point["completed"] = bucket["completed"]
+                point["completion_rate"] = round(
+                    bucket["completed"] / bucket["total"] * 100, 1)
+            else:
+                point["value"] = self._mean(bucket["values"])
+            series.append(point)
+
+        return {
+            "plan_id": plan_id,
+            "exercise_id": exercise_id,
+            "metric": metric,
+            "days": days,
+            "total_records": len(entries),
+            "series": series,
+            "data_source": self.STATISTICS_DATA_SOURCE,
+            "data_notes": ["计划内暂无进度记录，series 为空"] if not entries else [],
+        }
