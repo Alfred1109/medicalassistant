@@ -1,6 +1,7 @@
 """
 健康档案相关的schema定义
-包括健康档案、随访记录、健康数据等
+包括健康档案、健康数据等；随访相关 schema 已拆分至 .followup（FU01 S1），
+本文件保留转发导入以兼容既有引用（路由层 S2 收敛后移除）。
 """
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any, Union
@@ -8,6 +9,21 @@ from datetime import datetime
 from enum import Enum
 
 from .base import TimestampModel, PyObjectId, PydanticConfig
+from .followup import (  # noqa: F401  转发导出：随访唯一契约在 app/schemas/followup.py
+    FollowUpType,
+    FollowUpStatus,
+    FollowUpQuestion,
+    FollowUpAnswer,
+    FollowUpTemplate,
+    FollowUpBase,
+    FollowUpRecordCreate,
+    FollowUpRecordUpdate,
+    CompleteFollowUpRequest,
+    CancelFollowUpRequest,
+    RescheduleFollowUpRequest,
+    FollowUpRecordDB,
+    FollowUpRecordResponse,
+)
 
 
 # 记录类型枚举
@@ -22,26 +38,6 @@ class RecordType(str, Enum):
     PRESCRIPTION = "prescription"              # 处方
     NURSING_RECORD = "nursing_record"          # 护理记录
     OTHER = "other"                           # 其他
-
-
-# 随访类型枚举
-class FollowUpType(str, Enum):
-    PHONE = "phone"                           # 电话随访
-    ONLINE = "online"                         # 线上随访
-    ONSITE = "onsite"                         # 门诊随访
-    HOME_VISIT = "home_visit"                 # 家庭访视
-    REMOTE_MONITORING = "remote_monitoring"   # 远程监测
-    GROUP = "group"                           # 小组随访
-    OTHER = "other"                           # 其他
-
-
-# 随访状态枚举
-class FollowUpStatus(str, Enum):
-    SCHEDULED = "scheduled"                   # 已计划
-    COMPLETED = "completed"                   # 已完成
-    CANCELED = "canceled"                     # 已取消
-    MISSED = "missed"                         # 已错过
-    RESCHEDULED = "rescheduled"               # 已重新安排
 
 
 # 健康档案可见性枚举
@@ -112,17 +108,6 @@ class Diagnosis(BaseModel):
     notes: Optional[str] = None
     severity: Optional[str] = None
     body_site: Optional[str] = None
-
-
-# 问答模型
-class QuestionAnswer(BaseModel):
-    question_id: Optional[str] = None
-    question: str
-    answer: Optional[str] = None
-    answer_type: str = "text"  # text, number, option, boolean
-    options: Optional[List[str]] = None
-    required: bool = False
-    answered_at: Optional[datetime] = None
 
 
 # 患者病史模型
@@ -196,74 +181,6 @@ class HealthRecordResponse(BaseModel):
 
     class Config(PydanticConfig):
         pass
-
-
-# 随访记录创建请求模型
-class FollowUpRecordCreate(BaseModel):
-    patient_id: str
-    created_by: str
-    follow_up_type: FollowUpType
-    scheduled_date: datetime
-    notes: Optional[str] = None
-    questions: Optional[List[QuestionAnswer]] = None
-    health_record_ids: Optional[List[str]] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-
-# 随访记录更新请求模型
-class FollowUpRecordUpdate(BaseModel):
-    follow_up_type: Optional[FollowUpType] = None
-    scheduled_date: Optional[datetime] = None
-    actual_date: Optional[datetime] = None
-    status: Optional[FollowUpStatus] = None
-    notes: Optional[str] = None
-    questions: Optional[List[QuestionAnswer]] = None
-    answers: Optional[List[QuestionAnswer]] = None
-    attachments: Optional[List[Attachment]] = None
-    health_record_ids: Optional[List[str]] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-
-# 随访记录响应模型
-class FollowUpRecordResponse(BaseModel):
-    id: str
-    patient_id: str
-    created_by: str
-    follow_up_type: str
-    scheduled_date: datetime
-    actual_date: Optional[datetime] = None
-    status: str
-    notes: str = ""
-    questions: List[QuestionAnswer] = []
-    answers: List[QuestionAnswer] = []
-    attachments: List[Attachment] = []
-    health_record_ids: List[str] = []
-    created_at: datetime
-    updated_at: datetime
-    metadata: Dict[str, Any] = {}
-
-    class Config(PydanticConfig):
-        pass
-
-
-# 完成随访请求模型
-class CompleteFollowUpRequest(BaseModel):
-    actual_date: Optional[datetime] = None
-    notes: Optional[str] = None
-    answers: List[QuestionAnswer]
-    attachments: Optional[List[Attachment]] = None
-
-
-# 取消随访请求模型
-class CancelFollowUpRequest(BaseModel):
-    reason: str
-    reschedule_date: Optional[datetime] = None
-
-
-# 重新安排随访请求模型
-class RescheduleFollowUpRequest(BaseModel):
-    new_date: datetime
-    reason: Optional[str] = None
 
 
 # 健康数据创建请求模型
@@ -428,131 +345,6 @@ class HealthRecordStats(BaseModel):
         json_encoders = {
             datetime: lambda dt: dt.isoformat()
         }
-
-
-# 随访记录相关模型定义
-class FollowUpQuestion(BaseModel):
-    """随访问题"""
-    question_id: str
-    question_text: str
-    question_type: str  # text, number, choice, multiple_choice, scale
-    options: Optional[List[Dict[str, str]]] = None
-    required: bool = False
-    order: int
-
-
-class FollowUpAnswer(BaseModel):
-    """随访回答"""
-    question_id: str
-    answer_value: Any
-    answer_text: Optional[str] = None
-    answered_at: datetime = Field(default_factory=datetime.now)
-
-
-class FollowUpTemplate(BaseModel):
-    """随访模板"""
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    name: str
-    description: Optional[str] = None
-    follow_up_type: str
-    questions: List[FollowUpQuestion] = []
-    created_by: str
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: Optional[datetime] = None
-    active: bool = True
-
-
-class FollowUpBase(BaseModel):
-    """随访记录基础模型"""
-    patient_id: str
-    follow_up_type: str
-    scheduled_date: datetime
-    provider_id: str
-    description: str
-    questions: List[FollowUpQuestion] = []
-    related_records: List[str] = []
-    metadata: Dict[str, Any] = {}
-
-
-class FollowUpRecordCreate(FollowUpBase):
-    """创建随访记录请求"""
-    template_id: Optional[str] = None
-    created_by: Optional[str] = None
-    reminder_before: Optional[int] = None  # 提前多少分钟提醒
-
-
-class FollowUpRecordUpdate(BaseModel):
-    """更新随访记录请求"""
-    follow_up_type: Optional[str] = None
-    scheduled_date: Optional[datetime] = None
-    provider_id: Optional[str] = None
-    description: Optional[str] = None
-    questions: Optional[List[FollowUpQuestion]] = None
-    related_records: Optional[List[str]] = None
-    metadata: Optional[Dict[str, Any]] = None
-    status: Optional[FollowUpStatus] = None
-    reminder_before: Optional[int] = None
-
-
-class CompleteFollowUpRequest(BaseModel):
-    """完成随访请求"""
-    actual_date: datetime = Field(default_factory=datetime.now)
-    answers: List[FollowUpAnswer] = []
-    notes: Optional[str] = None
-    follow_up_result: str = "completed"
-    next_follow_up_date: Optional[datetime] = None
-
-
-class CancelFollowUpRequest(BaseModel):
-    """取消随访请求"""
-    cancel_reason: str
-    canceled_by: Optional[str] = None
-    reschedule_date: Optional[datetime] = None
-
-
-class RescheduleFollowUpRequest(BaseModel):
-    """重新安排随访请求"""
-    new_date: datetime
-    reason: str
-    provider_id: Optional[str] = None
-
-
-class FollowUpRecordDB(FollowUpBase, TimestampModel):
-    """数据库中的随访记录模型"""
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    created_by: str
-    status: FollowUpStatus = FollowUpStatus.SCHEDULED
-    actual_date: Optional[datetime] = None
-    answers: List[FollowUpAnswer] = []
-    notes: Optional[str] = None
-    follow_up_result: Optional[str] = None
-    next_follow_up_id: Optional[str] = None
-    template_id: Optional[str] = None
-    reminder_before: Optional[int] = None
-    completion_data: Optional[Dict[str, Any]] = None
-    cancellation_data: Optional[Dict[str, Any]] = None
-    deleted: bool = False
-    deleted_at: Optional[datetime] = None
-    deleted_by: Optional[str] = None
-
-
-class FollowUpRecordResponse(FollowUpBase, TimestampModel):
-    """随访记录响应模型"""
-    id: str
-    created_by: str
-    status: FollowUpStatus
-    actual_date: Optional[datetime] = None
-    answers: List[FollowUpAnswer] = []
-    notes: Optional[str] = None
-    follow_up_result: Optional[str] = None
-    next_follow_up_id: Optional[str] = None
-    template_id: Optional[str] = None
-    reminder_before: Optional[int] = None
-    completion_data: Optional[Dict[str, Any]] = None
-    cancellation_data: Optional[Dict[str, Any]] = None
-
-    class Config(PydanticConfig):
-        pass
 
 
 # 健康数据相关模型定义

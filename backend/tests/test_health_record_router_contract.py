@@ -22,9 +22,11 @@ from app.core.config import settings
 from app.core.dependencies import get_health_record_service
 from app.db.mongodb import get_database
 from app.main import app
-from app.schemas.health_record import (
+from app.schemas.followup import (
     FollowUpRecordResponse,
     FollowUpStatus,
+)
+from app.schemas.health_record import (
     HealthDataResponse,
     HealthRecordResponse,
 )

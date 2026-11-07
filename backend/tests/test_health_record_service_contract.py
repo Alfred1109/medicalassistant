@@ -7,9 +7,12 @@
    （organization_id / visibility 等第一代独有字段停止写入）；
 2. 更新健康档案：content 为 str（生效模型），版本历史照常推进；
 3. 创建随访记录：provider_id / description / template_id / related_records 正确落库
-   （description -> notes、related_records -> health_record_ids、其余经 metadata 缝合）；
+   （description -> notes、related_records -> health_record_ids；
+   FU01 S1 起扩展数据写顶层正式字段，不再经 metadata.* 缝合）；
 4. complete / cancel / reschedule 随访：cancel_reason 等第二代语义正确；
-5. 创建健康数据：data_content 转换正确、pydantic 对象不直接进 $set、device_id 不再是布尔。
+5. 创建健康数据：data_content 转换正确、pydantic 对象不直接进 $set、device_id 不再是布尔；
+6. FU01 S1 兼容：正式字段落顶层后 from_mongo 读回不报错；存量文档 metadata.* 回退路径仍生效；
+   FollowUpRecordDB 能校验服务层落库文档形状；list / upcoming 集成路径。
 
 不连接真实数据库：集合用内存 FakeCollection 打桩，并用 bson.encode 验证落库文档
 可被 BSON 序列化（pydantic 模型对象直接进库会抛 InvalidDocument，在此被断言拦截）。
@@ -23,19 +26,22 @@ from typing import Any, Dict, List, Optional
 from bson import ObjectId, encode
 
 from app.models.health_record import FollowUpRecord, HealthRecord
-from app.schemas.health_record import (
+from app.schemas.followup import (
     FollowUpAnswer,
     FollowUpQuestion,
     FollowUpRecordCreate,
+    FollowUpRecordDB,
     FollowUpRecordUpdate,
     FollowUpStatus,
     CancelFollowUpRequest,
     CompleteFollowUpRequest,
+    RescheduleFollowUpRequest,
+)
+from app.schemas.health_record import (
     HealthDataCreate,
     HealthRecordAttachment,
     HealthRecordCreate,
     HealthRecordUpdate,
-    RescheduleFollowUpRequest,
 )
 from app.services.health_record_service import HealthRecordService
 
@@ -279,11 +285,12 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         # description -> 存储字段 notes；related_records -> 存储字段 health_record_ids
         self.assertEqual(doc["notes"], "术后一周电话随访")
         self.assertEqual(doc["health_record_ids"], followup_data.related_records)
-        # template_id / provider_id / reminder_before 经 metadata 落库（缝合层约定）
-        self.assertEqual(doc["metadata"]["template_id"], "tpl-001")
-        self.assertEqual(doc["metadata"]["provider_id"], DOCTOR_ID)
-        self.assertEqual(doc["metadata"]["reminder_before"], 30)
-        self.assertEqual(doc["metadata"]["origin"], "wp0")
+        # FU01 S1：扩展数据落顶层正式字段，停止 metadata.* 缝合
+        self.assertEqual(doc["provider_id"], DOCTOR_ID)
+        self.assertEqual(doc["template_id"], "tpl-001")
+        self.assertEqual(doc["reminder_before"], 30)
+        # metadata 仅保留调用方显式传入的透传数据
+        self.assertEqual(doc["metadata"], {"origin": "wp0"})
         # questions 落库为 dict 列表而非 pydantic 对象
         self.assertIsInstance(doc["questions"][0], dict)
         self.assertEqual(doc["questions"][0]["question_id"], "q1")
@@ -304,6 +311,7 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 question_id="q2", question_text="疼痛评分",
                 question_type="scale", order=2)],
             status=FollowUpStatus.RESCHEDULED,
+            provider_id=DOCTOR_ID,
             reminder_before=15,
         )
 
@@ -318,6 +326,9 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(doc["status"], str)  # 枚举落库取字符串值
         self.assertIsInstance(doc["questions"][0], dict)
         self.assertEqual(doc["questions"][0]["question_id"], "q2")
+        # FU01 S1：provider_id / reminder_before 落顶层正式字段（此前入参被静默丢弃）
+        self.assertEqual(doc["provider_id"], DOCTOR_ID)
+        self.assertEqual(doc["reminder_before"], 15)
 
     # -------- complete / cancel / reschedule 随访 --------
 
@@ -352,8 +363,12 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(doc["answers"][0], dict)
         self.assertEqual(doc["answers"][0]["question_id"], "q1")
         self.assertEqual(doc["answers"][0]["answer_value"], 8)
-        self.assertEqual(doc["metadata"]["completion_data"]["result"], "completed")
-        self.assertEqual(doc["metadata"]["result"], "completed")
+        # FU01 S1：完成数据落顶层正式字段，停止 metadata.completion_data / metadata.result
+        self.assertEqual(doc["completion_data"]["result"], "completed")
+        self.assertEqual(doc["completion_data"]["notes"], "随访完成，恢复良好")
+        self.assertEqual(doc["follow_up_result"], "completed")
+        self.assertNotIn("completion_data", doc.get("metadata", {}))
+        self.assertNotIn("result", doc.get("metadata", {}))
         self.assertEqual(doc["notes"], "随访完成，恢复良好")
 
     async def test_complete_followup_creates_next_followup(self):
@@ -369,7 +384,8 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         new_docs = [d for _id, d in self.followup_records.docs.items()
                     if str(_id) != followup_id]
         self.assertEqual(len(new_docs), 1)
-        self.assertEqual(original["metadata"]["next_follow_up_id"], str(new_docs[0]["_id"]))
+        # FU01 S1：next_follow_up_id 落顶层正式字段
+        self.assertEqual(original["next_follow_up_id"], str(new_docs[0]["_id"]))
         encode(new_docs[0])
 
     async def test_cancel_followup_records_cancel_reason(self):
@@ -386,9 +402,10 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         doc = self.followup_records.docs[ObjectId(followup_id)]
         encode(doc)
         self.assertEqual(doc["status"], "canceled")
-        # cancel_reason（第二代字段）进入 metadata.cancellation_data.reason（缝合层约定）
-        self.assertEqual(doc["metadata"]["cancellation_data"]["reason"], "患者临时有事")
-        self.assertEqual(doc["metadata"]["cancellation_data"]["canceled_by"], DOCTOR_ID)
+        # FU01 S1：取消数据落顶层正式字段，停止 metadata.cancellation_data
+        self.assertEqual(doc["cancellation_data"]["reason"], "患者临时有事")
+        self.assertEqual(doc["cancellation_data"]["canceled_by"], DOCTOR_ID)
+        self.assertNotIn("cancellation_data", doc.get("metadata", {}))
         self.assertIn("已取消", doc["notes"])
 
     async def test_cancel_followup_with_reschedule_creates_new_record(self):
@@ -408,6 +425,9 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(new_docs), 1)
         # 重新安排的新随访应携带取消原因语义
         self.assertIn("医生出差", new_docs[0]["notes"])
+        # FU01 S1：原记录 next_follow_up_id 落顶层正式字段
+        original = self.followup_records.docs[ObjectId(followup_id)]
+        self.assertEqual(original["next_follow_up_id"], str(new_docs[0]["_id"]))
         encode(new_docs[0])
 
     async def test_reschedule_followup_updates_schedule_and_reason(self):
@@ -423,6 +443,125 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(doc["status"], "rescheduled")
         self.assertEqual(doc["scheduled_date"], new_date)
         self.assertEqual(doc["metadata"]["reschedule_reason"], "医生临时有事")
+
+    # -------- FU01 S1：正式字段读回 / metadata.* 回退 / list·upcoming --------
+
+    async def test_formal_fields_read_back_without_error(self):
+        """正式字段落顶层后，服务层 from_mongo 读回路径不报错且映射正确。"""
+        doc = FollowUpRecord(
+            patient_id=PATIENT_ID, created_by=DOCTOR_ID,
+            follow_up_type="phone",
+            scheduled_date=datetime.utcnow() + timedelta(days=2),
+            notes="待随访").to_mongo()
+        completion = {"completed_at": datetime.utcnow(), "result": "improved", "notes": "恢复良好"}
+        doc.update({
+            "provider_id": DOCTOR_ID,
+            "template_id": "tpl-009",
+            "reminder_before": 45,
+            "completion_data": completion,
+            "follow_up_result": "improved",
+            "next_follow_up_id": str(ObjectId()),
+        })
+        self.followup_records.docs[doc["_id"]] = doc
+        followup_id = str(doc["_id"])
+
+        response = await self.service.get_followup_record(followup_id)
+
+        self.assertIsNotNone(response)
+        self.assertEqual(response.provider_id, DOCTOR_ID)
+        self.assertEqual(response.template_id, "tpl-009")
+        self.assertEqual(response.reminder_before, 45)
+        self.assertEqual(response.completion_data, completion)
+        self.assertEqual(response.follow_up_result, "improved")
+        self.assertEqual(response.next_follow_up_id, doc["next_follow_up_id"])
+
+    async def test_legacy_metadata_fields_still_map_with_fallback(self):
+        """存量文档（e7e8706 缝合层约定 metadata.*，无顶层正式字段）读取回退仍生效。"""
+        next_id = str(ObjectId())
+        doc = FollowUpRecord(
+            patient_id=PATIENT_ID, created_by=DOCTOR_ID,
+            follow_up_type="phone",
+            scheduled_date=datetime.utcnow() + timedelta(days=1),
+            notes="存量随访").to_mongo()
+        doc["metadata"] = {
+            "provider_id": DOCTOR_ID,
+            "template_id": "tpl-legacy",
+            "reminder_before": 20,
+            "result": "legacy-result",
+            "next_follow_up_id": next_id,
+            "completion_data": {"result": "legacy-result"},
+            "cancellation_data": {"reason": "legacy-cancel"},
+        }
+        self.followup_records.docs[doc["_id"]] = doc
+        followup_id = str(doc["_id"])
+
+        response = await self.service.get_followup_record(followup_id)
+
+        self.assertIsNotNone(response)
+        self.assertEqual(response.provider_id, DOCTOR_ID)
+        self.assertEqual(response.template_id, "tpl-legacy")
+        self.assertEqual(response.reminder_before, 20)
+        self.assertEqual(response.follow_up_result, "legacy-result")
+        self.assertEqual(response.next_follow_up_id, next_id)
+        self.assertEqual(response.completion_data, {"result": "legacy-result"})
+        self.assertEqual(response.cancellation_data, {"reason": "legacy-cancel"})
+
+    async def test_followup_record_db_validates_service_document_shape(self):
+        """FollowUpRecordDB 可直接校验服务层落库文档（新写入与存量 metadata 两种形状）。"""
+        scheduled = datetime.utcnow() + timedelta(days=1)
+        service_doc = FollowUpRecord(
+            patient_id=PATIENT_ID, created_by=DOCTOR_ID,
+            follow_up_type="phone", scheduled_date=scheduled, notes="描述",
+            questions=[{"question_id": "q1", "question_text": "恢复如何",
+                        "question_type": "text", "order": 1}]).to_mongo()
+        service_doc.update({
+            "provider_id": DOCTOR_ID, "template_id": "tpl-001",
+            "reminder_before": 30, "status": "scheduled",
+        })
+
+        model = FollowUpRecordDB.model_validate(service_doc)
+        self.assertEqual(model.provider_id, DOCTOR_ID)
+        self.assertEqual(model.template_id, "tpl-001")
+        self.assertEqual(model.reminder_before, 30)
+        self.assertIsNone(model.completion_data)
+
+        legacy_doc = FollowUpRecord(
+            patient_id=PATIENT_ID, created_by=DOCTOR_ID,
+            follow_up_type="phone", scheduled_date=scheduled, notes="存量").to_mongo()
+        legacy_doc["metadata"] = {"provider_id": DOCTOR_ID, "completion_data": {"result": "ok"}}
+
+        legacy_model = FollowUpRecordDB.model_validate(legacy_doc)
+        # 存量文档无顶层正式字段（免回填），DB 模型全部 Optional 不报错
+        self.assertIsNone(legacy_model.provider_id)
+        self.assertIsNone(legacy_model.description)  # 存储字段为 notes
+        self.assertEqual(legacy_model.notes, "存量")
+
+    async def test_list_and_upcoming_followups_read_formal_fields(self):
+        """list / upcoming 集成路径：正式字段文档读回不报错且映射正确。"""
+        formal_doc = FollowUpRecord(
+            patient_id=PATIENT_ID, created_by=DOCTOR_ID,
+            follow_up_type="phone",
+            scheduled_date=datetime.utcnow() + timedelta(days=1),
+            notes="即将到来").to_mongo()
+        formal_doc["provider_id"] = DOCTOR_ID
+        formal_doc["template_id"] = "tpl-100"
+        other_doc = FollowUpRecord(
+            patient_id=str(ObjectId()), created_by=DOCTOR_ID,
+            follow_up_type="phone",
+            scheduled_date=datetime.utcnow() + timedelta(days=1),
+            notes="其他患者").to_mongo()
+        self.followup_records.docs[formal_doc["_id"]] = formal_doc
+        self.followup_records.docs[other_doc["_id"]] = other_doc
+
+        listed = await self.service.list_followup_records(PATIENT_ID)
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0].id, str(formal_doc["_id"]))
+        self.assertEqual(listed[0].provider_id, DOCTOR_ID)
+        self.assertEqual(listed[0].template_id, "tpl-100")
+
+        upcoming = await self.service.get_upcoming_followups(patient_id=PATIENT_ID)
+        self.assertEqual(len(upcoming), 1)
+        self.assertEqual(upcoming[0].id, str(formal_doc["_id"]))
 
     # -------- 创建健康数据 --------
 

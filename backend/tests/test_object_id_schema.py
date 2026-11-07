@@ -9,9 +9,9 @@ from pydantic import TypeAdapter, ValidationError
 
 from app.main import app
 from app.schemas.base import PyObjectId
+from app.schemas.followup import FollowUpRecordDB, FollowUpTemplate
 from app.schemas.health_record import (
-    FollowUpRecordDB, FollowUpTemplate, HealthDataDB,
-    HealthRecordAttachment, HealthRecordDB,
+    HealthDataDB, HealthRecordAttachment, HealthRecordDB,
 )
 
 
