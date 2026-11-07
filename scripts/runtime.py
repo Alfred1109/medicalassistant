@@ -318,8 +318,12 @@ def start(check_only=False):
             "--host", host, "--port", str(backend_port)], ROOT / "backend", env, ROOT / "logs")
         started.append(record); children.append(child); save_state(started)
         wait_http(child, f"http://{local}:{backend_port}/health", timeout, database=True)
-        frontend_env = dict(env, VITE_API_URL=f"http://{local}:{backend_port}",
-                            VITE_BACKEND_TARGET=f"http://{local}:{backend_port}")
+        # Browser API URLs belong to the public deployment configuration. A
+        # server-loopback URL works locally but sends remote browsers to their
+        # own machine. Only Vite's server-side proxy needs the backend listener.
+        # Keep an explicit VITE_API_URL unchanged; otherwise Vite loads the
+        # deployment prefix from its environment/.env files and uses same origin.
+        frontend_env = dict(env, VITE_BACKEND_TARGET=f"http://{local}:{backend_port}")
         child, record = spawn("frontend", [node, vite, "--host", host, "--port", str(frontend_port),
             "--strictPort"], ROOT / "frontend", frontend_env, ROOT / "logs")
         started.append(record); children.append(child); save_state(started)

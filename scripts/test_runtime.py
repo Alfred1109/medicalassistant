@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import socket
+import shutil
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,9 +21,16 @@ spec.loader.exec_module(runtime)
 
 SERVER = r'''
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import json, sys
+import json, sys, os
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path in ('/runtime-env', '/api/runtime-probe'):
+            body = ({key: os.environ.get(key) for key in
+                     ('VITE_API_URL', 'VITE_API_PREFIX', 'VITE_BACKEND_TARGET')}
+                    if self.path == '/runtime-env' else {'path': self.path})
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers(); self.wfile.write(json.dumps(body).encode()); return
         healthy = sys.argv[2] == 'healthy'
         is_api = self.path == '/health'
         status = 200 if healthy or not is_api else 207
@@ -162,7 +171,7 @@ class RuntimeTests(unittest.TestCase):
                 time.sleep(0.02)
         runtime.wait_http(child, url, 0.8)
 
-    def lifecycle(self, fail_frontend):
+    def lifecycle(self, fail_frontend, browser_config=None):
         back, front = unused_port(), unused_port()
         while front == back: front = unused_port()
         env = {"MEDICALASSISTANT_BACKEND_PORT": str(back),
@@ -179,6 +188,9 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(environment["VITE_BACKEND_TARGET"], f"http://127.0.0.1:{back}")
             return child, record
         with patch.dict(os.environ, env), patch.object(runtime, "preflight", return_value=(sys.executable, "node", "vite")), patch.object(runtime, "spawn", side_effect=fake_spawn):
+            for key in ('VITE_API_URL', 'VITE_API_PREFIX'):
+                os.environ.pop(key, None)
+            os.environ.update(browser_config or {})
             if fail_frontend:
                 with self.assertRaises(runtime.RuntimeFailure): runtime.start()
                 self.assertEqual(runtime.read_state(), [])
@@ -186,12 +198,69 @@ class RuntimeTests(unittest.TestCase):
             else:
                 runtime.start()
                 self.assertEqual(len(runtime.read_state()), 2)
+                with urllib.request.urlopen(f"http://127.0.0.1:{front}/runtime-env") as response:
+                    actual = json.load(response)
+                self.assertEqual(actual['VITE_API_URL'], (browser_config or {}).get('VITE_API_URL'))
+                self.assertEqual(actual['VITE_API_PREFIX'], (browser_config or {}).get('VITE_API_PREFIX'))
+                self.assertEqual(actual['VITE_BACKEND_TARGET'], f"http://127.0.0.1:{back}")
                 runtime.stop()
                 runtime.stop()  # idempotent stop
                 self.assertEqual(runtime.read_state(), [])
                 self.assertTrue(all(not runtime.owned_group(r) for r in self.records))
 
     def test_successful_start_and_stop(self): self.lifecycle(False)
+
+    def test_medical_prefix_does_not_inject_browser_loopback_url(self):
+        self.lifecycle(False, {'VITE_API_PREFIX': '/medical'})
+
+    def test_explicit_browser_api_url_is_preserved(self):
+        self.lifecycle(False, {'VITE_API_PREFIX': '/medical',
+                               'VITE_API_URL': 'https://public.example.invalid/clinical/api'})
+
+    def test_real_vite_proxy_uses_internal_target_and_keeps_browser_api_same_origin(self):
+        # Exercise the project's actual Vite config against synthetic backend HTTP,
+        # so an accidental public loopback API URL cannot hide behind local access.
+        project = Path(__file__).resolve().parents[1]
+        vite = project / 'frontend/node_modules/vite/bin/vite.js'
+        node = shutil.which('node')
+        if not node or not vite.is_file():
+            self.skipTest('installed project Node/Vite required for real proxy test')
+        back, front = unused_port(), unused_port()
+        while front == back: front = unused_port()
+        (self.root / 'frontend/index.html').write_text('<html><body>isolated actual Vite</body></html>')
+        (self.root / 'frontend/runtime-env.js').write_text(
+            'export const api = import.meta.env.VITE_API_URL;\n'
+            'export const prefix = import.meta.env.VITE_API_PREFIX;\n')
+        original_spawn = runtime.spawn
+        def actual_spawn(name, command, cwd, environment, log_dir):
+            actual = ([sys.executable, '-c', SERVER, str(back), 'healthy'] if name == 'backend'
+                      else command + ['--config', str(project / 'frontend/vite.config.ts')])
+            child, record = original_spawn(name, actual, cwd, environment, log_dir)
+            self.children.append(child); self.records.append(record)
+            return child, record
+        env = {'MEDICALASSISTANT_BACKEND_PORT': str(back),
+               'MEDICALASSISTANT_FRONTEND_PORT': str(front),
+               'MEDICALASSISTANT_START_TIMEOUT': '12', 'MEDICALASSISTANT_HOST': '127.0.0.1'}
+        with patch.dict(os.environ, env), patch.object(runtime, 'preflight', return_value=(sys.executable, node, str(vite))), patch.object(runtime, 'spawn', side_effect=actual_spawn):
+            os.environ.pop('VITE_API_URL', None)
+            for prefix in ('', '/medical'):
+                with self.subTest(prefix=prefix):
+                    os.environ['VITE_API_PREFIX'] = prefix
+                    runtime.start()
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    # The internal development proxy serves /api; a deployment
+                    # reverse proxy strips /medical from its public API route.
+                    with opener.open(f'http://127.0.0.1:{front}/api/runtime-probe', timeout=3) as response:
+                        self.assertEqual(json.load(response), {'path': '/api/runtime-probe'})
+                    with opener.open(f'http://127.0.0.1:{front}{prefix}/runtime-env.js', timeout=3) as response:
+                        source = response.read().decode()
+                    declaration = re.search(r'import\.meta\.env\s*=\s*(\{[^\n]*\})', source)
+                    self.assertIsNotNone(declaration, source)
+                    browser_env = json.loads(declaration.group(1))
+                    self.assertNotIn('VITE_API_URL', browser_env)
+                    self.assertEqual(browser_env['VITE_API_PREFIX'], prefix)
+                    self.assertEqual(browser_env['VITE_BACKEND_TARGET'], f'http://127.0.0.1:{back}')
+                    runtime.stop()
 
     def test_partial_start_failure_cleans_only_created_children(self): self.lifecycle(True)
 
