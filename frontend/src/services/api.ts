@@ -10,9 +10,8 @@ import {
   Patient, 
   PatientHealthRecord 
 } from '../types/patient.types';
-import { 
-  Doctor, 
-  FollowUp 
+import {
+  Doctor
 } from '../types/doctor.types';
 
 // 标记是否正在刷新令牌，避免重复刷新
@@ -219,13 +218,7 @@ export const apiService = {
     getPatientHealthRecord: (patientId: string): Promise<AxiosResponse<PatientHealthRecord>> => 
       api.get(`/doctors/health-records/${patientId}`),
     
-    getFollowUps: (status?: string): Promise<AxiosResponse<FollowUp[]>> => 
-      api.get('/doctors/follow-ups', { params: { status } }),
-    
-    createFollowUp: (data: Partial<FollowUp>): Promise<AxiosResponse<FollowUp>> => 
-      api.post('/doctors/follow-ups', data),
-    
-    getPatientMonitoring: (patientId: string, startDate?: string, endDate?: string): Promise<AxiosResponse<any>> => 
+    getPatientMonitoring: (patientId: string, startDate?: string, endDate?: string): Promise<AxiosResponse<any>> =>
       api.get(`/doctors/patient-monitoring/${patientId}`, {
         params: { start_date: startDate, end_date: endDate }
       }),
@@ -293,16 +286,23 @@ export const apiService = {
   updateFollowUp: (followUpId: string, followUpData: any): Promise<AxiosResponse<any>> =>
     api.put(`/health-records/followups/${followUpId}`, followUpData),
 
+  completeFollowUp: (followUpId: string, data?: { actual_date?: string; notes?: string }): Promise<AxiosResponse<any>> =>
+    api.post(`/health-records/followups/${followUpId}/complete`, data ?? {}),
+
+  cancelFollowUp: (followUpId: string, data: { cancel_reason: string }): Promise<AxiosResponse<any>> =>
+    api.post(`/health-records/followups/${followUpId}/cancel`, data),
+
+  rescheduleFollowUp: (followUpId: string, data: { new_date: string; reason?: string }): Promise<AxiosResponse<any>> =>
+    api.post(`/health-records/followups/${followUpId}/reschedule`, data),
+
   // 健康数据(体征、化验结果等)
   getHealthData: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<any[]>> =>
     api.get('/health-records/health-data', { params: { patient_id: patientId, ...(params || {}) } }),
   
   // AI助手接口
+  // 注意：后端 agent_router 不提供 POST /agents/{id}/execute，只保留查询/CRUD 接口。
   agent: {
-    executeAgent: (agentId: string): Promise<AxiosResponse<any>> => 
-      api.post(`/agents/${agentId}/execute`),
-    
-    getAgents: (): Promise<AxiosResponse<any[]>> => 
+    getAgents: (): Promise<AxiosResponse<any[]>> =>
       api.get('/agents'),
     
     createAgent: (agentData: any): Promise<AxiosResponse<any>> => 
