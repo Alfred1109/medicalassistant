@@ -315,6 +315,17 @@ class ReportSchedulerService:
     
     async def _get_rehabilitation_stats(self, days: int) -> List[Dict[str, Any]]:
         """获取康复训练统计数据"""
+        # TODO(orphan-read, 待业务决策): rehabilitation_sessions 是无写入方的孤儿集合
+        # （BASE03 集合收敛 9133342 已确认全库（含历史提交 dac0330 引入时）不存在任何
+        # 写入路径；migrate_legacy_collections.py 将其列为 REPORT_ONLY 待人工决策）。
+        # 此处聚合期望的文档形状：created_at(datetime) + duration(数值) + score(数值)
+        # 的逐次训练记录，仅被后台报表调度消费（report_schedules 调度循环 ->
+        # _process_schedule -> _generate_report -> _get_chart_data("rehabilitation")），
+        # 无直接 HTTP 端点。现存唯一集合 rehab_plans / rehab_progress / rehab_assessments
+        # 的字段形状均不匹配，不做猜测映射。
+        # 空集合时聚合无输出，本方法安全返回 []，报表该图表为空、调度不报错。
+        # 待决策项：新建"训练记录"写入域后改指唯一集合并修正字段映射；
+        # 或改由 rehab_progress（date/completed）按天统计完成次数；或删除该图表类型。
         start_date = datetime.utcnow() - timedelta(days=days)
         
         pipeline = [

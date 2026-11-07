@@ -19,6 +19,16 @@ class AnalyticsService:
         self.patients_collection = db.users
         self.doctors_collection = db.users
         self.devices_collection = db.devices
+        # TODO(orphan-read, 待业务决策): rehabilitation_records 是无写入方的孤儿集合
+        # （BASE03 集合收敛 9133342 已确认全库（含历史提交 65e990b 引入时）不存在任何
+        # 写入路径；migrate_legacy_collections.py 将其列为 REPORT_ONLY 待人工决策）。
+        # 此处读取期望的文档形状：含数值型 duration（分钟）的训练记录，仅支撑
+        # get_stats_overview 的 avgTrainingTime 指标（消费端点 GET /system/visualization/overview）。
+        # 现存唯一集合 rehab_plans / rehab_progress / rehab_assessments 的字段形状
+        # 均不匹配（无每文档数值 duration），不做猜测映射。
+        # 空集合时下方循环不执行，avgTrainingTime 安全回退为 0，端点返回 200。
+        # 待决策项：新建"训练记录"写入域后改指唯一集合；或改由 rehab_plans 的
+        # exercises[].progress 聚合计算；或确认废弃该指标后删除此引用。
         self.rehabilitation_collection = db.rehabilitation_records
     
     async def get_stats_overview(self) -> Dict[str, Any]:
