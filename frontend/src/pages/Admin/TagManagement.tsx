@@ -1,159 +1,115 @@
-import React from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box,
   Typography,
   Button,
   Paper,
   Grid,
-  TextField,
   Chip,
-  IconButton,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
   FormControl,
   InputLabel,
   Select,
   MenuItem,
   Divider,
+  CircularProgress,
   SelectChangeEvent,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
-import EditIcon from '@mui/icons-material/Edit';
-import DeleteIcon from '@mui/icons-material/Delete';
 import LocalOfferIcon from '@mui/icons-material/LocalOffer';
+import apiClient from '../../services/api';
 
-// 模拟标签数据
-const mockTags = [
-  { id: 1, name: '骨科康复', category: '康复类型', color: 'primary' },
-  { id: 2, name: '神经康复', category: '康复类型', color: 'secondary' },
-  { id: 3, name: '老年康复', category: '康复类型', color: 'success' },
-  { id: 4, name: '物理治疗', category: '治疗方式', color: 'info' },
-  { id: 5, name: '运动疗法', category: '治疗方式', color: 'warning' },
-  { id: 6, name: '作业疗法', category: '治疗方式', color: 'error' },
-  { id: 7, name: '言语治疗', category: '治疗方式', color: 'primary' },
-  { id: 8, name: '高血压', category: '疾病类型', color: 'secondary' },
-  { id: 9, name: '糖尿病', category: '疾病类型', color: 'success' },
-  { id: 10, name: '中风', category: '疾病类型', color: 'warning' },
-  { id: 11, name: '膝关节损伤', category: '疾病类型', color: 'error' },
-  { id: 12, name: '腰椎间盘突出', category: '疾病类型', color: 'info' },
-];
-
-// 标签类别
-const tagCategories = [
-  '康复类型',
-  '治疗方式',
-  '疾病类型',
-  '患者分类',
-  '设备类型',
-  '其他'
-];
-
-// 标签颜色
-const tagColors = [
-  { name: '蓝色', value: 'primary' },
-  { name: '紫色', value: 'secondary' },
-  { name: '绿色', value: 'success' },
-  { name: '青色', value: 'info' },
-  { name: '橙色', value: 'warning' },
-  { name: '红色', value: 'error' },
-  { name: '默认', value: 'default' },
-];
-
-interface TagData {
-  id: number;
-  name: string;
-  category: string;
-  color: string;
+// 标签管理：数据来自 GET /api/admin/tags
+// 该接口目前为后端占位实现（恒返回 []），创建/编辑/删除接口未持久化，故禁用相关入口
+interface TagRow {
+  id?: string | number;
+  name?: string;
+  category?: string;
+  color?: string;
 }
 
 const TagManagement: React.FC = () => {
-  const [tags, setTags] = React.useState<TagData[]>(mockTags);
-  const [openDialog, setOpenDialog] = React.useState(false);
-  const [selectedTag, setSelectedTag] = React.useState<TagData | null>(null);
-  const [newTag, setNewTag] = React.useState<Partial<TagData>>({
-    name: '',
-    category: '',
-    color: 'primary'
-  });
-  const [currentCategory, setCurrentCategory] = React.useState<string>('全部');
+  const [isLoading, setIsLoading] = useState(true);
+  const [tags, setTags] = useState<TagRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [currentCategory, setCurrentCategory] = useState('全部');
+  const [reloadKey, setReloadKey] = useState(0);
 
-  const handleAddTag = () => {
-    setSelectedTag(null);
-    setNewTag({
-      name: '',
-      category: '',
-      color: 'primary'
-    });
-    setOpenDialog(true);
-  };
+  useEffect(() => {
+    let cancelled = false;
 
-  const handleEditTag = (tag: TagData) => {
-    setSelectedTag(tag);
-    setNewTag({
-      name: tag.name,
-      category: tag.category,
-      color: tag.color
-    });
-    setOpenDialog(true);
-  };
+    const fetchTags = async () => {
+      setIsLoading(true);
+      setError(null);
 
-  const handleDeleteTag = (id: number) => {
-    setTags(tags.filter(tag => tag.id !== id));
-  };
-
-  const handleCloseDialog = () => {
-    setOpenDialog(false);
-    setSelectedTag(null);
-  };
-
-  const handleSaveTag = () => {
-    if (newTag.name && newTag.category) {
-      if (selectedTag) {
-        // 编辑现有标签
-        setTags(tags.map(tag => 
-          tag.id === selectedTag.id 
-            ? { ...tag, name: newTag.name!, category: newTag.category!, color: newTag.color! } 
-            : tag
-        ));
-      } else {
-        // 添加新标签
-        const newId = Math.max(...tags.map(tag => tag.id)) + 1;
-        setTags([...tags, { 
-          id: newId, 
-          name: newTag.name, 
-          category: newTag.category, 
-          color: newTag.color || 'primary' 
-        } as TagData]);
+      try {
+        const response = await apiClient.get('/admin/tags');
+        if (!cancelled) {
+          setTags(Array.isArray(response.data) ? response.data : []);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          const errorMessage = err.response
+            ? `获取标签数据失败: ${err.response.status} ${err.response.statusText || ''}${err.response.data?.detail ? ` (${err.response.data.detail})` : ''}`
+            : `获取标签数据失败: ${err.message || '未知错误'}`;
+          setError(errorMessage);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
-      handleCloseDialog();
-    }
-  };
+    };
 
-  const handleCategoryChange = (event: SelectChangeEvent<string>) => {
-    setCurrentCategory(event.target.value as string);
-  };
+    fetchTags();
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadKey]);
 
-  const handleTagNameChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setNewTag({...newTag, name: event.target.value});
-  };
-
-  const handleTagCategoryChange = (event: SelectChangeEvent<string>) => {
-    setNewTag({...newTag, category: event.target.value as string});
-  };
-
-  const handleTagColorChange = (event: SelectChangeEvent<string>) => {
-    setNewTag({...newTag, color: event.target.value as string});
-  };
+  // 标签类别从真实数据中提取
+  const allCategories = useMemo(() => {
+    const categories = Array.from(new Set(tags.map(tag => tag.category).filter(Boolean)));
+    return ['全部', ...categories];
+  }, [tags]);
 
   // 根据当前选择的类别筛选标签
-  const filteredTags = currentCategory === '全部' 
-    ? tags 
-    : tags.filter(tag => tag.category === currentCategory);
+  const filteredTags = useMemo(
+    () =>
+      currentCategory === '全部'
+        ? tags
+        : tags.filter(tag => tag.category === currentCategory),
+    [tags, currentCategory]
+  );
 
-  // 获取所有标签类别（包括自定义类别）
-  const allCategories = ['全部', ...new Set(tags.map(tag => tag.category))];
+  const handleCategoryChange = (event: SelectChangeEvent<string>) => {
+    setCurrentCategory(event.target.value);
+  };
+
+  // 加载中
+  if (isLoading) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" height="300px">
+        <CircularProgress />
+        <Typography variant="body1" sx={{ ml: 2 }}>
+          标签数据加载中...
+        </Typography>
+      </Box>
+    );
+  }
+
+  // 加载失败：真实错误状态 + 重试
+  if (error) {
+    return (
+      <Box display="flex" flexDirection="column" justifyContent="center" alignItems="center" height="300px">
+        <Typography color="error" variant="body1" gutterBottom>
+          {error}
+        </Typography>
+        <Button variant="outlined" onClick={() => setReloadKey(key => key + 1)}>
+          重试
+        </Button>
+      </Box>
+    );
+  }
 
   return (
     <Box>
@@ -161,14 +117,14 @@ const TagManagement: React.FC = () => {
         <Typography variant="h5" component="h1">
           标签管理
         </Typography>
-        <Button 
-          variant="contained" 
-          color="primary" 
-          startIcon={<AddIcon />}
-          onClick={handleAddTag}
-        >
-          添加标签
-        </Button>
+        <Box textAlign="right">
+          <Button variant="contained" color="primary" startIcon={<AddIcon />} disabled>
+            添加标签
+          </Button>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+            后端标签创建/编辑/删除接口尚未实现持久化，功能待开放
+          </Typography>
+        </Box>
       </Box>
 
       <Paper sx={{ p: 3, mb: 3 }}>
@@ -177,10 +133,7 @@ const TagManagement: React.FC = () => {
             按类别筛选:
           </Typography>
           <FormControl variant="outlined" size="small" sx={{ minWidth: 200 }}>
-            <Select
-              value={currentCategory}
-              onChange={handleCategoryChange}
-            >
+            <Select value={currentCategory} onChange={handleCategoryChange}>
               {allCategories.map((category) => (
                 <MenuItem key={category} value={category}>
                   {category}
@@ -195,137 +148,50 @@ const TagManagement: React.FC = () => {
         </Typography>
         <Divider sx={{ mb: 2 }} />
 
-        <Grid container spacing={2}>
-          {filteredTags.map((tag) => (
-            <Grid item key={tag.id}>
-              <Box 
-                sx={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  bgcolor: 'background.paper',
-                  border: 1,
-                  borderColor: 'divider',
-                  borderRadius: 1,
-                  p: 1,
-                  '&:hover': {
-                    boxShadow: 1
-                  }
-                }}
-              >
-                <Chip 
-                  icon={<LocalOfferIcon />}
-                  label={tag.name}
-                  color={tag.color as any}
-                  sx={{ mr: 1 }}
-                />
-                <Typography variant="caption" color="text.secondary" sx={{ ml: 1, mr: 2 }}>
-                  {tag.category}
-                </Typography>
-                <IconButton 
-                  size="small" 
-                  color="primary"
-                  onClick={() => handleEditTag(tag)}
+        {filteredTags.length === 0 ? (
+          <Box sx={{ p: 4, textAlign: 'center' }}>
+            <Typography variant="body1" color="text.secondary">
+              暂无标签数据
+            </Typography>
+            <Typography variant="caption" color="text.disabled" display="block" sx={{ mt: 1 }}>
+              后端管理接口建设中，暂无数据
+            </Typography>
+          </Box>
+        ) : (
+          <Grid container spacing={2}>
+            {filteredTags.map((tag, index) => (
+              <Grid item key={tag.id !== undefined ? tag.id : `tag-${index}`}>
+                <Box
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    bgcolor: 'background.paper',
+                    border: 1,
+                    borderColor: 'divider',
+                    borderRadius: 1,
+                    p: 1,
+                    '&:hover': {
+                      boxShadow: 1,
+                    },
+                  }}
                 >
-                  <EditIcon fontSize="small" />
-                </IconButton>
-                <IconButton 
-                  size="small" 
-                  color="error"
-                  onClick={() => handleDeleteTag(tag.id)}
-                >
-                  <DeleteIcon fontSize="small" />
-                </IconButton>
-              </Box>
-            </Grid>
-          ))}
-        </Grid>
-      </Paper>
-
-      <Dialog open={openDialog} onClose={handleCloseDialog} maxWidth="sm" fullWidth>
-        <DialogTitle>
-          {selectedTag ? '编辑标签' : '添加新标签'}
-        </DialogTitle>
-        <DialogContent>
-          <Grid container spacing={2} sx={{ mt: 1 }}>
-            <Grid item xs={12}>
-              <TextField
-                label="标签名称"
-                fullWidth
-                value={newTag.name}
-                onChange={handleTagNameChange}
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <FormControl fullWidth>
-                <InputLabel>标签类别</InputLabel>
-                <Select
-                  label="标签类别"
-                  value={newTag.category}
-                  onChange={handleTagCategoryChange}
-                >
-                  {tagCategories.map((category) => (
-                    <MenuItem key={category} value={category}>
-                      {category}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12}>
-              <FormControl fullWidth>
-                <InputLabel>标签颜色</InputLabel>
-                <Select
-                  label="标签颜色"
-                  value={newTag.color}
-                  onChange={handleTagColorChange}
-                >
-                  {tagColors.map((color) => (
-                    <MenuItem key={color.value} value={color.value}>
-                      <Box display="flex" alignItems="center">
-                        <Box 
-                          sx={{ 
-                            width: 20, 
-                            height: 20, 
-                            borderRadius: '50%', 
-                            bgcolor: `${color.value}.main`,
-                            mr: 1
-                          }} 
-                        />
-                        {color.name}
-                      </Box>
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12}>
-              <Typography variant="subtitle2" gutterBottom>
-                预览:
-              </Typography>
-              <Box sx={{ p: 1 }}>
-                <Chip 
-                  icon={<LocalOfferIcon />}
-                  label={newTag.name || '标签名称'}
-                  color={newTag.color as any || 'primary'}
-                />
-              </Box>
-            </Grid>
+                  <Chip
+                    icon={<LocalOfferIcon />}
+                    label={tag.name || '未命名标签'}
+                    color={(tag.color as any) || 'default'}
+                    sx={{ mr: 1 }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ ml: 1, mr: 2 }}>
+                    {tag.category || '—'}
+                  </Typography>
+                </Box>
+              </Grid>
+            ))}
           </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleCloseDialog}>取消</Button>
-          <Button 
-            onClick={handleSaveTag} 
-            variant="contained" 
-            color="primary"
-            disabled={!newTag.name || !newTag.category}
-          >
-            保存
-          </Button>
-        </DialogActions>
-      </Dialog>
+        )}
+      </Paper>
     </Box>
   );
 };
 
-export default TagManagement; 
+export default TagManagement;

@@ -1,385 +1,337 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Box,
   Card,
   CardContent,
   Typography,
-  Divider,
   Grid,
   LinearProgress,
-  Chip,
   Paper,
   List,
   ListItem,
-  ListItemIcon,
   ListItemText,
-  Tooltip,
-  IconButton,
-  Button,
+  Alert,
+  CircularProgress,
 } from '@mui/material';
-import TrendingUpIcon from '@mui/icons-material/TrendingUp';
-import TrendingDownIcon from '@mui/icons-material/TrendingDown';
-import TrendingFlatIcon from '@mui/icons-material/TrendingFlat';
-import InsertChartIcon from '@mui/icons-material/InsertChart';
-import SportsScoreIcon from '@mui/icons-material/SportsScore';
-import ScheduleIcon from '@mui/icons-material/Schedule';
-import InfoIcon from '@mui/icons-material/Info';
-import DownloadIcon from '@mui/icons-material/Download';
-import PrintIcon from '@mui/icons-material/Print';
-import { format, differenceInDays, addDays, parseISO } from 'date-fns';
+import { format, differenceInDays, parseISO } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
-import { Exercise, RehabPlan } from '../../types/rehab';
+import api from '../../services/api';
+import { RehabPlan } from '../../types/rehab';
 
-// 进度评估相关类型定义
-interface ProgressMetric {
-  name: string;
-  value: number;
-  target: number;
-  unit: string;
-  trend: 'up' | 'down' | 'flat';
-  lastValue?: number;
+/**
+ * 康复进度评估组件（真实数据版）
+ *
+ * 数据来源（均为后端真实端点，响应字段以 rehabilitation_router.py 为准）：
+ * - GET /rehabilitation/plans/{plan_id}/statistics  进度统计
+ * - GET /rehabilitation/plans/{plan_id}/trends      完成趋势（按天）
+ *
+ * 后端不提供历史对比/模拟指标，凡统计字段为 null（如 range_of_motion、
+ * muscle_strength）一律如实展示"暂无数据"，不做任何虚构。
+ */
+
+// GET /plans/{plan_id}/statistics 的响应结构（rehabilitation_service.calculate_plan_statistics）
+interface PlanStatistics {
+  plan_id: string;
+  time_range: string;
+  total_records: number;
+  completed_records: number;
+  completion_rate: number | null;
+  avg_pain_level: number | null;
+  avg_difficulty_rating: number | null;
+  range_of_motion: null;
+  muscle_strength: null;
+  weekly_completion: { week_start: string; total: number; completed: number; completion_rate: number }[];
+  per_exercise: {
+    exercise_id: string;
+    exercise_name: string;
+    total: number;
+    completed: number;
+    completion_rate: number | null;
+    avg_pain_level: number | null;
+    avg_difficulty_rating: number | null;
+  }[];
+  unsupported_metrics: string[];
+  data_source: string;
+  data_notes: string[];
 }
 
-interface WeeklyProgress {
-  week: number;
-  completionRate: number;
-  exerciseCount: number;
-  painLevel?: number;
-  improvementRate?: number;
+// GET /plans/{plan_id}/trends 的响应结构（metric=completion 时 series 每项含完成率）
+interface PlanTrends {
+  plan_id: string;
+  metric: string;
+  days: number;
+  total_records: number;
+  series: { date: string; total: number; completed: number; completion_rate: number }[];
+  data_source: string;
+  data_notes: string[];
 }
 
 interface RehabProgressEvaluationProps {
   plan: RehabPlan;
-  loading?: boolean;
 }
 
-const RehabProgressEvaluation: React.FC<RehabProgressEvaluationProps> = ({ plan, loading = false }) => {
-  // 模拟计算康复进度数据
-  const calculateProgressMetrics = (plan: RehabPlan): ProgressMetric[] => {
-    // 在实际应用中，这些数据应该从后端API获取或基于真实数据计算
-    return [
-      {
-        name: '总体完成率',
-        value: calculateCompletionRate(plan),
-        target: 100,
-        unit: '%',
-        trend: 'up',
-        lastValue: calculateCompletionRate(plan) - 5,
-      },
-      {
-        name: '训练频率',
-        value: calculateTrainingFrequency(plan),
-        target: 7,
-        unit: '次/周',
-        trend: 'up',
-        lastValue: calculateTrainingFrequency(plan) - 1,
-      },
-      {
-        name: '平均疼痛指数',
-        value: 3.2,
-        target: 0,
-        unit: '级',
-        trend: 'down',
-        lastValue: 4.5,
-      },
-      {
-        name: '活动能力提升',
-        value: 15,
-        target: 50,
-        unit: '%',
-        trend: 'up',
-        lastValue: 10,
-      },
-    ];
-  };
+const RehabProgressEvaluation: React.FC<RehabProgressEvaluationProps> = ({ plan }) => {
+  const [statistics, setStatistics] = useState<PlanStatistics | null>(null);
+  const [trends, setTrends] = useState<PlanTrends | null>(null);
+  const [fetchLoading, setFetchLoading] = useState<boolean>(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // 计算完成率
-  const calculateCompletionRate = (plan: RehabPlan): number => {
-    if (!plan.exercises || plan.exercises.length === 0) return 0;
-    
-    const completedExercises = plan.exercises.filter(ex => ex.completed).length;
-    return Math.round((completedExercises / plan.exercises.length) * 100);
-  };
+  const planId = plan.id || plan._id || '';
 
-  // 计算训练频率 (每周平均次数)
-  const calculateTrainingFrequency = (plan: RehabPlan): number => {
-    if (!plan.exercises || plan.exercises.length === 0) return 0;
+  // 拉取真实统计数据与趋势数据
+  useEffect(() => {
+    if (!planId) return;
+    let cancelled = false;
 
+    const fetchData = async () => {
+      setFetchLoading(true);
+      setFetchError(null);
+      try {
+        const [statsRes, trendsRes] = await Promise.all([
+          api.get<PlanStatistics>(`/rehabilitation/plans/${planId}/statistics`),
+          api.get<PlanTrends>(`/rehabilitation/plans/${planId}/trends`, {
+            params: { metric: 'completion', days: 30 },
+          }),
+        ]);
+        if (!cancelled) {
+          setStatistics(statsRes.data);
+          setTrends(trendsRes.data);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setFetchError(err?.response?.data?.detail || err?.message || '获取康复进度数据失败');
+          setStatistics(null);
+          setTrends(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setFetchLoading(false);
+        }
+      }
+    };
+
+    fetchData();
+    return () => {
+      cancelled = true;
+    };
+  }, [planId]);
+
+  // 计划内剩余天数（基于真实起止日期，无结束日期则如实标注）
+  const remainingDays = (() => {
+    const endDateStr = plan.endDate || plan.end_date;
+    if (!endDateStr) return null;
     try {
-      const startDateStr = plan.startDate || plan.start_date;
-      const endDateStr = plan.endDate || plan.end_date;
-      if (!startDateStr) return 0;
-      const startDate = parseISO(startDateStr);
-      const endDate = endDateStr ? parseISO(endDateStr) : new Date();
-      const totalDays = differenceInDays(endDate, startDate) + 1;
-      const totalWeeks = Math.max(1, Math.ceil(totalDays / 7));
-      return Math.round((plan.exercises.length / totalWeeks) * 10) / 10; // 保留一位小数
-    } catch (e) {
-      console.error("Date calculation error:", e);
-      return 0;
-    }
-  };
-
-  // 模拟每周进度数据
-  const generateWeeklyProgress = (plan: RehabPlan): WeeklyProgress[] => {
-    // 在实际应用中，这些数据应该从后端API获取
-    const weeks = [];
-    let startDate: Date;
-    try {
-      const startDateStr = plan.startDate || plan.start_date;
-      startDate = startDateStr ? parseISO(startDateStr) : new Date();
-    } catch (e) {
-      console.error("Invalid date format:", e);
-      startDate = new Date();
-    }
-    
-    const totalWeeks = 4; // 假设展示4周数据
-    
-    for (let i = 0; i < totalWeeks; i++) {
-      weeks.push({
-        week: i + 1,
-        completionRate: Math.min(100, 55 + i * 15 + Math.floor(Math.random() * 10)),
-        exerciseCount: 6 + Math.floor(Math.random() * 3),
-        painLevel: Math.max(1, 5 - i * 0.8 - Math.random()),
-        improvementRate: i * 7 + 5 + Math.floor(Math.random() * 5),
-      });
-    }
-    
-    return weeks;
-  };
-
-  // 计算剩余天数
-  const calculateRemainingDays = (plan: RehabPlan): number => {
-    if (!plan.endDate) return 0;
-    
-    try {
-      const today = new Date();
-      const endDate = parseISO(plan.endDate);
-      const days = differenceInDays(endDate, today);
+      const days = differenceInDays(parseISO(endDateStr), new Date());
       return days >= 0 ? days : 0;
-    } catch (e) {
-      console.error("Date calculation error:", e);
-      return 0;
+    } catch {
+      return null;
     }
-  };
+  })();
 
   // 格式化日期
   const formatDate = (dateString?: string): string => {
     if (!dateString) return '';
     try {
       return format(parseISO(dateString), 'yyyy年MM月dd日', { locale: zhCN });
-    } catch (e) {
+    } catch {
       return dateString;
     }
   };
 
-  // 渲染趋势图标
-  const renderTrendIcon = (trend: 'up' | 'down' | 'flat', isPositive: boolean = true) => {
-    const color = isPositive 
-      ? (trend === 'up' ? 'success.main' : trend === 'down' ? 'error.main' : 'warning.main')
-      : (trend === 'down' ? 'success.main' : trend === 'up' ? 'error.main' : 'warning.main');
-      
-    return (
-      <Box component="span" sx={{ color, display: 'inline-flex', alignItems: 'center', ml: 1 }}>
-        {trend === 'up' && <TrendingUpIcon fontSize="small" />}
-        {trend === 'down' && <TrendingDownIcon fontSize="small" />}
-        {trend === 'flat' && <TrendingFlatIcon fontSize="small" />}
-      </Box>
-    );
-  };
-
-  // 计算指标
-  const progressMetrics = calculateProgressMetrics(plan);
-  const weeklyProgress = generateWeeklyProgress(plan);
-  const remainingDays = calculateRemainingDays(plan);
 
   return (
     <Box>
       <Card variant="outlined" sx={{ mb: 3 }}>
         <CardContent>
-          <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-            <Typography variant="h6" component="h2">
-              康复进度评估
-            </Typography>
-            <Box>
-              <Tooltip title="导出评估报告">
-                <IconButton size="small" sx={{ mr: 1 }}>
-                  <DownloadIcon />
-                </IconButton>
-              </Tooltip>
-              <Tooltip title="打印评估报告">
-                <IconButton size="small">
-                  <PrintIcon />
-                </IconButton>
-              </Tooltip>
+          <Typography variant="h6" component="h2" mb={2}>
+            康复进度评估
+          </Typography>
+
+          {/* 错误状态 */}
+          {fetchError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {fetchError}
+            </Alert>
+          )}
+
+          {/* 加载状态 */}
+          {fetchLoading && (
+            <Box display="flex" justifyContent="center" my={4}>
+              <CircularProgress />
             </Box>
-          </Box>
+          )}
 
-          <Box mb={3}>
-            <Grid container spacing={2}>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper elevation={0} variant="outlined" sx={{ p: 2, height: '100%' }}>
-                  <Typography variant="body2" color="textSecondary" gutterBottom>
-                    康复开始日期
-                  </Typography>
-                  <Typography variant="body1" fontWeight="medium">
-                    {formatDate(plan.startDate)}
-                  </Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper elevation={0} variant="outlined" sx={{ p: 2, height: '100%' }}>
-                  <Typography variant="body2" color="textSecondary" gutterBottom>
-                    预计结束日期
-                  </Typography>
-                  <Typography variant="body1" fontWeight="medium">
-                    {plan.endDate ? formatDate(plan.endDate) : "未设定"}
-                  </Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper elevation={0} variant="outlined" sx={{ p: 2, height: '100%' }}>
-                  <Typography variant="body2" color="textSecondary" gutterBottom>
-                    剩余天数
-                  </Typography>
-                  <Typography variant="body1" fontWeight="medium">
-                    {remainingDays} 天
-                  </Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper elevation={0} variant="outlined" sx={{ p: 2, height: '100%', bgcolor: 'primary.light', borderColor: 'primary.main' }}>
-                  <Typography variant="body2" color="primary.contrastText" gutterBottom>
-                    总体完成度
-                  </Typography>
-                  <Box display="flex" alignItems="center">
-                    <Typography variant="h5" fontWeight="bold" color="primary.contrastText">
-                      {Math.round(calculateCompletionRate(plan))}%
-                    </Typography>
-                  </Box>
-                  <LinearProgress 
-                    variant="determinate" 
-                    value={calculateCompletionRate(plan)} 
-                    sx={{ height: 8, borderRadius: 4, mt: 1, bgcolor: 'rgba(255,255,255,0.3)' }}
-                  />
-                </Paper>
-              </Grid>
-            </Grid>
-          </Box>
-
-          <Typography variant="subtitle2" gutterBottom>
-            核心康复指标
-          </Typography>
-          <Grid container spacing={2} sx={{ mb: 3 }}>
-            {progressMetrics.map((metric, index) => (
-              <Grid item xs={12} sm={6} md={3} key={index}>
-                <Card variant="outlined" sx={{ height: '100%' }}>
-                  <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
-                    <Typography variant="body2" color="textSecondary" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
-                      {metric.name}
-                      <Tooltip title={`目标值: ${metric.target}${metric.unit}`}>
-                        <InfoIcon fontSize="small" sx={{ ml: 0.5, fontSize: '0.9rem', color: 'text.secondary' }} />
-                      </Tooltip>
-                    </Typography>
-                    <Box display="flex" alignItems="baseline">
-                      <Typography variant="h6" component="span" fontWeight="medium">
-                        {metric.value}{metric.unit}
+          {/* 数据区 */}
+          {!fetchLoading && (
+            <>
+              {/* 计划基本信息（来自 plan 本身的真实字段） */}
+              <Box mb={3}>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper elevation={0} variant="outlined" sx={{ p: 2, height: '100%' }}>
+                      <Typography variant="body2" color="textSecondary" gutterBottom>
+                        康复开始日期
                       </Typography>
-                      {metric.lastValue && (
-                        <Typography variant="body2" component="span" sx={{ ml: 1 }}>
-                          {metric.trend === 'up' && `+${(metric.value - metric.lastValue).toFixed(1)}`}
-                          {metric.trend === 'down' && `-${(metric.lastValue - metric.value).toFixed(1)}`}
-                          {metric.trend === 'flat' && `±0`}
-                          {renderTrendIcon(
-                            metric.trend, 
-                            (metric.name === '平均疼痛指数') ? metric.trend === 'down' : metric.trend === 'up'
-                          )}
+                      <Typography variant="body1" fontWeight="medium">
+                        {formatDate(plan.startDate || plan.start_date) || '未设定'}
+                      </Typography>
+                    </Paper>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper elevation={0} variant="outlined" sx={{ p: 2, height: '100%' }}>
+                      <Typography variant="body2" color="textSecondary" gutterBottom>
+                        预计结束日期
+                      </Typography>
+                      <Typography variant="body1" fontWeight="medium">
+                        {(plan.endDate || plan.end_date) ? formatDate(plan.endDate || plan.end_date) : '未设定'}
+                      </Typography>
+                    </Paper>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper elevation={0} variant="outlined" sx={{ p: 2, height: '100%' }}>
+                      <Typography variant="body2" color="textSecondary" gutterBottom>
+                        剩余天数
+                      </Typography>
+                      <Typography variant="body1" fontWeight="medium">
+                        {remainingDays !== null ? `${remainingDays} 天` : '未设定结束日期'}
+                      </Typography>
+                    </Paper>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper
+                      elevation={0}
+                      variant="outlined"
+                      sx={{ p: 2, height: '100%', bgcolor: 'primary.light', borderColor: 'primary.main' }}
+                    >
+                      <Typography variant="body2" color="primary.contrastText" gutterBottom>
+                        总体完成度
+                      </Typography>
+                      <Typography variant="h5" fontWeight="bold" color="primary.contrastText">
+                        {statistics?.completion_rate != null ? `${statistics.completion_rate}%` : '暂无数据'}
+                      </Typography>
+                      {statistics?.completion_rate != null && (
+                        <LinearProgress
+                          variant="determinate"
+                          value={Math.min(100, statistics.completion_rate)}
+                          sx={{ height: 8, borderRadius: 4, mt: 1, bgcolor: 'rgba(255,255,255,0.3)' }}
+                        />
+                      )}
+                    </Paper>
+                  </Grid>
+                </Grid>
+              </Box>
+
+              {/* 空状态：后端明确返回无进度记录 */}
+              {statistics && statistics.total_records === 0 && (
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  该计划暂无进度记录。请在计划详情中记录运动完成情况后，此处将展示真实统计数据。
+                </Alert>
+              )}
+
+              {/* 核心统计指标（来自 /statistics 的真实字段，null 一律展示"暂无数据"） */}
+              <Typography variant="subtitle2" gutterBottom>
+                核心康复指标
+              </Typography>
+              <Grid container spacing={2} sx={{ mb: 3 }}>
+                {[
+                  { name: '进度记录总数', value: statistics ? String(statistics.total_records) : null, unit: '条' },
+                  { name: '已完成记录', value: statistics ? String(statistics.completed_records) : null, unit: '条' },
+                  {
+                    name: '平均疼痛指数',
+                    value: statistics?.avg_pain_level != null ? String(Math.round(statistics.avg_pain_level * 10) / 10) : null,
+                    unit: '级',
+                  },
+                  {
+                    name: '平均难度评分',
+                    value: statistics?.avg_difficulty_rating != null ? String(Math.round(statistics.avg_difficulty_rating * 10) / 10) : null,
+                    unit: '分',
+                  },
+                ].map((metric) => (
+                  <Grid item xs={12} sm={6} md={3} key={metric.name}>
+                    <Card variant="outlined" sx={{ height: '100%' }}>
+                      <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+                        <Typography variant="body2" color="textSecondary" gutterBottom>
+                          {metric.name}
                         </Typography>
-                      )}
-                    </Box>
-                    <LinearProgress 
-                      variant="determinate" 
-                      value={(metric.value / metric.target) * 100} 
-                      sx={{ height: 6, borderRadius: 3, mt: 1 }}
-                    />
-                  </CardContent>
-                </Card>
+                        <Typography variant="h6" component="span" fontWeight="medium">
+                          {metric.value != null ? `${metric.value}${metric.unit}` : '暂无数据'}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
               </Grid>
-            ))}
-          </Grid>
 
-          <Typography variant="subtitle2" gutterBottom>
-            每周康复进展
-          </Typography>
-          <Grid container spacing={2}>
-            {weeklyProgress.map((week, index) => (
-              <Grid item xs={12} sm={6} lg={3} key={index}>
-                <Card variant="outlined" sx={{ height: '100%' }}>
-                  <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
-                    <Typography variant="body2" color="primary" fontWeight="medium" gutterBottom>
-                      第{week.week}周
+              {/* 每周完成情况（来自 statistics.weekly_completion 的真实分桶数据） */}
+              <Typography variant="subtitle2" gutterBottom>
+                每周完成情况
+              </Typography>
+              {statistics && statistics.weekly_completion.length > 0 ? (
+                <List dense>
+                  {statistics.weekly_completion.map((week) => (
+                    <ListItem key={week.week_start} divider>
+                      <ListItemText
+                        primary={`${formatDate(week.week_start)} 起的一周`}
+                        secondary={`完成 ${week.completed}/${week.total} 次`}
+                      />
+                      <Box sx={{ width: '40%', display: 'flex', alignItems: 'center' }}>
+                        <Box sx={{ width: '100%', mr: 1 }}>
+                          <LinearProgress variant="determinate" value={Math.min(100, week.completion_rate)} />
+                        </Box>
+                        <Typography variant="body2">{week.completion_rate}%</Typography>
+                      </Box>
+                    </ListItem>
+                  ))}
+                </List>
+              ) : (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                  暂无每周完成数据
+                </Typography>
+              )}
+
+              {/* 近30天完成趋势（来自 /trends metric=completion 的真实按天数据） */}
+              <Typography variant="subtitle2" gutterBottom>
+                近30天完成趋势
+              </Typography>
+              {trends && trends.series.length > 0 ? (
+                <List dense>
+                  {trends.series.map((point) => (
+                    <ListItem key={point.date} divider>
+                      <ListItemText
+                        primary={point.date}
+                        secondary={`完成 ${point.completed}/${point.total} 次`}
+                      />
+                      <Box sx={{ width: '40%', display: 'flex', alignItems: 'center' }}>
+                        <Box sx={{ width: '100%', mr: 1 }}>
+                          <LinearProgress variant="determinate" value={Math.min(100, point.completion_rate)} />
+                        </Box>
+                        <Typography variant="body2">{point.completion_rate}%</Typography>
+                      </Box>
+                    </ListItem>
+                  ))}
+                </List>
+              ) : (
+                <Typography variant="body2" color="text.secondary">
+                  暂无趋势数据
+                </Typography>
+              )}
+
+              {/* 后端数据说明（如实透出，例如"计划内暂无进度记录"） */}
+              {statistics && statistics.data_notes.length > 0 && (
+                <Box mt={2}>
+                  {statistics.data_notes.map((note, index) => (
+                    <Typography key={index} variant="caption" color="text.secondary" display="block">
+                      数据说明：{note}
                     </Typography>
-                    <List dense disablePadding>
-                      <ListItem disablePadding sx={{ mb: 0.5 }}>
-                        <ListItemIcon sx={{ minWidth: 30 }}>
-                          <SportsScoreIcon fontSize="small" color="success" />
-                        </ListItemIcon>
-                        <ListItemText 
-                          primary={`完成率: ${week.completionRate}%`}
-                          primaryTypographyProps={{ variant: 'body2' }}
-                        />
-                      </ListItem>
-                      <ListItem disablePadding sx={{ mb: 0.5 }}>
-                        <ListItemIcon sx={{ minWidth: 30 }}>
-                          <ScheduleIcon fontSize="small" color="info" />
-                        </ListItemIcon>
-                        <ListItemText 
-                          primary={`训练次数: ${week.exerciseCount}次`}
-                          primaryTypographyProps={{ variant: 'body2' }}
-                        />
-                      </ListItem>
-                      {week.painLevel && (
-                        <ListItem disablePadding sx={{ mb: 0.5 }}>
-                          <ListItemIcon sx={{ minWidth: 30 }}>
-                            <TrendingDownIcon fontSize="small" color="error" />
-                          </ListItemIcon>
-                          <ListItemText 
-                            primary={`疼痛指数: ${week.painLevel.toFixed(1)}`}
-                            primaryTypographyProps={{ variant: 'body2' }}
-                          />
-                        </ListItem>
-                      )}
-                      {week.improvementRate && (
-                        <ListItem disablePadding>
-                          <ListItemIcon sx={{ minWidth: 30 }}>
-                            <TrendingUpIcon fontSize="small" color="success" />
-                          </ListItemIcon>
-                          <ListItemText 
-                            primary={`提升率: ${week.improvementRate}%`}
-                            primaryTypographyProps={{ variant: 'body2' }}
-                          />
-                        </ListItem>
-                      )}
-                    </List>
-                  </CardContent>
-                </Card>
-              </Grid>
-            ))}
-          </Grid>
-
-          <Box mt={3} display="flex" justifyContent="center">
-            <Button
-              variant="outlined"
-              color="primary"
-              startIcon={<InsertChartIcon />}
-            >
-              查看详细进度分析
-            </Button>
-          </Box>
+                  ))}
+                </Box>
+              )}
+            </>
+          )}
         </CardContent>
       </Card>
     </Box>
   );
 };
 
-export default RehabProgressEvaluation; 
+export default RehabProgressEvaluation;

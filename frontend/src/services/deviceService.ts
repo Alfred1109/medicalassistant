@@ -1,49 +1,69 @@
 import { apiService } from './api';
 
-// 设备类型定义
+// 设备类型定义（与后端 DeviceResponse 字段对齐，snake_case）
 export interface Device {
   id: string;
+  device_type: string;
   name: string;
-  type: '血压计' | '血糖仪' | '体温计' | '心电图' | '体重秤' | '手环' | '其他';
-  status: 'online' | 'offline' | 'error' | 'syncing';
-  batteryLevel: number;
-  signalStrength: number; // 1-5
-  lastSyncTime: string;
-  nextSyncTime?: string;
-  firmwareVersion: string;
-  firmwareUpdateAvailable: boolean;
-  errorMessage?: string;
-  connectionType: 'bluetooth' | 'wifi' | 'cable';
-  patientId: string;
-  patientName: string;
+  manufacturer?: string | null;
+  model?: string | null;
+  connection_type?: string | null;
+  firmware_version?: string | null;
+  patient_id?: string | null;
+  status: string; // 'online' | 'offline' | 'error' ...
+  last_connected?: string | null;
+  battery_level?: number | null;
+  settings?: Record<string, any> | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
-// 设备数据类型定义
-export interface DeviceData {
+// 绑定设备提交载荷（与后端 DeviceCreate 对齐：device_type / name 必填）
+export interface DeviceCreatePayload {
+  device_type: string;
+  name: string;
+  manufacturer?: string;
+  model?: string;
+  connection_type?: string;
+  firmware_version?: string;
+  settings?: Record<string, any>;
+}
+
+// 设备数据条目（与后端 DeviceDataResponse 对齐）
+export interface DeviceDataItem {
   id: string;
-  deviceId: string;
+  device_id: string;
   timestamp: string;
-  dataType: string;
+  data_type: string;
   value: any;
   unit: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, any> | null;
+  created_at?: string;
+}
+
+// 设备状态（与后端 DeviceStatusResponse 对齐）
+export interface DeviceStatus {
+  status: string;
+  battery_level: number;
+  signal_strength: number;
+  last_sync_time?: string | null;
+  message?: string | null;
 }
 
 // 设备配置类型定义
 export interface DeviceConfig {
-  deviceId: string;
   syncFrequency: 'realtime' | 'hourly' | 'daily' | 'manual';
   notificationsEnabled: boolean;
   customName?: string;
   alarmSettings?: Record<string, any>;
 }
 
-// 设备服务
+// 设备服务（全部对接真实后端 /api/devices 接口）
 const deviceService = {
-  // 获取用户绑定的设备列表
-  getUserDevices: async (userId: string): Promise<Device[]> => {
+  // 获取当前登录用户绑定的设备列表（GET /api/devices）
+  getUserDevices: async (): Promise<Device[]> => {
     try {
-      const response = await apiService.getUserDevices(userId);
+      const response = await apiService.getUserDevices();
       return response.data;
     } catch (error) {
       console.error('获取用户设备列表失败:', error);
@@ -51,10 +71,10 @@ const deviceService = {
     }
   },
 
-  // 绑定新设备
-  bindDevice: async (userId: string, deviceData: Omit<Device, 'id' | 'status' | 'lastSyncTime' | 'batteryLevel' | 'signalStrength'>): Promise<Device> => {
+  // 绑定新设备到当前登录用户（POST /api/devices/bind，device_type / name 必填）
+  bindDevice: async (deviceData: DeviceCreatePayload): Promise<Device> => {
     try {
-      const response = await apiService.bindUserDevice(userId, deviceData);
+      const response = await apiService.bindUserDevice('', deviceData);
       return response.data;
     } catch (error) {
       console.error('绑定设备失败:', error);
@@ -62,18 +82,21 @@ const deviceService = {
     }
   },
 
-  // 解绑设备
-  unbindDevice: async (userId: string, deviceId: string): Promise<void> => {
+  // 解绑设备（DELETE /api/devices/{id}/unbind）
+  unbindDevice: async (deviceId: string): Promise<void> => {
     try {
-      await apiService.unbindUserDevice(userId, deviceId);
+      await apiService.unbindUserDevice('', deviceId);
     } catch (error) {
       console.error('解绑设备失败:', error);
       throw error;
     }
   },
 
-  // 获取设备数据
-  getDeviceData: async (deviceId: string, params?: { startDate?: string; endDate?: string; limit?: number; dataType?: string }): Promise<DeviceData[]> => {
+  // 获取设备数据（GET /api/devices/{id}/data，支持 start_date / end_date / data_type / limit）
+  getDeviceData: async (
+    deviceId: string,
+    params?: { startDate?: string; endDate?: string; limit?: number; dataType?: string }
+  ): Promise<DeviceDataItem[]> => {
     try {
       const response = await apiService.getDeviceData(deviceId, params);
       return response.data;
@@ -83,8 +106,10 @@ const deviceService = {
     }
   },
 
-  // 同步设备数据
-  syncDeviceData: async (deviceId: string): Promise<{ success: boolean; message: string; newData?: DeviceData[] }> => {
+  // 同步设备数据（POST /api/devices/{id}/sync，返回后端 device_service 的同步结果）
+  syncDeviceData: async (
+    deviceId: string
+  ): Promise<{ success: boolean; message: string; new_data?: any[]; [key: string]: any }> => {
     try {
       const response = await apiService.syncDeviceData(deviceId);
       return response.data;
@@ -94,8 +119,8 @@ const deviceService = {
     }
   },
 
-  // 获取设备状态
-  getDeviceStatus: async (deviceId: string): Promise<{ status: Device['status']; batteryLevel: number; signalStrength: number; lastSyncTime: string }> => {
+  // 获取设备状态（GET /api/devices/{id}/status）
+  getDeviceStatus: async (deviceId: string): Promise<DeviceStatus> => {
     try {
       const response = await apiService.getDeviceStatus(deviceId);
       return response.data;
@@ -105,8 +130,11 @@ const deviceService = {
     }
   },
 
-  // 配置设备
-  configureDevice: async (deviceId: string, config: DeviceConfig): Promise<{ success: boolean; message: string }> => {
+  // 配置设备（PUT /api/devices/{id}/config）
+  configureDevice: async (
+    deviceId: string,
+    config: DeviceConfig
+  ): Promise<{ success: boolean; message: string }> => {
     try {
       const response = await apiService.configureDevice(deviceId, config);
       return response.data;
@@ -116,12 +144,12 @@ const deviceService = {
     }
   },
 
-  // 修复设备异常
-  repairDevice: async (deviceId: string): Promise<{ 
-    success: boolean; 
+  // 修复设备异常（POST /api/devices/{id}/repair，返回真实的修复动作与结果）
+  repairDevice: async (deviceId: string): Promise<{
+    success: boolean;
     message: string;
     repair_actions?: string[];
-    repair_results?: Array<{action: string; success: boolean; message?: string; reason?: string}>;
+    repair_results?: Array<{ action: string; success: boolean; message?: string; reason?: string }>;
     new_status?: any;
   }> => {
     try {
@@ -131,113 +159,7 @@ const deviceService = {
       console.error('修复设备失败:', error);
       throw error;
     }
-  },
-
-  // 模拟扫描设备（仅用于演示）
-  scanForDevices: async (): Promise<Device[]> => {
-    // 模拟API调用延迟
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        const mockDevices: Device[] = [
-          {
-            id: 'bt-123456',
-            name: '智能手环 Pro',
-            type: '手环',
-            status: 'online',
-            batteryLevel: 85,
-            signalStrength: 4,
-            lastSyncTime: new Date().toISOString(),
-            firmwareVersion: '2.1.3',
-            connectionType: 'bluetooth',
-            firmwareUpdateAvailable: false,
-            patientId: '',
-            patientName: ''
-          },
-          {
-            id: 'bt-654321',
-            name: '血压监测仪',
-            type: '血压计',
-            status: 'offline',
-            batteryLevel: 92,
-            signalStrength: 3,
-            lastSyncTime: new Date(Date.now() - 86400000).toISOString(), // 一天前
-            firmwareVersion: '1.5.0',
-            connectionType: 'bluetooth',
-            firmwareUpdateAvailable: true,
-            patientId: '',
-            patientName: ''
-          },
-          {
-            id: 'wifi-abcdef',
-            name: '智能体重秤',
-            type: '体重秤',
-            status: 'online',
-            batteryLevel: 76,
-            signalStrength: 5,
-            lastSyncTime: new Date(Date.now() - 3600000).toISOString(), // 一小时前
-            firmwareVersion: '3.0.2',
-            connectionType: 'wifi',
-            firmwareUpdateAvailable: false,
-            patientId: '',
-            patientName: ''
-          }
-        ];
-        
-        resolve(mockDevices);
-      }, 2000);
-    });
-  },
-
-  // 模拟设备连接（仅用于演示）
-  connectToDevice: async (deviceId: string): Promise<{ success: boolean; message: string }> => {
-    // 模拟API调用延迟
-    return new Promise((resolve, reject) => {
-      setTimeout(() => {
-        // 模拟90%成功率
-        if (Math.random() > 0.1) {
-          resolve({
-            success: true,
-            message: '设备连接成功'
-          });
-        } else {
-          reject({
-            success: false,
-            message: '连接设备失败，请确保设备已开启并在范围内'
-          });
-        }
-      }, 2000);
-    });
-  },
-
-  // 模拟测试设备连接（仅用于演示）
-  testDeviceConnection: async (deviceId: string): Promise<{ success: boolean; message: string; details?: any }> => {
-    // 模拟API调用延迟
-    return new Promise((resolve, reject) => {
-      setTimeout(() => {
-        // 模拟85%成功率
-        if (Math.random() > 0.15) {
-          resolve({
-            success: true,
-            message: '设备连接正常，数据同步测试成功',
-            details: {
-              latency: Math.floor(Math.random() * 100),
-              dataTransferRate: Math.floor(500 + Math.random() * 1000) + 'kbps',
-              batteryLevel: Math.floor(70 + Math.random() * 30) + '%'
-            }
-          });
-        } else {
-          reject({
-            success: false,
-            message: '设备数据同步测试失败，请检查网络连接或设备状态',
-            details: {
-              errorCode: 'ERR_DATA_SYNC_TIMEOUT',
-              retryRecommended: true
-            }
-          });
-        }
-      }, 2500);
-    });
   }
 };
 
-export { deviceService }; 
+export { deviceService };

@@ -52,6 +52,7 @@ import ViewListIcon from '@mui/icons-material/ViewList';
 
 import { format } from 'date-fns';
 import { createSelector } from 'reselect';
+import Alert from '@mui/material/Alert';
 
 // 导入React hooks
 const { useState, useEffect } = React;
@@ -95,6 +96,11 @@ const RehabPlans: React.FC = () => {
   const [planToDelete, setPlanToDelete] = useState<string | null>(null);
   const [menuAnchorEl, setMenuAnchorEl] = useState<null | HTMLElement>(null);
   const [activePlanId, setActivePlanId] = useState<string | null>(null);
+  // 批量删除：确认对话框与执行状态
+  const [bulkDeleteDialogOpen, setBulkDeleteDialogOpen] = useState<boolean>(false);
+  const [bulkDeleting, setBulkDeleting] = useState<boolean>(false);
+  // 批量删除结果：逐条如实上报成功/失败（含后端返回的失败原因）
+  const [bulkDeleteResult, setBulkDeleteResult] = useState<{ succeeded: string[]; failed: { id: string; name: string; reason: string }[] } | null>(null);
   
   // 加载康复计划数据
   useEffect(() => {
@@ -151,12 +157,40 @@ const RehabPlans: React.FC = () => {
     }
   };
   
-  // 批量删除处理
-  const handleBulkDelete = () => {
-    // 这里可以实现批量删除逻辑
-    // 例如: selectedPlans.forEach(planId => dispatch(deleteRehabPlan(planId)));
-    console.log('批量删除:', selectedPlans);
-    setSelectedPlans([]);
+  // 打开批量删除确认对话框
+  const handleBulkDeleteClick = () => {
+    setBulkDeleteResult(null);
+    setBulkDeleteDialogOpen(true);
+  };
+
+  // 批量删除：逐个调用真实 DELETE /rehabilitation/plans/{id}（复用 deleteRehabPlan thunk）
+  const handleBulkDeleteConfirm = async () => {
+    setBulkDeleting(true);
+    setBulkDeleteResult(null);
+    try {
+      const results = await Promise.allSettled(
+        selectedPlans.map(planId => dispatch(deleteRehabPlan(planId)).unwrap())
+      );
+      const succeeded: string[] = [];
+      const failed: { id: string; name: string; reason: string }[] = [];
+      results.forEach((result, index) => {
+        const planId = selectedPlans[index];
+        const planName = plans.find(p => (p.id || p._id) === planId)?.name || planId;
+        if (result.status === 'fulfilled') {
+          succeeded.push(planName);
+        } else {
+          // rejectWithValue 的 payload 或异常信息，如实展示
+          failed.push({ id: planId, name: planName, reason: String(result.reason?.message || result.reason || '删除失败') });
+        }
+      });
+      setBulkDeleteResult({ succeeded, failed });
+      setSelectedPlans([]);
+      // 重新拉取列表，保证与后端状态一致
+      await dispatch(fetchRehabPlans());
+    } finally {
+      setBulkDeleting(false);
+      setBulkDeleteDialogOpen(false);
+    }
   };
   
   // 筛选和排序逻辑
@@ -492,10 +526,10 @@ const RehabPlans: React.FC = () => {
               已选择 {selectedPlans.length} 个计划
             </Typography>
             <Box>
-              <Button 
-                size="small" 
+              <Button
+                size="small"
                 color="error"
-                onClick={handleBulkDelete}
+                onClick={handleBulkDeleteClick}
                 startIcon={<DeleteIcon />}
                 sx={{ color: theme.palette.error.main, bgcolor: 'white', mr: 1 }}
               >
@@ -545,6 +579,20 @@ const RehabPlans: React.FC = () => {
         </Box>
       )}
       
+      {/* 批量删除结果反馈：成功/失败逐条如实展示 */}
+      {bulkDeleteResult && (
+        <Alert
+          severity={bulkDeleteResult.failed.length === 0 ? 'success' : 'warning'}
+          sx={{ mb: 3 }}
+          onClose={() => setBulkDeleteResult(null)}
+        >
+          {bulkDeleteResult.failed.length === 0
+            ? `已成功删除 ${bulkDeleteResult.succeeded.length} 个康复计划。`
+            : `成功删除 ${bulkDeleteResult.succeeded.length} 个，失败 ${bulkDeleteResult.failed.length} 个：` +
+              bulkDeleteResult.failed.map(f => `${f.name}（${f.reason}）`).join('；')}
+        </Alert>
+      )}
+
       {/* 内容区 - 网格视图或列表视图 */}
       {!loading && (
         <>
@@ -655,6 +703,24 @@ const RehabPlans: React.FC = () => {
           <Button onClick={handleDeleteCancel}>取消</Button>
           <Button onClick={handleDeleteConfirm} color="error" autoFocus>
             删除
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 批量删除确认对话框 */}
+      <Dialog open={bulkDeleteDialogOpen} onClose={() => !bulkDeleting && setBulkDeleteDialogOpen(false)}>
+        <DialogTitle>确认批量删除</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            您确定要删除已选的 {selectedPlans.length} 个康复计划吗？此操作无法撤销。
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBulkDeleteDialogOpen(false)} disabled={bulkDeleting}>
+            取消
+          </Button>
+          <Button onClick={handleBulkDeleteConfirm} color="error" autoFocus disabled={bulkDeleting}>
+            {bulkDeleting ? '删除中...' : '删除'}
           </Button>
         </DialogActions>
       </Dialog>

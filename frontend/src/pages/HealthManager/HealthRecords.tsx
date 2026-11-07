@@ -37,7 +37,29 @@ import {
   SelectChangeEvent,
 } from '@mui/material';
 import { Search as SearchIcon, Add as AddIcon, ArrowBack as ArrowBackIcon, Edit as EditIcon, Delete as DeleteIcon, Visibility as VisibilityIcon } from '@mui/icons-material';
+import { useSelector } from 'react-redux';
 import { apiService } from '../../services/api';
+import type { RootState } from '../../store/types';
+
+// 随访类型选项（对应后端 FollowUpType 枚举）
+const followUpTypes = [
+  { value: 'phone', label: '电话随访' },
+  { value: 'online', label: '线上随访' },
+  { value: 'onsite', label: '门诊随访' },
+  { value: 'home_visit', label: '家庭访视' },
+  { value: 'remote_monitoring', label: '远程监测' },
+  { value: 'group', label: '小组随访' },
+  { value: 'other', label: '其他' },
+];
+
+// ISO 时间转 datetime-local 输入值（本地时区）
+const toLocalInput = (iso?: string): string => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -103,6 +125,25 @@ const HealthRecords: React.FC = () => {
   const [snackbarSeverity, setSnackbarSeverity] = useState<'success' | 'error'>('success');
   const [filterType, setFilterType] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
+  // 当前登录用户（用于后端必填的 created_by / provider_id 字段）
+  const currentUser = useSelector((state: RootState) => state.auth.user);
+  // 健康档案表单（受控），对应后端 HealthRecordCreate：
+  // patient_id / record_type / title / content / created_by / tags
+  const [recordForm, setRecordForm] = useState({
+    record_type: 'medical_record',
+    title: '',
+    content: '',
+    tags: ''
+  });
+  // 随访表单（受控），对应后端 FollowUpRecordCreate：
+  // patient_id / follow_up_type / scheduled_date / provider_id / description
+  const [followUpForm, setFollowUpForm] = useState({
+    follow_up_type: 'phone',
+    scheduled_date: '',
+    description: ''
+  });
+  // 健康数据详情（只读查看，数据已在健康数据标签页抓取）
+  const [healthDataDetail, setHealthDataDetail] = useState<any>(null);
   
   // 处理标签切换
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
@@ -170,9 +211,15 @@ const HealthRecords: React.FC = () => {
     }
   }, [patientId]);
   
-  // 打开健康档案对话框
+  // 打开健康档案对话框（record 为空表示新建，否则编辑并预填）
   const handleOpenRecordDialog = (record: any = null) => {
     setSelectedRecord(record);
+    setRecordForm({
+      record_type: record?.record_type || 'medical_record',
+      title: record?.title || '',
+      content: record?.content || '',
+      tags: Array.isArray(record?.tags) ? record.tags.join(',') : ''
+    });
     setRecordDialogOpen(true);
   };
   
@@ -182,9 +229,14 @@ const HealthRecords: React.FC = () => {
     setRecordDialogOpen(false);
   };
   
-  // 打开随访记录对话框
+  // 打开随访记录对话框（followUp 为空表示新建，否则编辑并预填）
   const handleOpenFollowUpDialog = (followUp: any = null) => {
     setSelectedFollowUp(followUp);
+    setFollowUpForm({
+      follow_up_type: followUp?.follow_up_type || 'phone',
+      scheduled_date: toLocalInput(followUp?.scheduled_date),
+      description: followUp?.description || ''
+    });
     setFollowUpDialogOpen(true);
   };
   
@@ -221,35 +273,88 @@ const HealthRecords: React.FC = () => {
     setSelectedRecord(null);
   };
   
-  // 处理健康档案保存
-  const handleSaveRecord = async (formData: any) => {
+  // 处理健康档案保存（对应后端 HealthRecordCreate / HealthRecordUpdate）
+  const handleSaveRecord = async (formData: typeof recordForm) => {
+    // created_by 为后端必填字段，取当前登录用户，绝不伪造
+    if (!currentUser?.id) {
+      showSnackbar('无法获取当前登录用户，暂不能保存', 'error');
+      return;
+    }
+    if (!formData.title.trim() || !formData.content.trim()) {
+      showSnackbar('标题和内容为必填项', 'error');
+      return;
+    }
+
     try {
+      // tags 前端以逗号输入，提交时拆分为数组
+      const tags = formData.tags
+        .split(/[,，]/)
+        .map(tag => tag.trim())
+        .filter(Boolean);
+
       if (selectedRecord) {
-        await apiService.updateHealthRecord(selectedRecord.id, formData);
+        await apiService.updateHealthRecord(selectedRecord.id, {
+          title: formData.title.trim(),
+          content: formData.content,
+          record_type: formData.record_type,
+          tags
+        });
         showSnackbar('健康档案已更新', 'success');
       } else {
-        await apiService.createHealthRecord({ ...formData, patient_id: patientId });
+        await apiService.createHealthRecord({
+          patient_id: patientId,
+          record_type: formData.record_type,
+          title: formData.title.trim(),
+          content: formData.content,
+          created_by: currentUser.id,
+          tags
+        });
         showSnackbar('健康档案已创建', 'success');
       }
-      
+
       handleCloseRecordDialog();
       fetchHealthRecords();
     } catch (err: any) {
       showSnackbar(err.response?.data?.detail || '保存健康档案失败', 'error');
     }
   };
-  
-  // 处理随访记录保存
-  const handleSaveFollowUp = async (formData: any) => {
+
+  // 处理随访记录保存（对应后端 FollowUpRecordCreate / FollowUpRecordUpdate）
+  const handleSaveFollowUp = async (formData: typeof followUpForm) => {
+    // provider_id 为后端必填字段，取当前登录用户，绝不伪造
+    if (!currentUser?.id) {
+      showSnackbar('无法获取当前登录用户，暂不能保存', 'error');
+      return;
+    }
+    if (!formData.scheduled_date) {
+      showSnackbar('请选择计划随访日期', 'error');
+      return;
+    }
+    if (!formData.description.trim()) {
+      showSnackbar('随访说明为必填项', 'error');
+      return;
+    }
+
     try {
       if (selectedFollowUp) {
-        await apiService.updateFollowUp(selectedFollowUp.id, formData);
+        await apiService.updateFollowUp(selectedFollowUp.id, {
+          follow_up_type: formData.follow_up_type,
+          scheduled_date: formData.scheduled_date,
+          description: formData.description.trim(),
+          provider_id: currentUser.id
+        });
         showSnackbar('随访记录已更新', 'success');
       } else {
-        await apiService.createFollowUp({ ...formData, patient_id: patientId });
+        await apiService.createFollowUp({
+          patient_id: patientId,
+          follow_up_type: formData.follow_up_type,
+          scheduled_date: formData.scheduled_date,
+          provider_id: currentUser.id,
+          description: formData.description.trim()
+        });
         showSnackbar('随访记录已创建', 'success');
       }
-      
+
       handleCloseFollowUpDialog();
       fetchFollowUps();
     } catch (err: any) {
@@ -277,10 +382,10 @@ const HealthRecords: React.FC = () => {
   // 过滤健康档案列表
   const filteredRecords = records.filter(record => {
     const matchesType = filterType === 'all' || record.record_type === filterType;
-    const matchesSearch = searchTerm === '' || 
-      record.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      (record.content && JSON.stringify(record.content).toLowerCase().includes(searchTerm.toLowerCase()));
-    
+    const matchesSearch = searchTerm === '' ||
+      (record.title || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (record.content && String(record.content).toLowerCase().includes(searchTerm.toLowerCase()));
+
     return matchesType && matchesSearch;
   });
   
@@ -567,7 +672,11 @@ const HealthRecords: React.FC = () => {
                       <TableCell>{data.source || '手动录入'}</TableCell>
                       <TableCell>{data.recorded_by || '-'}</TableCell>
                       <TableCell align="right">
-                        <IconButton color="primary">
+                        <IconButton
+                          color="primary"
+                          title="查看详情"
+                          onClick={() => setHealthDataDetail(data)}
+                        >
                           <VisibilityIcon />
                         </IconButton>
                       </TableCell>
@@ -580,41 +689,200 @@ const HealthRecords: React.FC = () => {
         </TabPanel>
       </Paper>
       
-      {/* 健康档案编辑对话框 */}
-      {/* 这里省略具体实现，因为过于复杂，应该单独创建组件 */}
+      {/* 健康档案编辑对话框（真实接口：POST/PUT /health-records，
+          字段对应后端 HealthRecordCreate：patient_id / record_type / title / content / created_by / tags） */}
       <Dialog open={recordDialogOpen} onClose={handleCloseRecordDialog} maxWidth="md" fullWidth>
         <DialogTitle>
           {selectedRecord ? '编辑健康档案' : '创建健康档案'}
         </DialogTitle>
         <DialogContent>
-          <Typography variant="body1" color="text.secondary">
-            档案表单内容需要在真实项目中根据需求进一步实现
-          </Typography>
+          <Box component="form" sx={{ pt: 1 }}>
+            <Grid container spacing={2}>
+              <Grid item xs={12} sm={6}>
+                <FormControl fullWidth margin="normal">
+                  <InputLabel>记录类型</InputLabel>
+                  <Select
+                    value={recordForm.record_type}
+                    label="记录类型"
+                    onChange={(e: SelectChangeEvent) => setRecordForm({ ...recordForm, record_type: e.target.value })}
+                  >
+                    {recordTypes.filter(type => type.value !== 'all').map((type) => (
+                      <MenuItem key={type.value} value={type.value}>
+                        {type.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12} sm={6}>
+                <TextField
+                  fullWidth
+                  required
+                  label="标题"
+                  margin="normal"
+                  value={recordForm.title}
+                  onChange={(e) => setRecordForm({ ...recordForm, title: e.target.value })}
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  required
+                  multiline
+                  rows={5}
+                  label="内容"
+                  margin="normal"
+                  value={recordForm.content}
+                  onChange={(e) => setRecordForm({ ...recordForm, content: e.target.value })}
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  label="标签（用逗号分隔）"
+                  margin="normal"
+                  value={recordForm.tags}
+                  onChange={(e) => setRecordForm({ ...recordForm, tags: e.target.value })}
+                  helperText="多个标签请用逗号分隔"
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <Typography variant="caption" color="text.secondary">
+                  创建者将记录为当前登录用户（后端必填字段）
+                </Typography>
+              </Grid>
+            </Grid>
+          </Box>
         </DialogContent>
         <DialogActions>
           <Button onClick={handleCloseRecordDialog}>取消</Button>
-          <Button onClick={handleCloseRecordDialog} variant="contained" color="primary">
+          <Button
+            onClick={() => handleSaveRecord(recordForm)}
+            variant="contained"
+            color="primary"
+            disabled={!currentUser}
+          >
             保存
           </Button>
         </DialogActions>
       </Dialog>
-      
-      {/* 随访记录编辑对话框 */}
-      {/* 这里省略具体实现，因为过于复杂，应该单独创建组件 */}
+
+      {/* 随访记录编辑对话框（真实接口：POST/PUT /health-records/followups，
+          字段对应后端 FollowUpRecordCreate：patient_id / follow_up_type / scheduled_date /
+          provider_id / description；provider_id 取当前登录用户） */}
       <Dialog open={followUpDialogOpen} onClose={handleCloseFollowUpDialog} maxWidth="md" fullWidth>
         <DialogTitle>
           {selectedFollowUp ? '编辑随访记录' : '创建随访记录'}
         </DialogTitle>
         <DialogContent>
-          <Typography variant="body1" color="text.secondary">
-            随访表单内容需要在真实项目中根据需求进一步实现
-          </Typography>
+          <Box component="form" sx={{ pt: 1 }}>
+            <Grid container spacing={2}>
+              <Grid item xs={12} sm={6}>
+                <FormControl fullWidth margin="normal">
+                  <InputLabel>随访类型</InputLabel>
+                  <Select
+                    value={followUpForm.follow_up_type}
+                    label="随访类型"
+                    onChange={(e: SelectChangeEvent) => setFollowUpForm({ ...followUpForm, follow_up_type: e.target.value })}
+                  >
+                    {followUpTypes.map((type) => (
+                      <MenuItem key={type.value} value={type.value}>
+                        {type.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12} sm={6}>
+                <TextField
+                  fullWidth
+                  required
+                  label="计划随访日期"
+                  type="datetime-local"
+                  margin="normal"
+                  value={followUpForm.scheduled_date}
+                  onChange={(e) => setFollowUpForm({ ...followUpForm, scheduled_date: e.target.value })}
+                  InputLabelProps={{ shrink: true }}
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  required
+                  multiline
+                  rows={4}
+                  label="随访说明"
+                  margin="normal"
+                  value={followUpForm.description}
+                  onChange={(e) => setFollowUpForm({ ...followUpForm, description: e.target.value })}
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <Typography variant="caption" color="text.secondary">
+                  随访负责人将记录为当前登录用户（后端必填字段）
+                </Typography>
+              </Grid>
+            </Grid>
+          </Box>
         </DialogContent>
         <DialogActions>
           <Button onClick={handleCloseFollowUpDialog}>取消</Button>
-          <Button onClick={handleCloseFollowUpDialog} variant="contained" color="primary">
+          <Button
+            onClick={() => handleSaveFollowUp(followUpForm)}
+            variant="contained"
+            color="primary"
+            disabled={!currentUser}
+          >
             保存
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 健康数据只读详情对话框（数据来自已抓取的真实接口 GET /health-records/health-data） */}
+      <Dialog open={!!healthDataDetail} onClose={() => setHealthDataDetail(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>健康数据详情</DialogTitle>
+        <DialogContent>
+          {healthDataDetail && (
+            <Box sx={{ pt: 1 }}>
+              <Typography variant="body1" sx={{ mb: 1 }}>
+                <strong>数值：</strong>
+                {healthDataDetail.data_content?.value != null
+                  ? (typeof healthDataDetail.data_content.value === 'object'
+                    ? JSON.stringify(healthDataDetail.data_content.value)
+                    : String(healthDataDetail.data_content.value))
+                  : '-'}
+                {healthDataDetail.data_content?.unit ? ` ${healthDataDetail.data_content.unit}` : ''}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                <strong>数据类型：</strong>{healthDataDetail.data_type}
+                {healthDataDetail.data_content?.type ? `（${healthDataDetail.data_content.type}）` : ''}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                <strong>记录时间：</strong>
+                {healthDataDetail.recorded_at
+                  ? new Date(healthDataDetail.recorded_at).toLocaleString()
+                  : '-'}
+              </Typography>
+              {healthDataDetail.source && (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  <strong>数据来源：</strong>{healthDataDetail.source}
+                </Typography>
+              )}
+              {healthDataDetail.recorded_by && (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  <strong>记录者：</strong>{healthDataDetail.recorded_by}
+                </Typography>
+              )}
+              {healthDataDetail.data_content?.notes && (
+                <Typography variant="body2" sx={{ mb: 1 }}>
+                  <strong>备注：</strong>{healthDataDetail.data_content.notes}
+                </Typography>
+              )}
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setHealthDataDetail(null)}>关闭</Button>
         </DialogActions>
       </Dialog>
       

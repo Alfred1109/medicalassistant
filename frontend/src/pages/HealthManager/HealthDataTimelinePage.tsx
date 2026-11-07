@@ -4,30 +4,24 @@ import {
   Typography,
   Divider,
   Paper,
-  Tab,
-  Tabs,
   Button,
   Snackbar,
   Alert,
   Stack,
-  Chip,
-  CircularProgress,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from '@mui/material';
 import Badge from '@mui/material/Badge';
-import FileDownloadIcon from '@mui/icons-material/FileDownload';
-import ShareIcon from '@mui/icons-material/Share';
-import FilterListIcon from '@mui/icons-material/FilterList';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import WarningIcon from '@mui/icons-material/Warning';
-import { useParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 
 // 导入组件
 import HealthDataTimeline from '../../components/HealthManager/HealthDataTimeline';
-import { API_ORIGIN } from '../../config/constants';
-
-// API 根地址(不含 /api),由 nginx 反向代理转发
-const API_BASE_URL = API_ORIGIN;
+import { apiService } from '../../services/api';
+import api from '../../services/api';
 
 // 健康数据时间线项目类型
 interface HealthDataTimelineItem {
@@ -49,62 +43,63 @@ interface HealthDataTimelineItem {
   };
 }
 
-// 健康数据类型
+// 健康数据类型（对应后端 HealthDataResponse：data_content 承载具体数值）
 interface HealthData {
   id: string;
   patient_id: string;
-  patient_name?: string;
   data_type: string;
-  value: string | number | { [key: string]: any };
-  unit?: string;
-  measured_at?: string;
-  recorded_at?: string;
-  device?: string;
-  additional_info?: { [key: string]: any };
-  tags?: string[];
-  notes?: string;
+  data_content: {
+    value?: string | number | { systolic?: number; diastolic?: number; [key: string]: any };
+    unit?: string;
+    notes?: string;
+    type?: string;
+    [key: string]: any;
+  };
+  source?: string;
+  recorded_by?: string;
+  recorded_at: string;
+  created_at: string;
+  updated_at: string;
+  metadata?: { [key: string]: any };
   alert_level?: string;
   alert_status?: string;
   alert_message?: string;
-  recorded_by?: string;
-  created_at?: string;
-  updated_at?: string;
   [key: string]: any;
 }
 
-// 预警数据类型
+// 预警数据类型（对应后端 AlertResponse，GET /health/alerts/alerts）
 interface AlertData {
   id: string;
   health_data_id: string;
   patient_id: string;
   data_type: string;
+  vital_type?: string;
   value: number | { [key: string]: any };
+  unit?: string;
   alert_level: string;
   status: string;
-  alert_message?: string;
+  recorded_at?: string;
+  resolved_at?: string;
+  resolved_by?: string;
+  resolution_notes?: string;
 }
 
-// 转换健康数据到时间线项目
-const convertHealthDataToTimelineItems = (healthData: HealthData[]): HealthDataTimelineItem[] => {
-  return healthData.map(item => ({
-    id: item.id,
-    data_type: item.data_type,
-    title: getDataTitle(item.data_type, item),
-    description: getDataDescription(item.data_type, item),
-    value: getDisplayValue(item),
-    unit: item.unit || getUnitByDataType(item.data_type),
-    timestamp: item.measured_at || item.recorded_at || '',
-    metadata: {
-      device: item.device,
-      notes: item.notes,
-      tags: item.tags,
-      alert_status: item.alert_status,
-      alert_level: item.alert_level
-    }
-  }));
+// 数据类型映射
+const dataTypeLabelMap: Record<string, string> = {
+  blood_pressure: '血压测量',
+  blood_glucose: '血糖检测',
+  heart_rate: '心率监测',
+  body_temperature: '体温记录',
+  weight: '体重记录',
+  height: '身高测量',
+  sleep: '睡眠记录',
+  step_count: '步数统计',
+  blood_oxygen: '血氧监测',
+  oxygen_saturation: '血氧监测',
+  respiratory_rate: '呼吸频率'
 };
 
-// 获取单位
+// 数据类型默认单位
 const getUnitByDataType = (dataType: string): string => {
   const unitMap: Record<string, string> = {
     blood_pressure: 'mmHg',
@@ -114,469 +109,219 @@ const getUnitByDataType = (dataType: string): string => {
     weight: 'kg',
     height: 'cm',
     oxygen_saturation: '%',
+    blood_oxygen: '%',
     respiratory_rate: '次/分',
     step_count: '步',
   };
   return unitMap[dataType] || '';
 };
 
-// 获取数据标题
-const getDataTitle = (dataType: string, data: HealthData): string => {
-  const dataTypeMap: Record<string, string> = {
-    blood_pressure: '血压测量',
-    blood_glucose: '血糖检测',
-    heart_rate: '心率监测',
-    body_temperature: '体温记录',
-    weight: '体重记录',
-    height: '身高测量',
-    sleep: '睡眠记录',
-    step_count: '步数统计',
-    oxygen_saturation: '血氧监测',
-    respiratory_rate: '呼吸频率'
-  };
-  
-  // 如果有预警信息，添加预警标记
-  let title = dataTypeMap[dataType] || `${dataType}记录`;
-  if (data.alert_level === 'warning') {
-    title = `⚠️ ${title} (警告)`;
-  } else if (data.alert_level === 'critical') {
-    title = `🚨 ${title} (严重)`;
-  }
-  
-  return title;
-};
-
-// 获取数据描述
-const getDataDescription = (dataType: string, data: HealthData): string => {
-  let description = '';
-  
-  // 添加预警信息
-  if (data.alert_level) {
-    const alertMsg = data.alert_level === 'warning' ? '警告: 数值超出正常范围' : '严重: 数值大幅偏离正常范围';
-    description += `${alertMsg}`;
-    
-    if (data.alert_message) {
-      description += ` - ${data.alert_message}`;
-    }
-    
-    description += '\n';
-  }
-  
-  if (data.notes) {
-    description += data.notes;
-  }
-  
-  if (data.tags && data.tags.length > 0) {
-    description += description ? '\n' : '';
-    description += `标签: ${data.tags.join(', ')}`;
-  }
-  
-  return description;
-};
-
-// 获取显示值
+// 获取显示值（血压支持 {systolic, diastolic} 结构）
 const getDisplayValue = (data: HealthData): string | number => {
-  if (data.data_type === 'blood_pressure') {
-    if (data.additional_info && data.additional_info.systolic && data.additional_info.diastolic) {
-      return `${data.additional_info.systolic}/${data.additional_info.diastolic}`;
-    } else if (typeof data.value === 'object' && 'systolic' in data.value && 'diastolic' in data.value) {
-      const bpValue = data.value as { systolic: number, diastolic: number };
-      return `${bpValue.systolic}/${bpValue.diastolic}`;
+  const value = data.data_content?.value;
+  if (value && typeof value === 'object') {
+    const bp = value as { systolic?: number; diastolic?: number };
+    if (bp.systolic != null && bp.diastolic != null) {
+      return `${bp.systolic}/${bp.diastolic}`;
     }
+    return JSON.stringify(value);
   }
-  
-  return data.value as string | number;
+  return value != null ? (value as string | number) : '-';
 };
 
-// 模拟健康数据
-const mockHealthData: HealthData[] = [
-  {
-    id: '1',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'blood_pressure',
-    value: '120/80',
-    unit: 'mmHg',
-    measured_at: '2023-05-08T09:15:00Z',
-    device: 'Omron HEM-7121',
-    additional_info: {
-      systolic: 120,
-      diastolic: 80,
-      position: 'sitting',
-      arm: 'left'
-    },
-    tags: ['晨检', '空腹'],
-    notes: '早晨起床后测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-08T09:20:00Z',
-    updated_at: '2023-05-08T09:20:00Z'
-  },
-  {
-    id: '2',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'blood_glucose',
-    value: '5.6',
-    unit: 'mmol/L',
-    measured_at: '2023-05-08T12:30:00Z',
-    device: 'Accu-Chek Active',
-    additional_info: {
-      timing: 'after_meal',
-      meal_type: 'lunch'
-    },
-    tags: ['餐后2小时'],
-    notes: '午餐后测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-08T12:35:00Z',
-    updated_at: '2023-05-08T12:35:00Z'
-  },
-  {
-    id: '3',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'heart_rate',
-    value: '72',
-    unit: 'bpm',
-    measured_at: '2023-05-08T15:45:00Z',
-    device: 'Apple Watch Series 7',
-    additional_info: {
-      activity: 'resting'
-    },
-    tags: ['静息'],
-    notes: '下午休息时测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-08T15:50:00Z',
-    updated_at: '2023-05-08T15:50:00Z'
-  },
-  {
-    id: '4',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'body_temperature',
-    value: '36.5',
-    unit: '°C',
-    measured_at: '2023-05-08T18:00:00Z',
-    device: 'Braun ThermoScan 7',
-    additional_info: {
-      method: 'oral'
-    },
-    tags: ['日常检查'],
-    notes: '晚餐前测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-08T18:05:00Z',
-    updated_at: '2023-05-08T18:05:00Z'
-  },
-  {
-    id: '5',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'weight',
-    value: '70.5',
-    unit: 'kg',
-    measured_at: '2023-05-09T07:00:00Z',
-    device: 'Xiaomi Smart Scale',
-    additional_info: {},
-    tags: ['晨检'],
-    notes: '晨起测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-09T07:05:00Z',
-    updated_at: '2023-05-09T07:05:00Z'
-  },
-  {
-    id: '6',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'oxygen_saturation',
-    value: '98',
-    unit: '%',
-    measured_at: '2023-05-09T14:20:00Z',
-    device: 'Fingertip Pulse Oximeter',
-    additional_info: {},
-    tags: ['例行检查'],
-    notes: '下午休息时测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-09T14:25:00Z',
-    updated_at: '2023-05-09T14:25:00Z'
-  },
-  {
-    id: '7',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'heart_rate',
-    value: '68',
-    unit: 'bpm',
-    measured_at: '2023-05-09T14:30:00Z',
-    device: 'Apple Watch Series 7',
-    additional_info: {
-      activity: 'resting'
-    },
-    tags: ['静息'],
-    notes: '下午休息时测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-09T14:35:00Z',
-    updated_at: '2023-05-09T14:35:00Z'
-  },
-  {
-    id: '8',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'blood_pressure',
-    value: '118/78',
-    unit: 'mmHg',
-    measured_at: '2023-05-09T18:45:00Z',
-    device: 'Omron HEM-7121',
-    additional_info: {
-      systolic: 118,
-      diastolic: 78,
-      position: 'sitting',
-      arm: 'left'
-    },
-    tags: ['晚间检查'],
-    notes: '晚餐后测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-09T18:50:00Z',
-    updated_at: '2023-05-09T18:50:00Z'
-  },
-  {
-    id: '9',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'step_count',
-    value: '8652',
-    unit: '步',
-    measured_at: '2023-05-09T21:00:00Z',
-    device: 'Fitbit Charge 5',
-    additional_info: {
-      distance: 6.3,
-      distance_unit: 'km',
-      calories: 345
-    },
-    tags: ['日常活动'],
-    notes: '今日步数统计',
-    recorded_by: 'user1',
-    created_at: '2023-05-09T21:05:00Z',
-    updated_at: '2023-05-09T21:05:00Z'
-  },
-  {
-    id: '10',
-    patient_id: '1001',
-    patient_name: '张三',
-    data_type: 'blood_glucose',
-    value: '5.4',
-    unit: 'mmol/L',
-    measured_at: '2023-05-10T07:30:00Z',
-    device: 'Accu-Chek Active',
-    additional_info: {
-      timing: 'fasting'
-    },
-    tags: ['空腹'],
-    notes: '早晨空腹测量',
-    recorded_by: 'user1',
-    created_at: '2023-05-10T07:35:00Z',
-    updated_at: '2023-05-10T07:35:00Z'
-  }
-];
+// 转换健康数据到时间线项目
+const convertHealthDataToTimelineItems = (healthData: HealthData[]): HealthDataTimelineItem[] => {
+  return healthData.map(item => {
+    const semanticType = item.data_content?.type || item.data_type;
+    const baseTitle = dataTypeLabelMap[semanticType] || dataTypeLabelMap[item.data_type] || `${item.data_type}记录`;
+
+    // 如果有预警信息，添加预警标记
+    let title = baseTitle;
+    if (item.alert_level === 'warning') {
+      title = `⚠️ ${title} (警告)`;
+    } else if (item.alert_level === 'critical') {
+      title = `🚨 ${title} (严重)`;
+    }
+
+    // 描述：预警信息 + 备注
+    let description = '';
+    if (item.alert_level) {
+      const alertMsg = item.alert_level === 'warning' ? '警告: 数值超出正常范围' : '严重: 数值大幅偏离正常范围';
+      description += alertMsg;
+      if (item.alert_message) {
+        description += ` - ${item.alert_message}`;
+      }
+      description += '\n';
+    }
+    if (item.data_content?.notes) {
+      description += item.data_content.notes;
+    }
+
+    return {
+      id: item.id,
+      data_type: item.data_type,
+      title,
+      description,
+      value: getDisplayValue(item),
+      unit: item.data_content?.unit || getUnitByDataType(semanticType),
+      timestamp: item.recorded_at || '',
+      metadata: {
+        notes: item.data_content?.notes,
+        source: item.source,
+        alert_status: item.alert_status,
+        alert_level: item.alert_level
+      }
+    };
+  });
+};
 
 // 健康数据时间线页面组件
 const HealthDataTimelinePage: React.FC = () => {
   // 状态
-  const [loading, setLoading] = React.useState<boolean>(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [healthData, setHealthData] = React.useState<HealthData[]>([]);
-  const [timelineData, setTimelineData] = React.useState<HealthDataTimelineItem[]>([]);
-  const [alerts, setAlerts] = React.useState<AlertData[]>([]);
-  const [showAlertsOnly, setShowAlertsOnly] = React.useState<boolean>(false);
-  const [snackbar, setSnackbar] = React.useState({
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [healthData, setHealthData] = useState<HealthData[]>([]);
+  const [alerts, setAlerts] = useState<AlertData[]>([]);
+  const [showAlertsOnly, setShowAlertsOnly] = useState<boolean>(false);
+  const [detailItem, setDetailItem] = useState<HealthData | null>(null);
+  const [snackbar, setSnackbar] = useState({
     open: false,
     message: '',
-    severity: 'success' as 'success' | 'error' | 'info' | 'warning'
+    severity: 'info' as 'info' | 'warning' | 'error'
   });
-  
-  // 获取患者ID，如果没有则使用默认值
-  const { patientId = '1001' } = useParams<{ patientId?: string }>();
+
+  // 患者ID：路由参数优先，其次查询串 ?patientId=，均缺失时给出诚实提示
+  const { patientId: routePatientId } = useParams<{ patientId?: string }>();
+  const [searchParams] = useSearchParams();
+  const patientId = routePatientId || searchParams.get('patientId') || '';
   const navigate = useNavigate();
-  
-  // 加载健康数据
+
+  // 加载健康数据与预警数据（均为真实接口）
   const loadHealthData = async () => {
+    if (!patientId) return;
     try {
       setLoading(true);
-      
-      // 获取健康数据
-      // 实际项目中替换为真实API调用
-      // const response = await axios.get(`${API_BASE_URL}/api/health-records/health-data?patient_id=${patientId}`);
-      // const data = response.data;
-      
-      // 临时使用模拟数据
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const filteredData = mockHealthData.filter(item => item.patient_id === patientId);
-      
-      // 获取预警数据
+
+      // 获取健康数据：GET /health-records/health-data?patient_id=...
+      const response = await apiService.getHealthData(patientId);
+      const fetchedData: HealthData[] = response.data;
+
+      // 获取预警数据：GET /health/alerts/alerts?patient_id=...
+      // 即使预警接口失败，仍然显示基本健康数据
+      let fetchedAlerts: AlertData[] = [];
       try {
-        // 实际项目中，这里应该调用预警API
-        // const alertsResponse = await axios.get(`${API_BASE_URL}/api/health/alerts/alerts?patient_id=${patientId}`);
-        // const alertsData = alertsResponse.data;
-        
-        // 临时使用模拟预警数据
-        const mockAlerts: AlertData[] = [
-          {
-            id: 'a1',
-            health_data_id: '3',
-            patient_id: '1001',
-            data_type: 'heart_rate',
-            value: 72,
-            alert_level: 'warning',
-            status: 'active',
-            alert_message: '心率略高于正常范围'
-          },
-          {
-            id: 'a2',
-            health_data_id: '6',
-            patient_id: '1001',
-            data_type: 'oxygen_saturation',
-            value: 98,
-            alert_level: 'critical',
-            status: 'active',
-            alert_message: '血氧饱和度异常波动'
-          }
-        ];
-        
-        setAlerts(mockAlerts);
-        
-        // 将预警信息关联到健康数据
-        const dataWithAlerts = filteredData.map(item => {
-          const relatedAlert = mockAlerts.find(alert => alert.health_data_id === item.id);
-          if (relatedAlert) {
-            return {
-              ...item,
-              alert_level: relatedAlert.alert_level,
-              alert_status: relatedAlert.status,
-              alert_message: relatedAlert.alert_message
-            };
-          }
-          return item;
+        const alertsResponse = await api.get('/health/alerts/alerts', {
+          params: { patient_id: patientId }
         });
-        
-        setHealthData(dataWithAlerts);
-        
-        // 转换为时间线数据
-        const timelineItems = convertHealthDataToTimelineItems(dataWithAlerts);
-        setTimelineData(timelineItems);
+        fetchedAlerts = Array.isArray(alertsResponse.data) ? alertsResponse.data : [];
       } catch (alertErr) {
         console.error('获取健康预警数据失败:', alertErr);
-        // 即使预警API失败，仍然显示基本健康数据
-        setHealthData(filteredData);
-        const timelineItems = convertHealthDataToTimelineItems(filteredData);
-        setTimelineData(timelineItems);
       }
-      
+
+      setAlerts(fetchedAlerts);
+
+      // 将预警信息按 health_data_id 关联到健康数据
+      // （AlertResponse 无 message 字段，预警详情以级别/状态为准，
+      // 已处理的预警以 resolution_notes 作为说明）
+      const dataWithAlerts = fetchedData.map(item => {
+        const relatedAlert = fetchedAlerts.find(alert => alert.health_data_id === item.id);
+        if (relatedAlert) {
+          return {
+            ...item,
+            alert_level: relatedAlert.alert_level,
+            alert_status: relatedAlert.status,
+            alert_message: relatedAlert.status !== 'active' && relatedAlert.resolution_notes
+              ? relatedAlert.resolution_notes
+              : undefined
+          };
+        }
+        return item;
+      });
+
+      setHealthData(dataWithAlerts);
       setError(null);
-    } catch (err) {
+    } catch (err: any) {
       console.error('加载健康数据失败:', err);
-      setError('加载健康数据失败，请稍后重试');
+      setError(err.response?.data?.detail || '加载健康数据失败，请稍后重试');
     } finally {
       setLoading(false);
     }
   };
-  
+
   // 初始化加载数据
-  React.useEffect(() => {
+  useEffect(() => {
     loadHealthData();
   }, [patientId]);
-  
-  // 处理时间线项目点击事件
+
+  // 全量时间线项目
+  const allTimelineItems = convertHealthDataToTimelineItems(healthData);
+
+  // "仅显示异常数据" 时前端过滤出带预警的项目
+  const timelineData = showAlertsOnly
+    ? allTimelineItems.filter(item =>
+        item.metadata && (item.metadata.alert_level === 'warning' || item.metadata.alert_level === 'critical')
+      )
+    : allTimelineItems;
+
+  // 处理时间线项目点击事件：打开该项目真实数据的详情对话框
   const handleTimelineItemClick = (item: HealthDataTimelineItem) => {
-    // 查找原始健康数据
     const originalData = healthData.find(data => data.id === item.id);
-    
     if (originalData) {
-      if (originalData.alert_level) {
-        // 如果有预警，导航到预警处理页面
-        // 实际项目中应该实现导航到预警处理页面
-        setSnackbar({
-          open: true,
-          message: `正在处理 ${item.title} 的预警信息`,
-          severity: originalData.alert_level === 'critical' ? 'error' : 'warning'
-        });
-      } else {
-        // 没有预警，显示正常详情
-        setSnackbar({
-          open: true,
-          message: `查看 ${item.title} 详情`,
-          severity: 'info'
-        });
-      }
+      setDetailItem(originalData);
     }
   };
-  
-  // 处理数据导出
-  const handleExport = (data: HealthDataTimelineItem[], format: 'csv' | 'pdf' | 'excel') => {
-    // 实际项目中这里需要实现导出逻辑
-    console.log(`导出数据为 ${format} 格式:`, data);
-    
-    // 显示提示
+
+  // 处理数据导出：后端暂未提供导出接口，不伪造导出成功
+  const handleExport = () => {
     setSnackbar({
       open: true,
-      message: `数据已导出为 ${format.toUpperCase()} 格式`,
-      severity: 'success'
+      message: '导出功能后端暂未提供',
+      severity: 'info'
     });
   };
-  
-  // 处理数据分享
-  const handleShare = (data: HealthDataTimelineItem[]) => {
-    // 实际项目中这里需要实现分享逻辑
-    console.log('分享数据:', data);
-    
-    // 显示提示
+
+  // 处理数据分享：后端暂未提供分享接口，不伪造分享链接
+  const handleShare = () => {
     setSnackbar({
       open: true,
-      message: '分享链接已生成',
-      severity: 'success'
+      message: '分享功能后端暂未提供',
+      severity: 'info'
     });
   };
-  
-  // 处理数据过滤变更
-  const handleDataFilterChange = (filteredData: HealthDataTimelineItem[]) => {
-    console.log('过滤后的数据:', filteredData);
-  };
-  
+
   // 切换仅显示预警数据
   const toggleAlertsOnly = () => {
     setShowAlertsOnly(!showAlertsOnly);
-    
-    if (!showAlertsOnly) {
-      // 筛选有预警的数据
-      const alertItems = timelineData.filter(item => 
-        item.metadata && (item.metadata.alert_level === 'warning' || item.metadata.alert_level === 'critical')
-      );
-      if (alertItems.length > 0) {
-        setTimelineData(alertItems);
-      } else {
-        setSnackbar({
-          open: true,
-          message: '没有预警数据',
-          severity: 'info'
-        });
-      }
-    } else {
-      // 恢复显示所有数据
-      const allTimelineItems = convertHealthDataToTimelineItems(healthData);
-      setTimelineData(allTimelineItems);
-    }
   };
-  
+
   // 关闭提示消息
   const handleCloseSnackbar = () => {
     setSnackbar({ ...snackbar, open: false });
   };
-  
+
+  // 未指定患者时的诚实提示（后端接口要求必填 patient_id，且无患者列表接口可默认）
+  if (!patientId) {
+    return (
+      <Box>
+        <Typography variant="h5" gutterBottom>
+          健康数据时间线
+        </Typography>
+        <Divider sx={{ mb: 3 }} />
+        <Alert severity="info">
+          请先指定患者（通过患者列表进入，或在地址后附加 ?patientId=患者ID）后查看健康数据时间线。本页面不预设默认患者。
+        </Alert>
+      </Box>
+    );
+  }
+
   return (
     <Box>
       <Typography variant="h5" gutterBottom>
         健康数据时间线
         {alerts.length > 0 && (
-          <Badge 
-            badgeContent={alerts.length} 
-            color="error" 
+          <Badge
+            badgeContent={alerts.length}
+            color="error"
             sx={{ ml: 2 }}
           >
             <WarningIcon color="error" />
@@ -584,15 +329,15 @@ const HealthDataTimelinePage: React.FC = () => {
         )}
       </Typography>
       <Typography variant="body2" color="text.secondary" paragraph>
-        查看患者健康数据的时间线视图，了解健康指标的变化趋势和关键时间点。实时监测异常数据并提供预警通知。
+        查看患者（ID: {patientId}）健康数据的时间线视图，了解健康指标的变化趋势和关键时间点。实时监测异常数据并提供预警通知。
       </Typography>
       <Divider sx={{ mb: 3 }} />
-      
+
       {/* 操作按钮 */}
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between' }}>
         <Stack direction="row" spacing={2}>
-          <Button 
-            variant="outlined" 
+          <Button
+            variant="outlined"
             startIcon={<RefreshIcon />}
             onClick={loadHealthData}
             disabled={loading}
@@ -610,19 +355,23 @@ const HealthDataTimelinePage: React.FC = () => {
           </Button>
         </Stack>
         <Stack direction="row" spacing={2}>
-          <Button 
+          <Button
             color="primary"
-            onClick={() => navigate(`/app/health-manager/health-data/${patientId}`)}
+            onClick={() => navigate(`/app/health-manager/health-records/${patientId}`)}
           >
-            查看健康数据管理
+            查看健康档案
           </Button>
         </Stack>
       </Box>
-      
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 3 }}>{error}</Alert>
+      )}
+
       {/* 预警提示 */}
       {alerts.length > 0 && !showAlertsOnly && (
-        <Alert 
-          severity="warning" 
+        <Alert
+          severity="warning"
           sx={{ mb: 3 }}
           action={
             <Button color="inherit" size="small" onClick={toggleAlertsOnly}>
@@ -633,9 +382,9 @@ const HealthDataTimelinePage: React.FC = () => {
           发现 {alerts.length} 条健康数据异常，请及时查看并处理
         </Alert>
       )}
-      
-      {/* 时间线组件 */}
-      <HealthDataTimeline 
+
+      {/* 时间线组件（导出/分享为诚实提示，后端暂无对应能力） */}
+      <HealthDataTimeline
         data={timelineData}
         loading={loading}
         error={error || undefined}
@@ -644,10 +393,62 @@ const HealthDataTimelinePage: React.FC = () => {
         onItemClick={handleTimelineItemClick}
         onExport={handleExport}
         onShare={handleShare}
-        onDataFilterChange={handleDataFilterChange}
       />
-      
-      {/* 提示消息 */}
+
+      {/* 时间线项目详情对话框（展示抓取到的真实字段） */}
+      <Dialog open={!!detailItem} onClose={() => setDetailItem(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          {detailItem
+            ? dataTypeLabelMap[detailItem.data_content?.type || detailItem.data_type] ||
+              `${detailItem.data_type}记录`
+            : '数据详情'}
+        </DialogTitle>
+        <DialogContent>
+          {detailItem && (
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="body1" sx={{ mb: 1 }}>
+                <strong>数值：</strong>
+                {getDisplayValue(detailItem)}
+                {detailItem.data_content?.unit ? ` ${detailItem.data_content.unit}` : ''}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                <strong>数据类型：</strong>{detailItem.data_type}
+                {detailItem.data_content?.type ? `（${detailItem.data_content.type}）` : ''}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                <strong>测量时间：</strong>
+                {detailItem.recorded_at ? new Date(detailItem.recorded_at).toLocaleString('zh-CN') : '-'}
+              </Typography>
+              {detailItem.source && (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  <strong>来源：</strong>{detailItem.source}
+                </Typography>
+              )}
+              {detailItem.recorded_by && (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  <strong>记录人ID：</strong>{detailItem.recorded_by}
+                </Typography>
+              )}
+              {detailItem.alert_level && (
+                <Typography variant="body2" color="error" sx={{ mb: 1 }}>
+                  <strong>预警级别：</strong>{detailItem.alert_level}
+                  {detailItem.alert_message ? `（${detailItem.alert_message}）` : ''}
+                </Typography>
+              )}
+              {detailItem.data_content?.notes && (
+                <Typography variant="body2" sx={{ mb: 1 }}>
+                  <strong>备注：</strong>{detailItem.data_content.notes}
+                </Typography>
+              )}
+            </Paper>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDetailItem(null)}>关闭</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 提示消息（仅用于"功能后端暂未提供"等诚实提示） */}
       <Snackbar
         open={snackbar.open}
         autoHideDuration={5000}
@@ -666,4 +467,4 @@ const HealthDataTimelinePage: React.FC = () => {
   );
 };
 
-export default HealthDataTimelinePage; 
+export default HealthDataTimelinePage;

@@ -19,12 +19,10 @@ import {
 // 图标导入
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
-import BluetoothIcon from '@mui/icons-material/Bluetooth';
-import WifiIcon from '@mui/icons-material/Wifi';
-import StorageIcon from '@mui/icons-material/Storage';
-import SettingsIcon from '@mui/icons-material/Settings';
 import DevicesIcon from '@mui/icons-material/Devices';
-import PowerIcon from '@mui/icons-material/Power';
+import StorageIcon from '@mui/icons-material/Storage';
+
+import { deviceService } from '../../services/deviceService';
 
 // 测试项类型
 interface TestItem {
@@ -37,6 +35,15 @@ interface TestItem {
   icon: React.ReactNode;
 }
 
+// 修复结果（与后端 POST /devices/{id}/repair 返回对齐）
+interface RepairResult {
+  success: boolean;
+  message: string;
+  repair_actions?: string[];
+  repair_results?: Array<{ action: string; success: boolean; message?: string; reason?: string }>;
+  new_status?: any;
+}
+
 // 组件属性
 interface DeviceConnectionTestProps {
   deviceId?: string;
@@ -45,6 +52,29 @@ interface DeviceConnectionTestProps {
   autoStart?: boolean;
 }
 
+// 初始化真实测试项（只包含可由后端接口验证的项目）
+const buildInitialTests = (): TestItem[] => [
+  {
+    id: 'status',
+    name: '设备状态检查',
+    description: '通过 GET /devices/{id}/status 查询设备真实状态、电量与最后同步时间',
+    status: 'pending',
+    icon: <DevicesIcon />
+  },
+  {
+    id: 'data',
+    name: '数据读取检查',
+    description: '尝试读取设备最近的数据记录，验证数据链路可用',
+    status: 'pending',
+    icon: <StorageIcon />
+  }
+];
+
+// 提取后端返回的错误消息
+const getApiErrorMessage = (err: any, fallback: string): string => {
+  return err?.response?.data?.detail || err?.message || fallback;
+};
+
 const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
   deviceId,
   deviceType = 'unknown',
@@ -52,246 +82,161 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
   autoStart = false
 }) => {
   // 状态
-  const [testInProgress, setTestInProgress] = useState(autoStart);
-  const [currentTestIndex, setCurrentTestIndex] = useState(autoStart ? 0 : -1);
-  const [testResults, setTestResults] = useState<TestItem[]>([]);
+  const [testInProgress, setTestInProgress] = useState(false);
+  const [currentTestIndex, setCurrentTestIndex] = useState(-1);
+  const [testResults, setTestResults] = useState<TestItem[]>(buildInitialTests);
   const [overallSuccess, setOverallSuccess] = useState<boolean | null>(null);
   const [testCompleted, setTestCompleted] = useState(false);
-  
-  // 初始化测试项
-  React.useEffect(() => {
-    const initialTests: TestItem[] = [
-      {
-        id: 'bluetooth',
-        name: '蓝牙连接',
-        description: '检查设备蓝牙连接状态',
-        status: 'pending',
-        icon: <BluetoothIcon />
-      },
-      {
-        id: 'wifi',
-        name: '网络连接',
-        description: '检查设备网络连接状态',
-        status: 'pending',
-        icon: <WifiIcon />
-      },
-      {
-        id: 'battery',
-        name: '电池状态',
-        description: '检查设备电池电量',
-        status: 'pending',
-        icon: <PowerIcon />
-      },
-      {
-        id: 'storage',
-        name: '存储空间',
-        description: '检查设备存储空间',
-        status: 'pending',
-        icon: <StorageIcon />
-      },
-      {
-        id: 'config',
-        name: '配置检查',
-        description: '验证设备配置是否正确',
-        status: 'pending',
-        icon: <SettingsIcon />
-      },
-      {
-        id: 'data_sync',
-        name: '数据同步',
-        description: '测试数据同步功能',
-        status: 'pending',
-        icon: <DevicesIcon />
-      }
-    ];
-    
-    setTestResults(initialTests);
-    
-    // 如果autoStart为true，自动开始测试
-    if (autoStart) {
-      runTest(0);
+  const [repairing, setRepairing] = useState(false);
+  const [repairResult, setRepairResult] = useState<RepairResult | null>(null);
+  const [repairError, setRepairError] = useState<string | null>(null);
+
+  // 更新单个测试项结果
+  const updateTest = (index: number, partial: Partial<TestItem>) => {
+    setTestResults(prevTests => {
+      const newTests = [...prevTests];
+      newTests[index] = { ...newTests[index], ...partial };
+      return newTests;
+    });
+  };
+
+  // 单项真实检查：全部来自后端接口，不模拟任何结果
+  const runSingleTest = async (testId: string): Promise<Partial<TestItem>> => {
+    if (!deviceId) {
+      return { status: 'failure', message: '未指定设备' };
     }
-  }, [deviceId, deviceType, autoStart]);
-  
-  // 开始测试
-  const startTest = () => {
+
+    if (testId === 'status') {
+      const s = await deviceService.getDeviceStatus(deviceId);
+      const status = (s.status || '').toLowerCase();
+      const detailsParts: string[] = [];
+      if (s.battery_level !== undefined && s.battery_level !== null) {
+        detailsParts.push(`电量: ${s.battery_level}%`);
+      }
+      if (s.signal_strength !== undefined && s.signal_strength !== null) {
+        detailsParts.push(`信号强度: ${s.signal_strength}/5`);
+      }
+      if (s.last_sync_time) {
+        detailsParts.push(`最后同步: ${new Date(s.last_sync_time).toLocaleString()}`);
+      }
+      if (s.message) {
+        detailsParts.push(s.message);
+      }
+      const details = detailsParts.join(' | ');
+
+      if (status === 'online') {
+        return { status: 'success', message: '设备在线', details };
+      }
+      if (status === 'offline') {
+        return { status: 'warning', message: '设备当前离线', details };
+      }
+      return {
+        status: 'failure',
+        message: `设备状态异常（${s.status || '未知'}）`,
+        details
+      };
+    }
+
+    // data: 读取最近一条数据记录验证数据链路
+    const list = await deviceService.getDeviceData(deviceId, { limit: 1 });
+    if (list.length > 0) {
+      const latest = list[0];
+      return {
+        status: 'success',
+        message: '设备数据可正常读取',
+        details: `最近一条: ${new Date(latest.timestamp).toLocaleString()}（${latest.data_type}）`
+      };
+    }
+    return {
+      status: 'warning',
+      message: '设备暂无数据记录',
+      details: '设备尚未上报任何数据，可在同步数据后重新测试'
+    };
+  };
+
+  // 运行全部测试（顺序执行真实检查）
+  const runTests = async () => {
+    if (!deviceId || testInProgress) return;
+
     setTestInProgress(true);
     setCurrentTestIndex(0);
     setOverallSuccess(null);
     setTestCompleted(false);
-    
-    // 重置测试状态
-    setTestResults(prevTests => 
-      prevTests.map(test => ({
-        ...test,
-        status: 'pending',
-        message: undefined,
-        details: undefined
-      }))
-    );
-    
-    // 开始第一个测试
-    runTest(0);
-  };
-  
-  // 运行单个测试
-  const runTest = (index: number) => {
-    if (index >= testResults.length) {
-      // 所有测试完成
-      completeAllTests();
-      return;
-    }
-    
-    setCurrentTestIndex(index);
-    
-    // 更新测试状态为运行中
-    setTestResults(prevTests => {
-      const newTests = [...prevTests];
-      newTests[index] = {
-        ...newTests[index],
-        status: 'running'
-      };
-      return newTests;
-    });
-    
-    // 模拟测试过程
-    setTimeout(() => {
-      // 模拟测试结果
-      const result = simulateTestResult(testResults[index].id);
-      
-      // 更新测试结果
-      setTestResults(prevTests => {
-        const newTests = [...prevTests];
-        newTests[index] = {
-          ...newTests[index],
-          ...result
+    setRepairResult(null);
+    setRepairError(null);
+
+    const tests = buildInitialTests();
+    setTestResults(tests);
+
+    let allOk = true;
+    const finished: TestItem[] = [];
+
+    for (let index = 0; index < tests.length; index++) {
+      setCurrentTestIndex(index);
+      updateTest(index, { status: 'running' });
+
+      try {
+        const result = await runSingleTest(tests[index].id);
+        updateTest(index, result);
+        finished.push({ ...tests[index], ...result } as TestItem);
+        if (result.status === 'failure') allOk = false;
+      } catch (err: any) {
+        const failure = {
+          status: 'failure' as const,
+          message: getApiErrorMessage(err, '检查失败'),
         };
-        return newTests;
-      });
-      
-      // 继续下一个测试
-      setTimeout(() => {
-        runTest(index + 1);
-      }, 500);
-    }, 1000 + Math.random() * 1000); // 随机延迟，模拟不同测试的耗时
-  };
-  
-  // 完成所有测试
-  const completeAllTests = () => {
-    const success = testResults.every(test => 
-      test.status === 'success' || test.status === 'warning'
-    );
-    
-    setOverallSuccess(success);
+        updateTest(index, failure);
+        finished.push({ ...tests[index], ...failure } as TestItem);
+        allOk = false;
+      }
+    }
+
+    setCurrentTestIndex(-1);
     setTestInProgress(false);
     setTestCompleted(true);
-    
+    setOverallSuccess(allOk);
+
     if (onComplete) {
-      onComplete(success, testResults);
+      onComplete(allOk, finished);
     }
   };
-  
-  // 模拟测试结果
-  const simulateTestResult = (testId: string): Partial<TestItem> => {
-    // 模拟成功率
-    const successRate = 0.8;
-    const isSuccess = Math.random() < successRate;
-    
-    if (isSuccess) {
-      // 成功结果
-      switch (testId) {
-        case 'bluetooth':
-          return {
-            status: 'success',
-            message: '蓝牙连接正常',
-            details: '信号强度: 良好 (-65dBm)'
-          };
-        case 'wifi':
-          return {
-            status: Math.random() > 0.7 ? 'warning' : 'success',
-            message: Math.random() > 0.7 ? '网络连接较弱' : '网络连接正常',
-            details: Math.random() > 0.7 ? '信号强度: 较弱 (-85dBm)' : '信号强度: 良好 (-60dBm)'
-          };
-        case 'battery':
-          const batteryLevel = Math.floor(50 + Math.random() * 50);
-          return {
-            status: batteryLevel < 20 ? 'warning' : 'success',
-            message: `电池电量: ${batteryLevel}%`,
-            details: batteryLevel < 20 ? '电量较低，请及时充电' : '电量充足'
-          };
-        case 'storage':
-          const storagePercent = Math.floor(60 + Math.random() * 30);
-          return {
-            status: storagePercent > 90 ? 'warning' : 'success',
-            message: `剩余存储空间: ${100 - storagePercent}%`,
-            details: storagePercent > 90 ? '存储空间接近满，建议清理数据' : '存储空间充足'
-          };
-        case 'config':
-          return {
-            status: 'success',
-            message: '设备配置正确',
-            details: `固件版本: v${Math.floor(1 + Math.random() * 3)}.${Math.floor(Math.random() * 10)}.${Math.floor(Math.random() * 10)}`
-          };
-        case 'data_sync':
-          return {
-            status: 'success',
-            message: '数据同步正常',
-            details: '最后同步时间: 刚刚'
-          };
-        default:
-          return {
-            status: 'success',
-            message: '测试通过'
-          };
+
+  // 首次渲染时按需自动开始测试
+  React.useEffect(() => {
+    setTestResults(buildInitialTests());
+    setOverallSuccess(null);
+    setTestCompleted(false);
+    setCurrentTestIndex(-1);
+    setRepairResult(null);
+    setRepairError(null);
+    if (autoStart && deviceId) {
+      runTests();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceId, deviceType, autoStart]);
+
+  // 修复动作：调用真实的 POST /devices/{id}/repair，并展示后端返回的修复结果
+  const handleRepair = async () => {
+    if (!deviceId || repairing) return;
+
+    setRepairing(true);
+    setRepairResult(null);
+    setRepairError(null);
+
+    try {
+      const result = await deviceService.repairDevice(deviceId);
+      setRepairResult(result);
+      if (result.success) {
+        // 修复成功后重新执行检查，验证修复效果
+        await runTests();
       }
-    } else {
-      // 失败结果
-      switch (testId) {
-        case 'bluetooth':
-          return {
-            status: 'failure',
-            message: '蓝牙连接失败',
-            details: '无法与设备建立蓝牙连接，请确保设备在范围内且已开启蓝牙'
-          };
-        case 'wifi':
-          return {
-            status: 'failure',
-            message: '网络连接失败',
-            details: '设备无法连接到网络，请检查Wi-Fi设置'
-          };
-        case 'battery':
-          return {
-            status: 'warning',
-            message: '电池电量低: 15%',
-            details: '电量过低，部分功能可能受限，请及时充电'
-          };
-        case 'storage':
-          return {
-            status: 'warning',
-            message: '存储空间不足: 5%',
-            details: '存储空间几乎已满，请清理不必要的数据'
-          };
-        case 'config':
-          return {
-            status: 'failure',
-            message: '配置验证失败',
-            details: '设备配置不正确或已过期，请重新配置'
-          };
-        case 'data_sync':
-          return {
-            status: 'failure',
-            message: '数据同步失败',
-            details: '无法与服务器同步数据，请检查网络连接'
-          };
-        default:
-          return {
-            status: 'failure',
-            message: '测试失败'
-          };
-      }
+    } catch (err: any) {
+      setRepairError(getApiErrorMessage(err, '修复请求失败'));
+    } finally {
+      setRepairing(false);
     }
   };
-  
+
   // 获取测试状态图标
   const getTestStatusIcon = (status: string) => {
     switch (status) {
@@ -307,35 +252,41 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
         return null;
     }
   };
-  
+
   // 获取总体测试进度
   const getOverallProgress = () => {
-    const completed = testResults.filter(test => 
+    const completed = testResults.filter(test =>
       test.status !== 'pending' && test.status !== 'running'
     ).length;
-    
+
     return (completed / testResults.length) * 100;
   };
-  
+
   return (
     <Box>
       <Paper sx={{ p: 3, mb: 3 }}>
         <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
           <Typography variant="h6">设备连接测试</Typography>
-          <Chip 
-            label={deviceId ? `设备ID: ${deviceId}` : '未指定设备'} 
-            color="primary" 
-            variant="outlined" 
+          <Chip
+            label={deviceId ? `设备ID: ${deviceId}` : '未指定设备'}
+            color="primary"
+            variant="outlined"
           />
         </Box>
-        
-        {!testInProgress && !testCompleted && (
-          <Alert severity="info" sx={{ mb: 2 }}>
-            此工具将测试设备的连接状态、电池电量、存储空间和数据同步功能。
-            点击"开始测试"按钮开始全面测试。
+
+        {!deviceId && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            未指定设备，无法执行连接测试。
           </Alert>
         )}
-        
+
+        {deviceId && !testInProgress && !testCompleted && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            此工具将通过后端接口检查设备的真实状态（在线/离线、电量、最后同步时间）和数据读取链路。
+            点击"开始测试"按钮开始检查。
+          </Alert>
+        )}
+
         {testInProgress && (
           <Box mb={3}>
             <Box display="flex" justifyContent="space-between" alignItems="center" mb={1}>
@@ -346,40 +297,40 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
                 {currentTestIndex + 1} / {testResults.length}
               </Typography>
             </Box>
-            <LinearProgress 
-              variant="determinate" 
-              value={getOverallProgress()} 
+            <LinearProgress
+              variant="determinate"
+              value={getOverallProgress()}
               sx={{ height: 8, borderRadius: 4 }}
             />
           </Box>
         )}
-        
+
         {testCompleted && overallSuccess !== null && (
-          <Alert 
-            severity={overallSuccess ? "success" : "error"} 
+          <Alert
+            severity={overallSuccess ? "success" : "error"}
             sx={{ mb: 3 }}
           >
-            {overallSuccess 
-              ? "所有测试已完成，设备连接状态良好！" 
-              : "测试完成，检测到一些问题需要解决。"}
+            {overallSuccess
+              ? "检查完成，设备状态与数据链路正常。"
+              : "检查完成，发现设备存在问题，可尝试执行修复。"}
           </Alert>
         )}
-        
+
         <List>
           {testResults.map((test, index) => (
             <React.Fragment key={test.id}>
               <ListItem
                 sx={{
-                  backgroundColor: test.status === 'running' 
-                    ? 'rgba(25, 118, 210, 0.08)' 
+                  backgroundColor: test.status === 'running'
+                    ? 'rgba(25, 118, 210, 0.08)'
                     : 'transparent',
                   borderRadius: 1,
                   transition: 'background-color 0.3s'
                 }}
               >
                 <ListItemIcon>
-                  {test.status === 'pending' || test.status === 'running' 
-                    ? test.icon 
+                  {test.status === 'pending' || test.status === 'running'
+                    ? test.icon
                     : getTestStatusIcon(test.status)}
                 </ListItemIcon>
                 <ListItemText
@@ -387,7 +338,7 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
                     <Box display="flex" alignItems="center">
                       <Typography variant="body1">{test.name}</Typography>
                       {test.status === 'running' && (
-                        <Chip label="测试中" size="small" color="primary" sx={{ ml: 1 }} />
+                        <Chip label="检查中" size="small" color="primary" sx={{ ml: 1 }} />
                       )}
                     </Box>
                   }
@@ -409,45 +360,61 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
             </React.Fragment>
           ))}
         </List>
-        
+
+        {/* 真实修复结果展示 */}
+        {repairResult && (
+          <Box sx={{ mt: 2 }}>
+            <Alert severity={repairResult.success ? 'success' : 'error'}>
+              {repairResult.message || (repairResult.success ? '修复完成' : '修复未能解决问题')}
+            </Alert>
+            {repairResult.repair_results && repairResult.repair_results.length > 0 && (
+              <List dense>
+                {repairResult.repair_results.map((r, idx) => (
+                  <ListItem key={idx}>
+                    <ListItemIcon>
+                      {r.success
+                        ? <CheckCircleIcon color="success" fontSize="small" />
+                        : <ErrorIcon color="error" fontSize="small" />}
+                    </ListItemIcon>
+                    <ListItemText
+                      primary={r.action}
+                      secondary={r.success ? (r.message || '已执行') : (r.reason || r.message || '执行失败')}
+                    />
+                  </ListItem>
+                ))}
+              </List>
+            )}
+          </Box>
+        )}
+
+        {repairError && (
+          <Alert severity="error" sx={{ mt: 2 }}>修复失败: {repairError}</Alert>
+        )}
+
         <Stack direction="row" spacing={2} mt={3} justifyContent="center">
           <Button
             variant="contained"
             color="primary"
-            disabled={testInProgress}
-            onClick={startTest}
+            disabled={!deviceId || testInProgress || repairing}
+            onClick={runTests}
             sx={{ minWidth: 120 }}
           >
             {testCompleted ? "重新测试" : "开始测试"}
           </Button>
-          
-          {testCompleted && (
-            <Button
-              variant="outlined"
-              color="primary"
-              sx={{ minWidth: 120 }}
-              onClick={() => {
-                // 模拟修复问题
-                if (!overallSuccess) {
-                  setTestResults(prevTests => 
-                    prevTests.map(test => ({
-                      ...test,
-                      status: test.status === 'failure' ? 'warning' : test.status,
-                      message: test.status === 'failure' ? '问题已修复，但需要注意' : test.message
-                    }))
-                  );
-                  setOverallSuccess(true);
-                }
-              }}
-              disabled={overallSuccess === true}
-            >
-              修复问题
-            </Button>
-          )}
+
+          <Button
+            variant="outlined"
+            color="primary"
+            sx={{ minWidth: 120 }}
+            onClick={handleRepair}
+            disabled={!deviceId || testInProgress || repairing}
+          >
+            {repairing ? <CircularProgress size={20} /> : "修复设备"}
+          </Button>
         </Stack>
       </Paper>
     </Box>
   );
 };
 
-export default DeviceConnectionTest; 
+export default DeviceConnectionTest;

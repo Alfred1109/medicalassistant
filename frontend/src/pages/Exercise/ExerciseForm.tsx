@@ -31,7 +31,6 @@ import {
   Add as AddIcon,
   Delete as DeleteIcon,
   Save as SaveIcon,
-  CloudUpload as CloudUploadIcon,
 } from '@mui/icons-material';
 
 import { AppDispatch, RootState } from '../../store';
@@ -113,15 +112,17 @@ const ExerciseForm: React.FC = () => {
     repetitions: '',
     sets: '',
   });
+
+  // 媒体链接校验错误（宽松校验：非空时必须是 http/https 链接）
+  const [mediaErrors, setMediaErrors] = useState({
+    image_url: '',
+    video_url: '',
+  });
   
   // 临时输入字段
   const [newInstruction, setNewInstruction] = useState('');
   const [newContraindication, setNewContraindication] = useState('');
   const [newBenefit, setNewBenefit] = useState('');
-  
-  // 图片和视频文件
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [videoFile, setVideoFile] = useState<File | null>(null);
   
   // 提交状态
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -193,41 +194,38 @@ const ExerciseForm: React.FC = () => {
     }
   };
   
-  // 处理图片文件上传
-  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setImageFile(file);
-      
-      // 预览图片
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        if (event.target && event.target.result) {
-          setFormData((prev) => ({
-            ...prev,
-            image_url: event.target?.result as string,
-          }));
-        }
-      };
-      reader.readAsDataURL(file);
-    }
+  // 处理媒体链接输入：后端暂无文件上传接口，此处仅接受用户粘贴的已有 URL
+  const handleMediaUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setFormData((prev) => ({
+      ...prev,
+      [name]: value,
+    }));
+    // 输入时清除该字段的校验错误
+    setMediaErrors((prev) => ({
+      ...prev,
+      [name]: '',
+    }));
   };
-  
-  // 处理视频文件上传
-  const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setVideoFile(file);
-      
-      // 在实际应用中，这里可能需要上传视频到CDN或服务器
-      // 出于演示目的，我们只保存文件名，实际实现需要处理上传和URL生成
-      setFormData((prev) => ({
-        ...prev,
-        video_url: URL.createObjectURL(file), // 临时URL，实际应用中应替换为上传后的真实URL
-      }));
+
+  // 宽松校验媒体链接：非空时必须是 http/https 开头的 URL
+  const validateMediaUrls = (): boolean => {
+    const errors = { image_url: '', video_url: '' };
+    let isValid = true;
+
+    if (formData.image_url.trim() && !/^https?:\/\//i.test(formData.image_url.trim())) {
+      errors.image_url = '请输入以 http:// 或 https:// 开头的图片链接';
+      isValid = false;
     }
+    if (formData.video_url.trim() && !/^https?:\/\//i.test(formData.video_url.trim())) {
+      errors.video_url = '请输入以 http:// 或 https:// 开头的视频链接';
+      isValid = false;
+    }
+
+    setMediaErrors(errors);
+    return isValid;
   };
-  
+
   // 添加指导说明
   const handleAddInstruction = () => {
     if (newInstruction.trim()) {
@@ -345,18 +343,21 @@ const ExerciseForm: React.FC = () => {
     if (!validateForm()) {
       return;
     }
-    
+
+    // 媒体链接宽松校验（后端无上传接口，仅接受合法 URL）
+    if (!validateMediaUrls()) {
+      return;
+    }
+
     setIsSubmitting(true);
     setSubmitError(null);
-    
+
     try {
-      // 准备提交数据，移除临时URL
       const submitData: ExerciseFormValues = {
         ...formData,
+        image_url: formData.image_url.trim(),
+        video_url: formData.video_url.trim(),
       };
-      
-      // 实际应用中，这里需要处理图片和视频文件的上传
-      // 并将返回的URL存储在submitData中
       
       if (isEditMode && id) {
         // 更新现有练习
@@ -535,74 +536,64 @@ const ExerciseForm: React.FC = () => {
             <Grid item xs={12} md={6}>
               <Paper sx={{ p: 3, mb: 3 }}>
                 <Typography variant="h6" gutterBottom>
-                  图片上传
+                  图片链接
                 </Typography>
-                <Divider sx={{ mb: 3 }} />
-                
-                <Box textAlign="center">
-                  {formData.image_url ? (
-                    <Box mb={2}>
-                      <img
-                        src={formData.image_url}
-                        alt="练习图片预览"
-                        style={{ maxWidth: '100%', maxHeight: '200px' }}
-                      />
-                    </Box>
-                  ) : (
-                    <Typography color="text.secondary" mb={2}>
-                      未上传图片
-                    </Typography>
-                  )}
-                  
-                  <Button
-                    variant="outlined"
-                    component="label"
-                    startIcon={<CloudUploadIcon />}
-                  >
-                    上传图片
-                    <input
-                      type="file"
-                      accept="image/*"
-                      hidden
-                      onChange={handleImageChange}
+                <Divider sx={{ mb: 2 }} />
+
+                {/* 后端暂无文件上传接口，仅支持粘贴已有的图片 URL */}
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  系统暂不支持文件上传，请直接粘贴已有的图片链接（http/https）。
+                </Alert>
+
+                <TextField
+                  fullWidth
+                  label="图片 URL"
+                  name="image_url"
+                  placeholder="https://example.com/exercise.jpg"
+                  value={formData.image_url}
+                  onChange={handleMediaUrlChange}
+                  error={!!mediaErrors.image_url}
+                  helperText={mediaErrors.image_url || '选填'}
+                />
+
+                {/* 仅在链接合法时展示预览，避免渲染非法内容 */}
+                {formData.image_url.trim() && /^https?:\/\//i.test(formData.image_url.trim()) && (
+                  <Box mt={2} textAlign="center">
+                    <img
+                      src={formData.image_url.trim()}
+                      alt="练习图片预览"
+                      style={{ maxWidth: '100%', maxHeight: '200px' }}
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = 'none';
+                      }}
                     />
-                  </Button>
-                </Box>
+                  </Box>
+                )}
               </Paper>
             </Grid>
-            
+
             <Grid item xs={12} md={6}>
               <Paper sx={{ p: 3, mb: 3 }}>
                 <Typography variant="h6" gutterBottom>
-                  视频上传
+                  视频链接
                 </Typography>
-                <Divider sx={{ mb: 3 }} />
-                
-                <Box textAlign="center">
-                  {formData.video_url ? (
-                    <Typography color="success.main" mb={2}>
-                      已上传视频: {videoFile?.name || '视频链接已保存'}
-                    </Typography>
-                  ) : (
-                    <Typography color="text.secondary" mb={2}>
-                      未上传视频
-                    </Typography>
-                  )}
-                  
-                  <Button
-                    variant="outlined"
-                    component="label"
-                    startIcon={<CloudUploadIcon />}
-                  >
-                    上传视频
-                    <input
-                      type="file"
-                      accept="video/*"
-                      hidden
-                      onChange={handleVideoChange}
-                    />
-                  </Button>
-                </Box>
+                <Divider sx={{ mb: 2 }} />
+
+                {/* 后端暂无文件上传接口，仅支持粘贴已有的视频 URL */}
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  系统暂不支持文件上传，请直接粘贴已有的视频链接（http/https）。
+                </Alert>
+
+                <TextField
+                  fullWidth
+                  label="视频 URL"
+                  name="video_url"
+                  placeholder="https://example.com/exercise.mp4"
+                  value={formData.video_url}
+                  onChange={handleMediaUrlChange}
+                  error={!!mediaErrors.video_url}
+                  helperText={mediaErrors.video_url || '选填'}
+                />
               </Paper>
             </Grid>
           </Grid>

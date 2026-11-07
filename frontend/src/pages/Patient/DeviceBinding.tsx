@@ -6,6 +6,7 @@ import {
   Grid,
   Button,
   TextField,
+  MenuItem,
   Card,
   CardContent,
   List,
@@ -23,53 +24,40 @@ import {
   LinearProgress,
   IconButton,
   Snackbar,
+  Chip,
+  CircularProgress,
 } from '@mui/material';
-import CardMedia from '@mui/material/CardMedia';
 import AddIcon from '@mui/icons-material/Add';
 import DevicesIcon from '@mui/icons-material/Devices';
 import WatchIcon from '@mui/icons-material/Watch';
 import SmartphoneIcon from '@mui/icons-material/Smartphone';
-import BluetoothIcon from '@mui/icons-material/Bluetooth';
-import BluetoothSearchingIcon from '@mui/icons-material/BluetoothSearching';
 import SettingsRemoteIcon from '@mui/icons-material/SettingsRemote';
-import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import SyncIcon from '@mui/icons-material/Sync';
-import MemoryIcon from '@mui/icons-material/Memory';
 import BatteryFullIcon from '@mui/icons-material/BatteryFull';
-import BatteryChargingFullIcon from '@mui/icons-material/BatteryChargingFull';
 import CloseIcon from '@mui/icons-material/Close';
 import InfoIcon from '@mui/icons-material/Info';
 import DeleteIcon from '@mui/icons-material/Delete';
-import CircularProgress from '@mui/material/CircularProgress';
 import TimelineIcon from '@mui/icons-material/Timeline';
 import { Link } from 'react-router-dom';
 
-// 导入设备数据展示组件
+// 导入设备数据展示组件与设备服务
 import DeviceDataDisplay from '../../components/Device/DeviceDataDisplay';
 import DeviceConnectionTest from '../../components/Device/DeviceConnectionTest';
+import { deviceService, Device, DeviceCreatePayload, DeviceStatus } from '../../services/deviceService';
 
-// 设备类型定义
-interface Device {
-  id: string;
-  name: string;
-  type: 'wristband' | 'monitor' | 'phone' | string;
-  status: 'connected' | 'disconnected' | 'available';
-  lastActive?: string;
-  batteryLevel?: number;
-  model?: string;
-  serialNumber?: string;
-  firmwareVersion?: string;
-  lastSync?: string;
-}
-
-// 向导状态接口
-interface WizardState {
+// 绑定表单状态接口
+interface BindFormState {
   open: boolean;
-  activeStep: number;
   deviceType: string;
-  deviceName: string;
-  deviceCode: string;
+  name: string;
+  model: string;
+  manufacturer: string;
+  connectionType: string;
+  firmwareVersion: string;
 }
+
+// 可选的设备类型（device_type 为自由字符串，后端仅要求必填）
+const DEVICE_TYPE_OPTIONS = ['手环', '血压计', '血糖仪', '体重秤', '体温计', '其他'];
 
 // 选项卡面板属性接口
 interface TabPanelProps {
@@ -99,229 +87,264 @@ function TabPanel(props: TabPanelProps) {
   );
 }
 
+// 提取后端返回的错误消息
+const getApiErrorMessage = (err: any, fallback: string): string => {
+  return err?.response?.data?.detail || err?.message || fallback;
+};
+
+// 时间格式化
+const formatDateTime = (value?: string | null): string => {
+  if (!value) return '未知';
+  const date = new Date(value);
+  return isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+};
+
+// 设备状态映射为展示文案与颜色
+const getStatusLabel = (status?: string | null): string => {
+  switch ((status || '').toLowerCase()) {
+    case 'online': return '在线';
+    case 'offline': return '离线';
+    case 'error': return '异常';
+    case 'syncing': return '同步中';
+    default: return status || '未知';
+  }
+};
+
+const getStatusChipColor = (status?: string | null): 'success' | 'default' | 'error' | 'warning' => {
+  switch ((status || '').toLowerCase()) {
+    case 'online': return 'success';
+    case 'offline': return 'default';
+    case 'error': return 'error';
+    default: return 'warning';
+  }
+};
+
 const DeviceBinding: React.FC = () => {
-  const [scanning, setScanning] = React.useState(false);
-  const [pairedDevices, setPairedDevices] = React.useState<Device[]>([
-    {
-      id: '1',
-      name: '康复手环 A1',
-      type: 'wristband',
-      status: 'connected',
-      lastActive: '2023-06-01 14:30',
-      batteryLevel: 72,
-      model: 'RehabBand 2000',
-      serialNumber: 'RB2000-A1-12345',
-      firmwareVersion: 'v1.2.3',
-      lastSync: '2023-06-01 14:30'
-    }
-  ]);
-  
-  const [availableDevices, setAvailableDevices] = React.useState<Device[]>([]);
-  
-  // 新增状态
+  // 设备列表（真实数据：GET /api/devices）
+  const [devices, setDevices] = React.useState<Device[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+
+  // 设备详情对话框
   const [selectedDevice, setSelectedDevice] = React.useState<Device | null>(null);
   const [openDeviceDialog, setOpenDeviceDialog] = React.useState(false);
   const [dialogTabValue, setDialogTabValue] = React.useState(0);
   const [syncing, setSyncing] = React.useState(false);
+  // 详情打开时实时查询的状态（GET /api/devices/{id}/status）
+  const [dialogStatus, setDialogStatus] = React.useState<DeviceStatus | null>(null);
+  const [dialogStatusLoading, setDialogStatusLoading] = React.useState(false);
+
+  // 解绑确认
+  const [confirmUnbind, setConfirmUnbind] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+
   const [snackbar, setSnackbar] = React.useState({
     open: false,
     message: '',
     severity: 'success' as 'success' | 'error' | 'info' | 'warning'
   });
-  
-  // 设备向导状态
-  const [wizardState, setWizardState] = React.useState<WizardState>({
+
+  // 绑定表单状态（POST /api/devices/bind）
+  const [bindForm, setBindForm] = React.useState<BindFormState>({
     open: false,
-    activeStep: 0,
     deviceType: '',
-    deviceName: '',
-    deviceCode: ''
+    name: '',
+    model: '',
+    manufacturer: '',
+    connectionType: '',
+    firmwareVersion: ''
   });
-  
-  // 添加主标签页状态
+  const [binding, setBinding] = React.useState(false);
+
+  // 主标签页状态
   const [mainTabValue, setMainTabValue] = React.useState(0);
-  
-  const startScan = () => {
-    setScanning(true);
-    
-    // 模拟搜索过程
-    setTimeout(() => {
-      setAvailableDevices([
-        {
-          id: '2',
-          name: '康复监测器 B2',
-          type: 'monitor',
-          status: 'available'
-        },
-        {
-          id: '3',
-          name: '智能手环 C3',
-          type: 'wristband',
-          status: 'available'
-        }
-      ]);
-      setScanning(false);
-    }, 3000);
+
+  // 加载设备列表
+  const loadDevices = React.useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const list = await deviceService.getUserDevices();
+      setDevices(list);
+    } catch (err: any) {
+      setLoadError(getApiErrorMessage(err, '获取设备列表失败，请稍后再试'));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // 页面挂载时获取真实设备列表
+  React.useEffect(() => {
+    loadDevices();
+  }, [loadDevices]);
+
+  const handleOpenBindForm = () => {
+    setBindForm({ open: true, deviceType: '', name: '', model: '', manufacturer: '', connectionType: '', firmwareVersion: '' });
   };
-  
-  const pairDevice = (device: Device) => {
-    const enhancedDevice: Device = {
-      ...device, 
-      status: 'connected' as const,
-      lastActive: new Date().toLocaleString(),
-      batteryLevel: 100,
-      model: device.type === 'wristband' ? 'HealthBand Pro' : 'RehabMonitor 3000',
-      serialNumber: `${device.type === 'wristband' ? 'HB' : 'RM'}-${Math.floor(Math.random() * 10000)}`,
-      firmwareVersion: 'v1.0.0',
-      lastSync: new Date().toLocaleString()
-    };
-    setPairedDevices([...pairedDevices, enhancedDevice]);
-    setAvailableDevices(availableDevices.filter(d => d.id !== device.id));
-    
-    // 显示成功消息
-    setSnackbar({
-      open: true,
-      message: `设备 ${device.name} 配对成功！`,
-      severity: 'success'
-    });
+
+  const handleCloseBindForm = () => {
+    if (binding) return;
+    setBindForm(prev => ({ ...prev, open: false }));
   };
-  
-  const handleOpenDeviceDetail = (device: Device) => {
+
+  const handleBindFieldChange = (field: keyof BindFormState, value: string) => {
+    setBindForm(prev => ({ ...prev, [field]: value }));
+  };
+
+  // 提交绑定：调用真实的 POST /api/devices/bind，成功后重新拉取列表
+  const handleBindSubmit = async () => {
+    const name = bindForm.name.trim();
+    if (!bindForm.deviceType || !name) return;
+
+    setBinding(true);
+    try {
+      const payload: DeviceCreatePayload = {
+        device_type: bindForm.deviceType,
+        name,
+      };
+      if (bindForm.model.trim()) payload.model = bindForm.model.trim();
+      if (bindForm.manufacturer.trim()) payload.manufacturer = bindForm.manufacturer.trim();
+      if (bindForm.connectionType.trim()) payload.connection_type = bindForm.connectionType.trim();
+      if (bindForm.firmwareVersion.trim()) payload.firmware_version = bindForm.firmwareVersion.trim();
+
+      const created = await deviceService.bindDevice(payload);
+      setBindForm(prev => ({ ...prev, open: false }));
+      setSnackbar({
+        open: true,
+        message: `设备「${created?.name || name}」绑定成功`,
+        severity: 'success'
+      });
+      await loadDevices();
+    } catch (err: any) {
+      setSnackbar({
+        open: true,
+        message: `绑定失败: ${getApiErrorMessage(err, '请检查设备信息后重试')}`,
+        severity: 'error'
+      });
+    } finally {
+      setBinding(false);
+    }
+  };
+
+  // 打开设备详情，并实时查询设备状态
+  const handleOpenDeviceDetail = async (device: Device) => {
     setSelectedDevice(device);
     setOpenDeviceDialog(true);
+    setDialogTabValue(0);
+    setDialogStatus(null);
+    setDialogStatusLoading(true);
+    try {
+      setDialogStatus(await deviceService.getDeviceStatus(device.id));
+    } catch {
+      // 状态查询失败时回退展示列表中的已知信息，不伪造数据
+    } finally {
+      setDialogStatusLoading(false);
+    }
   };
-  
+
   const handleCloseDeviceDetail = () => {
     setOpenDeviceDialog(false);
+    setConfirmUnbind(false);
   };
-  
+
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setDialogTabValue(newValue);
   };
-  
-  const handleSyncDevice = () => {
+
+  // 同步设备数据：调用真实的 POST /api/devices/{id}/sync
+  const handleSyncDevice = async () => {
     if (!selectedDevice) return;
-    
+
     setSyncing(true);
-    
-    // 模拟同步过程
-    setTimeout(() => {
-      setPairedDevices(pairedDevices.map(device => 
-        device.id === selectedDevice.id 
-          ? {...device, lastSync: new Date().toLocaleString()} 
-          : device
-      ));
-      setSyncing(false);
-      
-      // 显示成功消息
+    try {
+      const result = await deviceService.syncDeviceData(selectedDevice.id);
+      const ok = result?.success !== false;
       setSnackbar({
         open: true,
-        message: `设备 ${selectedDevice.name} 数据同步成功！`,
-        severity: 'success'
+        message: result?.message || `设备 ${selectedDevice.name} 数据同步完成`,
+        severity: ok ? 'success' : 'error'
       });
-    }, 2000);
-  };
-  
-  const handleDeleteDevice = (deviceId: string) => {
-    setPairedDevices(pairedDevices.filter(device => device.id !== deviceId));
-    setOpenDeviceDialog(false);
-    
-    // 显示成功消息
-    setSnackbar({
-      open: true,
-      message: `设备已成功移除`,
-      severity: 'info'
-    });
-  };
-  
-  const handleCloseSnackbar = () => {
-    setSnackbar({...snackbar, open: false});
-  };
-  
-  const getDeviceIcon = (type: string) => {
-    switch (type) {
-      case 'wristband':
-        return <WatchIcon />;
-      case 'monitor':
-        return <SettingsRemoteIcon />;
-      case 'phone':
-        return <SmartphoneIcon />;
-      default:
-        return <DevicesIcon />;
+      // 同步后刷新列表与实时状态
+      await loadDevices();
+      try {
+        setDialogStatus(await deviceService.getDeviceStatus(selectedDevice.id));
+      } catch {
+        // 状态刷新失败不影响同步结果展示
+      }
+    } catch (err: any) {
+      setSnackbar({
+        open: true,
+        message: `数据同步失败: ${getApiErrorMessage(err, '请稍后再试')}`,
+        severity: 'error'
+      });
+    } finally {
+      setSyncing(false);
     }
   };
-  
-  const getBatteryColor = (level: number | undefined) => {
+
+  // 解绑设备：调用真实的 DELETE /api/devices/{id}/unbind
+  const handleUnbindDevice = async () => {
+    if (!selectedDevice) return;
+
+    setDeleting(true);
+    try {
+      await deviceService.unbindDevice(selectedDevice.id);
+      setOpenDeviceDialog(false);
+      setConfirmUnbind(false);
+      setSnackbar({
+        open: true,
+        message: `设备「${selectedDevice.name}」已解绑`,
+        severity: 'info'
+      });
+      await loadDevices();
+    } catch (err: any) {
+      setSnackbar({
+        open: true,
+        message: `解绑失败: ${getApiErrorMessage(err, '请稍后再试')}`,
+        severity: 'error'
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleCloseSnackbar = () => {
+    setSnackbar(prev => ({ ...prev, open: false }));
+  };
+
+  const getDeviceIcon = (type: string) => {
+    if (type.includes('手环') || type.includes('wristband')) return <WatchIcon />;
+    if (type.includes('监测') || type.includes('monitor')) return <SettingsRemoteIcon />;
+    if (type.includes('手机') || type.includes('phone')) return <SmartphoneIcon />;
+    return <DevicesIcon />;
+  };
+
+  const getBatteryColor = (level: number | null | undefined) => {
     if (!level) return 'grey.500';
     if (level > 60) return 'success.main';
     if (level > 20) return 'warning.main';
     return 'error.main';
   };
-  
-  // 打开向导
-  const handleOpenWizard = () => {
-    setWizardState({...wizardState, open: true, activeStep: 0});
-  };
-  
-  // 关闭向导
-  const handleCloseWizard = () => {
-    setWizardState({...wizardState, open: false});
-  };
-  
-  // 向导下一步
-  const handleWizardNext = () => {
-    setWizardState({...wizardState, activeStep: wizardState.activeStep + 1});
-  };
-  
-  // 向导上一步
-  const handleWizardBack = () => {
-    setWizardState({...wizardState, activeStep: wizardState.activeStep - 1});
-  };
-  
-  // 向导完成
-  const handleWizardComplete = () => {
-    // 创建新设备
-    const newDevice: Device = {
-      id: `custom-${Date.now()}`,
-      name: wizardState.deviceName || `${wizardState.deviceType}设备`,
-      type: wizardState.deviceType as any,
-      status: 'connected',
-      lastActive: new Date().toLocaleString(),
-      batteryLevel: 100,
-      model: wizardState.deviceType === 'wristband' ? 'HealthBand Pro' : 'RehabMonitor 3000',
-      serialNumber: wizardState.deviceCode,
-      firmwareVersion: 'v1.0.0',
-      lastSync: new Date().toLocaleString()
-    };
-    
-    setPairedDevices([...pairedDevices, newDevice]);
-    handleCloseWizard();
-    
-    // 显示成功消息
-    setSnackbar({
-      open: true,
-      message: `设备 ${newDevice.name} 配对成功！`,
-      severity: 'success'
-    });
-  };
-  
-  // 更新向导字段
-  const handleWizardFieldChange = (field: keyof WizardState, value: string) => {
-    setWizardState({...wizardState, [field]: value});
-  };
-  
+
+  // 详情内展示的电量与状态：优先使用实时查询结果，回退到列表数据
+  const displayBattery = dialogStatus
+    ? (dialogStatus.battery_level ?? selectedDevice?.battery_level ?? null)
+    : (selectedDevice?.battery_level ?? null);
+  const displayStatus = dialogStatus?.status || selectedDevice?.status;
+  const displayLastSync = dialogStatus?.last_sync_time || null;
+
   // 处理主标签页切换
   const handleMainTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setMainTabValue(newValue);
   };
-  
+
   return (
     <Box>
       <Typography variant="h5" component="h1" gutterBottom>
         设备绑定与管理
       </Typography>
-      
-      {/* 添加主标签页切换 */}
+
+      {/* 主标签页切换 */}
       <Paper sx={{ mb: 3 }}>
         <Tabs
           value={mainTabValue}
@@ -334,7 +357,7 @@ const DeviceBinding: React.FC = () => {
           <Tab icon={<TimelineIcon />} iconPosition="start" label="设备数据" />
         </Tabs>
       </Paper>
-      
+
       {/* 设备管理标签页内容 */}
       {mainTabValue === 0 && (
         <Grid container spacing={3}>
@@ -342,45 +365,58 @@ const DeviceBinding: React.FC = () => {
             <Paper sx={{ p: 3, mb: 3 }}>
               <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
                 <Typography variant="h6">已绑定设备</Typography>
-                <Box>
-                  <Button 
-                    variant="outlined" 
-                    color="primary" 
-                    onClick={handleOpenWizard}
-                    sx={{ mr: 1 }}
-                  >
-                    手动配置
-                  </Button>
-                  <Button 
-                    variant="contained" 
-                    color="primary" 
-                    startIcon={<AddIcon />}
-                    onClick={startScan}
-                    disabled={scanning}
-                  >
-                    添加设备
-                  </Button>
-                </Box>
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={<AddIcon />}
+                  onClick={handleOpenBindForm}
+                >
+                  添加设备
+                </Button>
               </Box>
-              
-              {pairedDevices.length > 0 ? (
+
+              {loading ? (
+                <Box textAlign="center" my={4}>
+                  <CircularProgress size={28} />
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                    正在加载设备列表...
+                  </Typography>
+                </Box>
+              ) : loadError ? (
+                <Alert
+                  severity="error"
+                  action={
+                    <Button color="inherit" size="small" onClick={loadDevices}>
+                      重试
+                    </Button>
+                  }
+                >
+                  {loadError}
+                </Alert>
+              ) : devices.length > 0 ? (
                 <List>
-                  {pairedDevices.map((device) => (
+                  {devices.map((device) => (
                     <React.Fragment key={device.id}>
                       <ListItem>
                         <ListItemIcon>
-                          {getDeviceIcon(device.type)}
+                          {getDeviceIcon(device.device_type)}
                         </ListItemIcon>
-                        <ListItemText 
+                        <ListItemText
                           primary={
-                            <Box display="flex" alignItems="center">
+                            <Box display="flex" alignItems="center" gap={1}>
                               {device.name}
+                              <Chip
+                                size="small"
+                                label={getStatusLabel(device.status)}
+                                color={getStatusChipColor(device.status)}
+                                variant="outlined"
+                              />
                             </Box>
                           }
-                          secondary={`最后活动: ${device.lastActive} | 电量: ${device.batteryLevel}%`}
+                          secondary={`类型: ${device.device_type || '未知'} | 最后连接: ${formatDateTime(device.last_connected)}${device.battery_level != null ? ` | 电量: ${device.battery_level}%` : ''}`}
                         />
-                        <Button 
-                          variant="outlined" 
+                        <Button
+                          variant="outlined"
                           size="small"
                           onClick={() => handleOpenDeviceDetail(device)}
                         >
@@ -392,62 +428,21 @@ const DeviceBinding: React.FC = () => {
                   ))}
                 </List>
               ) : (
-                <Alert severity="info">没有已绑定的设备</Alert>
-              )}
-              
-              {scanning && (
-                <Box textAlign="center" my={3}>
-                  <BluetoothSearchingIcon sx={{ fontSize: 40, color: 'primary.main', animation: 'pulse 1.5s infinite' }} />
-                  <Typography>正在搜索附近设备...</Typography>
-                </Box>
-              )}
-              
-              {!scanning && availableDevices.length > 0 && (
-                <Box mt={3}>
-                  <Typography variant="subtitle1" gutterBottom>
-                    可用设备
-                  </Typography>
-                  <List>
-                    {availableDevices.map((device) => (
-                      <React.Fragment key={device.id}>
-                        <ListItem>
-                          <ListItemIcon>
-                            {getDeviceIcon(device.type)}
-                          </ListItemIcon>
-                          <ListItemText 
-                            primary={device.name}
-                          />
-                          <Button 
-                            variant="outlined" 
-                            size="small"
-                            onClick={() => pairDevice(device)}
-                          >
-                            配对
-                          </Button>
-                        </ListItem>
-                        <Divider />
-                      </React.Fragment>
-                    ))}
-                  </List>
-                </Box>
+                <Alert severity="info">
+                  暂无已绑定的设备。点击"添加设备"填写设备信息完成绑定。
+                </Alert>
               )}
             </Paper>
           </Grid>
-          
+
           <Grid item xs={12} md={5}>
             <Card>
-              <CardMedia
-                component="img"
-                height="200"
-                image="https://via.placeholder.com/400x200?text=康复设备示意图"
-                alt="康复设备示意图"
-              />
               <CardContent>
                 <Typography gutterBottom variant="h6" component="div">
                   康复监测设备说明
                 </Typography>
                 <Typography variant="body2" color="text.secondary" paragraph>
-                  我们提供多种智能康复监测设备，帮助您更好地完成康复训练并追踪训练效果。
+                  绑定您的智能康复监测设备后，系统将展示设备上报的真实训练与健康数据。
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   设备类型:
@@ -457,7 +452,7 @@ const DeviceBinding: React.FC = () => {
                     <ListItemIcon>
                       <WatchIcon fontSize="small" />
                     </ListItemIcon>
-                    <ListItemText 
+                    <ListItemText
                       primary="康复手环"
                       secondary="记录日常活动和训练数据"
                     />
@@ -466,7 +461,7 @@ const DeviceBinding: React.FC = () => {
                     <ListItemIcon>
                       <SettingsRemoteIcon fontSize="small" />
                     </ListItemIcon>
-                    <ListItemText 
+                    <ListItemText
                       primary="康复监测器"
                       secondary="提供专业的康复训练监测与指导"
                     />
@@ -475,7 +470,7 @@ const DeviceBinding: React.FC = () => {
                     <ListItemIcon>
                       <SmartphoneIcon fontSize="small" />
                     </ListItemIcon>
-                    <ListItemText 
+                    <ListItemText
                       primary="手机应用"
                       secondary="与其他设备配合使用，随时查看康复数据"
                     />
@@ -486,16 +481,17 @@ const DeviceBinding: React.FC = () => {
           </Grid>
         </Grid>
       )}
-      
+
       {/* 设备数据标签页内容 */}
       {mainTabValue === 1 && (
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>设备健康数据</Typography>
           <Divider sx={{ mb: 3 }} />
-          
-          {pairedDevices.length > 0 ? (
+
+          {devices.length > 0 ? (
             <>
-              <DeviceDataDisplay 
+              <DeviceDataDisplay
+                deviceId={devices[0].id}
                 showChart={true}
                 timeRange="day"
                 onError={(error) => {
@@ -506,15 +502,17 @@ const DeviceBinding: React.FC = () => {
                   });
                 }}
               />
-              
+
               <Box mt={4}>
-                <DeviceConnectionTest 
-                  deviceId={pairedDevices[0].id}
-                  deviceType={pairedDevices[0].type}
-                  onComplete={(success, results) => {
+                <DeviceConnectionTest
+                  deviceId={devices[0].id}
+                  deviceType={devices[0].device_type}
+                  onComplete={(success) => {
                     setSnackbar({
                       open: true,
-                      message: success ? '设备测试完成：连接状态良好' : '设备测试完成：发现一些问题',
+                      message: success
+                        ? '设备检查完成：状态与数据链路正常'
+                        : '设备检查完成：发现问题，可尝试修复',
                       severity: success ? 'success' : 'warning'
                     });
                   }}
@@ -523,12 +521,14 @@ const DeviceBinding: React.FC = () => {
             </>
           ) : (
             <Alert severity="info" sx={{ mb: 2 }}>
-              您还没有绑定任何设备。请先在设备管理标签页中绑定设备，然后查看设备数据。
+              {loading
+                ? '正在加载设备列表...'
+                : '您还没有绑定任何设备。请先在设备管理标签页中绑定设备，然后查看设备数据。'}
             </Alert>
           )}
         </Paper>
       )}
-      
+
       {/* 设备详情对话框 */}
       <Dialog
         open={openDeviceDialog}
@@ -541,7 +541,7 @@ const DeviceBinding: React.FC = () => {
             <DialogTitle>
               <Box display="flex" justifyContent="space-between" alignItems="center">
                 <Box display="flex" alignItems="center">
-                  {getDeviceIcon(selectedDevice.type)}
+                  {getDeviceIcon(selectedDevice.device_type)}
                   <Typography variant="h6" sx={{ ml: 1 }}>
                     {selectedDevice.name}
                   </Typography>
@@ -560,7 +560,7 @@ const DeviceBinding: React.FC = () => {
                 <Tab label="设备信息" icon={<InfoIcon />} iconPosition="start" />
                 <Tab label="数据同步" icon={<SyncIcon />} iconPosition="start" />
               </Tabs>
-              
+
               <TabPanel value={dialogTabValue} index={0}>
                 <Grid container spacing={3}>
                   <Grid item xs={12} md={6}>
@@ -570,96 +570,113 @@ const DeviceBinding: React.FC = () => {
                           基本信息
                         </Typography>
                         <Divider sx={{ mb: 2 }} />
-                        
+
                         <Box sx={{ mb: 1 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            设备型号
+                          <Typography variant="body2" color="text.secondary">设备类型</Typography>
+                          <Typography variant="body1">
+                            {selectedDevice.device_type || '未知'}
                           </Typography>
+                        </Box>
+
+                        <Box sx={{ mb: 1 }}>
+                          <Typography variant="body2" color="text.secondary">设备型号</Typography>
                           <Typography variant="body1">
                             {selectedDevice.model || '未知'}
                           </Typography>
                         </Box>
-                        
+
                         <Box sx={{ mb: 1 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            序列号
-                          </Typography>
+                          <Typography variant="body2" color="text.secondary">制造商</Typography>
                           <Typography variant="body1">
-                            {selectedDevice.serialNumber || '未知'}
+                            {selectedDevice.manufacturer || '未知'}
                           </Typography>
                         </Box>
-                        
+
                         <Box sx={{ mb: 1 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            固件版本
-                          </Typography>
+                          <Typography variant="body2" color="text.secondary">连接类型</Typography>
                           <Typography variant="body1">
-                            {selectedDevice.firmwareVersion || '未知'}
+                            {selectedDevice.connection_type || '未知'}
+                          </Typography>
+                        </Box>
+
+                        <Box>
+                          <Typography variant="body2" color="text.secondary">固件版本</Typography>
+                          <Typography variant="body1">
+                            {selectedDevice.firmware_version || '未知'}
                           </Typography>
                         </Box>
                       </CardContent>
                     </Card>
                   </Grid>
-                  
+
                   <Grid item xs={12} md={6}>
                     <Card variant="outlined">
                       <CardContent>
                         <Typography variant="subtitle1" gutterBottom>
                           状态信息
+                          {dialogStatusLoading && (
+                            <CircularProgress size={14} sx={{ ml: 1, verticalAlign: 'middle' }} />
+                          )}
                         </Typography>
                         <Divider sx={{ mb: 2 }} />
-                        
+
                         <Box sx={{ mb: 1, display: 'flex', alignItems: 'center' }}>
-                          <BatteryFullIcon sx={{ mr: 1, color: getBatteryColor(selectedDevice.batteryLevel) }} />
+                          <BatteryFullIcon sx={{ mr: 1, color: getBatteryColor(displayBattery) }} />
                           <Box sx={{ flex: 1 }}>
                             <Typography variant="body2" color="text.secondary">
                               电池电量
                             </Typography>
-                            <LinearProgress
-                              variant="determinate"
-                              value={selectedDevice.batteryLevel || 0}
-                              sx={{ 
-                                height: 8, 
-                                borderRadius: 4,
-                                mb: 1,
-                                '& .MuiLinearProgress-bar': {
-                                  backgroundColor: getBatteryColor(selectedDevice.batteryLevel)
-                                }
-                              }}
-                            />
-                            <Typography variant="body2">
-                              {selectedDevice.batteryLevel || 0}%
-                            </Typography>
+                            {displayBattery != null ? (
+                              <>
+                                <LinearProgress
+                                  variant="determinate"
+                                  value={Math.min(100, displayBattery)}
+                                  sx={{
+                                    height: 8,
+                                    borderRadius: 4,
+                                    mb: 1,
+                                    '& .MuiLinearProgress-bar': {
+                                      backgroundColor: getBatteryColor(displayBattery)
+                                    }
+                                  }}
+                                />
+                                <Typography variant="body2">
+                                  {displayBattery}%
+                                </Typography>
+                              </>
+                            ) : (
+                              <Typography variant="body1">未知</Typography>
+                            )}
                           </Box>
                         </Box>
-                        
+
                         <Box sx={{ mb: 1 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            连接状态
-                          </Typography>
+                          <Typography variant="body2" color="text.secondary">连接状态</Typography>
                           <Box display="flex" alignItems="center">
-                            <CheckCircleIcon sx={{ mr: 1, fontSize: 16, color: 'success.main' }} />
-                            <Typography variant="body1">
-                              已连接
-                            </Typography>
+                            <Chip
+                              size="small"
+                              label={getStatusLabel(displayStatus)}
+                              color={getStatusChipColor(displayStatus)}
+                            />
+                            {dialogStatus?.signal_strength != null && (
+                              <Typography variant="body2" color="text.secondary" sx={{ ml: 1 }}>
+                                信号强度: {dialogStatus.signal_strength}/5
+                              </Typography>
+                            )}
                           </Box>
                         </Box>
-                        
+
                         <Box sx={{ mb: 1 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            最后活动时间
-                          </Typography>
+                          <Typography variant="body2" color="text.secondary">最后连接时间</Typography>
                           <Typography variant="body1">
-                            {selectedDevice.lastActive || '未知'}
+                            {formatDateTime(selectedDevice.last_connected)}
                           </Typography>
                         </Box>
-                        
+
                         <Box>
-                          <Typography variant="body2" color="text.secondary">
-                            最后同步时间
-                          </Typography>
+                          <Typography variant="body2" color="text.secondary">最后同步时间</Typography>
                           <Typography variant="body1">
-                            {selectedDevice.lastSync || '未同步'}
+                            {displayLastSync ? formatDateTime(displayLastSync) : '从未同步'}
                           </Typography>
                         </Box>
                       </CardContent>
@@ -667,21 +684,21 @@ const DeviceBinding: React.FC = () => {
                   </Grid>
                 </Grid>
               </TabPanel>
-              
+
               <TabPanel value={dialogTabValue} index={1}>
                 <Box textAlign="center" my={2}>
                   <Typography variant="h6" gutterBottom>
                     设备数据同步
                   </Typography>
                   <Typography variant="body2" color="text.secondary" paragraph>
-                    将设备收集的健康数据和训练记录同步到系统中，以便医生和康复师查看您的康复情况。
+                    从设备拉取最新的健康数据和训练记录，同步结果以服务端返回为准。
                   </Typography>
-                  
+
                   {syncing ? (
                     <Box sx={{ width: '100%', mt: 3 }}>
                       <LinearProgress />
                       <Typography variant="body2" sx={{ mt: 2 }}>
-                        正在同步数据，请不要断开设备连接...
+                        正在同步数据，请稍候...
                       </Typography>
                     </Box>
                   ) : (
@@ -695,215 +712,27 @@ const DeviceBinding: React.FC = () => {
                       开始同步
                     </Button>
                   )}
-                  
+
                   <Box sx={{ mt: 4 }}>
                     <Typography variant="subtitle2" gutterBottom>
-                      上次同步: {selectedDevice.lastSync || '从未同步'}
+                      最后同步: {displayLastSync ? formatDateTime(displayLastSync) : '从未同步'}
                     </Typography>
                   </Box>
-                  
-                  {/* 历史数据预览 */}
+
+                  {/* 真实设备数据展示（无数据时显示诚实空状态） */}
                   <Box sx={{ mt: 5, textAlign: 'left' }}>
-                    <Typography variant="h6" gutterBottom>
-                      最近数据预览
-                    </Typography>
-                    <Divider sx={{ mb: 2 }} />
-                    
-                    <Grid container spacing={3}>
-                      <Grid item xs={12} md={6}>
-                        <Typography variant="subtitle2" gutterBottom>
-                          今日步数
-                        </Typography>
-                        <Box sx={{ display: 'flex', alignItems: 'baseline' }}>
-                          <Typography variant="h4" color="primary.main">
-                            8,742
-                          </Typography>
-                          <Typography variant="body2" color="text.secondary" sx={{ ml: 1 }}>
-                            步
-                          </Typography>
-                        </Box>
-                        <Typography variant="body2" color="text.secondary">
-                          目标: 10,000步 | 达成率: 87%
-                        </Typography>
-                        <LinearProgress
-                          variant="determinate"
-                          value={87}
-                          sx={{ height: 6, borderRadius: 3, mt: 1 }}
-                        />
-                      </Grid>
-                      
-                      <Grid item xs={12} md={6}>
-                        <Typography variant="subtitle2" gutterBottom>
-                          今日消耗
-                        </Typography>
-                        <Box sx={{ display: 'flex', alignItems: 'baseline' }}>
-                          <Typography variant="h4" color="primary.main">
-                            324
-                          </Typography>
-                          <Typography variant="body2" color="text.secondary" sx={{ ml: 1 }}>
-                            千卡
-                          </Typography>
-                        </Box>
-                        <Typography variant="body2" color="text.secondary">
-                          基础代谢: 1,650千卡 | 活动消耗: 324千卡
-                        </Typography>
-                        <LinearProgress
-                          variant="determinate"
-                          value={45}
-                          sx={{ height: 6, borderRadius: 3, mt: 1 }}
-                        />
-                      </Grid>
-                      
-                      <Grid item xs={12}>
-                        <Divider sx={{ my: 1 }} />
-                      </Grid>
-                      
-                      <Grid item xs={12} md={4}>
-                        <Card variant="outlined">
-                          <CardContent>
-                            <Typography variant="subtitle2" color="text.secondary">
-                              最近心率
-                            </Typography>
-                            <Box sx={{ display: 'flex', alignItems: 'baseline', mt: 1 }}>
-                              <Typography variant="h4">
-                                78
-                              </Typography>
-                              <Typography variant="body2" sx={{ ml: 1 }}>
-                                BPM
-                              </Typography>
-                            </Box>
-                            <Typography variant="caption" color="text.secondary">
-                              记录于 今天 14:30
-                            </Typography>
-                            <Box 
-                              sx={{ 
-                                height: 60, 
-                                mt: 1, 
-                                display: 'flex', 
-                                alignItems: 'flex-end',
-                                justifyContent: 'space-between' 
-                              }}
-                            >
-                              {[75, 72, 71, 74, 78, 76, 78].map((value, index) => (
-                                <Box 
-                                  key={index}
-                                  sx={{
-                                    height: `${value / 100 * 60}px`,
-                                    width: '8px',
-                                    backgroundColor: 'primary.main',
-                                    borderRadius: 1
-                                  }}
-                                />
-                              ))}
-                            </Box>
-                          </CardContent>
-                        </Card>
-                      </Grid>
-                      
-                      <Grid item xs={12} md={4}>
-                        <Card variant="outlined">
-                          <CardContent>
-                            <Typography variant="subtitle2" color="text.secondary">
-                              今日训练
-                            </Typography>
-                            <Box sx={{ display: 'flex', alignItems: 'baseline', mt: 1 }}>
-                              <Typography variant="h4">
-                                25
-                              </Typography>
-                              <Typography variant="body2" sx={{ ml: 1 }}>
-                                分钟
-                              </Typography>
-                            </Box>
-                            <Typography variant="caption" color="text.secondary">
-                              完成康复计划训练 1 次
-                            </Typography>
-                            <Box 
-                              sx={{ 
-                                mt: 1,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center'
-                              }}
-                            >
-                              <Box 
-                                sx={{
-                                  position: 'relative',
-                                  display: 'inline-flex'
-                                }}
-                              >
-                                <CircularProgress
-                                  variant="determinate"
-                                  value={65}
-                                  size={50}
-                                  thickness={5}
-                                />
-                                <Box
-                                  sx={{
-                                    top: 0,
-                                    left: 0,
-                                    bottom: 0,
-                                    right: 0,
-                                    position: 'absolute',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                  }}
-                                >
-                                  <Typography variant="caption" color="text.secondary">
-                                    65%
-                                  </Typography>
-                                </Box>
-                              </Box>
-                            </Box>
-                          </CardContent>
-                        </Card>
-                      </Grid>
-                      
-                      <Grid item xs={12} md={4}>
-                        <Card variant="outlined">
-                          <CardContent>
-                            <Typography variant="subtitle2" color="text.secondary">
-                              睡眠质量
-                            </Typography>
-                            <Box sx={{ display: 'flex', alignItems: 'baseline', mt: 1 }}>
-                              <Typography variant="h4">
-                                7.5
-                              </Typography>
-                              <Typography variant="body2" sx={{ ml: 1 }}>
-                                小时
-                              </Typography>
-                            </Box>
-                            <Typography variant="caption" color="text.secondary">
-                              深睡: 2.3小时 | 浅睡: 5.2小时
-                            </Typography>
-                            <Box 
-                              sx={{ 
-                                height: 20, 
-                                mt: 1,
-                                display: 'flex',
-                                overflow: 'hidden',
-                                borderRadius: 1
-                              }}
-                            >
-                              <Box sx={{ width: '30%', bgcolor: 'primary.dark', height: '100%' }} />
-                              <Box sx={{ width: '50%', bgcolor: 'primary.light', height: '100%' }} />
-                              <Box sx={{ width: '20%', bgcolor: 'grey.300', height: '100%' }} />
-                            </Box>
-                          </CardContent>
-                        </Card>
-                      </Grid>
-                    </Grid>
-                    
-                    <Box sx={{ textAlign: 'center', mt: 3 }}>
-                      <Button
-                        variant="outlined"
-                        component={Link}
-                        to="/app/patient/health-records"
-                        size="small"
-                      >
-                        查看更多健康数据
-                      </Button>
-                    </Box>
+                    <DeviceDataDisplay
+                      deviceId={selectedDevice.id}
+                      showChart={true}
+                      timeRange="day"
+                      onError={(error) => {
+                        setSnackbar({
+                          open: true,
+                          message: `数据加载错误: ${error}`,
+                          severity: 'error'
+                        });
+                      }}
+                    />
                   </Box>
                 </Box>
               </TabPanel>
@@ -912,7 +741,8 @@ const DeviceBinding: React.FC = () => {
               <Button
                 color="error"
                 startIcon={<DeleteIcon />}
-                onClick={() => handleDeleteDevice(selectedDevice.id)}
+                onClick={() => setConfirmUnbind(true)}
+                disabled={deleting}
               >
                 解除绑定
               </Button>
@@ -923,209 +753,135 @@ const DeviceBinding: React.FC = () => {
           </>
         )}
       </Dialog>
-      
-      {/* 设备绑定向导对话框 */}
+
+      {/* 解绑确认对话框 */}
+      <Dialog open={confirmUnbind} onClose={() => !deleting && setConfirmUnbind(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>确认解除绑定？</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            解绑后设备「{selectedDevice?.name}」将不再向您的账户上报数据，此操作通过服务端完成且不可撤销。
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmUnbind(false)} disabled={deleting}>取消</Button>
+          <Button
+            onClick={handleUnbindDevice}
+            color="error"
+            variant="contained"
+            disabled={deleting}
+            startIcon={deleting ? <CircularProgress size={16} /> : <DeleteIcon />}
+          >
+            {deleting ? '解绑中...' : '确认解绑'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 绑定新设备对话框（真实绑定：POST /api/devices/bind） */}
       <Dialog
-        open={wizardState.open}
-        onClose={handleCloseWizard}
+        open={bindForm.open}
+        onClose={handleCloseBindForm}
         maxWidth="sm"
         fullWidth
       >
         <DialogTitle>
           <Box display="flex" justifyContent="space-between" alignItems="center">
-            <Typography variant="h6">
-              设备手动配置向导
-            </Typography>
-            <IconButton onClick={handleCloseWizard}>
-              <CloseIcon />
-            </IconButton>
+            <Typography variant="h6">绑定新设备</Typography>
+            {!binding && (
+              <IconButton onClick={handleCloseBindForm}>
+                <CloseIcon />
+              </IconButton>
+            )}
           </Box>
         </DialogTitle>
-        
+
         <DialogContent dividers>
-          <Box sx={{ minHeight: 300, display: 'flex', flexDirection: 'column' }}>
-            {/* 步骤指示器 */}
-            <Box sx={{ width: '100%', mb: 3 }}>
-              <LinearProgress 
-                variant="determinate" 
-                value={(wizardState.activeStep / 2) * 100} 
-                sx={{ height: 8, borderRadius: 4 }}
-              />
-              <Box 
-                sx={{ 
-                  display: 'flex', 
-                  justifyContent: 'space-between', 
-                  mt: 1 
-                }}
+          <Typography variant="body2" color="text.secondary" paragraph>
+            请填写设备的真实信息，绑定后设备将关联到您的账户。
+          </Typography>
+
+          <Grid container spacing={3} sx={{ mt: 0 }}>
+            <Grid item xs={12} sm={6}>
+              <TextField
+                fullWidth
+                required
+                select
+                label="设备类型"
+                variant="outlined"
+                value={bindForm.deviceType}
+                onChange={(e) => handleBindFieldChange('deviceType', e.target.value)}
               >
-                <Typography 
-                  variant="body2" 
-                  color={wizardState.activeStep >= 0 ? 'primary' : 'text.secondary'}
-                >
-                  1. 选择设备类型
-                </Typography>
-                <Typography 
-                  variant="body2" 
-                  color={wizardState.activeStep >= 1 ? 'primary' : 'text.secondary'}
-                >
-                  2. 设备信息
-                </Typography>
-                <Typography 
-                  variant="body2" 
-                  color={wizardState.activeStep >= 2 ? 'primary' : 'text.secondary'}
-                >
-                  3. 完成配置
-                </Typography>
-              </Box>
-            </Box>
-            
-            {/* 步骤内容 */}
-            {wizardState.activeStep === 0 && (
-              <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
-                <Typography variant="h6" gutterBottom>
-                  选择设备类型
-                </Typography>
-                <Typography variant="body2" color="text.secondary" paragraph>
-                  请选择您要绑定的设备类型
-                </Typography>
-                
-                <Grid container spacing={2} sx={{ mt: 1 }}>
-                  <Grid item xs={12} sm={6}>
-                    <Card 
-                      variant={wizardState.deviceType === 'wristband' ? 'elevation' : 'outlined'} 
-                      elevation={3}
-                      onClick={() => handleWizardFieldChange('deviceType', 'wristband')}
-                      sx={{ 
-                        cursor: 'pointer',
-                        transition: 'all 0.2s',
-                        '&:hover': { boxShadow: 3 },
-                        bgcolor: wizardState.deviceType === 'wristband' ? 'primary.50' : 'inherit'
-                      }}
-                    >
-                      <CardContent sx={{ textAlign: 'center' }}>
-                        <WatchIcon sx={{ fontSize: 48, color: 'primary.main', mb: 1 }} />
-                        <Typography variant="h6">智能手环</Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          记录日常活动和训练数据
-                        </Typography>
-                      </CardContent>
-                    </Card>
-                  </Grid>
-                  <Grid item xs={12} sm={6}>
-                    <Card 
-                      variant={wizardState.deviceType === 'monitor' ? 'elevation' : 'outlined'} 
-                      elevation={3}
-                      onClick={() => handleWizardFieldChange('deviceType', 'monitor')}
-                      sx={{ 
-                        cursor: 'pointer',
-                        transition: 'all 0.2s',
-                        '&:hover': { boxShadow: 3 },
-                        bgcolor: wizardState.deviceType === 'monitor' ? 'primary.50' : 'inherit'
-                      }}
-                    >
-                      <CardContent sx={{ textAlign: 'center' }}>
-                        <SettingsRemoteIcon sx={{ fontSize: 48, color: 'primary.main', mb: 1 }} />
-                        <Typography variant="h6">康复监测器</Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          提供专业的康复训练监测与指导
-                        </Typography>
-                      </CardContent>
-                    </Card>
-                  </Grid>
-                </Grid>
-              </Box>
-            )}
-            
-            {wizardState.activeStep === 1 && (
-              <Box sx={{ flexGrow: 1 }}>
-                <Typography variant="h6" gutterBottom>
-                  输入设备信息
-                </Typography>
-                <Typography variant="body2" color="text.secondary" paragraph>
-                  请输入您设备的详细信息
-                </Typography>
-                
-                <Grid container spacing={3} sx={{ mt: 1 }}>
-                  <Grid item xs={12}>
-                    <TextField
-                      fullWidth
-                      label="设备名称"
-                      variant="outlined"
-                      value={wizardState.deviceName}
-                      onChange={(e) => handleWizardFieldChange('deviceName', e.target.value)}
-                      helperText="给您的设备起个名字，方便识别"
-                    />
-                  </Grid>
-                  <Grid item xs={12}>
-                    <TextField
-                      fullWidth
-                      label="设备SN码"
-                      variant="outlined"
-                      value={wizardState.deviceCode}
-                      onChange={(e) => handleWizardFieldChange('deviceCode', e.target.value)}
-                      helperText="请输入设备背面或包装上的序列号/SN码"
-                    />
-                  </Grid>
-                </Grid>
-              </Box>
-            )}
-            
-            {wizardState.activeStep === 2 && (
-              <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                <CheckCircleIcon sx={{ fontSize: 60, color: 'success.main', mb: 2 }} />
-                <Typography variant="h6" gutterBottom align="center">
-                  设备配置完成
-                </Typography>
-                <Typography variant="body1" paragraph align="center">
-                  您的{wizardState.deviceType === 'wristband' ? '智能手环' : '康复监测器'}已准备就绪
-                </Typography>
-                <Typography variant="body2" color="text.secondary" align="center">
-                  设备名称: {wizardState.deviceName || `${wizardState.deviceType === 'wristband' ? '智能手环' : '康复监测器'}`}<br />
-                  设备类型: {wizardState.deviceType === 'wristband' ? '智能手环' : '康复监测器'}<br />
-                  设备SN码: {wizardState.deviceCode}
-                </Typography>
-              </Box>
-            )}
-          </Box>
+                {DEVICE_TYPE_OPTIONS.map((option) => (
+                  <MenuItem key={option} value={option}>{option}</MenuItem>
+                ))}
+              </TextField>
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField
+                fullWidth
+                required
+                label="设备名称"
+                variant="outlined"
+                value={bindForm.name}
+                onChange={(e) => handleBindFieldChange('name', e.target.value)}
+                helperText="给设备起个名字，方便识别"
+              />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField
+                fullWidth
+                label="设备型号（选填）"
+                variant="outlined"
+                value={bindForm.model}
+                onChange={(e) => handleBindFieldChange('model', e.target.value)}
+              />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField
+                fullWidth
+                label="制造商（选填）"
+                variant="outlined"
+                value={bindForm.manufacturer}
+                onChange={(e) => handleBindFieldChange('manufacturer', e.target.value)}
+              />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField
+                fullWidth
+                label="连接类型（选填）"
+                variant="outlined"
+                value={bindForm.connectionType}
+                onChange={(e) => handleBindFieldChange('connectionType', e.target.value)}
+                helperText="如 bluetooth / wifi"
+              />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField
+                fullWidth
+                label="固件版本（选填）"
+                variant="outlined"
+                value={bindForm.firmwareVersion}
+                onChange={(e) => handleBindFieldChange('firmwareVersion', e.target.value)}
+              />
+            </Grid>
+          </Grid>
         </DialogContent>
-        
+
         <DialogActions>
-          {wizardState.activeStep > 0 && (
-            <Button onClick={handleWizardBack}>
-              上一步
-            </Button>
-          )}
-          <Box sx={{ flex: '1 1 auto' }} />
-          {wizardState.activeStep === 0 && (
-            <Button 
-              onClick={handleWizardNext}
-              variant="contained" 
-              disabled={!wizardState.deviceType}
-            >
-              下一步
-            </Button>
-          )}
-          {wizardState.activeStep === 1 && (
-            <Button 
-              onClick={handleWizardNext}
-              variant="contained" 
-              disabled={!wizardState.deviceCode}
-            >
-              下一步
-            </Button>
-          )}
-          {wizardState.activeStep === 2 && (
-            <Button 
-              onClick={handleWizardComplete}
-              variant="contained" 
-              color="success"
-            >
-              完成配置
-            </Button>
-          )}
+          <Button onClick={handleCloseBindForm} disabled={binding}>
+            取消
+          </Button>
+          <Button
+            onClick={handleBindSubmit}
+            variant="contained"
+            color="primary"
+            disabled={!bindForm.deviceType || !bindForm.name.trim() || binding}
+            startIcon={binding ? <CircularProgress size={16} /> : <AddIcon />}
+          >
+            {binding ? '绑定中...' : '确认绑定'}
+          </Button>
         </DialogActions>
       </Dialog>
-      
+
       {/* 通知消息 */}
       <Snackbar
         open={snackbar.open}
@@ -1137,4 +893,4 @@ const DeviceBinding: React.FC = () => {
   );
 };
 
-export default DeviceBinding; 
+export default DeviceBinding;

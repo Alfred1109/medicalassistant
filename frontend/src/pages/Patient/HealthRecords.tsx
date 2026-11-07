@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useSelector } from 'react-redux';
 import {
   Box,
   Typography,
@@ -6,72 +7,133 @@ import {
   Tabs,
   Tab,
   Divider,
-  Grid,
-  Card,
-  CardContent,
   List,
   ListItem,
   ListItemText,
   Chip,
+  CircularProgress,
 } from '@mui/material';
+import type { RootState } from '../../store';
+import { apiService } from '../../services/api';
+import apiClient from '../../services/apiClient';
 
-interface TabPanelProps {
-  children?: React.ReactNode;
-  index: number;
-  value: number;
+// GET /api/health-records 返回的 HealthRecordResponse 关键字段
+// （见 backend/app/schemas/health_record.py，content 为字符串，tags / attachments 为数组）
+interface HealthRecordItem {
+  id: string;
+  patient_id?: string;
+  record_type?: string;
+  title: string;
+  content?: string;
+  created_by?: string;
+  tags?: string[];
+  created_at?: string;
+  updated_at?: string;
 }
 
-function TabPanel(props: TabPanelProps) {
-  const { children, value, index, ...other } = props;
-
-  return (
-    <div
-      role="tabpanel"
-      hidden={value !== index}
-      id={`health-record-tabpanel-${index}`}
-      aria-labelledby={`health-record-tab-${index}`}
-      {...other}
-    >
-      {value === index && (
-        <Box sx={{ p: 3 }}>
-          {children}
-        </Box>
-      )}
-    </div>
-  );
+// GET /api/health-records/timeline/{patient_id} 返回的 HealthTimelineItem 字段
+interface HealthTimelineItem {
+  id: string;
+  item_type?: string;
+  title: string;
+  description?: string | null;
+  occurred_at?: string;
 }
 
-// 模拟数据
-const basicInfo = {
-  name: '张三',
-  age: 45,
-  gender: '男',
-  height: 175,
-  weight: 72,
-  bloodType: 'A',
-  allergies: ['青霉素', '花粉'],
-  emergencyContact: '李四 (妻子) - 13800138000',
+// 时间显示：无效或缺失时间返回 null，避免渲染出 NaN/Invalid Date
+const formatDateTime = (value?: string | null) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
 };
 
-const medicalHistory = [
-  { date: '2022-03-15', diagnosis: '腰椎间盘突出', doctor: '王医生', hospital: '仁爱医院' },
-  { date: '2021-07-22', diagnosis: '高血压', doctor: '李医生', hospital: '人民医院' },
-  { date: '2020-11-05', diagnosis: '感冒', doctor: '赵医生', hospital: '社区医院' },
-];
+// 面板内通用的加载中提示
+const PanelLoading = () => (
+  <Box display="flex" justifyContent="center" alignItems="center" py={4}>
+    <CircularProgress size={24} sx={{ mr: 1 }} />
+    <Typography variant="body2" color="text.secondary">
+      加载中...
+    </Typography>
+  </Box>
+);
 
-const rehabHistory = [
-  { date: '2022-04-01', type: '理疗', details: '腰椎牵引', duration: '30分钟', frequency: '每周3次' },
-  { date: '2022-04-15', type: '运动治疗', details: '核心肌群稳定训练', duration: '45分钟', frequency: '每周5次' },
-  { date: '2022-05-10', type: '按摩治疗', details: '腰部肌肉放松', duration: '60分钟', frequency: '每周2次' },
-];
+// 面板内通用的错误提示
+const PanelError = ({ text }: { text: string }) => (
+  <Box textAlign="center" py={4}>
+    <Typography variant="body2" color="error">
+      {text}
+    </Typography>
+  </Box>
+);
 
-const currentMedications = [
-  { name: '布洛芬', dosage: '200mg', frequency: '每日2次', startDate: '2022-03-20', endDate: '2022-04-20' },
-  { name: '肌松剂', dosage: '10mg', frequency: '每晚1次', startDate: '2022-03-20', endDate: '长期' },
-];
+// 面板内通用的空数据提示
+const PanelEmpty = ({ text }: { text: string }) => (
+  <Box textAlign="center" py={4}>
+    <Typography variant="body2" color="text.secondary">
+      {text}
+    </Typography>
+  </Box>
+);
 
 const HealthRecords: React.FC = () => {
   const [tabValue, setTabValue] = useState(0);
+  const currentUser = useSelector((state: RootState) => state.auth.user);
+
+  // 真实数据状态：健康档案列表与医疗时间线
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [records, setRecords] = useState<HealthRecordItem[]>([]);
+  const [timeline, setTimeline] = useState<HealthTimelineItem[]>([]);
+
+  const patientId = currentUser?.id;
+
+  // 从真实后端拉取健康档案与时间线；患者本人 ID 取自认证 store
+  React.useEffect(() => {
+    if (!patientId) {
+      // 未登录 / 用户信息未就绪时不发请求，如实提示
+      setRecords([]);
+      setTimeline([]);
+      setError(false);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setError(false);
+
+    const loadData = async () => {
+      const [recordsRes, timelineRes] = await Promise.allSettled([
+        apiService.getHealthRecords(patientId),
+        apiClient.get<HealthTimelineItem[]>(`/health-records/timeline/${patientId}`),
+      ]);
+
+      if (cancelled) return;
+
+      if (recordsRes.status === 'fulfilled' && Array.isArray(recordsRes.value?.data)) {
+        setRecords(recordsRes.value.data);
+      } else {
+        setRecords([]);
+        setError(true);
+      }
+
+      if (timelineRes.status === 'fulfilled' && Array.isArray(timelineRes.value)) {
+        setTimeline(timelineRes.value);
+      } else {
+        setTimeline([]);
+        setError(true);
+      }
+
+      setLoading(false);
+    };
+
+    loadData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [patientId]);
 
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
@@ -82,183 +144,136 @@ const HealthRecords: React.FC = () => {
       <Typography variant="h5" gutterBottom>
         健康档案
       </Typography>
-      
-      <Paper sx={{ width: '100%', mt: 2 }}>
-        <Tabs
-          value={tabValue}
-          onChange={handleTabChange}
-          indicatorColor="primary"
-          textColor="primary"
-          variant="fullWidth"
-        >
-          <Tab label="基本信息" />
-          <Tab label="病史记录" />
-          <Tab label="康复历史" />
-          <Tab label="用药情况" />
-        </Tabs>
-        
-        <TabPanel value={tabValue} index={0}>
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <Card>
-                <CardContent>
-                  <Typography variant="h6" gutterBottom>个人信息</Typography>
-                  <Divider sx={{ mb: 2 }} />
-                  
-                  <Grid container spacing={2}>
-                    <Grid item xs={6}>
-                      <Typography variant="subtitle2" color="text.secondary">姓名</Typography>
-                      <Typography variant="body1">{basicInfo.name}</Typography>
-                    </Grid>
-                    <Grid item xs={6}>
-                      <Typography variant="subtitle2" color="text.secondary">年龄</Typography>
-                      <Typography variant="body1">{basicInfo.age}岁</Typography>
-                    </Grid>
-                    <Grid item xs={6}>
-                      <Typography variant="subtitle2" color="text.secondary">性别</Typography>
-                      <Typography variant="body1">{basicInfo.gender}</Typography>
-                    </Grid>
-                    <Grid item xs={6}>
-                      <Typography variant="subtitle2" color="text.secondary">血型</Typography>
-                      <Typography variant="body1">{basicInfo.bloodType}型</Typography>
-                    </Grid>
-                    <Grid item xs={6}>
-                      <Typography variant="subtitle2" color="text.secondary">身高</Typography>
-                      <Typography variant="body1">{basicInfo.height} cm</Typography>
-                    </Grid>
-                    <Grid item xs={6}>
-                      <Typography variant="subtitle2" color="text.secondary">体重</Typography>
-                      <Typography variant="body1">{basicInfo.weight} kg</Typography>
-                    </Grid>
-                  </Grid>
-                </CardContent>
-              </Card>
-            </Grid>
-            
-            <Grid item xs={12} md={6}>
-              <Card sx={{ height: '100%' }}>
-                <CardContent>
-                  <Typography variant="h6" gutterBottom>其他信息</Typography>
-                  <Divider sx={{ mb: 2 }} />
-                  
-                  <Typography variant="subtitle2" color="text.secondary" gutterBottom>过敏史</Typography>
-                  <Box mb={2}>
-                    {basicInfo.allergies.length > 0 ? (
-                      basicInfo.allergies.map((allergy, index) => (
-                        <Chip key={index} label={allergy} color="warning" size="small" sx={{ mr: 1 }} />
-                      ))
-                    ) : (
-                      <Typography variant="body2">无</Typography>
-                    )}
-                  </Box>
-                  
-                  <Typography variant="subtitle2" color="text.secondary" gutterBottom>紧急联系人</Typography>
-                  <Typography variant="body1">{basicInfo.emergencyContact}</Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-          </Grid>
-        </TabPanel>
-        
-        <TabPanel value={tabValue} index={1}>
-          <List>
-            {medicalHistory.map((record, index) => (
-              <React.Fragment key={index}>
-                <ListItem alignItems="flex-start">
-                  <ListItemText
-                    primary={
-                      <Box display="flex" justifyContent="space-between">
-                        <Typography variant="subtitle1">{record.diagnosis}</Typography>
-                        <Typography variant="body2" color="text.secondary">{record.date}</Typography>
-                      </Box>
-                    }
-                    secondary={
-                      <>
-                        <Typography variant="body2" component="span">
-                          {`主治医生: ${record.doctor}`}
-                        </Typography>
-                        <br />
-                        <Typography variant="body2" component="span">
-                          {`就诊医院: ${record.hospital}`}
-                        </Typography>
-                      </>
-                    }
-                  />
-                </ListItem>
-                {index < medicalHistory.length - 1 && <Divider variant="inset" component="li" />}
-              </React.Fragment>
-            ))}
-          </List>
-        </TabPanel>
-        
-        <TabPanel value={tabValue} index={2}>
-          <List>
-            {rehabHistory.map((record, index) => (
-              <React.Fragment key={index}>
-                <ListItem alignItems="flex-start">
-                  <ListItemText
-                    primary={
-                      <Box display="flex" justifyContent="space-between">
-                        <Typography variant="subtitle1">{record.type}</Typography>
-                        <Typography variant="body2" color="text.secondary">{record.date}</Typography>
-                      </Box>
-                    }
-                    secondary={
-                      <>
-                        <Typography variant="body2" component="span">
-                          {`详情: ${record.details}`}
-                        </Typography>
-                        <br />
-                        <Typography variant="body2" component="span">
-                          {`时长: ${record.duration} | 频率: ${record.frequency}`}
-                        </Typography>
-                      </>
-                    }
-                  />
-                </ListItem>
-                {index < rehabHistory.length - 1 && <Divider variant="inset" component="li" />}
-              </React.Fragment>
-            ))}
-          </List>
-        </TabPanel>
-        
-        <TabPanel value={tabValue} index={3}>
-          <List>
-            {currentMedications.map((med, index) => (
-              <React.Fragment key={index}>
-                <ListItem alignItems="flex-start">
-                  <ListItemText
-                    primary={
-                      <Box display="flex" justifyContent="space-between">
-                        <Typography variant="subtitle1">{med.name}</Typography>
-                        <Chip 
-                          label={med.endDate === '长期' ? '长期用药' : '阶段用药'} 
-                          color={med.endDate === '长期' ? 'primary' : 'default'} 
-                          size="small" 
+
+      {!patientId ? (
+        // 用户信息未就绪时统一提示，不渲染任何假数据
+        <Paper sx={{ mt: 2 }}>
+          <PanelEmpty text="未登录或用户信息加载中，暂时无法获取健康档案" />
+        </Paper>
+      ) : (
+        <Paper sx={{ width: '100%', mt: 2 }}>
+          <Tabs
+            value={tabValue}
+            onChange={handleTabChange}
+            indicatorColor="primary"
+            textColor="primary"
+            variant="fullWidth"
+          >
+            <Tab label="健康档案" />
+            <Tab label="健康时间线" />
+          </Tabs>
+
+          <Box sx={{ p: 3 }}>
+            {loading ? (
+              <PanelLoading />
+            ) : error ? (
+              <PanelError text="健康档案数据加载失败，请稍后重试" />
+            ) : tabValue === 0 ? (
+              // 健康档案列表（真实数据）
+              records.length === 0 ? (
+                <PanelEmpty text="暂无健康档案记录" />
+              ) : (
+                <List>
+                  {records.map((record, index) => (
+                    <React.Fragment key={record.id ?? `record-${index}`}>
+                      <ListItem alignItems="flex-start" sx={{ px: 0 }}>
+                        <ListItemText
+                          primary={
+                            <Box display="flex" justifyContent="space-between" alignItems="center" flexWrap="wrap">
+                              <Box display="flex" alignItems="center">
+                                <Typography variant="subtitle1">{record.title}</Typography>
+                                {record.record_type && (
+                                  <Chip
+                                    label={record.record_type}
+                                    size="small"
+                                    color="primary"
+                                    variant="outlined"
+                                    sx={{ ml: 1 }}
+                                  />
+                                )}
+                              </Box>
+                              <Typography variant="body2" color="text.secondary">
+                                {formatDateTime(record.created_at) ?? '时间未知'}
+                              </Typography>
+                            </Box>
+                          }
+                          secondary={
+                            <>
+                              {record.content && (
+                                <Typography
+                                  variant="body2"
+                                  component="span"
+                                  color="text.primary"
+                                  sx={{ display: 'block', mt: 0.5, whiteSpace: 'pre-wrap' }}
+                                >
+                                  {record.content}
+                                </Typography>
+                              )}
+                              {(record.tags ?? []).length > 0 && (
+                                <Box mt={1}>
+                                  {record.tags!.map((tag, tagIndex) => (
+                                    <Chip key={tagIndex} label={tag} size="small" sx={{ mr: 0.5, mb: 0.5 }} />
+                                  ))}
+                                </Box>
+                              )}
+                            </>
+                          }
                         />
-                      </Box>
-                    }
-                    secondary={
-                      <>
-                        <Typography variant="body2" component="span">
-                          {`剂量: ${med.dosage} | 频率: ${med.frequency}`}
-                        </Typography>
-                        <br />
-                        <Typography variant="body2" component="span">
-                          {`开始日期: ${med.startDate} | 结束日期: ${med.endDate}`}
-                        </Typography>
-                      </>
-                    }
-                  />
-                </ListItem>
-                {index < currentMedications.length - 1 && <Divider variant="inset" component="li" />}
-              </React.Fragment>
-            ))}
-          </List>
-        </TabPanel>
-      </Paper>
+                      </ListItem>
+                      {index < records.length - 1 && <Divider variant="inset" component="li" />}
+                    </React.Fragment>
+                  ))}
+                </List>
+              )
+            ) : (
+              // 健康时间线（真实数据）
+              timeline.length === 0 ? (
+                <PanelEmpty text="暂无健康时间线数据" />
+              ) : (
+                <List>
+                  {timeline.map((item, index) => (
+                    <React.Fragment key={item.id ?? `timeline-${index}`}>
+                      <ListItem alignItems="flex-start" sx={{ px: 0 }}>
+                        <ListItemText
+                          primary={
+                            <Box display="flex" justifyContent="space-between" alignItems="center" flexWrap="wrap">
+                              <Box display="flex" alignItems="center">
+                                <Typography variant="subtitle1">{item.title}</Typography>
+                                {item.item_type && (
+                                  <Chip
+                                    label={item.item_type}
+                                    size="small"
+                                    color="secondary"
+                                    variant="outlined"
+                                    sx={{ ml: 1 }}
+                                  />
+                                )}
+                              </Box>
+                              <Typography variant="body2" color="text.secondary">
+                                {formatDateTime(item.occurred_at) ?? '时间未知'}
+                              </Typography>
+                            </Box>
+                          }
+                          secondary={
+                            item.description ? (
+                              <Typography variant="body2" component="span" color="text.primary">
+                                {item.description}
+                              </Typography>
+                            ) : undefined
+                          }
+                        />
+                      </ListItem>
+                      {index < timeline.length - 1 && <Divider variant="inset" component="li" />}
+                    </React.Fragment>
+                  ))}
+                </List>
+              )
+            )}
+          </Box>
+        </Paper>
+      )}
     </Box>
   );
 };
 
-export default HealthRecords; 
+export default HealthRecords;
