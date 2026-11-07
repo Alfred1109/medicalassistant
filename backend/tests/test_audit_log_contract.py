@@ -21,6 +21,7 @@ from pymongo.errors import AutoReconnect
 
 from app.api.routers.audit_log_router import router
 from app.core.config import settings
+from app.core.permission_audit import PermissionAuditMiddleware
 from app.db.mongodb import get_database
 from app.schemas.audit_log import AuditLogCreate, AuditLogFilter
 from app.services.audit_log_service import AuditLogService
@@ -54,6 +55,129 @@ class AuditMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.details, {
             "permission": "patient:read", "target_user_id": "target", "note": "test",
         })
+
+
+class PermissionAuditMiddlewareIdentityTests(unittest.IsolatedAsyncioTestCase):
+    """旁路审计身份提取：有效令牌应归因到 user_id，失败路径保持 anonymous 且不打断业务请求。"""
+
+    async def asyncSetUp(self):
+        self.captured = []
+
+        async def capture_insert_one(document):
+            self.captured.append(document)
+            return MagicMock(inserted_id=ObjectId())
+
+        mock_db = MagicMock()
+        mock_db.audit_logs.insert_one = AsyncMock(side_effect=capture_insert_one)
+
+        async def fake_database():
+            yield mock_db
+
+        db_patcher = patch("app.db.mongodb.get_database", new=fake_database)
+        db_patcher.start()
+        self.addCleanup(db_patcher.stop)
+
+        self.app = FastAPI()
+        self.app.add_middleware(PermissionAuditMiddleware)
+
+        @self.app.get("/api/users/me")
+        async def read_me():
+            return {"ok": True}
+
+        @self.app.post("/api/users")
+        async def create_user():
+            return {"created": True}
+
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app, raise_app_exceptions=False),
+            base_url="http://audit-test",
+        )
+
+    async def asyncTearDown(self):
+        await self.client.aclose()
+
+    def token(self, user_id, secret=None, **extra):
+        payload = {
+            "sub": user_id,
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_type": "access",
+            **extra,
+        }
+        return jwt.encode(payload, secret or settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+    def bearer(self, token_value):
+        return {"Authorization": "Bearer " + token_value}
+
+    async def test_valid_token_attributes_user_id_and_role(self):
+        user_id = str(ObjectId())
+        response = await self.client.get("/api/users/me", headers=self.bearer(self.token(user_id, role="admin")))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"ok": True})
+        self.assertEqual(len(self.captured), 1)
+        entry = self.captured[0]
+        self.assertEqual(entry["user_id"], user_id)
+        self.assertEqual(entry["resource_type"], "users")
+        self.assertEqual(entry["action"], "access")
+        self.assertEqual(entry["details"]["role"], "admin")
+
+    async def test_missing_token_records_anonymous_and_request_unaffected(self):
+        response = await self.client.get("/api/users/me")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"ok": True})
+        self.assertEqual(self.captured[0]["user_id"], "anonymous")
+
+    async def test_invalid_signature_records_anonymous_and_request_unaffected(self):
+        user_id = str(ObjectId())
+        forged = self.token(user_id, secret="not-the-signing-key")
+        response = await self.client.get("/api/users/me", headers=self.bearer(forged))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.captured[0]["user_id"], "anonymous")
+
+    async def test_expired_token_records_anonymous_and_request_unaffected(self):
+        user_id = str(ObjectId())
+        expired = jwt.encode(
+            {"sub": user_id, "exp": datetime.now(timezone.utc) - timedelta(minutes=1), "token_type": "access"},
+            settings.SECRET_KEY, algorithm=settings.ALGORITHM,
+        )
+        response = await self.client.get("/api/users/me", headers=self.bearer(expired))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.captured[0]["user_id"], "anonymous")
+
+    async def test_refresh_token_is_not_attributed(self):
+        user_id = str(ObjectId())
+        refresh = self.token(user_id, token_type="refresh")
+        response = await self.client.get("/api/users/me", headers=self.bearer(refresh))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.captured[0]["user_id"], "anonymous")
+
+    async def test_non_bearer_authorization_scheme_is_anonymous(self):
+        response = await self.client.get(
+            "/api/users/me", headers={"Authorization": "Basic dXNlcjpwYXNz"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.captured[0]["user_id"], "anonymous")
+
+    async def test_malformed_header_is_anonymous(self):
+        response = await self.client.get("/api/users/me", headers={"Authorization": "Bearer"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.captured[0]["user_id"], "anonymous")
+
+    async def test_post_with_body_is_attributed_without_breaking_route(self):
+        user_id = str(ObjectId())
+        response = await self.client.post(
+            "/api/users", json={"name": "test"}, headers=self.bearer(self.token(user_id, role="patient")),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"created": True})
+        self.assertEqual(self.captured[0]["user_id"], user_id)
+        self.assertEqual(self.captured[0]["details"]["role"], "patient")
+
+    async def test_failure_warning_never_contains_token_content(self):
+        bogus = self.token(str(ObjectId()), secret="not-the-signing-key")
+        with self.assertLogs("app.core.permission_audit", level="WARNING") as observed:
+            response = await self.client.get("/api/users/me", headers=self.bearer(bogus))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn(bogus, "\n".join(observed.output))
 
 
 @unittest.skipUnless(MONGO_URI, "explicit isolated MongoDB test URI required")

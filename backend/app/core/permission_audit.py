@@ -1,15 +1,45 @@
-from typing import Callable, Optional, Dict, Any, List
+from typing import Callable, Optional, Dict, Any, List, Tuple
 from fastapi import Request, Response
+from jose import JWTError, jwt
+from math import isfinite
 import logging
 from datetime import datetime
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from app.core.config import settings
 from app.services.audit_log_service import AuditLogService
 from app.schemas.audit_log import AuditLogCreate
 from app.core.permissions import AUDITED_PERMISSIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_identity_from_token(token: str) -> Tuple[Optional[str], Optional[str]]:
+    """旁路审计用：解码访问令牌，返回 (user_id, role)。
+
+    解码失败或令牌无效时返回 (None, None)，由调用方记为 anonymous。
+    语义与 app.core.auth._access_token_user_id 保持一致；不记录令牌内容。
+    """
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM],
+            options={"require_exp": True},
+        )
+    except (JWTError, TypeError, ValueError):
+        return None, None
+    user_id = payload.get("sub")
+    expiry = payload.get("exp")
+    try:
+        valid_expiry = isinstance(expiry, (int, float)) and not isinstance(expiry, bool) and isfinite(expiry)
+    except OverflowError:
+        valid_expiry = False
+    # 旧版访问令牌没有 token_type；带类型的令牌必须明确为 access。
+    if not valid_expiry or not isinstance(user_id, str) or not user_id \
+            or payload.get("token_type", "access") != "access":
+        return None, None
+    role = payload.get("role")
+    return user_id, (role if isinstance(role, str) and role else None)
 
 class PermissionAuditMiddleware(BaseHTTPMiddleware):
     """
@@ -83,30 +113,28 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
         if len(parts) > 3 and parts[3] and parts[3].isalnum():
             resource_id = parts[3]
         
-        # 尝试获取用户信息
+        # 尝试获取用户信息（旁路审计提取，不做鉴权判断；失败时保持匿名）
         user_id = None
-        try:
-            # 用户信息可能在请求头或会话中
-            if "authorization" in request.headers:
-                # 实际实现中需要从token中提取用户ID
-                # 这里仅作为示例
-                token = request.headers["authorization"].split(" ")[1]
-                # 从token中提取用户ID的逻辑
-                # user_id = decode_token(token)["sub"]
-                pass
-        except Exception as e:
-            logger.error(f"Failed to extract user info from request: {str(e)}")
-        
-        # 尝试获取请求体
-        request_body = None
-        if method in ["POST", "PUT", "PATCH"]:
+        role = None
+        token = None
+        auth_header = request.headers.get("authorization")
+        if auth_header:
+            scheme, _, credentials = auth_header.partition(" ")
+            if scheme.lower() == "bearer" and credentials.strip():
+                token = credentials.strip()
+        if not token:
+            # 部分客户端通过 cookie 携带令牌（与 WebSocket 认证一致）
             try:
-                # 读取请求体，但要确保不影响后续处理
-                request_body = await request.body()
-                # 重置request body以供后续中间件/路由处理
-                await request._receive()
-            except Exception as e:
-                logger.error(f"Failed to read request body: {str(e)}")
+                token = request.cookies.get(settings.TOKEN_COOKIE_NAME)
+            except Exception:
+                token = None
+        if token:
+            user_id, role = _extract_identity_from_token(token)
+            if user_id is None:
+                logger.warning("Audit identity extraction failed: invalid or expired access token")
+        
+        # 审计为旁路记录：不消费请求体，避免阻塞等待下游 receive 事件
+        # 或影响路由对请求体的读取（此前预留的 body 采集逻辑从未被使用，已移除）。
         
         # 处理请求，记录响应状态
         start_time = datetime.utcnow()
@@ -131,17 +159,10 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
                 "duration_ms": round(duration * 1000),
                 "status_code": response.status_code
             }
-            
-            # 如果有请求体，添加到详情中
-            if request_body:
-                try:
-                    # 可能需要解析请求体
-                    # body_json = json.loads(request_body)
-                    # 在实际应用中，可能需要过滤或脱敏敏感信息
-                    # details["request"] = body_json
-                    pass
-                except:
-                    pass
+
+            # 令牌中携带角色时写入审计详情，便于归因分析
+            if role:
+                details["role"] = role
             
             # 创建审计日志
             await audit_service.create_log(
