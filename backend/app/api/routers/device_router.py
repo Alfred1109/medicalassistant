@@ -8,7 +8,11 @@ from datetime import datetime
 from bson import ObjectId
 from pydantic import BaseModel, Field
 
-from ...services.device_service import device_service
+from ...services.device_service import (
+    device_service,
+    DEVICE_READ_ROLES,
+    DEVICE_MUTATE_ROLES,
+)
 from ...core.auth import get_current_active_user
 
 
@@ -142,7 +146,7 @@ async def get_device(
     """获取设备详情"""
     # 检查权限（存在性 + 属主/角色粗判）
     device = await _get_device_or_404(device_id)
-    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
+    _ensure_device_access(device, current_user, list(DEVICE_READ_ROLES))
     return _to_device_response(device)
 
 
@@ -164,7 +168,7 @@ async def unbind_device(
     """解绑用户设备"""
     device = await _get_device_or_404(device_id)
 
-    # 检查权限（解绑仅限属主或管理员）
+    # 检查权限（解绑属变更操作：仅属主本人或管理员；健康管理师只读不可变更）
     if not _is_device_owner(device, current_user.id) and current_user.role not in ["admin"]:
         raise HTTPException(status_code=403, detail="无权解绑此设备")
 
@@ -188,8 +192,8 @@ async def get_device_data(
     # 检查权限（存在性 + 属主/角色粗判）
     device = await _get_device_or_404(device_id)
     # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
-    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
-    
+    _ensure_device_access(device, current_user, list(DEVICE_READ_ROLES))
+
     data = await device_service.get_device_data(
         device_id,
         start_date=start_date,
@@ -211,7 +215,7 @@ async def sync_device_data(
     # 检查权限（存在性 + 属主/角色粗判）
     device = await _get_device_or_404(device_id)
     # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
-    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
+    _ensure_device_access(device, current_user, list(DEVICE_READ_ROLES))
 
     return await device_service.sync_device_data(device_id)
 
@@ -225,13 +229,17 @@ async def repair_device(
     自动修复设备异常状态
     """
     # 存在性校验：畸形 ID 与不存在的设备语义一致（404）
-    await _get_device_or_404(device_id)
+    device = await _get_device_or_404(device_id)
 
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if current_user.role not in ["doctor", "admin"]:
+    # 变更操作守卫：属主患者可维修自己名下设备（此前属主患者被
+    # "只有医生或管理员" 一刀切 403，即患者角色错配缺陷）；
+    # 健康管理师只读，不可执行维修等变更操作。
+    # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
+    if not _is_device_owner(device, current_user.id) \
+            and current_user.role not in DEVICE_MUTATE_ROLES:
         raise HTTPException(
             status_code=403,
-            detail="权限不足，只有医生或管理员可以执行设备修复操作"
+            detail="无权修复此设备：仅设备属主、医生或管理员可执行维修操作"
         )
 
     # 调用设备修复服务
@@ -248,7 +256,7 @@ async def get_device_status(
     # 检查权限（存在性 + 属主/角色粗判）
     device = await _get_device_or_404(device_id)
     # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
-    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
+    _ensure_device_access(device, current_user, list(DEVICE_READ_ROLES))
 
     status = await device_service.get_device_status(device_id)
     return status
@@ -263,8 +271,10 @@ async def configure_device(
     """配置设备"""
     # 检查权限（存在性 + 属主/角色粗判）
     device = await _get_device_or_404(device_id)
+    # 变更操作守卫：配置属变更操作，健康管理师只读不可变更（缺陷 B 统一）；
+    # 属主患者可配置自己名下设备。
     # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
-    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
-    
+    _ensure_device_access(device, current_user, list(DEVICE_MUTATE_ROLES))
+
     result = await device_service.configure_device(device_id, config.dict(exclude_unset=True))
     return result 

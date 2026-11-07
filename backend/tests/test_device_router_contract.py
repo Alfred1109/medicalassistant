@@ -177,6 +177,103 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
             f"/api/devices/{DEVICE_ID}", headers=self.auth())
         self.assertEqual(response.status_code, 404, response.text)
 
+    async def test_owner_patient_can_repair_own_device(self):
+        # 回归锁定（缺陷 A）：患者请求维修自己名下设备此前被
+        # "只有医生或管理员" 一刀切 403（患者角色错配），属主应放行
+        self.device_service.auto_repair_device = AsyncMock(
+            return_value={"success": True, "message": "设备修复成功"})
+        response = await self.client.post(
+            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.device_service.auto_repair_device.assert_awaited_once_with(DEVICE_ID)
+
+    async def test_repair_forbidden_for_other_patient(self):
+        # 非属主患者请求维修他人设备：403，service 不被触发
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id="other-patient"))
+        self.device_service.auto_repair_device = AsyncMock()
+        response = await self.client.post(
+            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
+        self.assertEqual(response.status_code, 403, response.text)
+        self.device_service.auto_repair_device.assert_not_awaited()
+
+    async def test_repair_allowed_for_doctor_on_any_device(self):
+        # 医生可维修患者设备（变更操作的第二授权角色）
+        self.operator = make_operator(role="doctor")
+        self.get_user_mock.return_value = self.operator
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id="other-patient"))
+        self.device_service.auto_repair_device = AsyncMock(
+            return_value={"success": True, "message": "设备修复成功"})
+        response = await self.client.post(
+            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.device_service.auto_repair_device.assert_awaited_once_with(DEVICE_ID)
+
+    async def test_repair_forbidden_for_health_manager(self):
+        # 回归锁定（缺陷 B）：健康管理师只读，不可执行维修等变更操作
+        self.operator = make_operator(role="health_manager")
+        self.get_user_mock.return_value = self.operator
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id="other-patient"))
+        self.device_service.auto_repair_device = AsyncMock()
+        response = await self.client.post(
+            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
+        self.assertEqual(response.status_code, 403, response.text)
+        self.device_service.auto_repair_device.assert_not_awaited()
+
+    async def test_health_manager_can_read_device_detail(self):
+        # 健康管理师可查看其负责患者的设备数据（只读路径放行）
+        self.operator = make_operator(role="health_manager")
+        self.get_user_mock.return_value = self.operator
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id="other-patient"))
+        response = await self.client.get(
+            f"/api/devices/{DEVICE_ID}", headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_health_manager_can_read_device_data_and_status(self):
+        # 只读路径（data/status）对健康管理师保持放行，与统一语义一致
+        self.operator = make_operator(role="health_manager")
+        self.get_user_mock.return_value = self.operator
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id="other-patient"))
+        self.device_service.get_device_data = AsyncMock(return_value=[])
+        self.device_service.get_device_status = AsyncMock(return_value={
+            "status": "active", "battery_level": 80, "signal_strength": 4,
+            "last_sync_time": None})
+        data_resp = await self.client.get(
+            f"/api/devices/{DEVICE_ID}/data", headers=self.auth())
+        status_resp = await self.client.get(
+            f"/api/devices/{DEVICE_ID}/status", headers=self.auth())
+        self.assertEqual(data_resp.status_code, 200, data_resp.text)
+        self.assertEqual(status_resp.status_code, 200, status_resp.text)
+
+    async def test_configure_forbidden_for_health_manager(self):
+        # 回归锁定（缺陷 B）：配置属变更操作，健康管理师不可执行
+        self.operator = make_operator(role="health_manager")
+        self.get_user_mock.return_value = self.operator
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id="other-patient"))
+        self.device_service.configure_device = AsyncMock()
+        response = await self.client.put(
+            f"/api/devices/{DEVICE_ID}/config",
+            json={"sync_frequency": "hourly"}, headers=self.auth())
+        self.assertEqual(response.status_code, 403, response.text)
+        self.device_service.configure_device.assert_not_awaited()
+
+    async def test_owner_patient_can_configure_own_device(self):
+        # 属主患者可配置自己名下设备（变更守卫含属主本人）
+        self.device_service.configure_device = AsyncMock(
+            return_value={"success": True, "message": "设备配置已更新"})
+        response = await self.client.put(
+            f"/api/devices/{DEVICE_ID}/config",
+            json={"sync_frequency": "hourly"}, headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.device_service.configure_device.assert_awaited_once()
+
     async def test_malformed_device_id_returns_404(self):
         # 回归锁定：畸形 device_id 不应触发 ObjectId() 解析异常（此前 500），
         # 应与"设备不存在"语义一致返回 404，且不触发 service 查询

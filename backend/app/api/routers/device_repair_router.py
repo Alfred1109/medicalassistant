@@ -8,9 +8,25 @@ from datetime import datetime, timedelta
 from bson import ObjectId
 
 from ...db.mongodb import get_db
-from ...services.device_service import device_service
+from ...services.device_service import device_service, DEVICE_READ_ROLES
 from ...services.device_repair_service import device_repair_service
 from ...core.dependencies import get_current_user
+
+
+def _ensure_repair_log_read_access(current_user) -> None:
+    """维修记录只读守卫。
+
+    回归锁定：get_current_user 返回 pydantic UserResponse（.role 单角色字段），
+    此前按 dict.get("roles", []) 访问必然 AttributeError → 500。
+    语义统一（缺陷 B）：维修记录属设备数据只读路径，医疗 staff
+    （doctor / health_manager / admin）可查看；患者与健康管理师变更之外
+    的写角色不存在，此处不涉及变更操作。
+    """
+    if current_user.role not in DEVICE_READ_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="权限不足，只有医生、健康管理师或管理员可以查看设备维修记录"
+        )
 
 router = APIRouter(prefix="/device-repairs", tags=["device-repairs"])
 
@@ -34,13 +50,9 @@ async def get_repair_history(
     返回:
     - 修复历史记录列表
     """
-    # 检查用户权限
-    if "doctor" not in current_user.get("roles", []) and "admin" not in current_user.get("roles", []):
-        raise HTTPException(
-            status_code=403,
-            detail="权限不足，只有医生或管理员可以查看设备修复历史"
-        )
-    
+    # 检查用户权限（维修记录只读：医疗 staff 可查看）
+    _ensure_repair_log_read_access(current_user)
+
     # 构建查询条件
     query = {}
     
@@ -81,13 +93,9 @@ async def get_repair_details(
     返回:
     - 修复记录详情
     """
-    # 检查用户权限
-    if "doctor" not in current_user.get("roles", []) and "admin" not in current_user.get("roles", []):
-        raise HTTPException(
-            status_code=403,
-            detail="权限不足，只有医生或管理员可以查看设备修复详情"
-        )
-    
+    # 检查用户权限（维修记录只读：医疗 staff 可查看）
+    _ensure_repair_log_read_access(current_user)
+
     db = await get_db()
     repair = await db.device_repair_logs.find_one({"_id": ObjectId(repair_id)})
     
@@ -118,13 +126,9 @@ async def get_device_repair_summary(
     返回:
     - 修复统计摘要
     """
-    # 检查用户权限
-    if "doctor" not in current_user.get("roles", []) and "admin" not in current_user.get("roles", []):
-        raise HTTPException(
-            status_code=403,
-            detail="权限不足，只有医生或管理员可以查看设备修复统计"
-        )
-    
+    # 检查用户权限（维修记录只读：医疗 staff 可查看）
+    _ensure_repair_log_read_access(current_user)
+
     # 构建查询条件
     start_date = datetime.utcnow() - timedelta(days=days)
     query = {

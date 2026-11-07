@@ -14,6 +14,15 @@ from .device_data_validator_service import device_data_validator_service
 from ..db.mongodb import get_db
 
 
+# ── 设备域角色语义统一（缺陷 B 盘点后收敛）─────────────────────────────────
+# 只读路径（查看设备详情/数据/状态/分析/预警/维修记录）：医疗 staff
+# doctor / health_manager / admin；健康管理师可查看其负责患者的设备数据。
+DEVICE_READ_ROLES = ("doctor", "health_manager", "admin")
+# 变更路径（配置/维修等）：设备属主本人或 doctor / admin；
+# 健康管理师不可执行变更操作，患者仅可操作自己名下设备。
+DEVICE_MUTATE_ROLES = ("doctor", "admin")
+
+
 class DeviceService:
     """设备服务类，处理设备管理和数据相关功能"""
     
