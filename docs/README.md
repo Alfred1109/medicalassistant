@@ -6,13 +6,23 @@ Medical Rehabilitation Assistant是一个医疗康复辅助系统，旨在帮助
 
 ## 文档目录
 
+当前开发依据为 [肾脏康复平台开发计划（2026-11-07）](./development-plan-2026-11-07.md)，覆盖113.44表单嵌入、康复与质控、多中心和隐私计算。BASE01—BASE03基线已开始、尚未完整验收，其他任务按交付物和验收证据记录状态。
+
 本文档目录包含项目开发和架构相关的核心文档：
 
 - [项目架构说明](./structure.md)：详细描述系统架构和功能模块
-- [开发计划](./develop.md)：系统开发阶段规划和重构计划
-- [项目进度](../milestone.md)：当前开发进度和里程碑
+- [本轮开发计划](./development-plan-2026-11-07.md)：范围、工作包、依赖、待确认决策与验收标准
+- [统一身份接入契约草案](./identity-integration-contract.md)：注册审核、跨平台身份与授权、嵌入会话及撤权边界
+- [隔离演示账号初始化](./isolated-demo-accounts.md)：不在普通启动时创建默认账号，演示数据需显式初始化到新的本地隔离库
+- [开发基线核查记录](./baseline-2026-11-07.md)：已验证内容、领域断点和待修复事项
+- [设备 SDK 接入评估](./device-sdk-assessment-2026-11-07.md)：原生蓝牙SDK、当前模拟数据边界与实机验收前提
+- [康复方案链路核查](./rehabilitation-contract-review-2026-11-07.md)：实际路由、方案与运动执行链路的断点和整体改造顺序
+- [历史开发计划](./develop.md)：既有阶段规划，保留供追溯
+- [历史里程碑](./milestone.md)：历史声明，不能作为本轮完成度或功能验收证据
 
 ## 项目架构
+
+以下架构、功能和重构总结为既有说明，尚未逐项通过本轮运行验收；当前事实与改造任务见本轮开发计划。
 
 本项目采用分层架构设计：
 
@@ -111,21 +121,9 @@ Medical Rehabilitation Assistant是一个医疗康复辅助系统，旨在帮助
 
 ## 开发环境设置
 
-1. **克隆仓库**
-   ```bash
-   git clone <repository-url>
-   cd patientmanager
-   ```
+项目根目录提供 `./start.sh` 与 `./stop.sh`；`./start.sh --check` 检查依赖、MongoDB和端口，`./start.sh --status` 查看项目进程。脚本使用 `backend/.venv` 或 `backend/venv`，可用 `MEDICALASSISTANT_PYTHON` 指定项目Python；MongoDB独立配置和管理，启动器不会安装依赖或启停数据库。若环境中的 `DEBUG` 不是布尔值，可在启动命令前显式设置 `DEBUG=false`，无需修改全局环境。当前前端构建与统一身份仍待修复验收，启动成功不代表业务可用。
 
-2. **启动项目**
-   ```bash
-   ./start-project.sh
-   ```
-
-3. **停止项目**
-   ```bash
-   ./stop-project.sh
-   ```
+旧 `start-project.sh`、`stop-project.sh` 有跨项目进程操作，不应使用；按项目约定只使用 `start.sh`、`stop.sh`。
 
 ## 下一步工作
 
@@ -134,4 +132,4 @@ Medical Rehabilitation Assistant是一个医疗康复辅助系统，旨在帮助
 3. **性能优化**：数据库查询优化、批量操作优化
 4. **安全增强**：添加更多安全检查和防护措施
 5. **小程序开发**：推进小程序版本实现
-6. **设备接入能力**：完善设备接入标准和管理 
+6. **设备接入能力**：完善设备接入标准和管理
