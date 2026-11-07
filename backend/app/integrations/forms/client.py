@@ -35,13 +35,16 @@ class FormPlatformClient:
     """对 113.44 集成 API 的最小封装；仅覆盖填报会话所需端点。"""
 
     def __init__(self, base_url: str, client_id: str, client_secret: str,
-                 timeout_seconds: float, transport: Optional[httpx.AsyncBaseTransport] = None):
+                 timeout_seconds: float, transport: Optional[httpx.AsyncBaseTransport] = None,
+                 verify_tls: bool = True):
         self._base_url = base_url.rstrip("/")
         self._client_id = client_id
         self._client_secret = client_secret
         self._timeout = httpx.Timeout(timeout_seconds)
         # transport 仅测试注入（httpx.MockTransport）；生产为 None
         self._transport = transport
+        # verify_tls=False 仅限隔离联调的自签名证书场景
+        self._verify_tls = verify_tls
 
     @classmethod
     def from_settings(cls) -> "FormPlatformClient":
@@ -55,6 +58,7 @@ class FormPlatformClient:
             client_id=settings.FORM_PLATFORM_CLIENT_ID,
             client_secret=secret.get_secret_value(),
             timeout_seconds=settings.FORM_PLATFORM_TIMEOUT_SECONDS,
+            verify_tls=settings.FORM_PLATFORM_VERIFY_TLS,
         )
 
     def _auth_headers(self) -> Dict[str, str]:
@@ -64,7 +68,8 @@ class FormPlatformClient:
                        json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=self._timeout,
-                                         transport=self._transport) as client:
+                                         transport=self._transport,
+                                         verify=self._verify_tls) as client:
                 response = await client.request(
                     method, f"{self._base_url}{path}",
                     json=json_body, headers=self._auth_headers(),

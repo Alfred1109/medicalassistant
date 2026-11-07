@@ -86,9 +86,19 @@ const FormFillEmbedPage: React.FC = () => {
   useEffect(() => {
     if (!taskId || !embed) return;
 
+    // event.origin 是消息发送方（表单平台 iframe）的来源，
+    // 必须等于 embed_url 的来源；allowedOrigin 是本页面自身来源（postMessage 的目标），二者不能混用。
+    const formPlatformOrigin = (() => {
+      try {
+        return new URL(embed.embedUrl).origin;
+      } catch {
+        return '';
+      }
+    })();
+
     const handler = (event: MessageEvent) => {
-      // 严格校验 origin：必须与后端登记的 allowedOrigin 完全一致
-      if (event.origin !== embed.allowedOrigin) return;
+      // 严格校验 origin：必须与表单平台来源完全一致
+      if (!formPlatformOrigin || event.origin !== formPlatformOrigin) return;
       if (!isFormPlatformFillStatusMessage(event.data)) return;
       if (embed.sessionUuid && event.data.sessionSid !== embed.sessionUuid) return;
       if (event.data.status !== 'submitted') return;

@@ -118,30 +118,30 @@ const buildCreatePayload = (payload: CreateFillTaskPayload): Record<string, unkn
 export const formIntegrationService = {
   async createFillTask(payload: CreateFillTaskPayload): Promise<CreateFillTaskResult> {
     return apiClient.post<CreateFillTaskResult>(
-      '/api/integrations/forms/fill-tasks',
+      '/integrations/forms/fill-tasks',
       buildCreatePayload(payload),
     );
   },
 
   async getFillTask(taskId: string): Promise<FillTask> {
-    return apiClient.get<FillTask>(`/api/integrations/forms/fill-tasks/${taskId}`);
+    return apiClient.get<FillTask>(`/integrations/forms/fill-tasks/${taskId}`);
   },
 
   async getEmbedUrl(taskId: string): Promise<EmbedUrlResult> {
     return apiClient.get<EmbedUrlResult>(
-      `/api/integrations/forms/fill-tasks/${taskId}/embed-url`,
+      `/integrations/forms/fill-tasks/${taskId}/embed-url`,
     );
   },
 
   async confirmFillTask(taskId: string): Promise<FillTask> {
     return apiClient.post<FillTask>(
-      `/api/integrations/forms/fill-tasks/${taskId}/confirm`,
+      `/integrations/forms/fill-tasks/${taskId}/confirm`,
     );
   },
 
   async cancelFillTask(taskId: string): Promise<FillTask> {
     return apiClient.post<FillTask>(
-      `/api/integrations/forms/fill-tasks/${taskId}/cancel`,
+      `/integrations/forms/fill-tasks/${taskId}/cancel`,
     );
   },
 };
