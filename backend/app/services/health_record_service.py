@@ -47,17 +47,18 @@ class HealthRecordService:
         Returns:
             HealthRecordResponse: 创建成功的健康档案响应
         """
-        # 创建健康档案对象
+        # 按生效 schema（HealthRecordCreate，schemas/health_record.py:371-375）修正：
+        # organization_id / visibility 为第一代独有字段，生效模型上不存在，停止访问与写入（FU01 收敛决策），
+        # 由存储模型默认值（organization_id=None、visibility="all"）兜底
         record = HealthRecord(
             patient_id=record_data.patient_id,
             record_type=record_data.record_type,
             title=record_data.title,
             content=record_data.content,
             created_by=record_data.created_by,
-            organization_id=record_data.organization_id,
-            attachments=record_data.attachments,
+            # 按生效 schema 修正：附件为 pydantic 模型，须转 dict 才能落库（否则 bson InvalidDocument）
+            attachments=[a.model_dump() for a in record_data.attachments],
             tags=record_data.tags,
-            visibility=record_data.visibility,
             metadata=record_data.metadata
         )
         
@@ -111,24 +112,33 @@ class HealthRecordService:
         # 创建对象
         record = HealthRecord.from_mongo(record_doc)
         
-        # 更新内容（如果提供）
+        # 更新内容（如果提供）。按生效 schema 修正：HealthRecordUpdate.content 为 str，
+        # 而存储模型的 update_content 仅支持 Dict content（内部调用 self.content.copy()/.update()），
+        # 故在服务层直接赋值并沿用其版本记录语义
         if record_data.content:
-            record.update_content(
-                content=record_data.content,
-                updated_by=updated_by,
-                change_description=record_data.change_description
-            )
-        
+            record.versions.append({
+                "version_number": record.current_version,
+                "content": record.content,
+                "created_by": record.created_by if record.current_version == 1 else updated_by,
+                "created_at": record.created_at if record.current_version == 1 else record.updated_at,
+                "change_description": None if record.current_version == 1 else record_data.change_description
+            })
+            record.content = record_data.content
+            record.current_version += 1
+            record.updated_at = datetime.utcnow()
+
         # 更新其他字段
         update_data = {}
+        if record_data.record_type:
+            update_data["record_type"] = record_data.record_type  # 按生效 schema 修正：record_type 为生效字段
         if record_data.title:
             update_data["title"] = record_data.title
         if record_data.tags is not None:
             update_data["tags"] = record_data.tags
         if record_data.attachments is not None:
-            update_data["attachments"] = record_data.attachments
-        if record_data.visibility:
-            update_data["visibility"] = record_data.visibility
+            # 按生效 schema 修正：附件为 pydantic 模型，须转 dict 才能落库
+            update_data["attachments"] = [a.model_dump() for a in record_data.attachments]
+        # 按生效 schema（HealthRecordUpdate:378-388）修正：visibility 为第一代独有字段，停止访问与写入
         if record_data.metadata:
             update_data["metadata"] = record_data.metadata
         
@@ -338,16 +348,29 @@ class HealthRecordService:
         Returns:
             FollowUpRecordResponse: 创建成功的随访记录响应
         """
+        # 按生效 schema（FollowUpRecordCreate:477-482）修正：
+        # notes / health_record_ids 为第一代字段，生效模型上不存在，停止访问；
+        # 生效字段映射：description -> 存储字段 notes，related_records -> 存储字段 health_record_ids，
+        # created_by 缺省时回退到必填的 provider_id；template_id / provider_id / reminder_before
+        # 经 metadata 落库（与 _map_followup_record_to_response 的缝合层约定一致）
+        followup_metadata = dict(followup_data.metadata or {})
+        followup_metadata["provider_id"] = followup_data.provider_id
+        if followup_data.template_id:
+            followup_metadata["template_id"] = followup_data.template_id
+        if followup_data.reminder_before is not None:
+            followup_metadata["reminder_before"] = followup_data.reminder_before
+
         # 创建随访记录对象
         followup_record = FollowUpRecord(
             patient_id=followup_data.patient_id,
-            created_by=followup_data.created_by,
+            created_by=followup_data.created_by or followup_data.provider_id,
             follow_up_type=followup_data.follow_up_type,
             scheduled_date=followup_data.scheduled_date,
-            notes=followup_data.notes,
-            questions=followup_data.questions,
-            health_record_ids=followup_data.health_record_ids,
-            metadata=followup_data.metadata or {}
+            notes=followup_data.description,
+            # 按生效 schema 修正：questions 为 pydantic 模型，须转 dict 才能落库
+            questions=[q.model_dump() for q in followup_data.questions],
+            health_record_ids=followup_data.related_records,
+            metadata=followup_metadata
         )
         
         # 插入数据库
@@ -399,20 +422,24 @@ class HealthRecordService:
         # 创建对象
         followup_record = FollowUpRecord.from_mongo(followup_doc)
         
-        # 更新字段
+        # 更新字段。按生效 schema（FollowUpRecordUpdate:484-494）修正：
+        # notes / health_record_ids 为第一代字段，停止访问；
+        # 生效字段映射：description -> 存储字段 notes，related_records -> 存储字段 health_record_ids
         update_data = {}
         if followup_data.follow_up_type:
             update_data["follow_up_type"] = followup_data.follow_up_type
         if followup_data.scheduled_date:
             update_data["scheduled_date"] = followup_data.scheduled_date
         if followup_data.status:
-            update_data["status"] = followup_data.status
-        if followup_data.notes is not None:
-            update_data["notes"] = followup_data.notes
+            # 按生效 schema 修正：status 为枚举，落库取其字符串值
+            update_data["status"] = followup_data.status.value
+        if followup_data.description is not None:
+            update_data["notes"] = followup_data.description
         if followup_data.questions is not None:
-            update_data["questions"] = followup_data.questions
-        if followup_data.health_record_ids is not None:
-            update_data["health_record_ids"] = followup_data.health_record_ids
+            # 按生效 schema 修正：questions 为 pydantic 模型，须转 dict 才能进 $set
+            update_data["questions"] = [q.model_dump() for q in followup_data.questions]
+        if followup_data.related_records is not None:
+            update_data["health_record_ids"] = followup_data.related_records
         if followup_data.metadata is not None:
             update_data["metadata"] = followup_data.metadata
         
@@ -468,30 +495,36 @@ class HealthRecordService:
         # 创建对象
         followup_record = FollowUpRecord.from_mongo(followup_doc)
         
+        # 按生效 schema 修正：answers 为 pydantic 模型（FollowUpAnswer），须转 dict 才能落库（bson InvalidDocument）
+        answers_data = [a.model_dump() for a in data.answers]
+
         # 更新随访状态
         followup_record.complete_followup(
             actual_date=data.actual_date,
             notes=data.notes,
-            answers=data.answers
+            answers=answers_data
         )
-        
+
         # 完成数据
         completion_data = {
             "completed_at": datetime.utcnow(),
             "result": data.follow_up_result,
             "notes": data.notes
         }
-        
-        # 更新数据库
+
+        # 更新数据库。按生效 schema 修正：completion_data 不在存储模型 FollowUpRecord 的字段上，
+        # 顶层写入会令后续 from_mongo 读回抛 TypeError，故按缝合层约定写入 metadata
+        # （_map_followup_record_to_response 从 metadata.completion_data / metadata.result 读取）
         await self.followup_records.update_one(
             {"_id": ObjectId(followup_id)},
             {"$set": {
                 "status": "completed",
                 "actual_date": data.actual_date,
-                "answers": data.answers,
+                "answers": answers_data,
                 "notes": data.notes if data.notes else followup_record.notes,
                 "updated_at": datetime.utcnow(),
-                "completion_data": completion_data
+                "metadata.completion_data": completion_data,
+                "metadata.result": data.follow_up_result
             }}
         )
         
@@ -511,10 +544,10 @@ class HealthRecordService:
             # 插入数据库
             new_result = await self.followup_records.insert_one(new_followup.to_mongo())
             
-            # 更新原随访记录的next_follow_up_id
+            # 更新原随访记录的next_follow_up_id（按缝合层约定写入 metadata，避免顶层字段令 from_mongo 读回抛 TypeError）
             await self.followup_records.update_one(
                 {"_id": ObjectId(followup_id)},
-                {"$set": {"next_follow_up_id": str(new_result.inserted_id)}}
+                {"$set": {"metadata.next_follow_up_id": str(new_result.inserted_id)}}
             )
             
             # 创建关联的时间线项目
@@ -569,12 +602,13 @@ class HealthRecordService:
             "reschedule_date": data.reschedule_date
         }
         
-        # 更新字段
+        # 更新字段。按生效 schema 修正：cancellation_data 不在存储模型 FollowUpRecord 的字段上，
+        # 顶层写入会令后续 from_mongo 读回抛 TypeError，故按缝合层约定写入 metadata
         update_data = {
             "status": "canceled",
             "notes": followup_record.notes,
             "updated_at": datetime.utcnow(),
-            "cancellation_data": cancellation_data
+            "metadata.cancellation_data": cancellation_data
         }
         
         # 更新数据库
@@ -599,10 +633,10 @@ class HealthRecordService:
             # 插入数据库
             new_result = await self.followup_records.insert_one(new_followup.to_mongo())
             
-            # 更新原随访记录的next_follow_up_id
+            # 更新原随访记录的next_follow_up_id（按缝合层约定写入 metadata，避免顶层字段令 from_mongo 读回抛 TypeError）
             await self.followup_records.update_one(
                 {"_id": ObjectId(followup_id)},
-                {"$set": {"next_follow_up_id": str(new_result.inserted_id)}}
+                {"$set": {"metadata.next_follow_up_id": str(new_result.inserted_id)}}
             )
             
             # 创建关联的时间线项目
@@ -782,16 +816,17 @@ class HealthRecordService:
         Returns:
             HealthDataResponse: 创建成功的健康数据响应
         """
-        # 创建健康数据对象
+        # 按生效 schema（HealthDataCreate:569-571）修正：
+        # metadata 为第一代独有字段，生效模型上不存在，停止访问与写入，由存储模型默认值兜底；
+        # 原句 device_id=data.source == "device" 系笔误（把布尔写进 device_id），且生效模型无 device_id
+        # 字段，停止写入，设备来源语义由 source 字段承载
         health_data = HealthData(
             patient_id=data.patient_id,
             data_type=data.data_type,
             data=data.data_content,
             source=data.source,
-            device_id=data.source == "device",
             recorded_by=data.recorded_by,
-            recorded_at=data.recorded_at or datetime.utcnow(),
-            metadata=data.metadata or {}
+            recorded_at=data.recorded_at or datetime.utcnow()
         )
         
         # 插入数据库
@@ -1041,10 +1076,9 @@ class HealthRecordService:
             title=health_record.title,
             content=health_record.content,
             created_by=health_record.created_by,
-            organization_id=health_record.organization_id,
             attachments=health_record.attachments,
             tags=health_record.tags,
-            visibility=health_record.visibility,
+            # 按生效 schema 修正：organization_id / visibility 不在生效的 HealthRecordResponse（:404-414）上，停止透传
             created_at=health_record.created_at,
             updated_at=health_record.updated_at,
             current_version=health_record.current_version,
