@@ -114,31 +114,32 @@ class PatientCRUD(CRUDBase[Patient]):
         }
     
     async def find_by_doctor_id(self, doctor_id: str) -> List[dict]:
-        """根据医生ID查找其管理的所有患者"""
-        try:
-            # 获取医生对象
-            doctor_collection = self.db["users"]
-            doctor = await doctor_collection.find_one({"_id": ObjectId(doctor_id), "role": "doctor"})
-            
-            if not doctor or "patients" not in doctor or not doctor["patients"]:
-                return []
-                
-            # 获取患者列表
-            patient_ids = doctor["patients"]
-            results = []
-            
-            for patient_id in patient_ids:
-                try:
-                    patient_doc = await self.collection.find_one({"_id": ObjectId(patient_id), "role": "patient"})
-                    if patient_doc:
-                        results.append(self._get_patient_data(patient_doc))
-                except Exception as e:
-                    print(f"获取患者数据错误 (ID: {patient_id}): {str(e)}")
-            
-            return results
-        except Exception as e:
-            print(f"查找医生患者时出错: {str(e)}")
+        """根据医生ID查找其管理的所有患者
+
+        数据库/查询异常如实上抛（由路由层转 500），不再吞掉后返回 []，
+        避免"空列表"与"查询失败"混淆导致上层误判为空库。
+        单个患者 ID 无效仅跳过该条，不影响其余患者。
+        """
+        # 获取医生对象
+        doctor_collection = self.db["users"]
+        doctor = await doctor_collection.find_one({"_id": ObjectId(doctor_id), "role": "doctor"})
+
+        if not doctor or "patients" not in doctor or not doctor["patients"]:
             return []
+
+        # 获取患者列表
+        patient_ids = doctor["patients"]
+        results = []
+
+        for patient_id in patient_ids:
+            try:
+                patient_doc = await self.collection.find_one({"_id": ObjectId(patient_id), "role": "patient"})
+                if patient_doc:
+                    results.append(await self._get_patient_data(patient_doc))
+            except Exception as e:
+                print(f"获取患者数据错误 (ID: {patient_id}): {str(e)}")
+
+        return results
     
     async def update_medical_info(self, patient_id: str, medical_info: Dict[str, Any]) -> bool:
         """更新患者医疗信息"""

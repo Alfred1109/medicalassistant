@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List, Optional
+from datetime import datetime, timedelta
 from app.schemas.user import UserResponse
 from app.core.dependencies import get_current_user, get_database, format_mongo_doc, get_health_record_for_patient
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -25,47 +26,21 @@ async def get_doctor_patients(
     # 从数据库获取患者数据
     doctor_crud = DoctorCRUD(db, Doctor)
     patient_crud = PatientCRUD(db, Patient)
-    
+
     try:
         # 获取当前医生的所有患者
         doctor_id = current_user.id
         patients_data = await patient_crud.find_by_doctor_id(doctor_id)
-        
-        # 如果数据库中没有找到患者记录，返回模拟数据
-        if not patients_data:
-            # 创建模拟数据
-            mock_patients = [
-                {
-                    "id": f"mock_{i}",
-                    "name": f"测试患者{i}",
-                    "age": 30 + i,
-                    "gender": "男" if i % 2 == 0 else "女",
-                    "diagnosis": "腰椎间盘突出" if i % 2 == 0 else "腰肌劳损",
-                    "status": ["在治疗", "随访中", "已完成"][i % 3],
-                }
-                for i in range(1, 6)
-            ]
-            print(f"返回{len(mock_patients)}个模拟患者数据")
-            return mock_patients
-        
-        # 直接返回find_by_doctor_id的结果，无需再次格式化
-        return patients_data
     except Exception as e:
-        # 记录错误，返回模拟数据以避免页面一直加载
+        # 记录错误并如实上抛为 500，绝不返回模拟患者
         print(f"获取患者数据时出错: {str(e)}")
-        mock_patients = [
-            {
-                "id": f"mock_{i}",
-                "name": f"测试患者{i}",
-                "age": 30 + i,
-                "gender": "男" if i % 2 == 0 else "女",
-                "diagnosis": "腰椎间盘突出" if i % 2 == 0 else "腰肌劳损",
-                "status": ["在治疗", "随访中", "已完成"][i % 3],
-            }
-            for i in range(1, 6)
-        ]
-        print(f"返回{len(mock_patients)}个模拟患者数据")
-        return mock_patients
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="获取患者列表失败，请稍后重试"
+        )
+
+    # 空库/该医生暂无关联患者：如实返回空列表（不再返回 mock_i 模拟数据）
+    return patients_data
 
 # 健康档案
 @router.get("/health-records/{patient_id}", response_model=dict)
@@ -215,13 +190,71 @@ async def get_patient_monitoring_data(
     patient_id: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """获取患者监测数据"""
+    """获取患者监测数据（真实聚合快照，2026-11-08 替换存根空对象）
+
+    字段语义（均来自真实集合，无数据时如实为 0）：
+    - boundDevices:  绑定到该患者的设备数（devices.patient_id）
+    - rehabPlans:    该患者的康复计划总数/进行中/已完成（rehab_plans.patient_id）
+    - completedSessionsLast30Days: 近 30 天完成的训练进度记录数
+                    （rehab_progress，completed=true 且 date 在近 30 天内；
+                    该集合当前无写入方，通常为 0 —— 是真实空数据而非存根）
+    - implemented:   显式标记端点已实现真实聚合
+    - start_date/end_date 参数为历史签名保留，当前快照类指标不按时间切片
+    """
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {}
+    if not ObjectId.is_valid(patient_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到患者信息")
+    try:
+        doctor_id = current_user.id
+        # 校验患者存在且属于当前医生（与健康档案端点一致的授权语义）
+        doctor = await db["users"].find_one({"_id": ObjectId(doctor_id), "role": "doctor"})
+        patient_ids = (doctor or {}).get("patients") or []
+        if patient_id not in [str(p) for p in patient_ids]:
+            patient = await db["users"].find_one(
+                {"_id": ObjectId(patient_id), "role": "patient"})
+            if not patient:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                    detail="未找到患者信息")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="您无权查看该患者的监测数据")
+
+        plans_collection = db["rehab_plans"]
+        total_plans = await plans_collection.count_documents({"patient_id": patient_id})
+        active_plans = await plans_collection.count_documents(
+            {"patient_id": patient_id, "status": "active"})
+        completed_plans = await plans_collection.count_documents(
+            {"patient_id": patient_id, "status": "completed"})
+
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        completed_sessions = await db["rehab_progress"].count_documents({
+            "patient_id": patient_id,
+            "completed": True,
+            "date": {"$gte": thirty_days_ago},
+        })
+
+        return {
+            "implemented": True,
+            "patientId": patient_id,
+            "boundDevices": await db["devices"].count_documents({"patient_id": patient_id}),
+            "rehabPlans": {
+                "total": total_plans,
+                "active": active_plans,
+                "completed": completed_plans,
+            },
+            "completedSessionsLast30Days": completed_sessions,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"获取患者监测数据时出错: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="获取患者监测数据失败，请稍后重试"
+        )
 
 # 医患沟通
 @router.get("/communications", response_model=List[dict])
@@ -250,13 +283,64 @@ async def create_communication(
 @router.get("/statistics", response_model=dict)
 async def get_doctor_statistics(
     time_range: Optional[str] = "month",
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """获取医生工作统计数据"""
+    """获取医生工作统计数据（真实聚合，2026-11-08 替换存根空对象）
+
+    字段语义（均来自真实集合，无数据时如实为 0）：
+    - patientCount: 该医生关联的患者数（users.doctors.patients 列表长度）
+    - rehabPlans:   该医生作为 practitioner_id 的康复计划总数/进行中/已完成
+                    （rehab_plans 集合，status: active/completed）
+    - completedSessionsThisMonth: 该医生患者本月完成的训练进度记录数
+                    （rehab_progress，completed=true 且 date 不早于本月；
+                    该集合当前无写入方，通常为 0 —— 是真实空数据而非存根）
+    - implemented:  显式标记端点已实现真实聚合
+    """
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {}
+    try:
+        doctor_id = current_user.id
+        doctor = await db["users"].find_one({"_id": ObjectId(doctor_id), "role": "doctor"})
+        if not doctor:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到医生信息")
+
+        patient_ids = doctor.get("patients") or []
+        plans_collection = db["rehab_plans"]
+        total_plans = await plans_collection.count_documents({"practitioner_id": doctor_id})
+        active_plans = await plans_collection.count_documents(
+            {"practitioner_id": doctor_id, "status": "active"})
+        completed_plans = await plans_collection.count_documents(
+            {"practitioner_id": doctor_id, "status": "completed"})
+
+        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        completed_sessions = 0
+        if patient_ids:
+            completed_sessions = await db["rehab_progress"].count_documents({
+                "patient_id": {"$in": [str(p) for p in patient_ids]},
+                "completed": True,
+                "date": {"$gte": month_start},
+            })
+
+        return {
+            "implemented": True,
+            "timeRange": time_range,
+            "patientCount": len(patient_ids),
+            "rehabPlans": {
+                "total": total_plans,
+                "active": active_plans,
+                "completed": completed_plans,
+            },
+            "completedSessionsThisMonth": completed_sessions,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"获取医生统计数据时出错: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="获取医生统计数据失败，请稍后重试"
+        )
 
 # 知情同意
 @router.get("/informed-consents", response_model=List[dict])

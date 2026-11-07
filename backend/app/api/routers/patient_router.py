@@ -251,13 +251,57 @@ async def create_communication(
 @router.get("/statistics", response_model=dict)
 async def get_patient_statistics(
     time_range: Optional[str] = "month",
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """获取患者健康数据统计"""
+    """获取患者健康数据统计（真实聚合，2026-11-08 替换存根空对象）
+
+    字段语义（均来自真实集合，无数据时如实为 0）：
+    - rehabPlans: 本人康复计划总数/进行中/已完成（rehab_plans.patient_id）
+    - progress:   本人训练进度记录数/已完成数/完成率
+                  （rehab_progress，completed 字段；完成率 = 已完成/总数*100，
+                  无记录时为 0。该集合当前无写入方，通常为 0 —— 真实空数据而非存根）
+    - implemented: 显式标记端点已实现真实聚合
+    """
     if current_user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {}
+    try:
+        user_id = str(current_user.id)
+        plans_collection = db["rehab_plans"]
+        total_plans = await plans_collection.count_documents({"patient_id": user_id})
+        active_plans = await plans_collection.count_documents(
+            {"patient_id": user_id, "status": "active"})
+        completed_plans = await plans_collection.count_documents(
+            {"patient_id": user_id, "status": "completed"})
+
+        progress_collection = db["rehab_progress"]
+        total_records = await progress_collection.count_documents({"patient_id": user_id})
+        completed_records = await progress_collection.count_documents(
+            {"patient_id": user_id, "completed": True})
+        completion_rate = (completed_records / total_records * 100) if total_records > 0 else 0
+
+        return {
+            "implemented": True,
+            "timeRange": time_range,
+            "rehabPlans": {
+                "total": total_plans,
+                "active": active_plans,
+                "completed": completed_plans,
+            },
+            "progress": {
+                "totalRecords": total_records,
+                "completedRecords": completed_records,
+                "completionRate": round(completion_rate, 1),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"获取患者统计数据时出错: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="获取患者统计数据失败，请稍后重试"
+        )
 
 @router.get("/dashboard-data", response_model=Dict[str, Any])
 async def get_dashboard_data(
