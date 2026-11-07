@@ -70,6 +70,8 @@ export interface MessageDto {
   timestamp: string; // ISO 字符串
   read: boolean;
   deleted: boolean;
+  // WS 广播/message_ack 载荷中的可选幂等键（WS01：同发送者重复投递直接返回既有消息）
+  client_message_id?: string;
   attachments?: Array<Record<string, any>>;
   metadata?: Record<string, any>;
 }
