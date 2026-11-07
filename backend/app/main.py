@@ -36,7 +36,7 @@ from .api.routers.device_repair_router import router as device_repair_router
 from .api.routers.device_data_standard_router import router as device_data_standard_router
 
 # 导入权限审计中间件
-# from app.core.permission_audit import PermissionAuditMiddleware
+from app.core.permission_audit import PermissionAuditMiddleware
 
 # 创建应用实例
 app = FastAPI(
@@ -78,6 +78,13 @@ async def add_process_time_header(request: Request, call_next):
                 "request_id": request_id
             }
         )
+
+# 权限审计中间件（AUTH02：关键权限操作审计）
+# 注册顺序：add_middleware 采用"后注册者在外层"的栈语义，此处必须先于下方
+# CORSMiddleware 注册，使审计位于 CORS 之内 —— CORS 预检(OPTIONS)由 CORS
+# 直接短路、不会进入审计，且所有响应（含被审计路径）仍携带 CORS 头。
+# 审计为旁路记录：身份从 JWT 解出、落库失败仅记日志，不影响业务请求。
+app.add_middleware(PermissionAuditMiddleware)
 
 # 配置CORS
 origins = settings.BACKEND_CORS_ORIGINS

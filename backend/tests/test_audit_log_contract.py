@@ -22,6 +22,7 @@ from pymongo.errors import AutoReconnect
 from app.api.routers.audit_log_router import router
 from app.core.config import settings
 from app.core.permission_audit import PermissionAuditMiddleware
+from app.db.mongodb import db as app_db
 from app.db.mongodb import get_database
 from app.schemas.audit_log import AuditLogCreate, AuditLogFilter
 from app.services.audit_log_service import AuditLogService
@@ -69,6 +70,7 @@ class PermissionAuditMiddlewareIdentityTests(unittest.IsolatedAsyncioTestCase):
 
         mock_db = MagicMock()
         mock_db.audit_logs.insert_one = AsyncMock(side_effect=capture_insert_one)
+        self.mock_db = mock_db
 
         async def fake_database():
             yield mock_db
@@ -76,6 +78,12 @@ class PermissionAuditMiddlewareIdentityTests(unittest.IsolatedAsyncioTestCase):
         db_patcher = patch("app.db.mongodb.get_database", new=fake_database)
         db_patcher.start()
         self.addCleanup(db_patcher.stop)
+
+        # 审计落库守卫要求应用级连接已建立（绝不从审计路径主动发起连接）；
+        # 测试中模拟"已连接"状态，让 get_database 补丁成为唯一数据库入口。
+        self.original_client, self.original_db = app_db.client, app_db.db
+        app_db.client, app_db.db = MagicMock(), mock_db
+        self.addCleanup(self._restore_connection_state)
 
         self.app = FastAPI()
         self.app.add_middleware(PermissionAuditMiddleware)
@@ -95,6 +103,9 @@ class PermissionAuditMiddlewareIdentityTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.client.aclose()
+
+    def _restore_connection_state(self):
+        app_db.client, app_db.db = self.original_client, self.original_db
 
     def token(self, user_id, secret=None, **extra):
         payload = {
@@ -178,6 +189,42 @@ class PermissionAuditMiddlewareIdentityTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.get("/api/users/me", headers=self.bearer(bogus))
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn(bogus, "\n".join(observed.output))
+
+    async def test_audit_storage_failure_does_not_affect_business_response(self):
+        user_id = str(ObjectId())
+        self.mock_db.audit_logs.insert_one = AsyncMock(side_effect=RuntimeError("audit outage"))
+        response = await self.client.get("/api/users/me", headers=self.bearer(self.token(user_id)))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"ok": True})
+        self.assertEqual(self.mock_db.audit_logs.insert_one.await_count, 1)
+
+    async def test_audit_is_skipped_without_scheduling_database_connection(self):
+        # 应用未连接数据库时审计必须静默跳过，绝不主动发起连接（否则每个
+        # 被审计请求都会阻塞到 serverSelectionTimeoutMS）。
+        app_db.client, app_db.db = None, None
+        response = await self.client.get(
+            "/api/users/me", headers=self.bearer(self.token(str(ObjectId()))),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.captured, [])
+
+    async def test_preflight_options_is_not_audited(self):
+        response = await self.client.options("/api/users/me")
+        self.assertNotEqual(response.status_code, 500, response.text)
+        self.assertEqual(self.captured, [])
+
+    def test_main_app_registers_audit_middleware_inside_cors(self):
+        from fastapi.middleware.cors import CORSMiddleware
+        from app.main import app as main_app
+
+        classes = [m.cls for m in main_app.user_middleware]
+        self.assertIn(PermissionAuditMiddleware, classes)
+        self.assertIn(CORSMiddleware, classes)
+        # user_middleware 列表顺序即外层→内层：审计必须位于 CORS 之内，
+        # 让预检请求由 CORS 直接短路、不产生审计噪音。
+        self.assertGreater(
+            classes.index(PermissionAuditMiddleware), classes.index(CORSMiddleware),
+        )
 
 
 @unittest.skipUnless(MONGO_URI, "explicit isolated MongoDB test URI required")

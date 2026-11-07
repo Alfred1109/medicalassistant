@@ -71,9 +71,13 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # 检查是否需要审计此路径
         path = request.url.path
-        
+
         # 排除不需要审计的路径
         if any(path.startswith(prefix) for prefix in self.exclude_paths):
+            return await call_next(request)
+
+        # CORS 预检不承载业务语义（中间件在无 CORS 的裸应用上使用时也会命中），不产生审计噪音
+        if request.method == "OPTIONS":
             return await call_next(request)
         
         # 确定是否需要审计
@@ -123,11 +127,11 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
             if scheme.lower() == "bearer" and credentials.strip():
                 token = credentials.strip()
         if not token:
-            # 部分客户端通过 cookie 携带令牌（与 WebSocket 认证一致）
-            try:
-                token = request.cookies.get(settings.TOKEN_COOKIE_NAME)
-            except Exception:
-                token = None
+            # 部分客户端通过 cookie 携带令牌（与 WebSocket 认证一致）；
+            # 配置缺失时降级为仅依赖 Authorization 头，不中断请求。
+            cookie_name = getattr(settings, "TOKEN_COOKIE_NAME", None)
+            if cookie_name:
+                token = request.cookies.get(cookie_name)
         if token:
             user_id, role = _extract_identity_from_token(token)
             if user_id is None:
@@ -144,6 +148,13 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
         # 确定操作结果状态
         status = "success" if response.status_code < 400 else "failure"
         
+        # 审计为旁路记录：仅在应用已完成数据库连接时落库，绝不从审计路径主动发起
+        # 连接（否则无库环境下每个被审计请求都会阻塞到 serverSelectionTimeoutMS）。
+        # 未连接时跳过记录，业务响应不受影响；连接后由下方 try/except 兜底落库失败。
+        from app.db.mongodb import db as app_db
+        if not app_db.is_connected():
+            return response
+
         # 检查是否需要记录审计日志
         try:
             # 获取数据库连接
