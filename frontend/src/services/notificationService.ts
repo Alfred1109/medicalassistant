@@ -1,21 +1,23 @@
 import api from './api';
 
-// 通知类型定义
+// 通知类型定义（与后端 Notification 模型对齐：models/communication.py + notification_service.py）
+// 后端实际响应字段为 read / time / notification_type（前端不再维护 isRead/timestamp/type 第二套命名），
+// notification_type 当前真实落库值只有 "message"（communication_service 三处触发点），
+// 其余类型为预留，界面按未知类型回退到默认图标/文案。
 export interface Notification {
   id: string;
   title: string;
   content: string;
-  type: 'message' | 'appointment' | 'task' | 'system' | 'health_alert' | 'followup';
-  timestamp: Date | string;
-  isRead: boolean;
-  priority?: 'normal' | 'important' | 'urgent';
-  sender?: {
-    id: string;
-    name: string;
-    avatar?: string;
-  };
-  relatedLink?: string;
-  metadata?: Record<string, any>;
+  notification_type: string;
+  time: string; // ISO 时间字符串（FastAPI 序列化 datetime）
+  read: boolean;
+  priority?: 'low' | 'normal' | 'high' | 'urgent';
+  sender_id?: string;
+  sender_name?: string;
+  sender_role?: string;
+  recipient_id?: string;
+  related_entity_id?: string | null;
+  related_entity_type?: string | null;
 }
 
 export interface NotificationSettings {

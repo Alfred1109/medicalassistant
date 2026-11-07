@@ -52,7 +52,7 @@ const NotificationsPage: React.FC = () => {
       setNotifications(prevNotifications =>
         prevNotifications.map(notification =>
           notification.id === notificationId
-            ? { ...notification, isRead: true }
+            ? { ...notification, read: true }
             : notification
         )
       );
@@ -66,7 +66,7 @@ const NotificationsPage: React.FC = () => {
     try {
       await api.put('notifications/read-all');
       setNotifications(prevNotifications =>
-        prevNotifications.map(notification => ({ ...notification, isRead: true }))
+        prevNotifications.map(notification => ({ ...notification, read: true }))
       );
     } catch (error) {
       console.error('标记所有通知已读失败:', error);

@@ -72,6 +72,7 @@ import {
 import { AppDispatch, RootState } from '../../store';
 import { logout } from '../../store/slices/authSlice';
 import { toggleSidebar } from '../../store/slices/uiSlice';
+import NotificationPusher from '../common/NotificationPusher';
 
 // Drawer width for desktop
 const DRAWER_WIDTH = 260;
@@ -882,16 +883,12 @@ const Layout: React.FC = () => {
           )}
           
           <Box sx={{ display: 'flex', alignItems: 'center' }}>
+            {/* 全局通知 WS 推送：内部带 token 判空（未登录不渲染）与断连静默降级，
+                未读数来自后端真实接口 + /ws/notifications 的 notification_count 推送 */}
             <Tooltip title="通知中心">
-              <IconButton
-                color="inherit"
-                sx={{ position: 'relative', mr: 1 }}
-                onClick={() => navigate('/app/notifications')}
-              >
-                <Badge badgeContent={3} color="error">
-                  <NotificationsIcon />
-                </Badge>
-              </IconButton>
+              <Box sx={{ mr: 1 }}>
+                <NotificationPusher onNotificationClick={() => navigate('/app/notifications')} />
+              </Box>
             </Tooltip>
             
             <Tooltip title="个人中心">
@@ -975,9 +972,7 @@ const Layout: React.FC = () => {
             </MenuItem>
             <MenuItem onClick={() => { handleMenuClose(); navigate('/app/notifications'); }}>
               <ListItemIcon>
-                <Badge badgeContent={3} color="error" sx={{ '& .MuiBadge-badge': { right: -3, top: 3 } }}>
-                  <NotificationsIcon fontSize="small" />
-                </Badge>
+                <NotificationsIcon fontSize="small" />
               </ListItemIcon>
               通知中心
             </MenuItem>

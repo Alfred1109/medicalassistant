@@ -5,6 +5,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import useWebSocket from '../../hooks/useWebSocket';
 import { API_BASE_URL } from '../../config/api';
 import { STORAGE_KEYS } from '../../config/constants';
+import { notificationApi } from '../../services/notificationService';
 
 /**
  * 通知 WS 地址推导（与 chatWsService.resolveChatWsBaseUrl 同规则）：
@@ -12,23 +13,37 @@ import { STORAGE_KEYS } from '../../config/constants';
  * 不在 /api 前缀下，因此从 API_BASE_URL 去掉末尾 /api 得基址；
  * 鉴权与 /ws/chat 一致走 ?token= 查询参数（get_current_user_ws）。
  */
-function resolveNotificationWsUrl(): string {
+function resolveNotificationWsUrl(token: string): string {
   const withoutApi = API_BASE_URL.replace(/\/api\/?$/, '');
   const base = /^https?:\/\//i.test(withoutApi)
     ? withoutApi.replace(/^http/i, 'ws')
     : `${window.location.origin}${withoutApi}`;
-  const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
-  return `${base}/ws/notifications${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+  return `${base}/ws/notifications?token=${encodeURIComponent(token)}`;
 }
 
 interface NotificationPusherProps {
   onNotificationClick?: () => void;
-  unreadCount?: number;
 }
 
-const NotificationPusher: React.FC<NotificationPusherProps> = ({
+/**
+ * 外层组件：token 判空保护。
+ * 未登录（无 token）时直接不渲染，避免 useWebSocket 以空 token
+ * 连接 /ws/notifications 被后端拒绝后进入无意义重连循环。
+ * hooks 规则不允许条件调用，故拆成「守卫壳 + 已连接子组件」两层。
+ */
+const NotificationPusher: React.FC<NotificationPusherProps> = (props) => {
+  const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+  if (!token) return null;
+  return <ConnectedNotificationPusher {...props} token={token} />;
+};
+
+interface ConnectedNotificationPusherProps extends NotificationPusherProps {
+  token: string;
+}
+
+const ConnectedNotificationPusher: React.FC<ConnectedNotificationPusherProps> = ({
   onNotificationClick,
-  unreadCount = 0
+  token
 }) => {
   const theme = useTheme();
   const [notification, setNotification] = useState<{
@@ -37,9 +52,24 @@ const NotificationPusher: React.FC<NotificationPusherProps> = ({
     type: 'success' | 'info' | 'warning' | 'error';
     duration: number;
   } | null>(null);
-  
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  // 初始拉取真实未读数（后端 GET /api/notifications/unread/count 直接返回 int）
+  useEffect(() => {
+    let cancelled = false;
+    notificationApi.getUnreadCount()
+      .then((count) => {
+        if (!cancelled && typeof count === 'number') setUnreadCount(count);
+      })
+      .catch((error) => {
+        // 静默降级：拉取失败仅保留徽标为 0，不打扰用户
+        console.error('获取未读通知数量失败:', error);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   // WebSocket连接，用于接收实时通知（后端 /ws/notifications）
-  const { lastMessage, isConnected } = useWebSocket(resolveNotificationWsUrl());
+  const { lastMessage, isConnected } = useWebSocket(resolveNotificationWsUrl(token));
 
   // 处理收到的WebSocket消息
   useEffect(() => {
@@ -55,32 +85,38 @@ const NotificationPusher: React.FC<NotificationPusherProps> = ({
             type: priority === 'urgent' ? 'error' : priority === 'high' ? 'warning' : 'info',
             duration: 5000
           });
+          // 后端随后会补发 notification_count，这里本地先 +1 保证徽标即时性
+          setUnreadCount(count => count + 1);
+        }
+        // 后端在通知落库后推送真实未读数：{"type":"notification_count","count":N}
+        if (data.type === 'notification_count' && typeof data.count === 'number') {
+          setUnreadCount(data.count);
         }
       } catch (error) {
         console.error('解析通知消息失败:', error);
       }
     }
   }, [lastMessage]);
-  
+
   // 关闭通知
   const handleClose = () => {
     setNotification(prev => prev ? { ...prev, open: false } : null);
   };
-  
+
   return (
     <>
-      {/* 通知图标和未读数量 */}
+      {/* 通知图标和未读数量（断连时图标变灰静默降级，不弹提示） */}
       <Box position="relative" display="inline-block">
-        <IconButton 
-          color="inherit" 
+        <IconButton
+          color="inherit"
           onClick={onNotificationClick}
           sx={{
             transition: 'all 0.3s',
             '&:hover': { transform: 'scale(1.1)' }
           }}
         >
-          <Badge 
-            badgeContent={unreadCount} 
+          <Badge
+            badgeContent={unreadCount}
             color="error"
             sx={{
               '& .MuiBadge-badge': {
@@ -91,15 +127,15 @@ const NotificationPusher: React.FC<NotificationPusherProps> = ({
               }
             }}
           >
-            <NotificationsIcon 
-              sx={{ 
+            <NotificationsIcon
+              sx={{
                 color: isConnected ? theme.palette.primary.main : theme.palette.text.secondary
-              }} 
+              }}
             />
           </Badge>
         </IconButton>
       </Box>
-      
+
       {/* 通知弹窗 */}
       {notification && (
         <Snackbar
@@ -109,10 +145,10 @@ const NotificationPusher: React.FC<NotificationPusherProps> = ({
           anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
           sx={{ mt: 7 }}
         >
-          <Alert 
-            onClose={handleClose} 
-            severity={notification.type} 
-            sx={{ 
+          <Alert
+            onClose={handleClose}
+            severity={notification.type}
+            sx={{
               width: '100%',
               alignItems: 'center'
             }}
@@ -135,4 +171,4 @@ const NotificationPusher: React.FC<NotificationPusherProps> = ({
   );
 };
 
-export default NotificationPusher; 
+export default NotificationPusher;

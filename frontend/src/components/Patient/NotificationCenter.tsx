@@ -18,15 +18,14 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
 import NotificationsActiveIcon from '@mui/icons-material/NotificationsActive';
 import WarningIcon from '@mui/icons-material/Warning';
-import { useNavigate } from 'react-router-dom';
 import { Notification } from '../../services/notificationService';
 
 // 扩展通知类型，包含健康预警和随访提醒
 export type NotificationType = 
   'message' | 'appointment' | 'task' | 'system' | 'health_alert' | 'followup';
 
-// 扩展通知优先级
-export type NotificationPriority = 'normal' | 'important' | 'urgent';
+// 扩展通知优先级（与后端 priority 取值对齐：low/normal/high/urgent）
+export type NotificationPriority = 'low' | 'normal' | 'high' | 'urgent';
 
 // 组件属性定义
 interface NotificationCenterProps {
@@ -63,8 +62,9 @@ const notificationTypeText: Record<NotificationType, string> = {
 
 // 通知优先级颜色映射
 const priorityColorMap: Record<NotificationPriority, string> = {
+  low: 'default',
   normal: 'default',
-  important: 'primary',
+  high: 'primary',
   urgent: 'error'
 };
 
@@ -100,14 +100,13 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
   onNotificationClick,
   onSettingsClick
 }) => {
-  const navigate = useNavigate();
   const [currentTab, setCurrentTab] = useState<string>('all');
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [filterMenuAnchorEl, setFilterMenuAnchorEl] = useState<null | HTMLElement>(null);
   
   // 处理通知点击
   const handleNotificationClick = (notification: Notification) => {
-    if (!notification.isRead && onMarkAsRead) {
+    if (!notification.read && onMarkAsRead) {
       onMarkAsRead(notification.id).catch(err => 
         console.error('Failed to mark notification as read:', err)
       );
@@ -115,9 +114,9 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
     
     if (onNotificationClick) {
       onNotificationClick(notification);
-    } else if (notification.relatedLink) {
-      navigate(notification.relatedLink);
     }
+    // 后端仅返回 related_entity_id/related_entity_type（无可跳转链接），
+    // 跳转目标待后端补充实体→路由映射后再接入
   };
   
   // 处理标记为已读
@@ -228,11 +227,11 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
     const yesterday = today - 86400000; // 减去一天的毫秒数
     
     notifications.forEach(notification => {
-      const notificationDate = typeof notification.timestamp === 'string' 
-        ? new Date(notification.timestamp) 
-        : notification.timestamp;
+      const notificationDate = typeof notification.time === 'string'
+        ? new Date(notification.time)
+        : notification.time;
       const notificationTime = notificationDate.getTime();
-      
+
       if (notificationTime >= today) {
         groups.today.push(notification);
       } else if (notificationTime >= yesterday) {
@@ -241,15 +240,15 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
         groups.older.push(notification);
       }
     });
-    
+
     return groups;
   }, [notifications]);
-  
+
   // 过滤通知
   const filteredNotifications = useMemo(() => {
     if (currentTab === 'all') return notifications;
-    if (currentTab === 'unread') return notifications.filter(n => !n.isRead);
-    return notifications.filter(n => n.type === currentTab);
+    if (currentTab === 'unread') return notifications.filter(n => !n.read);
+    return notifications.filter(n => n.notification_type === currentTab);
   }, [notifications, currentTab]);
   
   // 过滤并分组通知
@@ -265,9 +264,9 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
     if (currentTab === 'all' || currentTab === 'unread') {
       // 如果是全部或未读，使用已有的分组，并根据未读过滤
       if (currentTab === 'unread') {
-        groups.today = groupedNotifications.today.filter(n => !n.isRead);
-        groups.yesterday = groupedNotifications.yesterday.filter(n => !n.isRead);
-        groups.older = groupedNotifications.older.filter(n => !n.isRead);
+        groups.today = groupedNotifications.today.filter(n => !n.read);
+        groups.yesterday = groupedNotifications.yesterday.filter(n => !n.read);
+        groups.older = groupedNotifications.older.filter(n => !n.read);
       } else {
         groups.today = groupedNotifications.today;
         groups.yesterday = groupedNotifications.yesterday;
@@ -280,11 +279,11 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
       const yesterday = today - 86400000; // 减去一天的毫秒数
       
       notifications
-        .filter(n => n.type === currentTab)
+        .filter(n => n.notification_type === currentTab)
         .forEach(notification => {
-          const notificationDate = typeof notification.timestamp === 'string' 
-            ? new Date(notification.timestamp) 
-            : notification.timestamp;
+          const notificationDate = typeof notification.time === 'string'
+            ? new Date(notification.time)
+            : notification.time;
           const notificationTime = notificationDate.getTime();
           
           if (notificationTime >= today) {
@@ -301,22 +300,22 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
   }, [groupedNotifications, notifications, currentTab]);
   
   // 获取未读通知数量
-  const unreadCount = notifications.filter(n => !n.isRead).length;
-  
+  const unreadCount = notifications.filter(n => !n.read).length;
+
   // 获取每种类型的通知数量
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     notifications.forEach(notification => {
-      counts[notification.type] = (counts[notification.type] || 0) + 1;
+      counts[notification.notification_type] = (counts[notification.notification_type] || 0) + 1;
     });
     return counts;
   }, [notifications]);
-  
+
   // 获取每种类型的未读通知数量
   const unreadTypeCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    notifications.filter(n => !n.isRead).forEach(notification => {
-      counts[notification.type] = (counts[notification.type] || 0) + 1;
+    notifications.filter(n => !n.read).forEach(notification => {
+      counts[notification.notification_type] = (counts[notification.notification_type] || 0) + 1;
     });
     return counts;
   }, [notifications]);
@@ -655,8 +654,8 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
   onDelete,
   isLast
 }) => {
-  const { id, title, content, type, timestamp, isRead, priority = 'normal' } = notification;
-  
+  const { title, content, notification_type: type, time, read, priority = 'normal' } = notification;
+
   return (
     <>
       <ListItem
@@ -664,7 +663,7 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
         button
         onClick={onClick}
         sx={{
-          bgcolor: isRead ? 'inherit' : 'action.hover',
+          bgcolor: read ? 'inherit' : 'action.hover',
           py: 1.5,
           position: 'relative',
           '&::after': priority === 'urgent' ? {
@@ -675,7 +674,7 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
             bottom: 0,
             width: '4px',
             backgroundColor: 'error.main'
-          } : priority === 'important' ? {
+          } : priority === 'high' ? {
             content: '""',
             position: 'absolute',
             left: 0,
@@ -688,8 +687,7 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
       >
         <ListItemAvatar>
           <Avatar
-            src={notification.sender?.avatar}
-            alt={notification.sender?.name}
+            alt={notification.sender_name || undefined}
           >
             {notificationTypeIcons[type as NotificationType] || <NotificationsIcon />}
           </Avatar>
@@ -700,8 +698,8 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
               <Typography
                 variant="subtitle1"
                 component="div"
-                sx={{ 
-                  fontWeight: isRead ? 'normal' : 'bold',
+                sx={{
+                  fontWeight: read ? 'normal' : 'bold',
                   display: 'flex',
                   alignItems: 'center'
                 }}
@@ -709,16 +707,16 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
                 {title}
                 {priority === 'urgent' && (
                   <Tooltip title="紧急">
-                    <WarningIcon 
-                      fontSize="small" 
-                      color="error" 
-                      sx={{ ml: 1 }} 
+                    <WarningIcon
+                      fontSize="small"
+                      color="error"
+                      sx={{ ml: 1 }}
                     />
                   </Tooltip>
                 )}
               </Typography>
               <Typography variant="caption" color="textSecondary">
-                {formatTime(timestamp)}
+                {formatTime(time)}
               </Typography>
             </Box>
           }
@@ -728,7 +726,7 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
                 variant="body2"
                 color="textPrimary"
                 component="span"
-                sx={{ display: 'inline', fontWeight: isRead ? 'normal' : 'medium' }}
+                sx={{ display: 'inline', fontWeight: read ? 'normal' : 'medium' }}
               >
                 {content}
               </Typography>
@@ -746,7 +744,7 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
                   variant="outlined"
                 />
                 <Box>
-                  {!isRead && (
+                  {!read && (
                     <Tooltip title="标记为已读">
                       <IconButton
                         onClick={onMarkAsRead}
