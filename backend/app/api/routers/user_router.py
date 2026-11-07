@@ -242,8 +242,9 @@ async def update_user_permissions(
         
     # 更新权限
     user = await user_service.update_user_permissions(
-        permission_data.user_id, 
-        permission_data.permissions
+        permission_data.user_id,
+        permission_data.permissions,
+        operator_id=current_user.id,
     )
     
     if not user:
