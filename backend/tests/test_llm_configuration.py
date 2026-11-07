@@ -101,8 +101,14 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
                                 createdAt=datetime.utcnow(), updatedAt=datetime.utcnow())
         get_user_mock = AsyncMock(return_value=operator)
 
+        # AUTH01 对象级授权：/plans/generate 会校验患者归属，按契约测试模式
+        # 打桩 db.users.find_one 返回带该操作者归属的患者文档
+        patient_db = MagicMock()
+        patient_db.users.find_one = AsyncMock(return_value={
+            "_id": "synthetic", "role": "patient", "practitioners": [SYNTHETIC_OPERATOR_ID]})
+
         async def fake_database():
-            yield MagicMock()
+            yield patient_db
 
         try:
             app.dependency_overrides[get_database] = fake_database

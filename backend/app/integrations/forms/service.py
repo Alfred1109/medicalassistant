@@ -48,32 +48,26 @@ def _map_remote_error(exc: FormPlatformError, prefix: str) -> FormIntegrationErr
                                 status_code=status_code, details={"remote_code": exc.remote_code})
 
 
-async def _load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str) -> Dict[str, Any]:
-    from bson import ObjectId, errors as bson_errors
-
-    query: Dict[str, Any] = {}
-    if ObjectId.is_valid(patient_id):
-        query["_id"] = ObjectId(patient_id)
-    else:
-        query["_id"] = patient_id
-    doc = await db.users.find_one({**query, "role": "patient"})
-    if not doc:
-        raise FormIntegrationError("患者不存在", error_code="PATIENT_NOT_FOUND", status_code=404)
-    return doc
-
-
 async def _verify_patient_assignment(db: AsyncIOMotorDatabase, patient_id: str,
                                      operator_id: str, operator_role: str) -> None:
-    """默认拒绝：操作者必须是患者档案中的主治医生（或管理员）。"""
-    if operator_role == "admin":
-        return
-    patient = await _load_patient_doc(db, patient_id)
-    practitioners = patient.get("practitioners") or []
-    normalized = {str(item) for item in practitioners}
-    if operator_id not in normalized:
+    """默认拒绝：操作者必须是患者档案中的主治医生（或管理员）。
+
+    校验逻辑复用 app.core.dependencies.ensure_patient_access（AUTH01 共享实现）；
+    此处仅把 PatientAccessError 翻译回集成侧错误类型，保持对外行为不变。
+    """
+    # 惰性导入：避免 forms 集成模块在加载期拖起全部业务服务依赖
+    from app.core.dependencies import PatientAccessError, ensure_patient_access
+
+    try:
+        await ensure_patient_access(db, patient_id, operator_id, operator_role)
+    except PatientAccessError as exc:
+        if exc.error_code == "PATIENT_NOT_FOUND":
+            raise FormIntegrationError("患者不存在",
+                                       error_code="PATIENT_NOT_FOUND",
+                                       status_code=404) from exc
         raise FormIntegrationError(
             "当前用户不是该患者的主治医生，不能为其发起表单填报任务",
-            error_code="PATIENT_NOT_ASSIGNED", status_code=403)
+            error_code="PATIENT_NOT_ASSIGNED", status_code=403) from exc
 
 
 def _extract_remote_refs(payload: Dict[str, Any]) -> Dict[str, Any]:

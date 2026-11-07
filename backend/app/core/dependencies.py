@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from typing import Dict, Any, List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
@@ -18,6 +18,7 @@ from app.services.agent_service import AgentService
 from app.services.rehabilitation_service import RehabilitationService
 from app.schemas.user import UserResponse
 from app.core.permissions import PermissionChecker, Permission
+from app.core.exceptions import AppBaseException
 from app.services.health_record_service import HealthRecordService
 from app.services.health_alert_service import HealthAlertService
 from app.core.auth import get_current_user as auth_get_current_user, get_current_active_user
@@ -220,6 +221,82 @@ def is_medical_staff():
                 detail="需要医疗人员(医生或健康管理师)权限"
             )
         return current_user
+    return dependency
+
+# ── AUTH01 对象级授权：患者归属校验（共享实现） ────────────────────────────
+# 错误码与 integrations/forms 侧约定一致：PATIENT_NOT_FOUND / PATIENT_NOT_ASSIGNED
+
+class PatientAccessError(AppBaseException):
+    """患者归属校验失败（对象级授权）。"""
+
+    def __init__(self, message: str, error_code: str = "PATIENT_NOT_ASSIGNED",
+                 status_code: int = status.HTTP_403_FORBIDDEN,
+                 details: Optional[Dict[str, Any]] = None):
+        super().__init__(message=message, status_code=status_code,
+                         error_code=error_code, details=details)
+
+
+async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str) -> Dict[str, Any]:
+    """按 ID 加载患者 users 文档（兼容 ObjectId 与非 ObjectId 主键），不存在则 404。"""
+    query: Dict[str, Any] = {}
+    if ObjectId.is_valid(patient_id):
+        query["_id"] = ObjectId(patient_id)
+    else:
+        query["_id"] = patient_id
+    doc = await db.users.find_one({**query, "role": "patient"})
+    if not doc:
+        raise PatientAccessError("患者不存在", error_code="PATIENT_NOT_FOUND",
+                                 status_code=status.HTTP_404_NOT_FOUND)
+    return doc
+
+
+async def ensure_patient_access(db: AsyncIOMotorDatabase, patient_id: str,
+                                operator_id: str, operator_role: str) -> Dict[str, Any]:
+    """默认拒绝：操作者必须在患者档案的 practitioners 列表中，admin 豁免。
+
+    返回患者文档（admin 豁免时不查库，返回空 dict）。
+    """
+    if operator_role == "admin":
+        return {}
+    patient = await load_patient_doc(db, patient_id)
+    practitioners = {str(item) for item in (patient.get("practitioners") or [])}
+    if str(operator_id) not in practitioners:
+        raise PatientAccessError(
+            "当前用户不是该患者的主治医生，无权访问该患者的康复数据",
+            error_code="PATIENT_NOT_ASSIGNED", status_code=status.HTTP_403_FORBIDDEN)
+    return patient
+
+
+def verify_patient_access(source: str = "query", name: str = "patient_id",
+                          required: bool = True):
+    """依赖工厂：从 path/query 提取患者标识并校验当前用户归属（AUTH01 第一层）。
+
+    - source="path"：路径参数（如 /patients/{patient_id}/assessments）；
+    - source="query"：查询参数（如 /plans?patient_id=...）；
+    - required=False：缺少参数时跳过校验（用于可选过滤，如 GET /plans）；
+    - 登录校验仍由内部依赖 get_current_user 完成，未认证一律 401。
+    """
+    async def dependency(
+        request: Request,
+        current_user: UserResponse = Depends(get_current_active_user),
+        db: AsyncIOMotorDatabase = Depends(get_database),
+    ) -> UserResponse:
+        if source == "path":
+            patient_id = request.path_params.get(name)
+        elif source == "query":
+            patient_id = request.query_params.get(name)
+        else:
+            raise RuntimeError(f"未知的 patient_id 来源: {source}")
+
+        if not patient_id:
+            if required:
+                raise PatientAccessError("缺少患者标识", error_code="PATIENT_ID_REQUIRED",
+                                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
+            return current_user
+
+        await ensure_patient_access(db, patient_id, str(current_user.id), current_user.role)
+        return current_user
+
     return dependency
 
 # 服务依赖

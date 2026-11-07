@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, status, Body, Path, Query
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
 from app.schemas.rehabilitation import (
-    RehabPlanCreate, 
-    RehabPlanUpdate, 
+    RehabPlanCreate,
+    RehabPlanUpdate,
     RehabPlanResponse,
     ExerciseCreate,
     ExerciseUpdate,
@@ -14,17 +16,28 @@ from app.schemas.rehabilitation import (
     AssessmentResponse
 )
 from app.services.rehabilitation_service import RehabilitationService
-from app.core.dependencies import get_rehabilitation_service
+from app.core.dependencies import (
+    get_rehabilitation_service,
+    get_database,
+    ensure_patient_access,
+    verify_patient_access,
+)
 from app.core.auth import get_current_active_user
 
 router = APIRouter()
 
+# AUTH01 对象级授权第一层：带患者标识的端点校验操作者与患者的归属关系
+# （操作者须在患者档案 practitioners 列表中，admin 豁免，否则 403 PATIENT_NOT_ASSIGNED）
+_verify_patient_query = verify_patient_access("query")
+_verify_patient_path = verify_patient_access("path")
+_verify_patient_query_optional = verify_patient_access("query", required=False)
+
 # LLM生成相关路由
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
 @router.post("/plans/generate", response_model=Dict[str, Any])
 async def generate_rehab_plan(
     data: Dict[str, Any],
     current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """使用LLM生成康复计划"""
@@ -32,10 +45,14 @@ async def generate_rehab_plan(
     for field in required_fields:
         if field not in data:
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Missing required field: {field}"
             )
-    
+
+    # AUTH01：patient_id 来自请求体，校验操作者与患者归属
+    await ensure_patient_access(db, data["patient_id"],
+                                str(current_user.id), current_user.role)
+
     plan = await rehab_service.generate_rehab_plan_with_llm(
         patient_id=data["patient_id"],
         patient_name=data["patient_name"],
@@ -48,7 +65,7 @@ async def generate_rehab_plan(
         
     return plan
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.post("/plans/{plan_id}/approve", response_model=Dict[str, Any])
 async def approve_generated_plan(
     plan_id: str,
@@ -68,17 +85,20 @@ async def approve_generated_plan(
     return approved_plan
 
 # 康复计划相关路由
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
 @router.post("/plans", response_model=Dict[str, Any])
 async def create_rehab_plan(
     plan_data: RehabPlanCreate,
     current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """Create a new rehabilitation plan"""
+    # AUTH01：patient_id 来自请求体，校验操作者与患者归属
+    await ensure_patient_access(db, plan_data.patient_id,
+                                str(current_user.id), current_user.role)
     return await rehab_service.create_rehab_plan(plan_data)
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.get("/plans/{plan_id}", response_model=Dict[str, Any])
 async def get_rehab_plan(
     plan_id: str = Path(..., description="The ID of the rehabilitation plan"),
@@ -91,7 +111,7 @@ async def get_rehab_plan(
         raise HTTPException(status_code=404, detail="Rehabilitation plan not found")
     return plan
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.put("/plans/{plan_id}", response_model=Dict[str, Any])
 async def update_rehab_plan(
     plan_data: RehabPlanUpdate,
@@ -105,7 +125,7 @@ async def update_rehab_plan(
         raise HTTPException(status_code=404, detail="Rehabilitation plan not found")
     return updated_plan
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.delete("/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_rehab_plan(
     plan_id: str = Path(..., description="The ID of the rehabilitation plan"),
@@ -117,19 +137,19 @@ async def delete_rehab_plan(
     if not success:
         raise HTTPException(status_code=404, detail="Rehabilitation plan not found")
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# AUTH01：携带 patient_id 过滤时校验归属；无过滤条件的全量枚举待 AUTH01 服务层按主治医生收敛
 @router.get("/plans", response_model=List[Dict[str, Any]])
 async def list_rehab_plans(
     patient_id: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(_verify_patient_query_optional),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """List all rehabilitation plans with optional filtering by patient"""
     return await rehab_service.list_rehab_plans(patient_id, skip, limit)
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.post("/plans/{plan_id}/exercises", response_model=Dict[str, Any])
 async def add_exercises_to_plan(
     plan_id: str,
@@ -183,14 +203,14 @@ async def list_exercises(
             detail=f"Error fetching exercises: {str(e)}"
         )
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# AUTH01：按查询参数 patient_id 校验归属
 @router.get("/exercises/recommendations", response_model=List[Dict[str, Any]])
 async def get_exercise_recommendations(
     patient_id: str,
     condition: Optional[str] = None,
     goal: Optional[str] = None,
     agent_id: Optional[str] = None,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(_verify_patient_query),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """Get personalized rehabilitation exercise recommendations"""
@@ -239,17 +259,20 @@ async def delete_exercise(
         raise HTTPException(status_code=404, detail="Exercise not found")
 
 # 康复评估相关路由
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
 @router.post("/assessments", response_model=Dict[str, Any])
 async def create_assessment(
     assessment_data: AssessmentCreate,
     current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """创建新的康复评估记录"""
+    # AUTH01：patient_id 来自请求体，校验操作者与患者归属
+    await ensure_patient_access(db, assessment_data.patient_id,
+                                str(current_user.id), current_user.role)
     return await rehab_service.create_assessment(assessment_data)
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): assessment_id→patient_id 归属校验待服务层收敛（需先加载评估文档取 patient_id）
 @router.get("/assessments/{assessment_id}", response_model=Dict[str, Any])
 async def get_assessment(
     assessment_id: str = Path(..., description="康复评估记录ID"),
@@ -262,7 +285,7 @@ async def get_assessment(
         raise HTTPException(status_code=404, detail="康复评估记录不存在")
     return assessment
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): assessment_id→patient_id 归属校验待服务层收敛（需先加载评估文档取 patient_id）
 @router.put("/assessments/{assessment_id}", response_model=Dict[str, Any])
 async def update_assessment(
     assessment_data: AssessmentUpdate,
@@ -276,7 +299,7 @@ async def update_assessment(
         raise HTTPException(status_code=404, detail="康复评估记录不存在")
     return updated_assessment
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# AUTH01：按路径参数 patient_id 校验归属
 @router.get("/patients/{patient_id}/assessments", response_model=List[Dict[str, Any]])
 async def list_patient_assessments(
     patient_id: str = Path(..., description="患者ID"),
@@ -285,7 +308,7 @@ async def list_patient_assessments(
     end_date: Optional[datetime] = None,
     skip: int = 0,
     limit: int = 100,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(_verify_patient_path),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """获取患者的康复评估记录列表"""
@@ -298,12 +321,12 @@ async def list_patient_assessments(
         limit=limit
     )
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# AUTH01：按查询参数 patient_id 校验归属
 @router.get("/assessments/{assessment_id}/comparison", response_model=Dict[str, Any])
 async def get_assessment_comparison(
     assessment_id: str = Path(..., description="康复评估记录ID"),
     patient_id: str = Query(..., description="患者ID"),
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(_verify_patient_query),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """比较当前评估与前一次评估的差异"""
@@ -312,13 +335,13 @@ async def get_assessment_comparison(
         raise HTTPException(status_code=404, detail=comparison["error"])
     return comparison
 
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# AUTH01：按查询参数 patient_id 校验归属
 @router.post("/assessments/{assessment_id}/analyze", response_model=Dict[str, Any])
 async def generate_assessment_analysis(
     assessment_id: str = Path(..., description="康复评估记录ID"),
     patient_id: str = Query(..., description="患者ID"),
     plan_id: Optional[str] = None,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(_verify_patient_query),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """使用LLM解释康复评估结果并提供建议"""
@@ -337,7 +360,7 @@ async def generate_assessment_analysis(
     return analysis
 
 # 分阶段康复计划相关路由
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.put("/plans/{plan_id}/phase", response_model=Dict[str, Any])
 async def update_plan_phase(
     plan_id: str = Path(..., description="康复计划ID"),
@@ -360,7 +383,7 @@ async def update_plan_phase(
     return updated_plan
 
 # 运动进度记录相关路由
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.post("/plans/{plan_id}/exercises/{exercise_id}/progress", response_model=Dict[str, Any])
 async def log_exercise_progress(
     plan_id: str = Path(..., description="康复计划ID"),
@@ -396,7 +419,7 @@ async def log_exercise_progress(
     return updated_plan
 
 # 计划调整相关路由
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.put("/plans/{plan_id}/adjustments/{adjustment_id}", response_model=Dict[str, Any])
 async def apply_plan_adjustment(
     plan_id: str = Path(..., description="康复计划ID"),
@@ -424,7 +447,7 @@ async def apply_plan_adjustment(
     return updated_plan
 
 # 增强的康复计划详情接口
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.get("/plans/{plan_id}/detailed", response_model=Dict[str, Any])
 async def get_detailed_rehab_plan(
     plan_id: str = Path(..., description="康复计划ID"),
@@ -446,7 +469,7 @@ async def get_detailed_rehab_plan(
     return plan
 
 # 获取康复计划进度统计
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.get("/plans/{plan_id}/statistics", response_model=Dict[str, Any])
 async def get_plan_statistics(
     plan_id: str = Path(..., description="康复计划ID"),
@@ -463,7 +486,7 @@ async def get_plan_statistics(
     return statistics
 
 # 获取运动完成趋势
-# TODO(AUTH01): 对象级授权待 AUTH01 收敛
+# TODO(AUTH01): plan_id→patient_id 归属校验待服务层收敛（需先加载计划文档取 patient_id）
 @router.get("/plans/{plan_id}/trends", response_model=Dict[str, Any])
 async def get_exercise_trends(
     plan_id: str = Path(..., description="康复计划ID"),
