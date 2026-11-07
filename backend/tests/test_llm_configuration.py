@@ -1,17 +1,24 @@
 """Missing provider credentials must not become clinical or streaming success."""
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from jose import jwt
 from pydantic import SecretStr
 
 from app.core.config import Settings, settings
 from app.core.dependencies import get_agent_service, get_rehabilitation_service
 from app.core.llm import LLMConfigurationError, require_llm_api_key
+from app.db.mongodb import get_database
 from app.main import app
+from app.schemas.user import UserResponse
 from app.services.agent_optimized_service import AgentOptimizedService
 from app.services.agent_service import AgentService
 from app.services.rehabilitation_service import RehabilitationService
+from app.services.user_service import UserService
+
+SYNTHETIC_OPERATOR_ID = "507f1f77bcf86cd799439011"
 
 
 class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
@@ -88,8 +95,23 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
         previous = app.dependency_overrides.copy()
         app.dependency_overrides[get_agent_service] = lambda: self.base
         app.dependency_overrides[get_rehabilitation_service] = lambda: self.rehab
+        # 路由已收敛为要求登录；按 test_rehab_agent_auth_contract 的模式打桩认证链
+        operator = UserResponse(id=SYNTHETIC_OPERATOR_ID, email="actor@example.com",
+                                name="Synthetic Operator", role="doctor", is_active=True,
+                                createdAt=datetime.utcnow(), updatedAt=datetime.utcnow())
+        get_user_mock = AsyncMock(return_value=operator)
+
+        async def fake_database():
+            yield MagicMock()
+
         try:
-            with patch.object(settings, "LLM_API_KEY", None), patch("openai.OpenAI") as client:
+            app.dependency_overrides[get_database] = fake_database
+            with patch.object(settings, "LLM_API_KEY", None), patch("openai.OpenAI") as client, \
+                    patch.object(UserService, "get_user_by_id", new=get_user_mock):
+                token = jwt.encode({"sub": operator.id, "token_type": "access",
+                                    "exp": datetime.utcnow() + timedelta(minutes=5)},
+                                   settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+                headers = {"Authorization": f"Bearer {token}"}
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
                     requests = [
                         ("/api/agents/synthetic/query", {"query": "Synthetic"}),
@@ -98,7 +120,7 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
                                                                "condition": "Synthetic", "goal": "Synthetic"}),
                     ]
                     for path, payload in requests:
-                        response = await http.post(path, json=payload)
+                        response = await http.post(path, json=payload, headers=headers)
                         self.assertEqual(response.status_code, 503, response.text)
                         self.assertEqual(response.json()["error"], "LLM_NOT_CONFIGURED")
                         self.assertNotIn("exercises", response.json())
