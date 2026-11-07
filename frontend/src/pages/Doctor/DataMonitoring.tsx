@@ -13,7 +13,6 @@ import {
   InputLabel,
   Select,
   MenuItem,
-  IconButton,
   Button,
   Chip,
   Alert,
@@ -26,20 +25,15 @@ import TableCell from '@mui/material/TableCell';
 import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
-import LinearProgress from '@mui/material/LinearProgress';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import TimelineIcon from '@mui/icons-material/Timeline';
 import FavoriteIcon from '@mui/icons-material/Favorite';
 import OpacityIcon from '@mui/icons-material/Opacity';
-import DeviceThermostatIcon from '@mui/icons-material/DeviceThermostat';
-import MonitorWeightIcon from '@mui/icons-material/MonitorWeight';
 import LocalHospitalIcon from '@mui/icons-material/LocalHospital';
-import WarningIcon from '@mui/icons-material/Warning';
-import ErrorIcon from '@mui/icons-material/Error';
-import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import MonitorWeightIcon from '@mui/icons-material/MonitorWeight';
 import { Link } from 'react-router-dom';
-// 模拟图表导入，在实际项目中替换为实际的图表库
-// 比如 import { Line, Bar } from 'react-chartjs-2';
+import { apiService } from '../../services/api';
+import AnalyticsChart from '../../components/Analytics/AnalyticsChart';
 
 // 选项卡面板属性接口
 interface TabPanelProps {
@@ -48,35 +42,97 @@ interface TabPanelProps {
   value: number;
 }
 
-// 生命体征数据接口
-interface VitalSign {
-  id: number;
+// 后端健康数据文档形状（GET /health-records/health-data，见 HealthDataResponse）
+// data_type = "vital_sign" 时 data = { type, value, unit, notes }
+// data_type = "lab_result"  时 data = { test_name, result_value, reference_range, unit, interpretation }
+interface HealthDataDoc {
+  id?: string;
+  _id?: string;
+  patient_id?: string;
+  data_type: string;
+  data: {
+    type?: string;
+    value?: any;
+    unit?: string;
+    notes?: string;
+    test_name?: string;
+    result_value?: any;
+    reference_range?: string;
+    interpretation?: string;
+    [key: string]: any;
+  };
+  source?: string;
+  recorded_at?: string;
+  created_at?: string;
+}
+
+// 患者下拉选项（GET /doctors/patients）
+interface PatientOption {
+  id: string;
+  name: string;
+  age?: number;
+  gender?: string;
+  diagnosis?: string;
+}
+
+// 生命体征摘要卡片
+interface VitalCard {
   type: string;
+  label: string;
+  unit: string;
   value: string;
-  unit: string;
   time: string;
-  status: 'normal' | 'warning' | 'alert';
-  reference: string;
-  history: any[];
 }
 
-// 血糖数据接口
-interface GlucoseData {
-  id: number;
-  timePoint: string;
-  value: number;
-  unit: string;
-  time: string;
-  status: 'normal' | 'warning' | 'alert';
-  reference: string;
-}
-
-// 血压趋势数据接口
-interface BPTrendData {
+// 血压趋势点
+interface BPTrendPoint {
   date: string;
   systolic: number;
   diastolic: number;
 }
+
+// 血糖记录行
+interface GlucoseRow {
+  id: string;
+  value: string;
+  unit: string;
+  time: string;
+  reference?: string;
+  interpretation?: string;
+}
+
+// 用药记录行（来自医生健康档案 medications 字段）
+interface MedicationRow {
+  id: string;
+  name: string;
+  dosage: string;
+  frequency: string;
+  purpose: string;
+  startDate: string;
+  endDate: string;
+}
+
+// 康复计划摘要（GET /rehabilitation/plans?patient_id=）
+interface RehabPlanSummary {
+  id: string;
+  name: string;
+  status: string;
+  goal: string;
+  frequency: string;
+  startDate: string;
+  endDate: string;
+  exerciseCount: number;
+  progress: number | null; // 仅当 exercises 内含数值型 progress 时可计算
+}
+
+// 生命体征类型定义（与后端 vital_type 约定一致，见 schemas/health_record.py:594）
+const VITAL_TYPES: Array<{ type: string; label: string; unit: string }> = [
+  { type: 'heart_rate', label: '心率', unit: 'bpm' },
+  { type: 'body_temperature', label: '体温', unit: '°C' },
+  { type: 'respiratory_rate', label: '呼吸频率', unit: '次/分钟' },
+  { type: 'blood_oxygen', label: '血氧饱和度', unit: '%' },
+  { type: 'weight', label: '体重', unit: 'kg' },
+];
 
 // 选项卡面板组件
 function TabPanel(props: TabPanelProps) {
@@ -99,174 +155,269 @@ function TabPanel(props: TabPanelProps) {
   );
 }
 
-// 模拟患者列表
-const MOCK_PATIENTS = [
-  { id: '1001', name: '张三', age: 45, gender: '男', diagnosis: '腰椎间盘突出' },
-  { id: '1002', name: '李四', age: 58, gender: '男', diagnosis: '骨关节炎' },
-  { id: '1003', name: '王五', age: 35, gender: '女', diagnosis: '腕管综合征' },
-  { id: '1004', name: '赵六', age: 62, gender: '女', diagnosis: '脑卒中后遗症' },
-];
+// 将 ISO 时间格式化为展示字符串
+const formatTime = (iso?: string): string => {
+  if (!iso) return '未知时间';
+  const date = new Date(iso);
+  if (isNaN(date.getTime())) return String(iso);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
 
-// 生命体征模拟数据
-const MOCK_VITAL_SIGNS: VitalSign[] = [
-  { 
-    id: 1, 
-    type: '心率', 
-    value: '78', 
-    unit: 'bpm', 
-    time: '2023-06-01 08:30', 
-    status: 'normal',
-    reference: '60-100 bpm',
-    history: [75, 72, 78, 79, 80, 77, 78]
-  },
-  { 
-    id: 2, 
-    type: '血压', 
-    value: '135/85', 
-    unit: 'mmHg', 
-    time: '2023-06-01 08:30', 
-    status: 'warning',
-    reference: '收缩压 < 130, 舒张压 < 80 mmHg',
-    history: [
-      { systolic: 132, diastolic: 84 }, 
-      { systolic: 129, diastolic: 83 }, 
-      { systolic: 135, diastolic: 85 }, 
-      { systolic: 140, diastolic: 86 },
-      { systolic: 138, diastolic: 85 }, 
-      { systolic: 132, diastolic: 82 }
-    ]
-  },
-  { 
-    id: 3, 
-    type: '体温', 
-    value: '36.5', 
-    unit: '°C', 
-    time: '2023-06-01 08:30', 
-    status: 'normal',
-    reference: '36.0-37.3°C',
-    history: [36.4, 36.5, 36.7, 36.5, 36.4, 36.5, 36.5]
-  },
-  { 
-    id: 4, 
-    type: '呼吸频率', 
-    value: '18', 
-    unit: '次/分钟', 
-    time: '2023-06-01 08:30', 
-    status: 'normal',
-    reference: '12-20 次/分钟',
-    history: [16, 17, 18, 16, 17, 18, 18]
-  },
-  { 
-    id: 5, 
-    type: '血氧饱和度', 
-    value: '95', 
-    unit: '%', 
-    time: '2023-06-01 08:30', 
-    status: 'normal',
-    reference: '95-100%',
-    history: [97, 96, 96, 95, 96, 97, 95]
+// 图表 x 轴短标签
+const formatChartLabel = (iso?: string): string => {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (isNaN(date.getTime())) return String(iso);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+// 解析血压值：支持 "135/85" 字符串与 { systolic, diastolic } 对象
+const parseBP = (value: any): { systolic: number; diastolic: number } | null => {
+  if (value && typeof value === 'object' && 'systolic' in value) {
+    const s = Number(value.systolic);
+    const d = Number(value.diastolic);
+    if (!isNaN(s) && !isNaN(d)) return { systolic: s, diastolic: d };
+    return null;
   }
-];
-
-// 血糖模拟数据
-const MOCK_GLUCOSE_DATA: GlucoseData[] = [
-  { id: 1, timePoint: '早餐前', value: 5.2, unit: 'mmol/L', time: '2023-06-01 07:30', status: 'normal', reference: '3.9-7.2 mmol/L' },
-  { id: 2, timePoint: '早餐后2小时', value: 9.1, unit: 'mmol/L', time: '2023-06-01 09:30', status: 'warning', reference: '< 8.3 mmol/L' },
-  { id: 3, timePoint: '午餐前', value: 6.3, unit: 'mmol/L', time: '2023-06-01 12:00', status: 'normal', reference: '3.9-7.2 mmol/L' },
-  { id: 4, timePoint: '午餐后2小时', value: 8.8, unit: 'mmol/L', time: '2023-06-01 14:00', status: 'warning', reference: '< 8.3 mmol/L' },
-  { id: 5, timePoint: '晚餐前', value: 5.9, unit: 'mmol/L', time: '2023-06-01 18:00', status: 'normal', reference: '3.9-7.2 mmol/L' },
-  { id: 6, timePoint: '晚餐后2小时', value: 7.8, unit: 'mmol/L', time: '2023-06-01 20:00', status: 'normal', reference: '< 8.3 mmol/L' },
-  { id: 7, timePoint: '睡前', value: 6.5, unit: 'mmol/L', time: '2023-06-01 22:00', status: 'normal', reference: '3.9-7.2 mmol/L' },
-];
-
-// 血压趋势模拟数据
-const MOCK_BP_TREND: BPTrendData[] = [
-  { date: '5/25', systolic: 128, diastolic: 80 },
-  { date: '5/26', systolic: 130, diastolic: 82 },
-  { date: '5/27', systolic: 125, diastolic: 78 },
-  { date: '5/28', systolic: 132, diastolic: 83 },
-  { date: '5/29', systolic: 135, diastolic: 85 },
-  { date: '5/30', systolic: 130, diastolic: 81 },
-  { date: '5/31', systolic: 128, diastolic: 80 },
-  { date: '6/1', systolic: 135, diastolic: 85 },
-];
-
-// 用药情况模拟数据
-const MOCK_MEDICATIONS = [
-  {
-    id: 1,
-    name: '布洛芬缓释胶囊',
-    dosage: '0.3g',
-    frequency: '每日3次',
-    startDate: '2023-05-20',
-    endDate: '2023-06-20',
-    purpose: '疼痛管理',
-    status: 'active'
-  },
-  {
-    id: 2,
-    name: '盐酸氨基葡萄糖胶囊',
-    dosage: '0.75g',
-    frequency: '每日1次',
-    startDate: '2023-05-15',
-    endDate: '2023-08-15',
-    purpose: '关节健康',
-    status: 'active'
-  },
-  {
-    id: 3,
-    name: '维生素D钙片',
-    dosage: '1片',
-    frequency: '每日1次',
-    startDate: '2023-05-15',
-    endDate: '长期',
-    purpose: '骨骼健康',
-    status: 'active'
+  const parts = String(value ?? '').split('/');
+  if (parts.length === 2) {
+    const s = parseFloat(parts[0]);
+    const d = parseFloat(parts[1]);
+    if (!isNaN(s) && !isNaN(d)) return { systolic: s, diastolic: d };
   }
-];
+  return null;
+};
 
-// 康复进度模拟数据
-const MOCK_REHAB_PROGRESS = {
-  startDate: '2023-05-01',
-  currentWeek: 5,
-  totalWeeks: 12,
-  completionRate: 65,
-  painLevel: {
-    initial: 8,
-    current: 4,
-    target: 0
-  },
-  mobility: {
-    initial: 40,
-    current: 65,
-    target: 90
-  },
-  strength: {
-    initial: 30,
-    current: 55,
-    target: 85
-  },
-  weeklyExercises: [
-    { week: 1, completed: 100 },
-    { week: 2, completed: 90 },
-    { week: 3, completed: 85 },
-    { week: 4, completed: 75 },
-    { week: 5, completed: 65 },
-  ],
-  nextAppointment: '2023-06-05 14:30'
+// 数值型体征值转字符串（血压等复合值单独处理）
+const vitalValueText = (value: any): string => {
+  if (value === null || value === undefined || value === '') return '-';
+  if (typeof value === 'number') return String(Math.round(value * 10) / 10);
+  return String(value);
+};
+
+// 患者下拉项展示文案
+const patientLabel = (p: PatientOption): string => {
+  const traits: string[] = [];
+  if (p.age !== undefined) traits.push(`${p.age}岁`);
+  if (p.gender) traits.push(p.gender);
+  return traits.length > 0 ? `${p.name} (${traits.join(', ')})` : p.name;
+};
+
+// 从康复计划 exercises 内的数值型 progress 计算平均完成率；无有效数据时返回 null（不伪造）
+const computePlanProgress = (exercises: any[]): number | null => {
+  if (!Array.isArray(exercises) || exercises.length === 0) return null;
+  const values = exercises
+    .map((ex: any) => {
+      const raw = ex?.progress ?? ex?.completion_rate ?? ex?.completion;
+      const num = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
+      return isNaN(num) ? null : num > 1 ? num : num * 100; // 0-1 归一为百分比
+    })
+    .filter((v): v is number => v !== null);
+  if (values.length === 0) return null;
+  return Math.round(values.reduce((a, b) => a + b, 0) / values.length);
 };
 
 const DataMonitoring: React.FC = () => {
   // 状态管理
   const [tabValue, setTabValue] = React.useState(0);
   const [selectedPatient, setSelectedPatient] = React.useState<string>('');
+  const [patients, setPatients] = React.useState<PatientOption[]>([]);
+  const [patientsLoading, setPatientsLoading] = React.useState(false);
+  const [patientsError, setPatientsError] = React.useState<string | null>(null);
+  const [patientNotice, setPatientNotice] = React.useState<string | null>(null);
+
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [vitals, setVitals] = React.useState<VitalSign[]>([]);
-  const [glucoseData, setGlucoseData] = React.useState<GlucoseData[]>([]);
-  const [bpTrend, setBpTrend] = React.useState<BPTrendData[]>([]);
-  const [medications, setMedications] = React.useState<any[]>([]);
-  const [rehabProgress, setRehabProgress] = React.useState<any>(null);
+  const [vitals, setVitals] = React.useState<VitalCard[]>([]);
+  const [heartRateTrend, setHeartRateTrend] = React.useState<Array<{ date: string; value: number }>>([]);
+  const [temperatureTrend, setTemperatureTrend] = React.useState<Array<{ date: string; value: number }>>([]);
+  const [bpTrend, setBpTrend] = React.useState<BPTrendPoint[]>([]);
+  const [latestBP, setLatestBP] = React.useState<{ value: string; time: string } | null>(null);
+  const [glucoseData, setGlucoseData] = React.useState<GlucoseRow[]>([]);
+  const [medications, setMedications] = React.useState<MedicationRow[]>([]);
+  const [rehabPlan, setRehabPlan] = React.useState<RehabPlanSummary | null>(null);
+
+  // 加载医生的患者列表（真实接口 GET /doctors/patients）
+  const loadPatients = React.useCallback(async () => {
+    setPatientsLoading(true);
+    setPatientsError(null);
+    setPatientNotice(null);
+    try {
+      const response = await apiService.doctor.getPatients();
+      const list: any[] = Array.isArray(response.data) ? response.data : [];
+      // 后端缺陷防护：GET /doctors/patients 在数据库无真实患者时会返回 id 形如
+      // "mock_1" 的模拟患者（backend/app/api/routers/doctor_router.py:34-49），
+      // 这里过滤掉，仅展示真实患者，并以提示说明
+      const realPatients = list.filter(p => !String(p?.id ?? p?._id ?? '').startsWith('mock_'));
+      if (list.length > realPatients.length) {
+        setPatientNotice('后端在无真实患者数据时返回了模拟患者（后端缺陷，待修复），已过滤，仅显示真实患者。');
+      }
+      setPatients(realPatients.map(p => ({
+        id: String(p?.id ?? p?._id ?? ''),
+        name: String(p?.name ?? '未知患者'),
+        age: typeof p?.age === 'number' ? p.age : undefined,
+        gender: p?.gender ? String(p.gender) : undefined,
+        diagnosis: p?.diagnosis ? String(p.diagnosis) : undefined,
+      })));
+    } catch (err: any) {
+      console.error('获取患者列表失败:', err);
+      setPatientsError(err?.response?.data?.detail || err?.message || '获取患者列表失败');
+    } finally {
+      setPatientsLoading(false);
+    }
+  }, []);
+
+  // 初始加载患者列表
+  React.useEffect(() => {
+    loadPatients();
+  }, [loadPatients]);
+
+  // 加载选中患者的监测数据
+  const loadPatientData = async () => {
+    if (!selectedPatient) return;
+    setLoading(true);
+    setError(null);
+
+    try {
+      const [vitalRes, labRes, plansRes, recordRes] = await Promise.all([
+        // 生命体征（含血压、血糖体征），真实接口 GET /health-records/health-data
+        apiService.getHealthData(selectedPatient, { data_type: 'vital_sign', limit: 200 }),
+        // 化验结果（血糖也可能记录在此），真实接口 GET /health-records/health-data?data_type=lab_result
+        apiService.getHealthData(selectedPatient, { data_type: 'lab_result', limit: 50 }),
+        // 康复计划，真实接口 GET /rehabilitation/plans?patient_id=
+        apiService.rehabilitation.getPlans(selectedPatient),
+        // 医生侧健康档案（用药记录来源），失败不阻塞其余数据
+        apiService.doctor.getPatientHealthRecord(selectedPatient).catch(() => null),
+      ]);
+
+      const vitalDocs: HealthDataDoc[] = Array.isArray(vitalRes.data) ? vitalRes.data : [];
+      const labDocs: HealthDataDoc[] = Array.isArray(labRes.data) ? labRes.data : [];
+
+      // 按记录时间升序排列，便于取"最新值"与绘制趋势
+      const sortedVitals = [...vitalDocs].sort((a, b) =>
+        new Date(a.recorded_at ?? a.created_at ?? 0).getTime() - new Date(b.recorded_at ?? b.created_at ?? 0).getTime()
+      );
+
+      // 生命体征摘要：每个类型取最新一条
+      const latestByType = new Map<string, HealthDataDoc>();
+      sortedVitals.forEach(doc => {
+        const type = doc?.data?.type;
+        if (type) latestByType.set(type, doc);
+      });
+
+      const vitalCards: VitalCard[] = VITAL_TYPES
+        .filter(v => latestByType.has(v.type))
+        .map(v => {
+          const doc = latestByType.get(v.type)!;
+          return {
+            type: v.type,
+            label: v.label,
+            unit: doc?.data?.unit || v.unit,
+            value: vitalValueText(doc?.data?.value),
+            time: formatTime(doc?.recorded_at ?? doc?.created_at),
+          };
+        });
+      setVitals(vitalCards);
+
+      // 趋势：心率 / 体温历史
+      const trendOf = (type: string) =>
+        sortedVitals
+          .filter(doc => doc?.data?.type === type && !isNaN(Number(doc?.data?.value)))
+          .map(doc => ({ date: formatChartLabel(doc.recorded_at ?? doc.created_at), value: Number(doc.data.value) }));
+      setHeartRateTrend(trendOf('heart_rate'));
+      setTemperatureTrend(trendOf('body_temperature'));
+
+      // 血压：最新值 + 趋势
+      const bpDocs = sortedVitals.filter(doc => doc?.data?.type === 'blood_pressure');
+      const bpPoints: BPTrendPoint[] = bpDocs
+        .map(doc => {
+          const parsed = parseBP(doc?.data?.value);
+          return parsed ? { date: formatChartLabel(doc.recorded_at ?? doc.created_at), ...parsed } : null;
+        })
+        .filter((p): p is BPTrendPoint => p !== null);
+      setBpTrend(bpPoints);
+      if (bpDocs.length > 0) {
+        const latestDoc = bpDocs[bpDocs.length - 1];
+        setLatestBP({
+          value: vitalValueText(latestDoc?.data?.value),
+          time: formatTime(latestDoc?.recorded_at ?? latestDoc?.created_at),
+        });
+      } else {
+        setLatestBP(null);
+      }
+
+      // 血糖：体征类型 blood_glucose + 化验结果中含"血糖/葡萄糖"的记录
+      const glucoseRows: GlucoseRow[] = [];
+      sortedVitals
+        .filter(doc => doc?.data?.type === 'blood_glucose')
+        .forEach(doc => {
+          glucoseRows.push({
+            id: String(doc.id ?? doc._id ?? Math.random()),
+            value: vitalValueText(doc?.data?.value),
+            unit: doc?.data?.unit || '',
+            time: formatTime(doc?.recorded_at ?? doc?.created_at),
+          });
+        });
+      labDocs.forEach(doc => {
+        const testName = String(doc?.data?.test_name ?? '');
+        if (testName.includes('血糖') || testName.includes('葡萄糖')) {
+          glucoseRows.push({
+            id: String(doc.id ?? doc._id ?? Math.random()),
+            value: vitalValueText(doc?.data?.result_value),
+            unit: doc?.data?.unit || '',
+            time: formatTime(doc?.recorded_at ?? doc?.created_at),
+            reference: doc?.data?.reference_range ? String(doc.data.reference_range) : undefined,
+            interpretation: doc?.data?.interpretation ? String(doc.data.interpretation) : undefined,
+          });
+        }
+      });
+      glucoseRows.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+      setGlucoseData(glucoseRows);
+
+      // 用药记录：来自医生健康档案（GET /doctors/health-records/{patient_id} 的 medications 字段）
+      const meds = (recordRes?.data as any)?.medications;
+      setMedications(Array.isArray(meds)
+        ? meds.map((med: any, index: number) => ({
+            id: String(med?.id ?? med?._id ?? index),
+            name: String(med?.name ?? med?.medication_name ?? med?.drug_name ?? '未知药品'),
+            dosage: String(med?.dosage ?? med?.dose ?? '-'),
+            frequency: String(med?.frequency ?? med?.dosage_frequency ?? '-'),
+            purpose: String(med?.purpose ?? med?.indication ?? '-'),
+            startDate: String(med?.start_date ?? med?.startDate ?? '-'),
+            endDate: String(med?.end_date ?? med?.endDate ?? '-'),
+          }))
+        : []);
+
+      // 康复计划：取开始时间最近的一份
+      const plans: any[] = Array.isArray(plansRes.data) ? plansRes.data : [];
+      if (plans.length > 0) {
+        const sortedPlans = [...plans].sort((a, b) =>
+          new Date(a?.start_date ?? 0).getTime() - new Date(b?.start_date ?? 0).getTime()
+        );
+        const plan = sortedPlans[sortedPlans.length - 1];
+        setRehabPlan({
+          id: String(plan?._id ?? plan?.id ?? ''),
+          name: String(plan?.name ?? '未命名康复计划'),
+          status: String(plan?.status ?? 'unknown'),
+          goal: plan?.goal ? String(plan.goal) : '',
+          frequency: plan?.frequency ? String(plan.frequency) : '',
+          startDate: plan?.start_date ? formatTime(plan.start_date).split(' ')[0] : '-',
+          endDate: plan?.end_date ? formatTime(plan.end_date).split(' ')[0] : '-',
+          exerciseCount: Array.isArray(plan?.exercises) ? plan.exercises.length : 0,
+          progress: computePlanProgress(plan?.exercises ?? []),
+        });
+      } else {
+        setRehabPlan(null);
+      }
+    } catch (err: any) {
+      console.error('加载患者监测数据失败:', err);
+      setError(err?.response?.data?.detail || err?.message || '加载患者监测数据失败，请稍后重试');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // 处理选项卡变更
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
@@ -278,74 +429,24 @@ const DataMonitoring: React.FC = () => {
     setSelectedPatient(event.target.value as string);
   };
 
-  // 获取状态图标和颜色
-  const getStatusIcon = (status: string): React.ReactElement | undefined => {
-    switch(status) {
-      case 'normal':
-        return <CheckCircleIcon fontSize="small" color="success" />;
-      case 'warning':
-        return <WarningIcon fontSize="small" color="warning" />;
-      case 'alert':
-        return <ErrorIcon fontSize="small" color="error" />;
-      default:
-        return undefined;
-    }
+  // 化验结论标签（后端 interpretation 字段，无则不展示，不自行判定）
+  const getInterpretationChip = (interpretation?: string) => {
+    if (!interpretation) return null;
+    const map: Record<string, { label: string; color: 'success' | 'warning' | 'error' | 'default' }> = {
+      normal: { label: '正常', color: 'success' },
+      abnormal: { label: '异常', color: 'warning' },
+      critical: { label: '危急', color: 'error' },
+    };
+    const item = map[interpretation] ?? { label: interpretation, color: 'default' as const };
+    return <Chip size="small" label={item.label} color={item.color} />;
   };
-  
-  // 获取状态颜色
-  const getStatusColor = (status: string) => {
-    switch(status) {
-      case 'normal':
-        return 'success';
-      case 'warning':
-        return 'warning';
-      case 'alert':
-        return 'error';
-      default:
-        return 'default';
-    }
-  };
-
-  // 模拟加载数据
-  const loadPatientData = () => {
-    setLoading(true);
-    setError(null);
-    
-    // 模拟API延迟
-    setTimeout(() => {
-      // 设置模拟数据
-      setVitals(MOCK_VITAL_SIGNS);
-      setGlucoseData(MOCK_GLUCOSE_DATA);
-      setBpTrend(MOCK_BP_TREND);
-      setMedications(MOCK_MEDICATIONS);
-      setRehabProgress(MOCK_REHAB_PROGRESS);
-      setLoading(false);
-    }, 1000);
-  };
-
-  // 初始加载数据
-  React.useEffect(() => {
-    if (selectedPatient) {
-      loadPatientData();
-    }
-  }, [selectedPatient]);
-
-  // 模拟图表组件 - 实际项目中应使用真实的图表库
-  const LineChartPlaceholder = ({ title, data }: { title: string, data: any[] }) => (
-    <Box sx={{ width: '100%', height: 200, bgcolor: 'action.hover', p: 2, borderRadius: 1, position: 'relative' }}>
-      <Typography variant="subtitle2" gutterBottom>{title}</Typography>
-      <Typography variant="caption" sx={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>
-        图表将在此处显示 - 包含 {data.length} 数据点
-      </Typography>
-    </Box>
-  );
 
   return (
     <Box>
       <Typography variant="h5" component="h1" gutterBottom>
         患者数据监测
       </Typography>
-      
+
       <Paper sx={{ p: 3, mb: 3 }}>
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={12} sm={6} md={4}>
@@ -357,21 +458,32 @@ const DataMonitoring: React.FC = () => {
                 value={selectedPatient}
                 label="选择患者"
                 onChange={handlePatientChange as any}
+                disabled={patientsLoading}
               >
                 <MenuItem value="">
                   <em>请选择</em>
                 </MenuItem>
-                {MOCK_PATIENTS.map((patient) => (
+                {patients.map((patient) => (
                   <MenuItem key={patient.id} value={patient.id}>
-                    {patient.name} ({patient.age}岁, {patient.gender})
+                    {patientLabel(patient)}
                   </MenuItem>
                 ))}
               </Select>
             </FormControl>
           </Grid>
           <Grid item xs={12} sm={6} md={8} textAlign="right">
-            <Button 
-              variant="contained" 
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<RefreshIcon />}
+              onClick={loadPatients}
+              disabled={patientsLoading}
+              sx={{ mr: 1 }}
+            >
+              刷新患者
+            </Button>
+            <Button
+              variant="contained"
               color="primary"
               startIcon={<RefreshIcon />}
               onClick={loadPatientData}
@@ -392,8 +504,18 @@ const DataMonitoring: React.FC = () => {
             )}
           </Grid>
         </Grid>
+        {patientsError && (
+          <Alert severity="error" sx={{ mt: 2 }}>
+            {patientsError}
+          </Alert>
+        )}
+        {patientNotice && (
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            {patientNotice}
+          </Alert>
+        )}
       </Paper>
-      
+
       {!selectedPatient ? (
         <Alert severity="info" sx={{ mt: 2 }}>请选择一位患者以查看其健康数据监测信息</Alert>
       ) : loading ? (
@@ -405,9 +527,9 @@ const DataMonitoring: React.FC = () => {
       ) : (
         <Box sx={{ width: '100%' }}>
           <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-            <Tabs 
-              value={tabValue} 
-              onChange={handleTabChange} 
+            <Tabs
+              value={tabValue}
+              onChange={handleTabChange}
               aria-label="health data tabs"
               variant="scrollable"
               scrollButtons="auto"
@@ -418,64 +540,81 @@ const DataMonitoring: React.FC = () => {
               <Tab icon={<MonitorWeightIcon />} iconPosition="start" label="康复进度" />
             </Tabs>
           </Box>
-          
+
+          <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+            数据来源：患者健康档案中已录入的生命体征与化验记录（GET /health-records/health-data）。
+            数据非实时同步，可点击"刷新数据"获取最新记录。
+          </Typography>
+
           {/* 生命体征选项卡 */}
           <TabPanel value={tabValue} index={0}>
             <Grid container spacing={3}>
-              {/* 生命体征摘要卡片 */}
-              {vitals.map((vital) => (
-                <Grid item xs={12} sm={6} md={4} key={vital.id}>
-                  <Card variant="outlined">
-                    <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
-                      <Box display="flex" justifyContent="space-between" alignItems="center" mb={1}>
-                        <Typography variant="subtitle1" component="div">
-                          {vital.type}
-                        </Typography>
-                        {getStatusIcon(vital.status)}
-                      </Box>
-                      <Box display="flex" alignItems="baseline">
-                        <Typography variant="h4" component="span" color={`${getStatusColor(vital.status)}.main`}>
-                          {vital.value}
-                        </Typography>
-                        <Typography variant="body2" component="span" sx={{ ml: 1 }}>
-                          {vital.unit}
-                        </Typography>
-                      </Box>
-                      <Typography variant="caption" color="text.secondary" component="div">
-                        记录时间: {vital.time}
-                      </Typography>
-                      <Divider sx={{ my: 1 }} />
-                      <Typography variant="caption" color="text.secondary">
-                        参考范围: {vital.reference}
-                      </Typography>
-                    </CardContent>
-                  </Card>
+              {vitals.length === 0 ? (
+                <Grid item xs={12}>
+                  <Alert severity="info">该患者暂无生命体征记录</Alert>
                 </Grid>
-              ))}
-              
-              {/* 生命体征历史趋势图表 */}
+              ) : (
+                vitals.map((vital) => (
+                  <Grid item xs={12} sm={6} md={4} key={vital.type}>
+                    <Card variant="outlined">
+                      <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+                        <Box display="flex" justifyContent="space-between" alignItems="center" mb={1}>
+                          <Typography variant="subtitle1" component="div">
+                            {vital.label}
+                          </Typography>
+                        </Box>
+                        <Box display="flex" alignItems="baseline">
+                          <Typography variant="h4" component="span">
+                            {vital.value}
+                          </Typography>
+                          <Typography variant="body2" component="span" sx={{ ml: 1 }}>
+                            {vital.unit}
+                          </Typography>
+                        </Box>
+                        <Typography variant="caption" color="text.secondary" component="div">
+                          记录时间: {vital.time}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))
+              )}
+
+              {/* 生命体征历史趋势（真实记录绘制） */}
               <Grid item xs={12}>
                 <Paper sx={{ p: 2 }}>
                   <Typography variant="h6" gutterBottom>生命体征趋势</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={12} md={6}>
-                      <LineChartPlaceholder 
-                        title="心率趋势 (bpm)" 
-                        data={vitals.length > 0 ? vitals[0].history : []} 
-                      />
+                  {heartRateTrend.length === 0 && temperatureTrend.length === 0 ? (
+                    <Alert severity="info">暂无可用于绘制趋势的体征历史记录</Alert>
+                  ) : (
+                    <Grid container spacing={2}>
+                      <Grid item xs={12} md={6}>
+                        <AnalyticsChart
+                          type="line"
+                          data={heartRateTrend}
+                          height={250}
+                          xKey="date"
+                          yKeys={['value']}
+                          title="心率趋势 (bpm)"
+                        />
+                      </Grid>
+                      <Grid item xs={12} md={6}>
+                        <AnalyticsChart
+                          type="line"
+                          data={temperatureTrend}
+                          height={250}
+                          xKey="date"
+                          yKeys={['value']}
+                          title="体温趋势 (°C)"
+                        />
+                      </Grid>
                     </Grid>
-                    <Grid item xs={12} md={6}>
-                      <LineChartPlaceholder 
-                        title="体温趋势 (°C)" 
-                        data={vitals.length > 0 ? vitals[2].history : []} 
-                      />
-                    </Grid>
-                  </Grid>
+                  )}
                 </Paper>
               </Grid>
             </Grid>
           </TabPanel>
-          
+
           {/* 血压/血糖选项卡 */}
           <TabPanel value={tabValue} index={1}>
             <Grid container spacing={3}>
@@ -488,79 +627,103 @@ const DataMonitoring: React.FC = () => {
                       <Card variant="outlined">
                         <CardContent>
                           <Typography variant="subtitle1" gutterBottom>当前血压</Typography>
-                          <Box display="flex" alignItems="baseline">
-                            <Typography variant="h4" component="span" color={vitals.length > 0 && vitals[1].status === 'warning' ? 'warning.main' : 'text.primary'}>
-                              {vitals.length > 0 ? vitals[1].value : '-/-'}
+                          {latestBP ? (
+                            <>
+                              <Box display="flex" alignItems="baseline">
+                                <Typography variant="h4" component="span">
+                                  {latestBP.value}
+                                </Typography>
+                                <Typography variant="body2" component="span" sx={{ ml: 1 }}>
+                                  mmHg
+                                </Typography>
+                              </Box>
+                              <Typography variant="caption" color="text.secondary">
+                                记录于 {latestBP.time}
+                              </Typography>
+                            </>
+                          ) : (
+                            <Typography variant="body2" color="text.secondary">
+                              暂无血压记录
                             </Typography>
-                            <Typography variant="body2" component="span" sx={{ ml: 1 }}>
-                              mmHg
-                            </Typography>
-                          </Box>
-                          <Typography variant="caption" color="text.secondary">
-                            {vitals.length > 0 ? `记录于 ${vitals[1].time}` : '无数据'}
-                          </Typography>
-                          {vitals.length > 0 && vitals[1].status === 'warning' && (
-                            <Alert severity="warning" sx={{ mt: 1 }}>
-                              血压偏高，请注意监测
-                            </Alert>
                           )}
                         </CardContent>
                       </Card>
                     </Grid>
                     <Grid item xs={12} md={8}>
-                      <LineChartPlaceholder title="血压趋势" data={bpTrend} />
+                      <AnalyticsChart
+                        type="line"
+                        data={bpTrend}
+                        height={250}
+                        xKey="date"
+                        yKeys={['systolic', 'diastolic']}
+                        colors={{ systolic: '#e53935', diastolic: '#1e88e5' }}
+                        title="血压趋势 (mmHg)"
+                      />
                     </Grid>
                   </Grid>
                 </Paper>
               </Grid>
-              
+
               {/* 血糖部分 */}
               <Grid item xs={12}>
                 <Paper sx={{ p: 3 }}>
                   <Typography variant="h6" gutterBottom>血糖监测</Typography>
-                  <TableContainer>
-                    <Table size="small">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell>测量时间点</TableCell>
-                          <TableCell>数值</TableCell>
-                          <TableCell>状态</TableCell>
-                          <TableCell>参考范围</TableCell>
-                          <TableCell>记录时间</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {glucoseData.map((row) => (
-                          <TableRow key={row.id} hover>
-                            <TableCell>{row.timePoint}</TableCell>
-                            <TableCell>
-                              <Box display="flex" alignItems="center">
-                                {row.value} {row.unit}
-                              </Box>
-                            </TableCell>
-                            <TableCell>
-                              <Chip 
-                                size="small" 
-                                label={row.status === 'normal' ? '正常' : '偏高'} 
-                                color={getStatusColor(row.status) as any} 
-                                icon={getStatusIcon(row.status)}
-                              />
-                            </TableCell>
-                            <TableCell>{row.reference}</TableCell>
-                            <TableCell>{row.time}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                  <Box mt={3}>
-                    <LineChartPlaceholder title="血糖日内波动" data={glucoseData.map(item => item.value)} />
-                  </Box>
+                  {glucoseData.length === 0 ? (
+                    <Alert severity="info">
+                      暂无血糖记录（体征记录中无 blood_glucose 类型数据，化验结果中亦无血糖类检测）
+                    </Alert>
+                  ) : (
+                    <>
+                      <TableContainer>
+                        <Table size="small">
+                          <TableHead>
+                            <TableRow>
+                              <TableCell>数值</TableCell>
+                              <TableCell>状态</TableCell>
+                              <TableCell>参考范围</TableCell>
+                              <TableCell>记录时间</TableCell>
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
+                            {glucoseData.map((row) => (
+                              <TableRow key={row.id} hover>
+                                <TableCell>
+                                  <Box display="flex" alignItems="center">
+                                    {row.value} {row.unit}
+                                  </Box>
+                                </TableCell>
+                                <TableCell>
+                                  {getInterpretationChip(row.interpretation) ?? (
+                                    <Chip size="small" label="未判定" variant="outlined" />
+                                  )}
+                                </TableCell>
+                                <TableCell>{row.reference ?? '-'}</TableCell>
+                                <TableCell>{row.time}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                      <Box mt={3}>
+                        <AnalyticsChart
+                          type="line"
+                          data={glucoseData
+                            .filter(row => !isNaN(Number(row.value)))
+                            .map(row => ({ date: row.time, value: Number(row.value) }))
+                            .reverse()}
+                          height={250}
+                          xKey="date"
+                          yKeys={['value']}
+                          title="血糖记录 (按时间)"
+                        />
+                      </Box>
+                    </>
+                  )}
                 </Paper>
               </Grid>
             </Grid>
           </TabPanel>
-          
+
           {/* 用药情况选项卡 */}
           <TabPanel value={tabValue} index={2}>
             <Grid container spacing={3}>
@@ -568,8 +731,8 @@ const DataMonitoring: React.FC = () => {
                 <Paper sx={{ p: 3, mb: 3 }}>
                   <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
                     <Typography variant="h6">当前用药</Typography>
-                    <Button 
-                      variant="outlined" 
+                    <Button
+                      variant="outlined"
                       size="small"
                       component={Link}
                       to={`/app/doctor/health-records/${selectedPatient}`}
@@ -577,103 +740,67 @@ const DataMonitoring: React.FC = () => {
                       查看完整用药史
                     </Button>
                   </Box>
-                  
-                  <TableContainer>
-                    <Table>
-                      <TableHead>
-                        <TableRow>
-                          <TableCell>药品名称</TableCell>
-                          <TableCell>剂量</TableCell>
-                          <TableCell>频率</TableCell>
-                          <TableCell>用途</TableCell>
-                          <TableCell>起止日期</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {medications.map((med) => (
-                          <TableRow key={med.id} hover>
-                            <TableCell>
-                              <Typography variant="body2" fontWeight="500">
-                                {med.name}
-                              </Typography>
-                            </TableCell>
-                            <TableCell>{med.dosage}</TableCell>
-                            <TableCell>{med.frequency}</TableCell>
-                            <TableCell>{med.purpose}</TableCell>
-                            <TableCell>
-                              {med.startDate} 至 {med.endDate === '长期' ? (
-                                <Chip size="small" label="长期" color="primary" />
-                              ) : med.endDate}
-                            </TableCell>
+
+                  {medications.length === 0 ? (
+                    <Alert severity="info">
+                      暂无用药记录（该患者健康档案的 medications 字段为空）
+                    </Alert>
+                  ) : (
+                    <TableContainer>
+                      <Table>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>药品名称</TableCell>
+                            <TableCell>剂量</TableCell>
+                            <TableCell>频率</TableCell>
+                            <TableCell>用途</TableCell>
+                            <TableCell>起止日期</TableCell>
                           </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
+                        </TableHead>
+                        <TableBody>
+                          {medications.map((med) => (
+                            <TableRow key={med.id} hover>
+                              <TableCell>
+                                <Typography variant="body2" fontWeight="500">
+                                  {med.name}
+                                </Typography>
+                              </TableCell>
+                              <TableCell>{med.dosage}</TableCell>
+                              <TableCell>{med.frequency}</TableCell>
+                              <TableCell>{med.purpose}</TableCell>
+                              <TableCell>
+                                {med.startDate} 至 {med.endDate}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  )}
                 </Paper>
               </Grid>
-              
+
               <Grid item xs={12}>
                 <Paper sx={{ p: 3 }}>
                   <Typography variant="h6" gutterBottom>服药依从性</Typography>
-                  <Grid container spacing={3}>
-                    <Grid item xs={12} md={6}>
-                      <Card variant="outlined">
-                        <CardContent>
-                          <Typography variant="subtitle2" color="text.secondary">
-                            本周服药依从率
-                          </Typography>
-                          <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-                            <Box sx={{ width: '100%', mr: 1 }}>
-                              <LinearProgress 
-                                variant="determinate" 
-                                value={85} 
-                                color="success"
-                                sx={{ height: 10, borderRadius: 5 }}
-                              />
-                            </Box>
-                            <Box sx={{ minWidth: 35 }}>
-                              <Typography variant="body2" color="text.secondary">85%</Typography>
-                            </Box>
-                          </Box>
-                          <Typography variant="body2" mt={1}>
-                            患者本周服药情况良好，但周三早晨剂量缺失。
-                          </Typography>
-                        </CardContent>
-                      </Card>
-                    </Grid>
-                    <Grid item xs={12} md={6}>
-                      <Card variant="outlined">
-                        <CardContent>
-                          <Typography variant="subtitle2" color="text.secondary">
-                            近4周服药依从率趋势
-                          </Typography>
-                          <Box sx={{ height: 120, mt: 2 }}>
-                            <LineChartPlaceholder 
-                              title="依从率趋势" 
-                              data={[90, 88, 78, 85]} 
-                            />
-                          </Box>
-                        </CardContent>
-                      </Card>
-                    </Grid>
-                  </Grid>
+                  <Alert severity="info">
+                    暂无数据源：后端未提供服药依从率统计端点，依从率与依从趋势待后端支持后接入。
+                  </Alert>
                 </Paper>
               </Grid>
             </Grid>
           </TabPanel>
-          
+
           {/* 康复进度选项卡 */}
           <TabPanel value={tabValue} index={3}>
-            {rehabProgress ? (
+            {rehabPlan ? (
               <Grid container spacing={3}>
-                {/* 康复进度概览 */}
                 <Grid item xs={12}>
                   <Paper sx={{ p: 3, mb: 3 }}>
                     <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
                       <Typography variant="h6">康复计划进度</Typography>
-                      <Button 
-                        variant="outlined" 
+                      <Button
+                        variant="outlined"
                         size="small"
                         component={Link}
                         to={`/app/rehab-plans`}
@@ -681,168 +808,99 @@ const DataMonitoring: React.FC = () => {
                         查看完整计划
                       </Button>
                     </Box>
-                    
+
                     <Grid container spacing={3}>
                       <Grid item xs={12} md={6}>
                         <Box>
                           <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                            当前进度
+                            {rehabPlan.name}
                           </Typography>
-                          <Box sx={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
-                            <Box sx={{ position: 'relative', display: 'inline-flex' }}>
-                              <CircularProgress 
-                                variant="determinate" 
-                                value={rehabProgress.completionRate} 
-                                size={100}
-                                thickness={5}
-                                color="primary"
-                              />
-                              <Box
-                                sx={{
-                                  top: 0,
-                                  left: 0,
-                                  bottom: 0,
-                                  right: 0,
-                                  position: 'absolute',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                }}
-                              >
-                                <Typography variant="h5" component="div" color="text.secondary">
-                                  {`${rehabProgress.completionRate}%`}
-                                </Typography>
-                              </Box>
-                            </Box>
-                            <Box ml={3}>
-                              <Typography variant="body2" gutterBottom>
-                                开始日期: {rehabProgress.startDate}
-                              </Typography>
-                              <Typography variant="body2" gutterBottom>
-                                当前周期: 第 {rehabProgress.currentWeek} 周 / 共 {rehabProgress.totalWeeks} 周
-                              </Typography>
-                              <Typography variant="body2">
-                                下次复诊: {rehabProgress.nextAppointment}
+                          <Box display="flex" gap={1} mb={2}>
+                            <Chip
+                              size="small"
+                              label={
+                                rehabPlan.status === 'active' ? '进行中'
+                                  : rehabPlan.status === 'completed' ? '已完成'
+                                  : rehabPlan.status === 'cancelled' ? '已取消'
+                                  : rehabPlan.status
+                              }
+                              color={rehabPlan.status === 'active' ? 'primary' : 'default'}
+                            />
+                            {rehabPlan.frequency && (
+                              <Chip size="small" variant="outlined" label={`频率: ${rehabPlan.frequency}`} />
+                            )}
+                          </Box>
+                          {rehabPlan.goal && (
+                            <Typography variant="body2" gutterBottom>
+                              康复目标: {rehabPlan.goal}
+                            </Typography>
+                          )}
+                          <Typography variant="body2" gutterBottom>
+                            开始日期: {rehabPlan.startDate}{rehabPlan.endDate !== '-' ? ` 至 ${rehabPlan.endDate}` : ''}
+                          </Typography>
+                          <Typography variant="body2" gutterBottom>
+                            训练项目数: {rehabPlan.exerciseCount}
+                          </Typography>
+                          <Typography variant="body2">
+                            下次复诊: 暂无数据源（后端未提供复诊预约查询端点）
+                          </Typography>
+                        </Box>
+                      </Grid>
+
+                      <Grid item xs={12} md={6}>
+                        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                          计划完成率（按训练项目进度均值估算）
+                        </Typography>
+                        {rehabPlan.progress !== null ? (
+                          <Box sx={{ position: 'relative', display: 'inline-flex', mt: 1 }}>
+                            <CircularProgress
+                              variant="determinate"
+                              value={Math.min(100, rehabPlan.progress)}
+                              size={100}
+                              thickness={5}
+                              color="primary"
+                            />
+                            <Box
+                              sx={{
+                                top: 0,
+                                left: 0,
+                                bottom: 0,
+                                right: 0,
+                                position: 'absolute',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                              }}
+                            >
+                              <Typography variant="h6" component="div" color="text.secondary">
+                                {`${rehabPlan.progress}%`}
                               </Typography>
                             </Box>
                           </Box>
-                        </Box>
-                      </Grid>
-                      
-                      <Grid item xs={12} md={6}>
-                        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                          每周训练完成率
-                        </Typography>
-                        <Box sx={{ height: 150 }}>
-                          <LineChartPlaceholder 
-                            title="每周训练完成率" 
-                            data={rehabProgress.weeklyExercises.map((w: any) => w.completed)} 
-                          />
-                        </Box>
+                        ) : (
+                          <Alert severity="info" sx={{ mt: 1 }}>
+                            计划内训练项目暂无进度记录，无法计算完成率
+                          </Alert>
+                        )}
                       </Grid>
                     </Grid>
                   </Paper>
                 </Grid>
-                
-                {/* 康复关键指标 */}
+
                 <Grid item xs={12}>
                   <Paper sx={{ p: 3 }}>
                     <Typography variant="h6" gutterBottom>康复关键指标</Typography>
-                    <Grid container spacing={3}>
-                      <Grid item xs={12} md={4}>
-                        <Card variant="outlined">
-                          <CardContent>
-                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                              疼痛等级 (0-10)
-                            </Typography>
-                            <Box sx={{ width: '100%', mb: 1 }}>
-                              <LinearProgress 
-                                variant="determinate" 
-                                value={(rehabProgress.painLevel.current / 10) * 100} 
-                                color={rehabProgress.painLevel.current <= 3 ? "success" : 
-                                      rehabProgress.painLevel.current <= 6 ? "warning" : "error"}
-                                sx={{ height: 10, borderRadius: 5 }}
-                              />
-                            </Box>
-                            <Box display="flex" justifyContent="space-between">
-                              <Typography variant="body2">
-                                初始值: {rehabProgress.painLevel.initial}
-                              </Typography>
-                              <Typography variant="body2" fontWeight="bold">
-                                当前值: {rehabProgress.painLevel.current}
-                              </Typography>
-                              <Typography variant="body2">
-                                目标值: {rehabProgress.painLevel.target}
-                              </Typography>
-                            </Box>
-                          </CardContent>
-                        </Card>
-                      </Grid>
-                      
-                      <Grid item xs={12} md={4}>
-                        <Card variant="outlined">
-                          <CardContent>
-                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                              关节活动度 (%)
-                            </Typography>
-                            <Box sx={{ width: '100%', mb: 1 }}>
-                              <LinearProgress 
-                                variant="determinate" 
-                                value={rehabProgress.mobility.current} 
-                                color="primary"
-                                sx={{ height: 10, borderRadius: 5 }}
-                              />
-                            </Box>
-                            <Box display="flex" justifyContent="space-between">
-                              <Typography variant="body2">
-                                初始值: {rehabProgress.mobility.initial}%
-                              </Typography>
-                              <Typography variant="body2" fontWeight="bold">
-                                当前值: {rehabProgress.mobility.current}%
-                              </Typography>
-                              <Typography variant="body2">
-                                目标值: {rehabProgress.mobility.target}%
-                              </Typography>
-                            </Box>
-                          </CardContent>
-                        </Card>
-                      </Grid>
-                      
-                      <Grid item xs={12} md={4}>
-                        <Card variant="outlined">
-                          <CardContent>
-                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                              肌肉力量 (%)
-                            </Typography>
-                            <Box sx={{ width: '100%', mb: 1 }}>
-                              <LinearProgress 
-                                variant="determinate" 
-                                value={rehabProgress.strength.current} 
-                                color="primary"
-                                sx={{ height: 10, borderRadius: 5 }}
-                              />
-                            </Box>
-                            <Box display="flex" justifyContent="space-between">
-                              <Typography variant="body2">
-                                初始值: {rehabProgress.strength.initial}%
-                              </Typography>
-                              <Typography variant="body2" fontWeight="bold">
-                                当前值: {rehabProgress.strength.current}%
-                              </Typography>
-                              <Typography variant="body2">
-                                目标值: {rehabProgress.strength.target}%
-                              </Typography>
-                            </Box>
-                          </CardContent>
-                        </Card>
-                      </Grid>
-                    </Grid>
+                    <Alert severity="info">
+                      暂无数据源：疼痛等级、关节活动度、肌肉力量及每周训练完成率
+                      依赖计划统计端点（GET /rehabilitation/plans/&#123;id&#125;/statistics），
+                      该端点依赖的服务方法后端尚未实现（调用会 500），待后端补齐后接入。
+                    </Alert>
                   </Paper>
                 </Grid>
               </Grid>
             ) : (
               <Alert severity="info">
-                未找到当前患者的康复计划信息，请先选择患者或创建康复计划。
+                未找到当前患者的康复计划（GET /rehabilitation/plans?patient_id= 无记录），请先为该患者创建康复计划。
               </Alert>
             )}
           </TabPanel>
@@ -852,4 +910,4 @@ const DataMonitoring: React.FC = () => {
   );
 };
 
-export default DataMonitoring; 
+export default DataMonitoring;

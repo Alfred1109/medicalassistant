@@ -15,6 +15,7 @@ import {
   Tab,
   Button,
   Tooltip,
+  Alert,
   SelectChangeEvent,
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -29,55 +30,13 @@ import {
 import AnalyticsChart from '../../components/Analytics/AnalyticsChart';
 import { analyticsService } from '../../services/analyticsService';
 
-// 模拟图表组件
-const ChartPlaceholder: React.FC<{ title: string; height?: number; type?: string }> = ({ 
-  title, 
-  height = 300,
-  type = "line"
-}) => {
-  return (
-    <Box 
-      sx={{ 
-        height: height, 
-        display: 'flex', 
-        flexDirection: 'column',
-        alignItems: 'center', 
-        justifyContent: 'center',
-        border: '1px dashed grey',
-        borderRadius: 1,
-        p: 2
-      }}
-    >
-      <Typography variant="subtitle1" gutterBottom>
-        {title}
-      </Typography>
-      <Typography variant="body2" color="text.secondary" align="center">
-        这里将显示{type === "line" ? "折线图" : type === "bar" ? "柱状图" : type === "pie" ? "饼图" : "图表"}数据
-        <br />
-        集成真实图表库后替换
-      </Typography>
-    </Box>
-  );
-};
-
-// 模拟数据
-const mockData = {
-  patientCount: 1248,
-  weekPatientChange: 4.2,
-  doctorCount: 86,
-  totalDevices: 152,
-  activeDeviceRate: 82,
-  avgTrainingTime: 45,
-  rehabilitationRate: 68,
-  patientSatisfaction: 92
-};
-
 const DataVisualization: React.FC = () => {
   // 状态管理
   const [timeRange, setTimeRange] = useState<TimeRange>('month');
   const [dataType, setDataType] = useState<ChartDataType>('patient');
   const [tabValue, setTabValue] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [statsData, setStatsData] = useState<StatsOverview | null>(null);
   const [trendData, setTrendData] = useState<TrendData[]>([]);
   const [distributionData, setDistributionData] = useState<DistributionData[]>([]);
@@ -101,6 +60,7 @@ const DataVisualization: React.FC = () => {
   // 加载数据
   const loadData = async () => {
     setLoading(true);
+    setError(null);
     try {
       // 并行加载多个数据源
       const [stats, trend, distribution, comparison] = await Promise.all([
@@ -109,13 +69,15 @@ const DataVisualization: React.FC = () => {
         analyticsService.getDistributionData(dataType, timeRange),
         analyticsService.getComparisonData(dataType, timeRange, 'lastPeriod')
       ]);
-      
+
       setStatsData(stats);
       setTrendData(trend);
       setDistributionData(distribution);
       setComparisonData(comparison);
-    } catch (error) {
-      console.error('加载数据失败:', error);
+    } catch (err: any) {
+      // 错误不再静默吞掉（原实现会回退模拟数据），改为明确的错误态
+      console.error('加载数据失败:', err);
+      setError(err?.response?.data?.detail || err?.message || '加载数据失败，请稍后重试');
     } finally {
       setLoading(false);
     }
@@ -177,6 +139,28 @@ const DataVisualization: React.FC = () => {
           </Tooltip>
         </Box>
       </Box>
+
+      {/* 已知后端缺陷说明：趋势/分布/对比三个查询在 analytics_service 服务层仍为随机模拟值，
+          修复需在后端完成（本次任务约定后端文件只读），此处如实注明 */}
+      <Alert severity="info" sx={{ mb: 3 }}>
+        注意：趋势、分布、对比三类图表当前由后端分析接口返回演示数据（服务层聚合逻辑待建设），
+        概览卡片中的患者/医生/设备数量为真实统计；"康复有效率"与"患者满意度"为后端占位值。
+      </Alert>
+
+      {/* 请求失败错误态（分析端点不可达/无权限时展示） */}
+      {error && (
+        <Alert
+          severity="error"
+          sx={{ mb: 3 }}
+          action={
+            <Button color="inherit" size="small" onClick={loadData}>
+              重试
+            </Button>
+          }
+        >
+          {error}
+        </Alert>
+      )}
 
       {/* 数据概览卡片 */}
       <Grid container spacing={3} mb={4}>
@@ -376,21 +360,26 @@ const DataVisualization: React.FC = () => {
                 地域分布
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              <AnalyticsChart 
-                type="pie"
-                data={[
-                  { name: '北京', value: 25, color: '#8884d8' },
-                  { name: '上海', value: 20, color: '#82ca9d' },
-                  { name: '广州', value: 18, color: '#ffc658' },
-                  { name: '深圳', value: 15, color: '#ff8042' },
-                  { name: '其他', value: 22, color: '#0088FE' }
-                ]}
-                height={350}
-                loading={loading}
-                nameKey="name"
-                valueKey="value"
-                title="地域分布图"
-              />
+              {/* 后端 /api/analytics 下无地域分布数据源，此处不再展示硬编码城市数据 */}
+              <Box
+                sx={{
+                  height: 350,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: '1px dashed grey',
+                  borderRadius: 1,
+                  p: 2
+                }}
+              >
+                <Typography variant="subtitle1" gutterBottom>
+                  暂无数据源
+                </Typography>
+                <Typography variant="body2" color="text.secondary" align="center">
+                  后端分析接口暂不提供地域分布数据，待后端支持后接入
+                </Typography>
+              </Box>
             </Paper>
           </Grid>
           
