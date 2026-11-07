@@ -465,6 +465,9 @@ class DeviceAnalysisService:
         # 构建查询条件
         query = {}
         if device_id:
+            if not ObjectId.is_valid(device_id):
+                # 畸形 ID 视为设备不存在（与路由层 404 语义一致），避免 InvalidId 异常
+                return []
             query["_id"] = ObjectId(device_id)
         if patient_id:
             query["patient_id"] = patient_id
@@ -850,17 +853,31 @@ class DeviceAnalysisService:
             }
             
         # 检查数据是否足够做预测分析
+        # 注意：状态必须为 error 而非 warning——路由层 AdvancedPredictionResponse 要求
+        # prediction/history 等字段必填，warning 载荷缺失字段会引发响应校验 500
         if len(values) < 5:
             return {
-                "status": "warning",
+                "status": "error",
                 "message": "数据点过少，无法进行有效的预测分析",
                 "data_type": data_type,
                 "device_id": device_id
             }
-            
+
         # 按时间聚合数据
         aggregated_data = self._aggregate_data_by_interval(values, timestamps, interval)
-        aggregated_values = [item["value"] for item in aggregated_data]
+        # 聚合项的键为 timestamp/count/mean/median/max/min/std（见 _aggregate_data_by_interval），
+        # 预测算法需要每个时间间隔的中心趋势值，取 mean
+        aggregated_values = [item["mean"] for item in aggregated_data]
+
+        # 聚合后数据点不足时，线性预测的残差标准差需除以 (n-2)，ARIMA/Prophet
+        # 同样依赖多期历史，显式返回失败而非伪装预测成功
+        if len(aggregated_data) < 3:
+            return {
+                "status": "error",
+                "message": f"聚合后数据点不足（{len(aggregated_data)} 个），无法进行有效的预测分析",
+                "data_type": data_type,
+                "device_id": device_id
+            }
         
         # 选择合适的预测方法
         result = {}
@@ -966,7 +983,9 @@ class DeviceAnalysisService:
         
         # 计算置信区间
         confidence_intervals = None
-        if with_confidence:
+        # 残差标准差需除以 (n-2)，聚合点数不足 3 时会除零（n=2）或得到负数被
+        # 平方根化为复数（n=1），此时跳过置信区间计算
+        if with_confidence and n >= 3:
             # 计算残差标准差
             y_pred = [slope * x_i + intercept for x_i in x]
             residuals = [values[i] - y_pred[i] for i in range(n)]

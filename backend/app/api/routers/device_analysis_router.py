@@ -5,6 +5,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from bson import ObjectId
 from pydantic import BaseModel, Field
 
 from ...services.device_service import device_service
@@ -12,6 +13,34 @@ from ...services.device_analysis_service import device_analysis_service
 from ...core.auth import get_current_active_user
 
 router = APIRouter(prefix="/device-analysis", tags=["device-analysis"])
+
+
+def _is_device_owner(device: Dict, user_id: str) -> bool:
+    """判断当前用户是否为设备属主。
+
+    device_service.get_device 返回原始文档，patient_id 未做规范化，
+    历史数据中可能以 ObjectId 存储，统一转 str 后比较。
+    """
+    return str(device.get("patient_id")) == str(user_id)
+
+
+async def _check_device_access(device_id: str, current_user: Any) -> Dict:
+    """设备访问粗判：畸形 ID 与不存在的设备均 404，非属主且非授权角色 403。"""
+    # 畸形 ID 视为设备不存在，避免 device_service.get_device 内
+    # ObjectId(device_id) 抛 InvalidId 导致 500
+    if not ObjectId.is_valid(device_id):
+        raise HTTPException(status_code=404, detail="设备不存在")
+
+    device = await device_service.get_device(device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="设备不存在")
+
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if not _is_device_owner(device, current_user.id) and current_user.role not in [
+        "doctor", "health_manager", "admin"]:
+        raise HTTPException(status_code=403, detail="无权访问此设备数据")
+
+    return device
 
 
 # 数据模型
@@ -115,15 +144,9 @@ async def detect_data_anomalies(
     - days: 检测最近多少天的数据（默认30天）
     - method: 检测方法，支持z_score、range、iqr
     """
-    # 检查设备访问权限
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此设备数据")
-    
+    # 检查设备访问权限（存在性 + 属主/角色粗判）
+    await _check_device_access(device_id, current_user)
+
     # 检测异常
     anomalies = await device_analysis_service.detect_data_anomalies(
         device_id=device_id,
@@ -152,15 +175,9 @@ async def analyze_data_trend(
     - days: 分析最近多少天的数据（默认30天）
     - interval: 数据聚合间隔，支持hour、day、week、month
     """
-    # 检查设备访问权限
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此设备数据")
-    
+    # 检查设备访问权限（存在性 + 属主/角色粗判）
+    await _check_device_access(device_id, current_user)
+
     # 分析趋势
     trend = await device_analysis_service.analyze_data_trend(
         device_id=device_id,
@@ -185,15 +202,9 @@ async def monitor_device_status(
     - device_id: 设备ID
     - hours: 监测最近多少小时内的设备状态（默认24小时）
     """
-    # 检查设备访问权限
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此设备数据")
-    
+    # 检查设备访问权限（存在性 + 属主/角色粗判）
+    await _check_device_access(device_id, current_user)
+
     # 监测状态
     statuses = await device_analysis_service.monitor_device_status(
         device_id=device_id,
@@ -243,15 +254,9 @@ async def get_device_alerts(
     - device_id: 设备ID
     - severity: 预警级别阈值，只返回大于等于该级别的预警
     """
-    # 检查设备访问权限
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此设备数据")
-    
+    # 检查设备访问权限（存在性 + 属主/角色粗判）
+    await _check_device_access(device_id, current_user)
+
     # 获取预警
     alerts = await device_analysis_service.generate_device_alerts(
         device_id=device_id,
@@ -303,14 +308,8 @@ async def predict_device_data_advanced(
     高级数据预测分析
     支持多种预测算法和置信区间计算
     """
-    # 检查设备是否存在
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此设备数据")
+    # 检查设备访问权限（存在性 + 属主/角色粗判）
+    await _check_device_access(device_id, current_user)
 
     # 检查预测方法是否有效
     valid_methods = ["linear", "arima", "prophet", "ensemble"]
