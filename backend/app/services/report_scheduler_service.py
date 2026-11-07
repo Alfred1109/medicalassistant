@@ -270,16 +270,18 @@ class ReportSchedulerService:
         start_date = datetime.utcnow() - timedelta(days=days)
         
         pipeline = [
-            {"$match": {"created_at": {"$gte": start_date}}},
+            # 患者统一存于 users 集合（User.collection_name），按 role 区分；
+            # patients 为无写入路径的遗留集合名，读取收敛到唯一集合
+            {"$match": {"role": "patient", "created_at": {"$gte": start_date}}},
             {"$group": {
                 "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
                 "count": {"$sum": 1}
             }},
             {"$sort": {"_id": 1}}
         ]
-        
+
         result = []
-        async for doc in self.db.patients.aggregate(pipeline):
+        async for doc in self.db.users.aggregate(pipeline):
             result.append({
                 "date": doc["_id"],
                 "value": doc["count"]

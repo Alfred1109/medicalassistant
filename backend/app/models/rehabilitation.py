@@ -76,7 +76,9 @@ class Exercise:
 
 class RehabilitationPlan:
     """康复计划模型"""
-    collection_name = "rehabilitation_plans"
+    # 唯一集合名：rehab_plans（RehabilitationService / PredictionService /
+    # AgentService 实际读写；原声明 rehabilitation_plans 无代码引用，属遗留名）
+    collection_name = "rehab_plans"
     
     def __init__(
         self,
@@ -192,7 +194,9 @@ class RehabilitationPlan:
 
 class ProgressRecord:
     """进度记录模型，用于跟踪康复计划的进度"""
-    collection_name = "progress_records"
+    # 唯一集合名：rehab_progress（PredictionService / DashboardService 实际读取；
+    # 原声明 progress_records 无代码引用，属遗留名）
+    collection_name = "rehab_progress"
     
     def __init__(
         self,

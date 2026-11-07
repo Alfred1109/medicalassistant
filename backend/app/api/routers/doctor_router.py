@@ -5,6 +5,7 @@ from app.core.dependencies import get_current_user, get_database, format_mongo_d
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.db.crud_services import PatientCRUD, DoctorCRUD
 from app.models.user import Doctor, Patient
+from app.models.health_record import FollowUpRecord
 from bson.objectid import ObjectId
 
 router = APIRouter()
@@ -167,17 +168,19 @@ async def get_follow_ups(
     """获取随访列表"""
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    
+
     try:
         # 获取当前医生的所有随访记录
+        # 服务层（HealthRecordService）写入的创建人字段是 created_by，
+        # 读取按服务层写入形状对齐，集合收敛为 followup_records 唯一名
         doctor_id = current_user.id
-        query = {"doctor_id": doctor_id}
-        
+        query = {"created_by": doctor_id}
+
         # 如果指定了状态，添加到查询条件
         if status:
             query["status"] = status
-        
-        follow_up_collection = db["follow_ups"]
+
+        follow_up_collection = db[FollowUpRecord.collection_name]
         follow_ups = []
         
         # 执行查询

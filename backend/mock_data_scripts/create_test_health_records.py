@@ -261,9 +261,9 @@ async def create_test_health_records():
     if "health_records" not in await db.list_collection_names():
         await db.create_collection("health_records")
     
-    # 确保随访记录集合存在
-    if "follow_ups" not in await db.list_collection_names():
-        await db.create_collection("follow_ups")
+    # 确保随访记录集合存在（唯一集合名与服务层一致：followup_records）
+    if "followup_records" not in await db.list_collection_names():
+        await db.create_collection("followup_records")
     
     # 获取所有患者和医生
     patient_cursor = db.users.find({"role": "patient"})
@@ -350,23 +350,35 @@ async def create_test_health_records():
                 status = "completed" if follow_up_date < datetime.now() else "scheduled"
                 
                 # 创建随访记录
+                # 字段形状与服务层 FollowUpRecord 模型（models/health_record.py）对齐：
+                # 创建人字段为 created_by，关联档案为 health_record_ids 列表；
+                # 演示用展示信息（标题/姓名）放入 metadata，不再使用遗留的
+                # title/content/doctor_id/completed_date 形状
                 follow_up_doc = {
-                    "title": follow_up_template["title"],
-                    "content": follow_up_template["content"] if status == "completed" else {},
                     "patient_id": patient["id"],
-                    "patient_name": patient["name"],
-                    "doctor_id": doctor["id"],
-                    "doctor_name": doctor["name"],
-                    "health_record_id": record_id,
+                    "created_by": doctor["id"],
+                    "follow_up_type": "general",
                     "scheduled_date": follow_up_date,
-                    "completed_date": follow_up_date if status == "completed" else None,
+                    "actual_date": follow_up_date if status == "completed" else None,
                     "status": status,
+                    "notes": follow_up_template["content"] if status == "completed" else "",
+                    "questions": [],
+                    "answers": [],
+                    "attachments": [],
+                    "health_record_ids": [record_id],
+                    "reminder_sent": False,
+                    "metadata": {
+                        "title": follow_up_template["title"],
+                        "patient_name": patient["name"],
+                        "doctor_name": doctor["name"],
+                        "seed_source": "create_test_health_records"
+                    },
                     "created_at": created_at,
                     "updated_at": follow_up_date if status == "completed" else created_at
                 }
-                
+
                 # 插入随访记录
-                result = await db.follow_ups.insert_one(follow_up_doc)
+                result = await db.followup_records.insert_one(follow_up_doc)
                 follow_up_id = str(result.inserted_id)
                 
                 print(f"  - 为健康记录创建随访: {follow_up_template['title']} (ID: {follow_up_id})")

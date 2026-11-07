@@ -14,8 +14,10 @@ class AnalyticsService:
             db: MongoDB数据库连接
         """
         self.db = db
-        self.patients_collection = db.patients
-        self.doctors_collection = db.doctors
+        # 患者与医生统一存于 users 集合（User.collection_name），按 role 区分；
+        # patients/doctors 为无写入路径的遗留集合名，读取收敛到唯一集合
+        self.patients_collection = db.users
+        self.doctors_collection = db.users
         self.devices_collection = db.devices
         self.rehabilitation_collection = db.rehabilitation_records
     
@@ -27,10 +29,10 @@ class AnalyticsService:
         """
         try:
             # 计算患者数量
-            patient_count = await self.patients_collection.count_documents({})
-            
+            patient_count = await self.patients_collection.count_documents({"role": "patient"})
+
             # 计算医生数量
-            doctor_count = await self.doctors_collection.count_documents({})
+            doctor_count = await self.doctors_collection.count_documents({"role": "doctor"})
             
             # 计算设备数量
             device_count = await self.devices_collection.count_documents({})
@@ -42,7 +44,7 @@ class AnalyticsService:
             # 计算一周内的患者增长率
             one_week_ago = datetime.utcnow() - timedelta(days=7)
             previous_patient_count = await self.patients_collection.count_documents(
-                {"created_at": {"$lt": one_week_ago}}
+                {"role": "patient", "created_at": {"$lt": one_week_ago}}
             )
             week_patient_change = ((patient_count - previous_patient_count) / previous_patient_count * 100) if previous_patient_count > 0 else 0
             

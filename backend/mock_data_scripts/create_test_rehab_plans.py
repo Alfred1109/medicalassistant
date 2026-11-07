@@ -198,9 +198,9 @@ async def create_test_rehab_plans():
     client = AsyncIOMotorClient(settings.MONGODB_URL)
     db = client[settings.MONGODB_DB_NAME]
     
-    # 确保集合存在
-    if "rehabilitation_plans" not in await db.list_collection_names():
-        await db.create_collection("rehabilitation_plans")
+    # 确保集合存在（唯一集合名与服务层一致：rehab_plans）
+    if "rehab_plans" not in await db.list_collection_names():
+        await db.create_collection("rehab_plans")
     
     # 获取所有患者和医生
     patient_cursor = db.users.find({"role": "patient"})
@@ -268,7 +268,7 @@ async def create_test_rehab_plans():
             }
             
             # 插入文档
-            result = await db.rehabilitation_plans.insert_one(plan_doc)
+            result = await db.rehab_plans.insert_one(plan_doc)
             
             # 更新患者的康复计划列表
             plan_id = str(result.inserted_id)
