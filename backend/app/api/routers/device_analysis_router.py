@@ -3,13 +3,13 @@
 提供设备数据分析和预警相关的API接口
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
 
 from ...services.device_service import device_service
 from ...services.device_analysis_service import device_analysis_service
-from ...core.dependencies import get_current_user
+from ...core.auth import get_current_active_user
 
 router = APIRouter(prefix="/device-analysis", tags=["device-analysis"])
 
@@ -104,7 +104,7 @@ async def detect_data_anomalies(
     data_type: Optional[str] = None,
     days: int = Query(30, ge=1, le=365),
     method: str = Query("z_score", regex="^(z_score|range|iqr)$"),
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     检测设备数据异常
@@ -120,7 +120,8 @@ async def detect_data_anomalies(
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
     
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
         raise HTTPException(status_code=403, detail="无权访问此设备数据")
     
     # 检测异常
@@ -140,7 +141,7 @@ async def analyze_data_trend(
     data_type: str,
     days: int = Query(30, ge=1, le=365),
     interval: str = Query("day", regex="^(hour|day|week|month)$"),
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     分析设备数据趋势
@@ -156,7 +157,8 @@ async def analyze_data_trend(
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
     
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
         raise HTTPException(status_code=403, detail="无权访问此设备数据")
     
     # 分析趋势
@@ -174,7 +176,7 @@ async def analyze_data_trend(
 async def monitor_device_status(
     device_id: str,
     hours: int = Query(24, ge=1, le=168),
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     监测设备状态
@@ -188,7 +190,8 @@ async def monitor_device_status(
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
     
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
         raise HTTPException(status_code=403, detail="无权访问此设备数据")
     
     # 监测状态
@@ -204,7 +207,7 @@ async def monitor_device_status(
 async def monitor_patient_devices(
     patient_id: str,
     hours: int = Query(24, ge=1, le=168),
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     监测患者所有设备状态
@@ -214,7 +217,8 @@ async def monitor_patient_devices(
     - hours: 监测最近多少小时内的设备状态（默认24小时）
     """
     # 检查访问权限
-    if user["_id"] != patient_id and user.get("role") not in ["doctor", "health_manager", "admin"]:
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if current_user.id != patient_id and current_user.role not in ["doctor", "health_manager", "admin"]:
         raise HTTPException(status_code=403, detail="无权访问此患者数据")
     
     # 监测状态
@@ -230,7 +234,7 @@ async def monitor_patient_devices(
 async def get_device_alerts(
     device_id: str,
     severity: str = Query("medium", regex="^(high|medium|low)$"),
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     获取设备预警信息
@@ -244,7 +248,8 @@ async def get_device_alerts(
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
     
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
         raise HTTPException(status_code=403, detail="无权访问此设备数据")
     
     # 获取预警
@@ -260,7 +265,7 @@ async def get_device_alerts(
 async def get_patient_alerts(
     patient_id: str,
     severity: str = Query("medium", regex="^(high|medium|low)$"),
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     获取患者所有设备的预警信息
@@ -270,7 +275,8 @@ async def get_patient_alerts(
     - severity: 预警级别阈值，只返回大于等于该级别的预警
     """
     # 检查访问权限
-    if user["_id"] != patient_id and user.get("role") not in ["doctor", "health_manager", "admin"]:
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if current_user.id != patient_id and current_user.role not in ["doctor", "health_manager", "admin"]:
         raise HTTPException(status_code=403, detail="无权访问此患者数据")
     
     # 获取预警
@@ -291,7 +297,7 @@ async def predict_device_data_advanced(
     method: str = Query("linear", description="预测方法：linear, arima, prophet, ensemble"),
     confidence_interval: bool = Query(True, description="是否计算置信区间"),
     interval: str = Query("day", description="数据聚合间隔: hour, day, week, month"),
-    current_user: dict = Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     高级数据预测分析
@@ -301,7 +307,11 @@ async def predict_device_data_advanced(
     device = await device_service.get_device(device_id)
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
-        
+
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if device.get("patient_id") != current_user.id and current_user.role not in ["doctor", "health_manager", "admin"]:
+        raise HTTPException(status_code=403, detail="无权访问此设备数据")
+
     # 检查预测方法是否有效
     valid_methods = ["linear", "arima", "prophet", "ensemble"]
     if method not in valid_methods:

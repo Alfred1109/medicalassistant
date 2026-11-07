@@ -31,6 +31,7 @@ from .api.routers import report_scheduler_router, data_filter_router
 
 # 导入设备相关路由
 from .api.routers.device_router import router as device_router
+from .api.routers.device_analysis_router import router as device_analysis_router
 from .api.routers.device_repair_router import router as device_repair_router
 from .api.routers.device_data_standard_router import router as device_data_standard_router
 
@@ -215,6 +216,7 @@ app.include_router(data_filter_router.router, prefix="/api")
 
 # 添加设备相关路由
 app.include_router(device_router, prefix="/api")
+app.include_router(device_analysis_router, prefix="/api")
 app.include_router(device_repair_router, prefix="/api")
 app.include_router(device_data_standard_router, prefix="/api")
 
