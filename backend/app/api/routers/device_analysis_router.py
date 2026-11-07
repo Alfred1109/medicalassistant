@@ -8,7 +8,11 @@ from datetime import datetime
 from bson import ObjectId
 from pydantic import BaseModel, Field
 
-from ...services.device_service import device_service
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
+from ...db.mongodb import get_database
+from ...core.dependencies import ensure_patient_access
+from ...services.device_service import device_service, DEVICE_READ_ROLES
 from ...services.device_analysis_service import device_analysis_service
 from ...core.auth import get_current_active_user
 
@@ -24,8 +28,18 @@ def _is_device_owner(device: Dict, user_id: str) -> bool:
     return str(device.get("patient_id")) == str(user_id)
 
 
-async def _check_device_access(device_id: str, current_user: Any) -> Dict:
-    """设备访问粗判：畸形 ID 与不存在的设备均 404，非属主且非授权角色 403。"""
+async def _check_device_access(device_id: str, current_user: Any,
+                               db: AsyncIOMotorDatabase) -> Dict:
+    """AUTH01 对象级授权（按 device_id 寻址，与 device_router 同一语义）。
+
+    畸形 ID 与不存在的设备均 404（不暴露存在性）；随后分层：
+    - admin 豁免；
+    - 患者本人访问自己名下设备走属主判断（属主语义，不走医护归属）；
+    - 其他用户须为授权医护（DEVICE_READ_ROLES）且与设备所属患者存在
+      归属关系（共享 ensure_patient_access：患者不存在 → 404
+      PATIENT_NOT_FOUND，非归属医护 → 403 PATIENT_NOT_ASSIGNED）；
+    - 设备文档缺失 patient_id 的畸形数据按 404 处置。
+    """
     # 畸形 ID 视为设备不存在，避免 device_service.get_device 内
     # ObjectId(device_id) 抛 InvalidId 导致 500
     if not ObjectId.is_valid(device_id):
@@ -35,12 +49,36 @@ async def _check_device_access(device_id: str, current_user: Any) -> Dict:
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
 
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if not _is_device_owner(device, current_user.id) and current_user.role not in [
-        "doctor", "health_manager", "admin"]:
+    if current_user.role == "admin" or _is_device_owner(device, current_user.id):
+        return device
+    patient_id = device.get("patient_id")
+    if not patient_id:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    if current_user.role not in DEVICE_READ_ROLES:
         raise HTTPException(status_code=403, detail="无权访问此设备数据")
-
+    await ensure_patient_access(db, str(patient_id),
+                                str(current_user.id), current_user.role)
     return device
+
+
+async def _check_patient_data_access(patient_id: str, current_user: Any,
+                                     db: AsyncIOMotorDatabase) -> None:
+    """AUTH01 对象级授权（按 patient_id 寻址的聚合数据端点）。
+
+    - admin 豁免；
+    - 患者本人访问自身聚合数据放行（属主语义，与医护归属语义分开，
+      不把患者当"无归属医护"错拒）；
+    - 医护（DEVICE_READ_ROLES）须在患者 practitioners 列表中
+      （共享 ensure_patient_access：患者不存在 → 404 PATIENT_NOT_FOUND，
+      非归属医护 → 403 PATIENT_NOT_ASSIGNED）；
+    - 其余角色（含患者查他人）一律 403，不泄露患者存在性。
+    """
+    if current_user.role == "admin" or str(current_user.id) == str(patient_id):
+        return
+    if current_user.role not in DEVICE_READ_ROLES:
+        raise HTTPException(status_code=403, detail="无权访问此患者数据")
+    await ensure_patient_access(db, patient_id,
+                                str(current_user.id), current_user.role)
 
 
 # 数据模型
@@ -133,19 +171,20 @@ async def detect_data_anomalies(
     data_type: Optional[str] = None,
     days: int = Query(30, ge=1, le=365),
     method: str = Query("z_score", regex="^(z_score|range|iqr)$"),
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
     检测设备数据异常
-    
+
     参数:
     - device_id: 设备ID
     - data_type: 数据类型（可选）
     - days: 检测最近多少天的数据（默认30天）
     - method: 检测方法，支持z_score、range、iqr
     """
-    # 检查设备访问权限（存在性 + 属主/角色粗判）
-    await _check_device_access(device_id, current_user)
+    # AUTH01：存在性校验（404 先行）+ 对象级归属校验
+    await _check_device_access(device_id, current_user, db)
 
     # 检测异常
     anomalies = await device_analysis_service.detect_data_anomalies(
@@ -164,19 +203,20 @@ async def analyze_data_trend(
     data_type: str,
     days: int = Query(30, ge=1, le=365),
     interval: str = Query("day", regex="^(hour|day|week|month)$"),
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
     分析设备数据趋势
-    
+
     参数:
     - device_id: 设备ID
     - data_type: 数据类型
     - days: 分析最近多少天的数据（默认30天）
     - interval: 数据聚合间隔，支持hour、day、week、month
     """
-    # 检查设备访问权限（存在性 + 属主/角色粗判）
-    await _check_device_access(device_id, current_user)
+    # AUTH01：存在性校验（404 先行）+ 对象级归属校验
+    await _check_device_access(device_id, current_user, db)
 
     # 分析趋势
     trend = await device_analysis_service.analyze_data_trend(
@@ -193,17 +233,18 @@ async def analyze_data_trend(
 async def monitor_device_status(
     device_id: str,
     hours: int = Query(24, ge=1, le=168),
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
     监测设备状态
-    
+
     参数:
     - device_id: 设备ID
     - hours: 监测最近多少小时内的设备状态（默认24小时）
     """
-    # 检查设备访问权限（存在性 + 属主/角色粗判）
-    await _check_device_access(device_id, current_user)
+    # AUTH01：存在性校验（404 先行）+ 对象级归属校验
+    await _check_device_access(device_id, current_user, db)
 
     # 监测状态
     statuses = await device_analysis_service.monitor_device_status(
@@ -218,19 +259,18 @@ async def monitor_device_status(
 async def monitor_patient_devices(
     patient_id: str,
     hours: int = Query(24, ge=1, le=168),
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
     监测患者所有设备状态
-    
+
     参数:
     - patient_id: 患者ID
     - hours: 监测最近多少小时内的设备状态（默认24小时）
     """
-    # 检查访问权限
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if current_user.id != patient_id and current_user.role not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此患者数据")
+    # AUTH01：按 patient_id 寻址的对象级归属校验（患者本人/豁免/医护归属分层）
+    await _check_patient_data_access(patient_id, current_user, db)
     
     # 监测状态
     statuses = await device_analysis_service.monitor_device_status(
@@ -245,17 +285,18 @@ async def monitor_patient_devices(
 async def get_device_alerts(
     device_id: str,
     severity: str = Query("medium", regex="^(high|medium|low)$"),
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
     获取设备预警信息
-    
+
     参数:
     - device_id: 设备ID
     - severity: 预警级别阈值，只返回大于等于该级别的预警
     """
-    # 检查设备访问权限（存在性 + 属主/角色粗判）
-    await _check_device_access(device_id, current_user)
+    # AUTH01：存在性校验（404 先行）+ 对象级归属校验
+    await _check_device_access(device_id, current_user, db)
 
     # 获取预警
     alerts = await device_analysis_service.generate_device_alerts(
@@ -270,19 +311,18 @@ async def get_device_alerts(
 async def get_patient_alerts(
     patient_id: str,
     severity: str = Query("medium", regex="^(high|medium|low)$"),
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
     获取患者所有设备的预警信息
-    
+
     参数:
     - patient_id: 患者ID
     - severity: 预警级别阈值，只返回大于等于该级别的预警
     """
-    # 检查访问权限
-    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
-    if current_user.id != patient_id and current_user.role not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此患者数据")
+    # AUTH01：按 patient_id 寻址的对象级归属校验（患者本人/豁免/医护归属分层）
+    await _check_patient_data_access(patient_id, current_user, db)
     
     # 获取预警
     alerts = await device_analysis_service.generate_device_alerts(
@@ -302,14 +342,15 @@ async def predict_device_data_advanced(
     method: str = Query("linear", description="预测方法：linear, arima, prophet, ensemble"),
     confidence_interval: bool = Query(True, description="是否计算置信区间"),
     interval: str = Query("day", description="数据聚合间隔: hour, day, week, month"),
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
     高级数据预测分析
     支持多种预测算法和置信区间计算
     """
-    # 检查设备访问权限（存在性 + 属主/角色粗判）
-    await _check_device_access(device_id, current_user)
+    # AUTH01：存在性校验（404 先行）+ 对象级归属校验
+    await _check_device_access(device_id, current_user, db)
 
     # 检查预测方法是否有效
     valid_methods = ["linear", "arima", "prophet", "ensemble"]

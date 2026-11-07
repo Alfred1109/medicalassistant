@@ -7,7 +7,10 @@ device_router 此前以字典方式访问认证用户（user["_id"] / user.get("
 2. 带有效 JWT 时以真实 UserResponse 形态进入端点（current_user.id / .role），
    绑定属主匹配可成功落库（打桩 db，不触碰真实数据库）；
 3. 畸形设备 ID 与不存在的设备语义一致返回 404；
-   device_service 层畸形 ID 返回 None / False（既有"资源不存在"约定）。
+   device_service 层畸形 ID 返回 None / False（既有"资源不存在"约定）；
+4. AUTH01 对象级授权：属主患者本人放行（属主语义），admin 豁免，
+   医护须在患者 practitioners 列表（非归属 403 PATIENT_NOT_ASSIGNED，
+   患者/设备文档缺失 404 先于 403）。
 """
 
 import importlib
@@ -34,12 +37,19 @@ OPERATOR_ID = "507f1f77bcf86cd799439011"
 # 合成设备 ID 必须是合法 ObjectId 十六进制串
 DEVICE_ID = "64b0f1c2a3b4c5d6e7f80901"
 MALFORMED_DEVICE_ID = "not-an-objectid"
+OTHER_PATIENT_ID = "other-patient"
 
 
 def make_operator(role="patient", user_id=OPERATOR_ID):
     now = datetime.utcnow()
     return UserResponse(id=user_id, email="actor@example.com", name="合成操作者",
                         role=role, is_active=True, createdAt=now, updatedAt=now)
+
+
+def make_patient_doc(patient_id=OTHER_PATIENT_ID, practitioners=()):
+    """users 集合中的患者档案（AUTH01 归属校验读取 practitioners 列表）"""
+    return {"_id": patient_id, "role": "patient", "name": "合成患者",
+            "practitioners": list(practitioners)}
 
 
 def make_device_doc(patient_id=OPERATOR_ID, device_id=DEVICE_ID):
@@ -76,17 +86,18 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
             device_router, "device_service", self.device_service)
         self.device_patch.start()
 
-        # get_current_user 依赖 get_database；认证链的查库走 UserService 打桩，
-        # 返回真实 UserResponse（锁定 user 形态契约，而非 dict）
+        # get_database 依赖同时服务认证链与 AUTH01 归属校验
+        # （ensure_patient_access 读 db.users.find_one），打桩为可按用例控制
+        self.db = MagicMock()
+        self.db.users.find_one = AsyncMock(return_value=None)
         app.dependency_overrides[get_database] = self._fake_database
         self.get_user_mock = AsyncMock(return_value=self.operator)
         self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 
-    @staticmethod
-    async def _fake_database():
-        yield MagicMock()
+    async def _fake_database(self):
+        yield self.db
 
     async def asyncTearDown(self):
         await self.client.aclose()
@@ -199,12 +210,15 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.device_service.auto_repair_device.assert_not_awaited()
 
-    async def test_repair_allowed_for_doctor_on_any_device(self):
-        # 医生可维修患者设备（变更操作的第二授权角色）
+    async def test_assigned_doctor_can_repair_patient_device(self):
+        # AUTH01 后医生维修他人设备的条件收敛为：须为该患者的主管医护
+        # （practitioners 列表成员），变更操作的第二授权角色仍生效
         self.operator = make_operator(role="doctor")
         self.get_user_mock.return_value = self.operator
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
+            practitioners=[OPERATOR_ID]))
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
-            patient_id="other-patient"))
+            patient_id=OTHER_PATIENT_ID))
         self.device_service.auto_repair_device = AsyncMock(
             return_value={"success": True, "message": "设备修复成功"})
         response = await self.client.post(
@@ -224,22 +238,26 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.device_service.auto_repair_device.assert_not_awaited()
 
-    async def test_health_manager_can_read_device_detail(self):
-        # 健康管理师可查看其负责患者的设备数据（只读路径放行）
+    async def test_assigned_health_manager_can_read_device_detail(self):
+        # 健康管理师可查看其负责患者的设备数据（只读路径放行，须有归属关系）
         self.operator = make_operator(role="health_manager")
         self.get_user_mock.return_value = self.operator
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
+            practitioners=[OPERATOR_ID]))
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
-            patient_id="other-patient"))
+            patient_id=OTHER_PATIENT_ID))
         response = await self.client.get(
             f"/api/devices/{DEVICE_ID}", headers=self.auth())
         self.assertEqual(response.status_code, 200, response.text)
 
     async def test_health_manager_can_read_device_data_and_status(self):
-        # 只读路径（data/status）对健康管理师保持放行，与统一语义一致
+        # 只读路径（data/status）对有归属关系的健康管理师保持放行
         self.operator = make_operator(role="health_manager")
         self.get_user_mock.return_value = self.operator
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
+            practitioners=[OPERATOR_ID]))
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
-            patient_id="other-patient"))
+            patient_id=OTHER_PATIENT_ID))
         self.device_service.get_device_data = AsyncMock(return_value=[])
         self.device_service.get_device_status = AsyncMock(return_value={
             "status": "active", "battery_level": 80, "signal_strength": 4,
@@ -250,6 +268,97 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
             f"/api/devices/{DEVICE_ID}/status", headers=self.auth())
         self.assertEqual(data_resp.status_code, 200, data_resp.text)
         self.assertEqual(status_resp.status_code, 200, status_resp.text)
+
+    async def test_unassigned_doctor_read_forbidden_and_no_business_call(self):
+        # AUTH01：非归属医生即使具备设备只读角色，未在患者 practitioners
+        # 列表中也是 403 PATIENT_NOT_ASSIGNED，且业务逻辑零调用
+        self.operator = make_operator(role="doctor")
+        self.get_user_mock.return_value = self.operator
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
+            practitioners=["another-doctor"]))
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id=OTHER_PATIENT_ID))
+        self.device_service.get_device_data = AsyncMock()
+        self.device_service.get_device_status = AsyncMock()
+        for path in (f"/api/devices/{DEVICE_ID}",
+                     f"/api/devices/{DEVICE_ID}/data",
+                     f"/api/devices/{DEVICE_ID}/status",
+                     f"/api/devices/{DEVICE_ID}/sync"):
+            method = "post" if path.endswith("/sync") else "get"
+            response = await getattr(self.client, method)(
+                path, headers=self.auth())
+            self.assertEqual(response.status_code, 403,
+                             f"{method.upper()} {path}: {response.text}")
+            self.assertEqual(response.json()["error"], "PATIENT_NOT_ASSIGNED",
+                             f"{method.upper()} {path}: {response.text}")
+        self.device_service.get_device_data.assert_not_awaited()
+        self.device_service.get_device_status.assert_not_awaited()
+
+    async def test_unassigned_doctor_mutate_forbidden_and_no_business_call(self):
+        # AUTH01：非归属医生的变更请求（维修/配置）同样 403，service 零调用
+        self.operator = make_operator(role="doctor")
+        self.get_user_mock.return_value = self.operator
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
+            practitioners=["another-doctor"]))
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id=OTHER_PATIENT_ID))
+        self.device_service.auto_repair_device = AsyncMock()
+        self.device_service.configure_device = AsyncMock()
+        repair_resp = await self.client.post(
+            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
+        config_resp = await self.client.put(
+            f"/api/devices/{DEVICE_ID}/config",
+            json={"sync_frequency": "hourly"}, headers=self.auth())
+        self.assertEqual(repair_resp.status_code, 403, repair_resp.text)
+        self.assertEqual(config_resp.status_code, 403, config_resp.text)
+        self.device_service.auto_repair_device.assert_not_awaited()
+        self.device_service.configure_device.assert_not_awaited()
+
+    async def test_admin_exempt_from_patient_assignment(self):
+        # AUTH01：admin 豁免归属校验（不查 practitioners），可访问任意设备
+        self.operator = make_operator(role="admin")
+        self.get_user_mock.return_value = self.operator
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id=OTHER_PATIENT_ID))
+        self.device_service.get_device_data = AsyncMock(return_value=[])
+        self.device_service.get_device_status = AsyncMock(return_value={
+            "status": "active", "battery_level": 80, "signal_strength": 4,
+            "last_sync_time": None})
+        detail_resp = await self.client.get(
+            f"/api/devices/{DEVICE_ID}", headers=self.auth())
+        data_resp = await self.client.get(
+            f"/api/devices/{DEVICE_ID}/data", headers=self.auth())
+        status_resp = await self.client.get(
+            f"/api/devices/{DEVICE_ID}/status", headers=self.auth())
+        self.assertEqual(detail_resp.status_code, 200, detail_resp.text)
+        self.assertEqual(data_resp.status_code, 200, data_resp.text)
+        self.assertEqual(status_resp.status_code, 200, status_resp.text)
+        # admin 豁免路径不触发患者档案查询
+        self.db.users.find_one.assert_not_awaited()
+
+    async def test_device_without_patient_id_404_for_staff(self):
+        # AUTH01：设备文档缺 patient_id 的畸形数据按 404 处置（不暴露存在性），
+        # 与设备本身不存在语义一致
+        self.operator = make_operator(role="doctor")
+        self.get_user_mock.return_value = self.operator
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id=None))
+        response = await self.client.get(
+            f"/api/devices/{DEVICE_ID}", headers=self.auth())
+        self.assertEqual(response.status_code, 404, response.text)
+
+    async def test_missing_patient_doc_404_for_staff(self):
+        # AUTH01：设备指向的患者档案不存在 → 404 PATIENT_NOT_FOUND
+        # （患者不存在先于归属判定，与 7c5d690 语义一致）
+        self.operator = make_operator(role="doctor")
+        self.get_user_mock.return_value = self.operator
+        self.db.users.find_one = AsyncMock(return_value=None)
+        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
+            patient_id=OTHER_PATIENT_ID))
+        response = await self.client.get(
+            f"/api/devices/{DEVICE_ID}/data", headers=self.auth())
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["error"], "PATIENT_NOT_FOUND")
 
     async def test_configure_forbidden_for_health_manager(self):
         # 回归锁定（缺陷 B）：配置属变更操作，健康管理师不可执行
