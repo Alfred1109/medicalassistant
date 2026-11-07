@@ -1,9 +1,12 @@
 """康复计划/Agent 路由鉴权契约测试（AUTH01）。
 
-两层契约：
+三层契约：
 1. 登录层——未认证访问一律 401，带有效 JWT 才进入业务逻辑；
 2. 对象级授权第一层——带患者标识的康复端点校验操作者与患者归属
-   （操作者须在患者档案 practitioners 列表中，admin 豁免，否则 403 PATIENT_NOT_ASSIGNED）。
+   （操作者须在患者档案 practitioners 列表中，admin 豁免，否则 403 PATIENT_NOT_ASSIGNED）；
+3. 对象级授权第二层——仅持 plan_id/assessment_id 的端点先加载文档取 patient_id
+   （文档不存在 → 404 PATIENT_NOT_FOUND 语义，畸形文档不暴露存在性），
+   再按同一归属规则校验，读写同一标准，业务逻辑零调用。
 全部使用内存打桩与合成数据，不触碰真实数据库。
 """
 
@@ -24,6 +27,8 @@ from app.services.user_service import UserService
 
 OPERATOR_ID = "507f1f77bcf86cd799439011"
 PATIENT_ID = str(ObjectId())
+PLAN_ID = str(ObjectId())
+ASSESSMENT_ID = str(ObjectId())
 
 
 def make_operator(role="doctor", user_id=OPERATOR_ID):
@@ -39,15 +44,36 @@ class RehabAgentAuthContractTests(unittest.IsolatedAsyncioTestCase):
                             "name": "合成患者", "practitioners": [OPERATOR_ID]}
         self.rehab_service = AsyncMock()
         self.rehab_service.list_rehab_plans = AsyncMock(return_value=[])
-        self.rehab_service.get_rehab_plan = AsyncMock(return_value={"id": "synthetic"})
+        self.rehab_service.get_rehab_plan = AsyncMock(
+            return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID, "name": "合成计划"})
         self.rehab_service.create_rehab_plan = AsyncMock(return_value={"id": "synthetic"})
+        self.rehab_service.update_rehab_plan = AsyncMock(return_value={"id": "synthetic"})
         self.rehab_service.delete_rehab_plan = AsyncMock(return_value=True)
         self.rehab_service.generate_rehab_plan_with_llm = AsyncMock(
             return_value={"patient_id": "synthetic"})
+        self.rehab_service.approve_generated_plan = AsyncMock(
+            return_value={"_id": PLAN_ID, "status": "active"})
+        self.rehab_service.add_exercises_to_plan = AsyncMock(
+            return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID})
+        self.rehab_service.update_rehab_plan_phase = AsyncMock(
+            return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID, "current_phase": "进步期"})
+        self.rehab_service.log_exercise_progress = AsyncMock(
+            return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID})
+        self.rehab_service.apply_plan_adjustment = AsyncMock(
+            return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID})
+        self.rehab_service.calculate_plan_statistics = AsyncMock(
+            return_value={"plan_id": PLAN_ID, "completion_rate": 0.8})
+        self.rehab_service.get_exercise_trends = AsyncMock(
+            return_value={"plan_id": PLAN_ID, "trend": []})
         self.rehab_service.get_recommendations = AsyncMock(return_value=[])
         self.rehab_service.list_patient_assessments = AsyncMock(return_value=[])
         self.rehab_service.get_assessment_comparison = AsyncMock(
             return_value={"patient_id": PATIENT_ID})
+        self.rehab_service.get_assessment = AsyncMock(
+            return_value={"_id": ASSESSMENT_ID, "patient_id": PATIENT_ID,
+                          "assessment_type": "initial"})
+        self.rehab_service.update_assessment = AsyncMock(
+            return_value={"_id": ASSESSMENT_ID, "patient_id": PATIENT_ID})
         self.rehab_service.create_assessment = AsyncMock(return_value={"id": "synthetic"})
         self.agent_service = AsyncMock()
         self.agent_service.list_agents = AsyncMock(return_value=[])
@@ -223,6 +249,129 @@ class RehabAgentAuthContractTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_unauthorized(
             "post", "/api/rehabilitation/plans", json=self.plan_payload())
         self.database.users.find_one.assert_not_awaited()
+
+
+    # ── AUTH01 对象级授权第二层：仅持 plan_id/assessment_id 的端点 ──────────
+
+    def object_level_endpoints(self):
+        """13 个仅持 plan_id/assessment_id 的端点（method, path, kwargs）。"""
+        return [
+            ("post", f"/api/rehabilitation/plans/{PLAN_ID}/approve", {}),
+            ("get", f"/api/rehabilitation/plans/{PLAN_ID}", {}),
+            ("put", f"/api/rehabilitation/plans/{PLAN_ID}",
+             {"json": {"goal": "恢复行走"}}),
+            ("delete", f"/api/rehabilitation/plans/{PLAN_ID}", {}),
+            ("post", f"/api/rehabilitation/plans/{PLAN_ID}/exercises",
+             {"json": {"exercise_ids": []}}),
+            ("get", f"/api/rehabilitation/assessments/{ASSESSMENT_ID}", {}),
+            ("put", f"/api/rehabilitation/assessments/{ASSESSMENT_ID}",
+             {"json": {"notes": "合成备注"}}),
+            ("put", f"/api/rehabilitation/plans/{PLAN_ID}/phase",
+             {"json": {"phase": "进步期"}}),
+            ("post", f"/api/rehabilitation/plans/{PLAN_ID}/exercises/合成运动/progress",
+             {"json": {"completed": True}}),
+            ("put", f"/api/rehabilitation/plans/{PLAN_ID}/adjustments/合成调整",
+             {"json": {"apply": True}}),
+            ("get", f"/api/rehabilitation/plans/{PLAN_ID}/detailed", {}),
+            ("get", f"/api/rehabilitation/plans/{PLAN_ID}/statistics", {}),
+            ("get", f"/api/rehabilitation/plans/{PLAN_ID}/trends", {}),
+        ]
+
+    def object_level_business_mocks(self):
+        """第二层端点背后的业务方法（403/404 时必须零调用）。"""
+        return [
+            self.rehab_service.approve_generated_plan,
+            self.rehab_service.update_rehab_plan,
+            self.rehab_service.delete_rehab_plan,
+            self.rehab_service.add_exercises_to_plan,
+            self.rehab_service.update_assessment,
+            self.rehab_service.update_rehab_plan_phase,
+            self.rehab_service.log_exercise_progress,
+            self.rehab_service.apply_plan_adjustment,
+            self.rehab_service.calculate_plan_statistics,
+            self.rehab_service.get_exercise_trends,
+        ]
+
+    async def test_object_level_endpoints_reject_unassigned_doctor(self):
+        self.patient_doc["practitioners"] = ["someone-else"]
+        headers = self.auth()
+        for method, path, kwargs in self.object_level_endpoints():
+            response = await getattr(self.client, method)(path, headers=headers, **kwargs)
+            self.assertEqual(response.status_code, 403, f"{method.upper()} {path}: {response.text}")
+            self.assertEqual(response.json()["error"], "PATIENT_NOT_ASSIGNED",
+                             f"{method.upper()} {path}: {response.text}")
+        # 默认拒绝：归属校验不通过时业务逻辑零调用
+        for business_mock in self.object_level_business_mocks():
+            business_mock.assert_not_awaited()
+
+    async def test_object_level_endpoints_admin_bypass(self):
+        self.set_operator(role="admin")
+        self.patient_doc["practitioners"] = ["someone-else"]
+        headers = self.auth()
+        for method, path, kwargs in self.object_level_endpoints():
+            response = await getattr(self.client, method)(path, headers=headers, **kwargs)
+            self.assertIn(response.status_code, (200, 204),
+                          f"{method.upper()} {path}: {response.text}")
+        # admin 豁免不查患者档案
+        self.database.users.find_one.assert_not_awaited()
+
+    async def test_object_level_endpoints_missing_document_returns_404(self):
+        self.rehab_service.get_rehab_plan = AsyncMock(return_value=None)
+        self.rehab_service.get_assessment = AsyncMock(return_value=None)
+        headers = self.auth()
+        for method, path, kwargs in self.object_level_endpoints():
+            response = await getattr(self.client, method)(path, headers=headers, **kwargs)
+            self.assertEqual(response.status_code, 404, f"{method.upper()} {path}: {response.text}")
+        # 文档不存在时不进入业务逻辑
+        for business_mock in self.object_level_business_mocks():
+            business_mock.assert_not_awaited()
+
+    async def test_object_level_endpoints_malformed_document_returns_404(self):
+        # 畸形文档（缺失 patient_id 字段）按 404 处置，不暴露存在性
+        self.rehab_service.get_rehab_plan = AsyncMock(
+            return_value={"_id": PLAN_ID, "name": "无归属合成计划"})
+        self.rehab_service.get_assessment = AsyncMock(
+            return_value={"_id": ASSESSMENT_ID, "assessment_type": "initial"})
+        headers = self.auth()
+        for method, path, kwargs in self.object_level_endpoints():
+            response = await getattr(self.client, method)(path, headers=headers, **kwargs)
+            self.assertEqual(response.status_code, 404, f"{method.upper()} {path}: {response.text}")
+        for business_mock in self.object_level_business_mocks():
+            business_mock.assert_not_awaited()
+
+    async def test_object_level_endpoints_allow_assigned_doctor(self):
+        # 只读与变更端点同一归属规则：归属医生全部放行
+        headers = self.auth()
+        response = await self.client.get(
+            f"/api/rehabilitation/plans/{PLAN_ID}", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["patient_id"], PATIENT_ID)
+
+        response = await self.client.put(
+            f"/api/rehabilitation/plans/{PLAN_ID}",
+            json={"goal": "恢复行走"}, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.rehab_service.update_rehab_plan.assert_awaited_once()
+
+        response = await self.client.get(
+            f"/api/rehabilitation/assessments/{ASSESSMENT_ID}", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["patient_id"], PATIENT_ID)
+
+        response = await self.client.post(
+            f"/api/rehabilitation/plans/{PLAN_ID}/exercises/合成运动/progress",
+            json={"completed": True}, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.rehab_service.log_exercise_progress.assert_awaited_once()
+
+    async def test_object_level_endpoints_require_authentication(self):
+        # 未认证先 401，文档加载与归属校验均不触发
+        await self.assert_unauthorized("get", f"/api/rehabilitation/plans/{PLAN_ID}")
+        await self.assert_unauthorized(
+            "put", f"/api/rehabilitation/assessments/{ASSESSMENT_ID}",
+            json={"notes": "合成备注"})
+        self.rehab_service.get_rehab_plan.assert_not_awaited()
+        self.rehab_service.get_assessment.assert_not_awaited()
 
 
 if __name__ == "__main__":
