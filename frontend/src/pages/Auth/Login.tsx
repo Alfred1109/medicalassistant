@@ -29,31 +29,44 @@ import InfoIcon from '@mui/icons-material/Info';
 import { AppDispatch, RootState } from '../../store';
 import { login, clearAuthError, User } from '../../store/slices/authSlice';
 
-const DEMO_LOGIN_ENABLED = import.meta.env.DEV;
+// 演示登录入口仅限本地开发，需同时满足两个条件：
+// 1. dev 构建（import.meta.env.DEV 在生产构建中被 Vite 静态替换为 false，
+//    使下方演示凭据字面量整体被死代码消除，不出现在产物中）；
+// 2. 显式设置 VITE_ENABLE_DEMO_LOGIN=true（运行时或 dev 环境变量，参见 .env.example）。
+const DEMO_LOGIN_ENABLED = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_LOGIN === 'true';
+
+interface DemoCredentials {
+  email: string;
+  password: string;
+}
+
+type DemoRole = 'admin' | 'doctor' | 'health_manager' | 'patient';
+
+const DEMO_CREDENTIALS: Record<DemoRole, DemoCredentials> | null = DEMO_LOGIN_ENABLED
+  ? {
+      admin: { email: 'admin@example.com', password: 'Admin123!' }, // 后端创建时的默认密码
+      doctor: { email: 'doctor@example.com', password: 'Doctor123!' },
+      health_manager: { email: 'liujk@example.com', password: 'Manager123!' },
+      patient: { email: 'zhangsan@example.com', password: 'Patient123!' },
+    }
+  : null;
+
+// 未开启演示登录时返回空凭据，保证各处引用始终可用（对应入口不会渲染）。
+const EMPTY_CREDENTIALS: DemoCredentials = { email: '', password: '' };
+const demoCredentials = (role: DemoRole): DemoCredentials =>
+  DEMO_CREDENTIALS?.[role] ?? EMPTY_CREDENTIALS;
 
 // 管理员账号信息
-const ADMIN_CREDENTIALS = {
-  email: 'admin@example.com',
-  password: 'Admin123!', // 使用后端创建时的默认密码
-};
+const ADMIN_CREDENTIALS = demoCredentials('admin');
 
 // 医生账号信息
-const DOCTOR_CREDENTIALS = {
-  email: 'doctor@example.com',
-  password: 'Doctor123!',
-};
+const DOCTOR_CREDENTIALS = demoCredentials('doctor');
 
 // 健康管理师账号信息
-const HEALTH_MANAGER_CREDENTIALS = {
-  email: 'liujk@example.com',
-  password: 'Manager123!',
-};
+const HEALTH_MANAGER_CREDENTIALS = demoCredentials('health_manager');
 
 // 患者账号信息
-const PATIENT_CREDENTIALS = {
-  email: 'zhangsan@example.com',
-  password: 'Patient123!',
-};
+const PATIENT_CREDENTIALS = demoCredentials('patient');
 
 // 添加防抖函数
 const debounce = (func: Function, wait: number) => {

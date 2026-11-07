@@ -35,6 +35,16 @@ export interface AgentQueryResult {
   metadata?: Record<string, any> | null;
 }
 
+/** queryAgent 失败时的结构化载荷：透传后端错误码，便于 UI 区分可重试错误与配置问题 */
+export interface QueryAgentError {
+  /** 面向用户的提示信息 */
+  message: string;
+  /** 后端 error_code（如 LLM_NOT_CONFIGURED），无则为 null */
+  code: string | null;
+  /** HTTP 状态码，无则为 null */
+  status: number | null;
+}
+
 // Define the agent state interface
 export interface AgentState {
   agents: Agent[];
@@ -42,6 +52,8 @@ export interface AgentState {
   loading: boolean;
   error: string | null;
   queryResponse: string | null;
+  /** 最近一次 queryAgent 失败的后端错误码（如 LLM_NOT_CONFIGURED），无则为 null */
+  queryErrorCode: string | null;
   /** 提问接口返回的附加数据(如推荐动作) */
   queryMetadata: Record<string, any> | null;
 }
@@ -53,6 +65,7 @@ const initialState: AgentState = {
   loading: false,
   error: null,
   queryResponse: null,
+  queryErrorCode: null,
   queryMetadata: null,
 };
 
@@ -124,7 +137,7 @@ export const deleteAgent = createAsyncThunk<string, string, ThunkApiConfig>(
 export const queryAgent = createAsyncThunk<
   AgentQueryResult,
   { id: string; query: string },
-  ThunkApiConfig
+  Omit<ThunkApiConfig, 'rejectValue'> & { rejectValue: QueryAgentError }
 >(
   'agents/queryAgent',
   async ({ id, query }: { id: string; query: string }, { rejectWithValue }) => {
@@ -132,7 +145,15 @@ export const queryAgent = createAsyncThunk<
       const response = await axios.post(`${API_BASE_URL}/agents/${id}/query`, { query });
       return response.data as AgentQueryResult;
     } catch (error: any) {
-      return rejectWithValue(error.response?.data?.message || '查询助手失败');
+      const status: number | null = error?.response?.status ?? null;
+      // 后端 AppBaseException 统一返回 { error: error_code, message, ... }
+      const code: string | null = error?.response?.data?.error ?? null;
+      if (status === 503 && code === 'LLM_NOT_CONFIGURED') {
+        // LLM 未配置属于部署配置问题，重试无意义。
+        return rejectWithValue({ message: 'LLM 未配置，请联系管理员', code, status });
+      }
+      // 其他错误（网络波动、超时、临时故障）均可重试。
+      return rejectWithValue({ message: '查询助手失败，请稍后重试', code, status });
     }
   }
 );
@@ -144,6 +165,7 @@ const agentSlice = createSlice({
   reducers: {
     clearQueryResponse: (state) => {
       state.queryResponse = null;
+      state.queryErrorCode = null;
       state.queryMetadata = null;
     },
     setSelectedAgent: (state, action: PayloadAction<Agent | null>) => {
@@ -235,6 +257,7 @@ const agentSlice = createSlice({
       .addCase(queryAgent.pending, (state) => {
         state.loading = true;
         state.error = null;
+        state.queryErrorCode = null;
       })
       .addCase(queryAgent.fulfilled, (state, action) => {
         state.loading = false;
@@ -243,7 +266,8 @@ const agentSlice = createSlice({
       })
       .addCase(queryAgent.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.payload as string;
+        state.error = action.payload?.message ?? '查询助手失败';
+        state.queryErrorCode = action.payload?.code ?? null;
         state.queryResponse = null;
         state.queryMetadata = null;
       });

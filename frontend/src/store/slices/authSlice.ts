@@ -210,21 +210,9 @@ export const updateUserProfile = createAsyncThunk<
   }
 );
 
-// Legacy demo exports use the same backend authentication as ordinary login.
-// They cannot manufacture a principal or a token, and require explicitly seeded accounts.
-const demoLogin = (kind: string, email: string, password: string) => createAsyncThunk<
-  LoginSuccessPayload, void, ThunkApiConfig
->(`auth/${kind}`, async (_, { dispatch, rejectWithValue }) => {
-  try {
-    return await dispatch(login({ email, password })).unwrap();
-  } catch (error) {
-    return rejectWithValue(typeof error === 'string' ? error : '演示账号登录失败');
-  }
-});
-export const mockDoctorLogin = demoLogin('mockDoctorLogin', 'doctor@example.com', 'Doctor123!');
-export const mockHealthManagerLogin = demoLogin('mockHealthManagerLogin', 'liujk@example.com', 'Manager123!');
-export const mockAdminLogin = demoLogin('mockAdminLogin', 'admin@example.com', 'Admin123!');
-export const mockPatientLogin = demoLogin('mockPatientLogin', 'zhangsan@example.com', 'Patient123!');
+// 演示账号登录不再由本 slice 提供独立 thunk：登录页在 VITE_ENABLE_DEMO_LOGIN=true
+// 时直接复用上面的 login thunk 填充演示凭据（见 pages/Auth/Login.tsx），
+// 因此这里不保留任何硬编码演示凭据的代码路径。
 
 // A token replacement or logout invalidates every validation of the previous session.
 function invalidateSessionCheck(state: AuthState) {
@@ -334,86 +322,6 @@ const authSlice = createSlice({
         state.profileLoading = false;
         state.error = action.payload as string;
       })
-
-      // 添加模拟医生登录处理
-      .addCase(mockDoctorLogin.pending, (state) => {
-        state.loading = true;
-        state.loginLoading = true;
-        state.error = null;
-      })
-      .addCase(mockDoctorLogin.fulfilled, (state, action) => {
-        invalidateSessionCheck(state);
-        state.loading = false;
-        state.loginLoading = false;
-        state.user = action.payload.user;
-        state.token = action.payload.token;
-        state.checking = false;
-      })
-      .addCase(mockDoctorLogin.rejected, (state, action) => {
-        state.loading = false;
-        state.loginLoading = false;
-        state.error = action.payload || '模拟医生登录失败';
-      })
-
-      // 添加模拟健康管理师登录处理
-      .addCase(mockHealthManagerLogin.pending, (state) => {
-        state.loading = true;
-        state.loginLoading = true;
-        state.error = null;
-      })
-      .addCase(mockHealthManagerLogin.fulfilled, (state, action) => {
-        invalidateSessionCheck(state);
-        state.loading = false;
-        state.loginLoading = false;
-        state.user = action.payload.user;
-        state.token = action.payload.token;
-        state.checking = false;
-      })
-      .addCase(mockHealthManagerLogin.rejected, (state, action) => {
-        state.loading = false;
-        state.loginLoading = false;
-        state.error = action.payload || '模拟健康管理师登录失败';
-      })
-
-      // 添加模拟管理员登录处理
-      .addCase(mockAdminLogin.pending, (state) => {
-        state.loading = true;
-        state.loginLoading = true;
-        state.error = null;
-      })
-      .addCase(mockAdminLogin.fulfilled, (state, action) => {
-        invalidateSessionCheck(state);
-        state.loading = false;
-        state.loginLoading = false;
-        state.user = action.payload.user;
-        state.token = action.payload.token;
-        state.checking = false;
-      })
-      .addCase(mockAdminLogin.rejected, (state, action) => {
-        state.loading = false;
-        state.loginLoading = false;
-        state.error = action.payload || '模拟管理员登录失败';
-      })
-
-      // 添加模拟患者登录处理
-      .addCase(mockPatientLogin.pending, (state) => {
-        state.loading = true;
-        state.loginLoading = true;
-        state.error = null;
-      })
-      .addCase(mockPatientLogin.fulfilled, (state, action) => {
-        invalidateSessionCheck(state);
-        state.loading = false;
-        state.loginLoading = false;
-        state.user = action.payload.user;
-        state.token = action.payload.token;
-        state.checking = false;
-      })
-      .addCase(mockPatientLogin.rejected, (state, action) => {
-        state.loading = false;
-        state.loginLoading = false;
-        state.error = action.payload || '模拟患者登录失败';
-      });
   },
 });
 
