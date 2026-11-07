@@ -109,6 +109,22 @@ async def confirm_fill_task(
     return service.models.serialize_task(doc)
 
 
+@router.get("/fill-tasks")
+async def list_fill_tasks(
+    status: Optional[str] = None,
+    patient_id: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 20,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """填报任务列表：发起人只见自己创建的，admin 见全部；倒序分页。"""
+    try:
+        return await service.list_fill_tasks(db, current_user, status, patient_id, skip, limit)
+    except FormIntegrationError as exc:
+        raise _form_error_response(exc) from exc
+
+
 @router.post("/fill-tasks/{task_id}/cancel")
 async def cancel_fill_task(
     task_id: str,

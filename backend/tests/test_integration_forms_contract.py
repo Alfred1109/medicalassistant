@@ -42,6 +42,51 @@ def make_patient_doc(practitioners=(OPERATOR_ID,)):
             "name": "合成患者", "practitioners": list(practitioners)}
 
 
+def _doc_matches(doc, query):
+    """支持点路径的精确匹配（如 operator.user_id）。"""
+    for key, value in query.items():
+        current = doc
+        for part in key.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        if current != value:
+            return False
+    return True
+
+
+class FakeCursor:
+    """模拟 motor find 游标的 sort/skip/limit 链与异步迭代。"""
+
+    def __init__(self, docs):
+        self._docs = list(docs)
+        self._skip = 0
+        self._limit = None
+
+    def sort(self, key, direction):
+        self._docs.sort(key=lambda d: d.get(key) or datetime.min, reverse=direction < 0)
+        return self
+
+    def skip(self, n):
+        self._skip = n
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    def __aiter__(self):
+        end = None if self._limit is None else self._skip + self._limit
+        self._iter = iter(self._docs[self._skip:end])
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
 class FakeTaskCollection:
     """模拟 motor 集合：内存字典存储，返回值形状与 AsyncIOMotorCollection 对齐。"""
 
@@ -56,6 +101,12 @@ class FakeTaskCollection:
 
     async def find_one(self, query):
         return self.docs.get(query["_id"])
+
+    def find(self, query):
+        return FakeCursor([d for d in self.docs.values() if _doc_matches(d, query)])
+
+    async def count_documents(self, query):
+        return len([d for d in self.docs.values() if _doc_matches(d, query)])
 
     async def update_one(self, query, update):
         doc = self.docs.get(query["_id"])
@@ -311,6 +362,55 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         cancel_calls = [r for r in self.remote.requests
                         if r.url.path.endswith("/cancel")]
         self.assertEqual(len(cancel_calls), 1)
+
+    async def test_list_scoped_to_creator_with_filters(self):
+        first = await self.client.post("/api/integrations/forms/fill-tasks",
+                                       json=self.payload(), headers=self.auth())
+        second = await self.client.post("/api/integrations/forms/fill-tasks",
+                                        json=self.payload(), headers=self.auth())
+        # 取消第二个任务，验证状态过滤
+        await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{second.json()['id']}/cancel",
+            headers=self.auth())
+
+        response = await self.client.get("/api/integrations/forms/fill-tasks",
+                                         headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["total"], 2)
+        self.assertEqual(len(body["items"]), 2)
+        # 倒序：最新的在前
+        self.assertEqual(body["items"][0]["id"], second.json()["id"])
+        # 输出不含令牌材料
+        self.assertNotIn("embedToken", json.dumps(body))
+
+        # 状态过滤
+        filtered = await self.client.get(
+            "/api/integrations/forms/fill-tasks?status=cancelled", headers=self.auth())
+        self.assertEqual(filtered.json()["total"], 1)
+        self.assertEqual(filtered.json()["items"][0]["id"], second.json()["id"])
+
+        # 非法状态过滤被拒绝
+        bad = await self.client.get(
+            "/api/integrations/forms/fill-tasks?status=bogus", headers=self.auth())
+        self.assertEqual(bad.status_code, 422)
+        self.assertEqual(bad.json()["detail"]["error"], "INVALID_STATUS_FILTER")
+
+    async def test_list_forbidden_tasks_hidden_from_other_operator(self):
+        await self.client.post("/api/integrations/forms/fill-tasks",
+                               json=self.payload(), headers=self.auth())
+        other = make_operator(role="doctor", user_id="507f1f77bcf86cd799439099")
+        response = await self.client.get("/api/integrations/forms/fill-tasks",
+                                         headers=self.auth(user=other))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 0)
+        self.assertEqual(response.json()["items"], [])
+
+        # admin 可以看到全部
+        admin = make_operator(role="admin", user_id="507f1f77bcf86cd7994390aa")
+        admin_view = await self.client.get("/api/integrations/forms/fill-tasks",
+                                           headers=self.auth(user=admin))
+        self.assertEqual(admin_view.json()["total"], 1)
 
 
 if __name__ == "__main__":

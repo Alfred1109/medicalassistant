@@ -116,6 +116,23 @@ const buildCreatePayload = (payload: CreateFillTaskPayload): Record<string, unkn
 });
 
 export const formIntegrationService = {
+  async listFillTasks(params?: {
+    status?: string;
+    patientId?: string;
+    skip?: number;
+    limit?: number;
+  }): Promise<{ items: FillTask[]; total: number; skip: number; limit: number }> {
+    const query: Record<string, string | number> = {};
+    if (params?.status) query.status = params.status;
+    if (params?.patientId) query.patient_id = params.patientId;
+    if (params?.skip !== undefined) query.skip = params.skip;
+    if (params?.limit !== undefined) query.limit = params.limit;
+    return apiClient.get<{ items: FillTask[]; total: number; skip: number; limit: number }>(
+      '/integrations/forms/fill-tasks',
+      { params: query },
+    );
+  },
+
   async createFillTask(payload: CreateFillTaskPayload): Promise<CreateFillTaskResult> {
     return apiClient.post<CreateFillTaskResult>(
       '/integrations/forms/fill-tasks',

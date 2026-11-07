@@ -276,6 +276,31 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
     return doc
 
 
+async def list_fill_tasks(db: AsyncIOMotorDatabase, operator: Any,
+                          status: Optional[str] = None,
+                          patient_id: Optional[str] = None,
+                          skip: int = 0, limit: int = 20) -> Dict[str, Any]:
+    """填报任务列表：发起人只看自己创建的，admin 可看全部；按创建时间倒序分页。"""
+    if status is not None and status not in models.TASK_STATUSES:
+        raise FormIntegrationError(f"未知任务状态：{status}",
+                                   error_code="INVALID_STATUS_FILTER", status_code=422)
+    query: Dict[str, Any] = {}
+    if operator.role != "admin":
+        query["operator.user_id"] = str(operator.id)
+    if status is not None:
+        query["status"] = status
+    if patient_id:
+        query["patient_id"] = patient_id
+
+    total = await db[models.COLLECTION_NAME].count_documents(query)
+    cursor = (db[models.COLLECTION_NAME].find(query)
+              .sort("created_at", -1)
+              .skip(max(skip, 0))
+              .limit(min(max(limit, 1), 100)))
+    items = [models.serialize_task(doc) async for doc in cursor]
+    return {"items": items, "total": total, "skip": skip, "limit": limit}
+
+
 async def cancel_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
                            task_id: str, operator: Any) -> Dict[str, Any]:
     doc = await get_fill_task(db, task_id, operator)
