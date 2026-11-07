@@ -33,6 +33,7 @@ import LocalHospitalIcon from '@mui/icons-material/LocalHospital';
 import MonitorWeightIcon from '@mui/icons-material/MonitorWeight';
 import { Link } from 'react-router-dom';
 import { apiService } from '../../services/api';
+import { rehabilitationService, PlanStatisticsResponse } from '../../services/rehabilitationService';
 import AnalyticsChart from '../../components/Analytics/AnalyticsChart';
 
 // 选项卡面板属性接口
@@ -123,6 +124,16 @@ interface RehabPlanSummary {
   endDate: string;
   exerciseCount: number;
   progress: number | null; // 仅当 exercises 内含数值型 progress 时可计算
+}
+
+// 计划统计响应（GET /rehabilitation/plans/{id}/statistics，形状见 rehabilitationService.ts）
+// range_of_motion / muscle_strength 后端无对应字段，如实为 null（unsupported_metrics 列出）
+type PlanStatistics = PlanStatisticsResponse;
+
+// 疼痛趋势点（GET /rehabilitation/plans/{id}/trends?metric=pain，按天均值；无值日 value 为 null）
+interface PainTrendPoint {
+  date: string;
+  value: number;
 }
 
 // 生命体征类型定义（与后端 vital_type 约定一致，见 schemas/health_record.py:594）
@@ -226,7 +237,6 @@ const DataMonitoring: React.FC = () => {
   const [patients, setPatients] = React.useState<PatientOption[]>([]);
   const [patientsLoading, setPatientsLoading] = React.useState(false);
   const [patientsError, setPatientsError] = React.useState<string | null>(null);
-  const [patientNotice, setPatientNotice] = React.useState<string | null>(null);
 
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -238,23 +248,20 @@ const DataMonitoring: React.FC = () => {
   const [glucoseData, setGlucoseData] = React.useState<GlucoseRow[]>([]);
   const [medications, setMedications] = React.useState<MedicationRow[]>([]);
   const [rehabPlan, setRehabPlan] = React.useState<RehabPlanSummary | null>(null);
+  // 康复计划统计（statistics/trends 端点已真实实现）
+  const [planStatistics, setPlanStatistics] = React.useState<PlanStatistics | null>(null);
+  const [planStatsError, setPlanStatsError] = React.useState<string | null>(null);
+  const [painTrend, setPainTrend] = React.useState<PainTrendPoint[]>([]);
 
   // 加载医生的患者列表（真实接口 GET /doctors/patients）
   const loadPatients = React.useCallback(async () => {
     setPatientsLoading(true);
     setPatientsError(null);
-    setPatientNotice(null);
     try {
       const response = await apiService.doctor.getPatients();
       const list: any[] = Array.isArray(response.data) ? response.data : [];
-      // 后端缺陷防护：GET /doctors/patients 在数据库无真实患者时会返回 id 形如
-      // "mock_1" 的模拟患者（backend/app/api/routers/doctor_router.py:34-49），
-      // 这里过滤掉，仅展示真实患者，并以提示说明
-      const realPatients = list.filter(p => !String(p?.id ?? p?._id ?? '').startsWith('mock_'));
-      if (list.length > realPatients.length) {
-        setPatientNotice('后端在无真实患者数据时返回了模拟患者（后端缺陷，待修复），已过滤，仅显示真实患者。');
-      }
-      setPatients(realPatients.map(p => ({
+      // 后端已诚实化：空库如实返回 []，不再返回 mock_* 模拟患者
+      setPatients(list.map(p => ({
         id: String(p?.id ?? p?._id ?? ''),
         name: String(p?.name ?? '未知患者'),
         age: typeof p?.age === 'number' ? p.age : undefined,
@@ -274,11 +281,42 @@ const DataMonitoring: React.FC = () => {
     loadPatients();
   }, [loadPatients]);
 
+  // 加载康复计划统计与疼痛趋势（真实端点：GET /rehabilitation/plans/{id}/statistics 与 /trends，
+  // plan_id 来自页面已加载的康复计划前置判断）
+  const loadRehabStats = async (planId: string) => {
+    setPlanStatsError(null);
+    try {
+      const [statsRes, painTrendRes] = await Promise.all([
+        rehabilitationService.getPlanStatistics(planId),
+        // 疼痛趋势（近30天，按天均值）；趋势失败不阻塞统计展示
+        rehabilitationService.getPlanTrends(planId, { metric: 'pain', days: 30 }).catch(() => null),
+      ]);
+      const stats = statsRes.data;
+      setPlanStatistics(stats);
+
+      const series = Array.isArray(painTrendRes?.data?.series) ? painTrendRes.data.series : [];
+      // 无值日 value 为 null，过滤后仅保留有效均值点
+      setPainTrend(
+        series
+          .filter(p => p?.value !== null && p?.value !== undefined && !isNaN(Number(p.value)))
+          .map(p => ({ date: String(p.date), value: Number(p.value) }))
+      );
+    } catch (err: any) {
+      console.error('获取康复计划统计失败:', err);
+      setPlanStatistics(null);
+      setPainTrend([]);
+      setPlanStatsError(err?.response?.data?.detail || err?.message || '获取康复计划统计失败');
+    }
+  };
+
   // 加载选中患者的监测数据
   const loadPatientData = async () => {
     if (!selectedPatient) return;
     setLoading(true);
     setError(null);
+    setPlanStatistics(null);
+    setPainTrend([]);
+    setPlanStatsError(null);
 
     try {
       const [vitalRes, labRes, plansRes, recordRes] = await Promise.all([
@@ -397,8 +435,9 @@ const DataMonitoring: React.FC = () => {
           new Date(a?.start_date ?? 0).getTime() - new Date(b?.start_date ?? 0).getTime()
         );
         const plan = sortedPlans[sortedPlans.length - 1];
+        const planId = String(plan?._id ?? plan?.id ?? '');
         setRehabPlan({
-          id: String(plan?._id ?? plan?.id ?? ''),
+          id: planId,
           name: String(plan?.name ?? '未命名康复计划'),
           status: String(plan?.status ?? 'unknown'),
           goal: plan?.goal ? String(plan.goal) : '',
@@ -408,6 +447,11 @@ const DataMonitoring: React.FC = () => {
           exerciseCount: Array.isArray(plan?.exercises) ? plan.exercises.length : 0,
           progress: computePlanProgress(plan?.exercises ?? []),
         });
+
+        // 已有康复计划时加载计划统计与疼痛趋势（真实端点，失败仅提示不影响其余页签）
+        if (planId) {
+          await loadRehabStats(planId);
+        }
       } else {
         setRehabPlan(null);
       }
@@ -507,11 +551,6 @@ const DataMonitoring: React.FC = () => {
         {patientsError && (
           <Alert severity="error" sx={{ mt: 2 }}>
             {patientsError}
-          </Alert>
-        )}
-        {patientNotice && (
-          <Alert severity="warning" sx={{ mt: 2 }}>
-            {patientNotice}
           </Alert>
         )}
       </Paper>
@@ -889,12 +928,114 @@ const DataMonitoring: React.FC = () => {
 
                 <Grid item xs={12}>
                   <Paper sx={{ p: 3 }}>
-                    <Typography variant="h6" gutterBottom>康复关键指标</Typography>
-                    <Alert severity="info">
-                      暂无数据源：疼痛等级、关节活动度、肌肉力量及每周训练完成率
-                      依赖计划统计端点（GET /rehabilitation/plans/&#123;id&#125;/statistics），
-                      该端点依赖的服务方法后端尚未实现（调用会 500），待后端补齐后接入。
-                    </Alert>
+                    <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+                      <Typography variant="h6">康复关键指标</Typography>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => rehabPlan && loadRehabStats(rehabPlan.id)}
+                      >
+                        刷新统计
+                      </Button>
+                    </Box>
+
+                    {planStatsError && (
+                      <Alert severity="error" sx={{ mb: 2 }}>{planStatsError}</Alert>
+                    )}
+
+                    {!planStatistics ? (
+                      !planStatsError && (
+                        <Alert severity="info">暂无统计数据（点击"刷新统计"重新加载）</Alert>
+                      )
+                    ) : (
+                      <>
+                        {/* 统计摘要：statistics 真实聚合字段 */}
+                        <Grid container spacing={2} mb={3}>
+                          <Grid item xs={6} sm={3}>
+                            <Typography variant="caption" color="text.secondary">训练记录数</Typography>
+                            <Typography variant="h6">{planStatistics.total_records}</Typography>
+                          </Grid>
+                          <Grid item xs={6} sm={3}>
+                            <Typography variant="caption" color="text.secondary">已完成记录</Typography>
+                            <Typography variant="h6">{planStatistics.completed_records}</Typography>
+                          </Grid>
+                          <Grid item xs={6} sm={3}>
+                            <Typography variant="caption" color="text.secondary">完成率</Typography>
+                            <Typography variant="h6">
+                              {planStatistics.completion_rate !== null ? `${planStatistics.completion_rate}%` : '--'}
+                            </Typography>
+                          </Grid>
+                          <Grid item xs={6} sm={3}>
+                            <Typography variant="caption" color="text.secondary">平均疼痛等级</Typography>
+                            <Typography variant="h6">
+                              {planStatistics.avg_pain_level !== null ? planStatistics.avg_pain_level : '--'}
+                            </Typography>
+                          </Grid>
+                        </Grid>
+
+                        <Grid container spacing={3}>
+                          {/* 疼痛趋势：trends(metric=pain)，按天均值，无值日 value 为 null 已过滤 */}
+                          <Grid item xs={12} md={6}>
+                            <Typography variant="subtitle2" gutterBottom>
+                              疼痛趋势（近30天，按天均值）
+                            </Typography>
+                            {painTrend.length === 0 ? (
+                              <Alert severity="info">
+                                该计划暂无疼痛记录（训练进度中 pain_level 无非空值）
+                              </Alert>
+                            ) : (
+                              <AnalyticsChart
+                                type="line"
+                                data={painTrend}
+                                height={220}
+                                xKey="date"
+                                yKeys={['value']}
+                                title="疼痛等级趋势 (0-10)"
+                              />
+                            )}
+                          </Grid>
+
+                          {/* 每周训练完成率：statistics.weekly_completion[]（按自然周分桶） */}
+                          <Grid item xs={12} md={6}>
+                            <Typography variant="subtitle2" gutterBottom>
+                              每周训练完成率
+                            </Typography>
+                            {planStatistics.weekly_completion.length === 0 ? (
+                              <Alert severity="info">
+                                暂无周完成率数据（计划内无进度记录）
+                              </Alert>
+                            ) : (
+                              <AnalyticsChart
+                                type="bar"
+                                data={planStatistics.weekly_completion.map(w => ({
+                                  week: w.week_start,
+                                  rate: w.completion_rate,
+                                }))}
+                                height={220}
+                                xKey="week"
+                                yKeys={['rate']}
+                                title="每周完成率 (%)"
+                              />
+                            )}
+                          </Grid>
+                        </Grid>
+
+                        {/* 后端无对应数据字段的指标：如实保持"暂无数据源" */}
+                        <Alert severity="warning" sx={{ mt: 3 }}>
+                          暂无数据源：关节活动度（range_of_motion）与肌肉力量（muscle_strength）
+                          后端无对应数据字段，统计响应中如实为 null
+                          （unsupported_metrics: {planStatistics.unsupported_metrics.join('、')}），
+                          待后端补充数据采集后接入。
+                        </Alert>
+
+                        <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+                          数据来源：{planStatistics.data_source}
+                          {planStatistics.data_notes.length > 0
+                            ? `；备注：${planStatistics.data_notes.join('；')}`
+                            : ''}
+                        </Typography>
+                      </>
+                    )}
                   </Paper>
                 </Grid>
               </Grid>

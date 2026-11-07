@@ -140,11 +140,10 @@ const DataVisualization: React.FC = () => {
         </Box>
       </Box>
 
-      {/* 已知后端缺陷说明：趋势/分布/对比三个查询在 analytics_service 服务层仍为随机模拟值，
-          修复需在后端完成（本次任务约定后端文件只读），此处如实注明 */}
+      {/* 数据说明（后端 analytics 域已诚实化：全部真实聚合，无随机模拟值） */}
       <Alert severity="info" sx={{ mb: 3 }}>
-        注意：趋势、分布、对比三类图表当前由后端分析接口返回演示数据（服务层聚合逻辑待建设），
-        概览卡片中的患者/医生/设备数量为真实统计；"康复有效率"与"患者满意度"为后端占位值。
+        数据说明：趋势、分布、对比三类图表与概览统计均来自后端真实聚合，无演示数据；
+        "康复有效率"与"患者满意度"因系统尚无疗效评定与满意度评价数据，后端如实返回 0 并标记不可用。
       </Alert>
 
       {/* 请求失败错误态（分析端点不可达/无权限时展示） */}
@@ -226,7 +225,9 @@ const DataVisualization: React.FC = () => {
                 {statsData?.avgTrainingTime || 0}分钟
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                康复有效率: {statsData?.rehabilitationRate || 0}%
+                {(statsData as any)?.dataAvailable?.rehabilitationRate === false
+                  ? '康复有效率: 暂无数据源（无疗效评定数据）'
+                  : `康复有效率: ${statsData?.rehabilitationRate || 0}%`}
               </Typography>
             </CardContent>
           </Card>

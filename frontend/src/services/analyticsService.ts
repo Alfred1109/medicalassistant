@@ -19,11 +19,12 @@ import api from './api'; // 导入配置好的axios实例
  * - GET /api/analytics/comparison           对比（原始形状 { category, currentValue, compareValue }）
  * - GET /api/device-analysis/predict-advanced/{device_id} 高级预测（稀疏数据时返回 400）
  *
- * 注意：本服务不再在请求失败时回退到前端模拟数据（原 generateMock* 已删除），
+ * 注意：本服务不在请求失败时回退到前端模拟数据（原 generateMock* 已删除），
  * 请求失败会向上抛出，由页面渲染错误态。
- * 已知后端缺陷（报告，不在此掩盖）：backend/app/services/analytics_service.py 的
- * trend/distribution/comparison 三个查询在服务层仍返回随机模拟值，且
- * get_stats_overview 异常时会回退模拟概览数据 —— 需后端修复。
+ * 后端 trend/distribution/comparison 与 get_stats_overview 均已实现真实聚合
+ * （backend/app/services/analytics_service.py，不再返回随机模拟值/模拟回退）；
+ * 概览中的 rehabilitationRate/patientSatisfaction 因全库无疗效评定与满意度
+ * 评价的写入路径，后端如实返回 0 并以 dataAvailable 标记不可用。
  */
 
 // 后端趋势数据原始行形状
