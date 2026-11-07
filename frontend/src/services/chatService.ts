@@ -19,7 +19,7 @@ export interface ChatMessage {
   }>;
 }
 
-// 对话类型
+// 对话类型（旧前端形态，仅保留兼容）
 export interface Conversation {
   id: string;
   participants: Array<{
@@ -37,10 +37,47 @@ export interface Conversation {
   updatedAt: Date | string;
 }
 
+// ---- 与后端实际响应对齐的类型（backend/app/services/communication_service.py）----
+
+// GET /communications/conversations 返回的会话条目
+// （participant1_id/participant2_id 双人文档结构，other_user 是相对当前用户的对方）
+export interface ConversationDto {
+  id: string;
+  participant1_id: string;
+  participant2_id: string;
+  type: string;
+  status?: string;
+  created_at: string;
+  last_message_time?: string;
+  last_message_preview?: string;
+  unread_count: number;
+  other_user?: {
+    id: string;
+    name: string;
+    role: string;
+    avatar?: string | null;
+  };
+}
+
+// GET /communications/conversations/{id}/messages 与 POST 同路径返回的消息条目
+export interface MessageDto {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  recipient_id: string;
+  content: string;
+  type: string;
+  timestamp: string; // ISO 字符串
+  read: boolean;
+  deleted: boolean;
+  attachments?: Array<Record<string, any>>;
+  metadata?: Record<string, any>;
+}
+
 // 创建聊天API服务
 export const chatApi = {
   // 获取用户的所有对话（后端 GET /communications/conversations）
-  async getConversations(params?: { limit?: number; skip?: number; status?: string }) {
+  async getConversations(params?: { limit?: number; skip?: number; status?: string }): Promise<ConversationDto[]> {
     try {
       const response = await api.get('/communications/conversations', { params });
       return response.data;
@@ -52,7 +89,7 @@ export const chatApi = {
 
   // 获取特定对话的消息（后端 GET /communications/conversations/{id}/messages，
   // 分页参数为 limit / before_id）
-  async getMessages(conversationId: string, limit = 30, before?: string) {
+  async getMessages(conversationId: string, limit = 30, before?: string): Promise<MessageDto[]> {
     try {
       const params: Record<string, any> = { limit };
       if (before) {
@@ -71,7 +108,7 @@ export const chatApi = {
 
   // 发送消息（后端 POST /communications/conversations/{id}/messages，
   // body 为 MessageCreate: { content, type?, attachments?, metadata? }，JSON 而非 FormData）
-  async sendMessage(conversationId: string, content: string, attachments?: Array<Record<string, any>>) {
+  async sendMessage(conversationId: string, content: string, attachments?: Array<Record<string, any>>): Promise<MessageDto> {
     try {
       const response = await api.post(
         `/communications/conversations/${conversationId}/messages`,
@@ -89,7 +126,7 @@ export const chatApi = {
 
   // 创建新对话（后端 POST /communications/conversations，body 为
   // ConversationCreate: { participant_id, type? }，单个参与者）
-  async createConversation(participantId: string, type = 'chat') {
+  async createConversation(participantId: string, type = 'chat'): Promise<{ id: string }> {
     try {
       const response = await api.post('/communications/conversations', {
         participant_id: participantId,
@@ -104,7 +141,7 @@ export const chatApi = {
 
   // 标记单条消息为已读（后端 PUT /communications/messages/{message_id}/read；
   // 后端无批量已读端点，整段对话请配合 markConversationAsRead）
-  async markAsRead(messageId: string) {
+  async markAsRead(messageId: string): Promise<{ status: string }> {
     try {
       const response = await api.put(`/communications/messages/${messageId}/read`);
       return response.data;
@@ -115,7 +152,7 @@ export const chatApi = {
   },
 
   // 标记对话所有消息为已读（后端 PUT /communications/conversations/{conversation_id}/read）
-  async markConversationAsRead(conversationId: string) {
+  async markConversationAsRead(conversationId: string): Promise<{ marked_count: number }> {
     try {
       const response = await api.put(`/communications/conversations/${conversationId}/read`);
       return response.data;
@@ -126,7 +163,7 @@ export const chatApi = {
   },
 
   // 删除消息（后端 DELETE /communications/messages/{message_id}，软删除）
-  async deleteMessage(messageId: string) {
+  async deleteMessage(messageId: string): Promise<{ status: string }> {
     try {
       const response = await api.delete(`/communications/messages/${messageId}`);
       return response.data;
@@ -137,7 +174,7 @@ export const chatApi = {
   },
 
   // 获取未读消息数量（后端 GET /communications/unread-count）
-  async getUnreadCount() {
+  async getUnreadCount(): Promise<{ count: number }> {
     try {
       const response = await api.get('/communications/unread-count');
       return response.data;
@@ -148,7 +185,7 @@ export const chatApi = {
   },
 
   // 获取特定对话详情（后端 GET /communications/conversations/{conversation_id}）
-  async getConversation(conversationId: string) {
+  async getConversation(conversationId: string): Promise<ConversationDto> {
     try {
       const response = await api.get(`/communications/conversations/${conversationId}`);
       return response.data;
@@ -159,7 +196,7 @@ export const chatApi = {
   },
 
   // 同步离线消息（后端 POST /communications/sync，body 为 { last_sync_time }）
-  async syncOfflineMessages(lastSyncTime: string) {
+  async syncOfflineMessages(lastSyncTime: string): Promise<MessageDto[]> {
     try {
       const response = await api.post('/communications/sync', {
         last_sync_time: lastSyncTime,
