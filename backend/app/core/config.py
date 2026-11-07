@@ -56,6 +56,15 @@ class Settings(BaseSettings):
     TEST_USER: str = "test@example.com"
     TEST_USER_PASSWORD: str = "password123"
     
+    # 表单平台（113.44 康复问卷管理系统）集成配置
+    # 服务端对服务端凭证认证；SECRET 为 SecretStr 避免日志泄露
+    FORM_PLATFORM_BASE_URL: str = os.getenv("FORM_PLATFORM_BASE_URL", "")
+    FORM_PLATFORM_CLIENT_ID: str = os.getenv("FORM_PLATFORM_CLIENT_ID", "")
+    FORM_PLATFORM_CLIENT_SECRET: Optional[SecretStr] = (
+        SecretStr(os.getenv("FORM_PLATFORM_CLIENT_SECRET")) if os.getenv("FORM_PLATFORM_CLIENT_SECRET") else None
+    )
+    FORM_PLATFORM_TIMEOUT_SECONDS: float = float(os.getenv("FORM_PLATFORM_TIMEOUT_SECONDS", "10"))
+
     # LLM API配置
     LLM_API_KEY: Optional[SecretStr] = None
     LLM_API_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"

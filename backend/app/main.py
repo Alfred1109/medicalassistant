@@ -226,6 +226,10 @@ app.include_router(audit_log_router, prefix="/api", tags=["audit-logs"])
 from app.api.routers import analytics_router
 app.include_router(analytics_router, prefix="/api", tags=["analytics"])
 
+# 表单平台（113.44）集成填报路由
+from app.integrations.forms.router import router as integration_forms_router
+app.include_router(integration_forms_router, prefix="/api", tags=["form-integration"])
+
 @app.get("/api")
 async def api_root():
     """API根路径响应"""

@@ -47,6 +47,9 @@ import Communication from './pages/Doctor/Communication';
 import Statistics from './pages/Doctor/Statistics';
 import InformedConsent from './pages/Doctor/InformedConsent';
 
+// 表单平台（113.44）嵌入填报（首轮隔离联调）
+import FormFillEmbedPage from './pages/Integration/FormFillEmbedPage';
+
 import HealthManagerDashboard from './pages/HealthManager/HealthManagerDashboard';
 import HealthDataTimelinePage from './pages/HealthManager/HealthDataTimelinePage';
 import HealthThresholdPage from './pages/HealthManager/HealthThresholdPage';
@@ -303,6 +306,8 @@ const AppRoutes: React.FC = () => (
         <Route path="documents/templates" element={<ConsentTemplateList />} />
         <Route path="documents/:documentId" element={<ConsentDocumentView />} />
         <Route path="documents" element={<ConsentDocumentList />} />
+        {/* 表单平台（113.44）嵌入填报 */}
+        <Route path="form-fill/:taskId" element={<FormFillEmbedPage />} />
       </Route>
       
       {/* 健康管理师专属路由 */}
@@ -323,6 +328,8 @@ const AppRoutes: React.FC = () => (
         <Route path="documents/templates" element={<ConsentTemplateList />} />
         <Route path="documents/:documentId" element={<ConsentDocumentView />} />
         <Route path="documents" element={<ConsentDocumentList />} />
+        {/* 表单平台（113.44）嵌入填报 */}
+        <Route path="form-fill/:taskId" element={<FormFillEmbedPage />} />
       </Route>
       
       {/* 患者专属路由 */}
