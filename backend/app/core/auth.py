@@ -96,11 +96,7 @@ async def get_current_user_ws(websocket: WebSocket, db: AsyncIOMotorClient) -> O
     
     # 如果查询参数中没有token，尝试从cookie中获取
     if not token:
-        try:
-            cookies = websocket.cookies
-            token = cookies.get(settings.TOKEN_COOKIE_NAME)
-        except Exception:
-            pass
+        token = websocket.cookies.get(settings.TOKEN_COOKIE_NAME)
     
     if not token:
         return None

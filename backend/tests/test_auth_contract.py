@@ -145,6 +145,12 @@ class WebSocketAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         websocket.cookies = {}
         return await auth.get_current_user_ws(websocket, self.database)
 
+    async def authenticate_via_cookie(self, token):
+        websocket = MagicMock()
+        websocket.query_params = {}
+        websocket.cookies = {settings.TOKEN_COOKIE_NAME: token} if token else {}
+        return await auth.get_current_user_ws(websocket, self.database)
+
     async def test_valid_access_uses_same_subject_as_http(self):
         self.assertIsNotNone(await self.authenticate(self.token(token_type="access")))
         self.database.users.find_one.assert_awaited_once()
@@ -161,6 +167,14 @@ class WebSocketAuthenticationTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_user_is_rejected(self):
         self.database.users.find_one.return_value = {"_id": self.user_id, "is_active": False}
         self.assertIsNone(await self.authenticate(self.token()))
+
+    async def test_cookie_fallback_authenticates_when_query_param_absent(self):
+        self.assertIsNotNone(await self.authenticate_via_cookie(self.token(token_type="access")))
+        self.database.users.find_one.assert_awaited_once()
+
+    async def test_cookie_fallback_without_token_returns_none(self):
+        self.assertIsNone(await self.authenticate_via_cookie(None))
+        self.database.users.find_one.assert_not_awaited()
 
 
 if __name__ == "__main__":

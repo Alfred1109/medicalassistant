@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30  # 30 days
+    # 携带访问令牌的 cookie 名：WebSocket 认证与审计身份提取在缺少
+    # Authorization 头/查询参数时的回退通道。代码库中此前无任何
+    # set_cookie 或既定 cookie 名，取中性默认值 "access_token"。
+    TOKEN_COOKIE_NAME: str = "access_token"
     
     # LLM/Agent Settings
     DEFAULT_LLM_MODEL: str = os.getenv("DEFAULT_LLM_MODEL", "gpt-4-turbo")

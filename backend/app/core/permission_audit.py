@@ -127,11 +127,8 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
             if scheme.lower() == "bearer" and credentials.strip():
                 token = credentials.strip()
         if not token:
-            # 部分客户端通过 cookie 携带令牌（与 WebSocket 认证一致）；
-            # 配置缺失时降级为仅依赖 Authorization 头，不中断请求。
-            cookie_name = getattr(settings, "TOKEN_COOKIE_NAME", None)
-            if cookie_name:
-                token = request.cookies.get(cookie_name)
+            # 部分客户端通过 cookie 携带令牌（与 WebSocket 认证一致）
+            token = request.cookies.get(settings.TOKEN_COOKIE_NAME)
         if token:
             user_id, role = _extract_identity_from_token(token)
             if user_id is None:
