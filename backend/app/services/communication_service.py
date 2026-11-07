@@ -199,8 +199,30 @@ class CommunicationService:
         }
         
         result = await db.conversations.insert_one(conversation)
-        return str(result.inserted_id)
-    
+        conversation_id = str(result.inserted_id)
+
+        # 真实业务事件触发点：新会话建立 → 通知受邀参与者（participant2）。
+        # 通知失败不影响会话创建（notification_service 内部已兜底 WS 推送失败）。
+        try:
+            sender = await db.users.find_one({"_id": ObjectId(participant1_id)})
+            await NotificationService.create_notification(
+                db=db,
+                title="新会话",
+                content=f"{(sender or {}).get('name', 'Unknown')} 发起了沟通会话，可以开始交流。",
+                sender_id=participant1_id,
+                sender_name=(sender or {}).get("name", "Unknown"),
+                sender_role=(sender or {}).get("role", "unknown"),
+                recipient_id=participant2_id,
+                notification_type="message",
+                priority="normal",
+                related_entity_id=conversation_id,
+                related_entity_type="conversation"
+            )
+        except Exception as e:
+            logger.warning(f"新会话通知创建失败: {str(e)}")
+
+        return conversation_id
+
     @staticmethod
     async def get_messages(
         db: AsyncIOMotorClient,
@@ -529,9 +551,39 @@ class CommunicationService:
                 )
             except Exception as e:
                 logger.warning(f"推送消息删除通知失败: {str(e)}")
-        
+
+        # 真实业务事件触发点：消息撤回（软删除）→ 通知对话另一方。
+        # 通知失败不影响删除本身。
+        if result.modified_count > 0:
+            try:
+                conversation = await db.conversations.find_one(
+                    {"_id": ObjectId(message["conversation_id"])}
+                )
+                if conversation:
+                    other_id = (
+                        conversation["participant2_id"]
+                        if user_id == conversation["participant1_id"]
+                        else conversation["participant1_id"]
+                    )
+                    sender = await db.users.find_one({"_id": ObjectId(user_id)})
+                    await NotificationService.create_notification(
+                        db=db,
+                        title="消息已撤回",
+                        content=f"{(sender or {}).get('name', '对方')} 撤回了一条消息。",
+                        sender_id=user_id,
+                        sender_name=(sender or {}).get("name", "Unknown"),
+                        sender_role=(sender or {}).get("role", "unknown"),
+                        recipient_id=str(other_id),
+                        notification_type="message",
+                        priority="low",
+                        related_entity_id=str(message["conversation_id"]),
+                        related_entity_type="conversation"
+                    )
+            except Exception as e:
+                logger.warning(f"撤回通知创建失败: {str(e)}")
+
         return result.modified_count > 0
-    
+
     @staticmethod
     async def sync_offline_messages(
         db: AsyncIOMotorClient,

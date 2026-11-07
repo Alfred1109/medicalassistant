@@ -194,7 +194,12 @@ class NotificationService:
         related_entity_id: Optional[str] = None,
         related_entity_type: Optional[str] = None
     ) -> List[str]:
-        """批量创建通知给多个用户"""
+        """批量创建通知给多个用户
+
+        注（审计 2026-11-08）：当前代码库内无任何调用方（现存真实触发点为
+        communication_service.py 的离线消息/新会话/消息撤回三处，均为单收件人）。
+        本方法为真实落库+推送实现，非假数据入口，保留供未来批量场景接入。
+        """
         if not recipient_ids:
             return []
         

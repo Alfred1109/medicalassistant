@@ -3,6 +3,23 @@ import { Snackbar, Alert, Badge, IconButton, Typography, Box, useTheme } from '@
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import CloseIcon from '@mui/icons-material/Close';
 import useWebSocket from '../../hooks/useWebSocket';
+import { API_BASE_URL } from '../../config/api';
+import { STORAGE_KEYS } from '../../config/constants';
+
+/**
+ * 通知 WS 地址推导（与 chatWsService.resolveChatWsBaseUrl 同规则）：
+ * 后端通知端点挂在应用根 /ws/notifications（websockets.py:301），
+ * 不在 /api 前缀下，因此从 API_BASE_URL 去掉末尾 /api 得基址；
+ * 鉴权与 /ws/chat 一致走 ?token= 查询参数（get_current_user_ws）。
+ */
+function resolveNotificationWsUrl(): string {
+  const withoutApi = API_BASE_URL.replace(/\/api\/?$/, '');
+  const base = /^https?:\/\//i.test(withoutApi)
+    ? withoutApi.replace(/^http/i, 'ws')
+    : `${window.location.origin}${withoutApi}`;
+  const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+  return `${base}/ws/notifications${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+}
 
 interface NotificationPusherProps {
   onNotificationClick?: () => void;
@@ -21,20 +38,22 @@ const NotificationPusher: React.FC<NotificationPusherProps> = ({
     duration: number;
   } | null>(null);
   
-  // WebSocket连接，用于接收实时通知
-  const { lastMessage, isConnected } = useWebSocket(`${import.meta.env.VITE_WS_URL || 'wss://api.example.com'}/notifications/ws`);
-  
+  // WebSocket连接，用于接收实时通知（后端 /ws/notifications）
+  const { lastMessage, isConnected } = useWebSocket(resolveNotificationWsUrl());
+
   // 处理收到的WebSocket消息
   useEffect(() => {
     if (lastMessage) {
       try {
         const data = JSON.parse(lastMessage.data);
-        if (data.type === 'notification') {
+        // 后端广播形状：{"type":"notification","data":{content,priority,...}}（websockets.py send_notification）
+        if (data.type === 'notification' && data.data) {
+          const priority = data.data.priority;
           setNotification({
             open: true,
-            message: data.content,
-            type: data.level || 'info',
-            duration: data.duration || 5000
+            message: data.data.content,
+            type: priority === 'urgent' ? 'error' : priority === 'high' ? 'warning' : 'info',
+            duration: 5000
           });
         }
       } catch (error) {
