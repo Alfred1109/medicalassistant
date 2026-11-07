@@ -3,13 +3,52 @@
 处理设备管理相关API请求
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 from datetime import datetime
+from bson import ObjectId
 from pydantic import BaseModel, Field
 
 from ...services.device_service import device_service
-from ...services.user_service import UserService
-from ...core.dependencies import get_current_user
+from ...core.auth import get_current_active_user
+
+
+def _is_device_owner(device: Dict, user_id: str) -> bool:
+    """判断当前用户是否为设备属主。
+
+    device_service.get_device 返回原始文档，patient_id 可能以 ObjectId
+    形态存储，统一转 str 后比较。
+    """
+    return str(device.get("patient_id")) == str(user_id)
+
+
+async def _get_device_or_404(device_id: str) -> Dict:
+    """获取设备或抛 404：畸形 ID 与不存在的设备语义一致（404）。"""
+    if not ObjectId.is_valid(device_id):
+        raise HTTPException(status_code=404, detail="设备不存在")
+    device = await device_service.get_device(device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    return device
+
+
+def _ensure_device_access(device: Dict, current_user: Any, roles: List[str]) -> None:
+    """对象级粗判：属主或指定授权角色之外一律 403。"""
+    if not _is_device_owner(device, current_user.id) and current_user.role not in roles:
+        raise HTTPException(status_code=403, detail="无权访问此设备")
+
+
+def _to_device_response(device: Any) -> Any:
+    """service 文档以 _id 存储主键、patient_id 可能以 ObjectId 存储，
+    而 DeviceResponse/DeviceDataResponse 以 id/patient_id: str 声明；
+    返回前规范字段名与形态，否则响应校验必然失败。"""
+    if isinstance(device, dict):
+        normalized = dict(device)
+        if "_id" in normalized and "id" not in normalized:
+            normalized["id"] = str(normalized["_id"])
+        if normalized.get("patient_id") is not None:
+            normalized["patient_id"] = str(normalized["patient_id"])
+        return normalized
+    return device
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -88,55 +127,48 @@ class DeviceConfigResponse(BaseModel):
 # API路由定义
 @router.get("/", response_model=List[DeviceResponse])
 async def get_user_devices(
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """获取当前用户绑定的设备列表"""
-    devices = await device_service.get_user_devices(user["_id"])
-    return devices
+    devices = await device_service.get_user_devices(current_user.id)
+    return [_to_device_response(device) for device in devices]
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)
 async def get_device(
     device_id: str,
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """获取设备详情"""
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    # 检查权限
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此设备")
-    
-    return device
+    # 检查权限（存在性 + 属主/角色粗判）
+    device = await _get_device_or_404(device_id)
+    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
+    return _to_device_response(device)
 
 
 @router.post("/bind", response_model=DeviceResponse)
 async def bind_device(
     device: DeviceCreate,
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """绑定新设备到当前用户"""
-    result = await device_service.bind_device(user["_id"], device.dict())
-    return result
+    result = await device_service.bind_device(current_user.id, device.dict())
+    return _to_device_response(result)
 
 
 @router.delete("/{device_id}/unbind")
 async def unbind_device(
     device_id: str,
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """解绑用户设备"""
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    # 检查权限
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["admin"]:
+    device = await _get_device_or_404(device_id)
+
+    # 检查权限（解绑仅限属主或管理员）
+    if not _is_device_owner(device, current_user.id) and current_user.role not in ["admin"]:
         raise HTTPException(status_code=403, detail="无权解绑此设备")
-    
-    result = await device_service.unbind_device(user["_id"], device_id)
+
+    result = await device_service.unbind_device(current_user.id, device_id)
     if result:
         return {"message": "设备已解绑"}
     else:
@@ -150,53 +182,58 @@ async def get_device_data(
     end_date: Optional[datetime] = None,
     data_type: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """获取设备数据"""
-    # 检查权限
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此设备数据")
+    # 检查权限（存在性 + 属主/角色粗判）
+    device = await _get_device_or_404(device_id)
+    # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
+    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
     
     data = await device_service.get_device_data(
-        device_id, 
+        device_id,
         start_date=start_date,
         end_date=end_date,
         data_type=data_type,
         limit=limit
     )
-    return data
+    return [_to_device_response(item) for item in data]
 
 
 @router.post("/{device_id}/sync", response_model=dict)
 async def sync_device_data(
     device_id: str,
-    current_user: Dict = Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     同步设备数据
     """
+    # 检查权限（存在性 + 属主/角色粗判）
+    device = await _get_device_or_404(device_id)
+    # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
+    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
+
     return await device_service.sync_device_data(device_id)
 
 
 @router.post("/{device_id}/repair", response_model=dict)
 async def repair_device(
     device_id: str,
-    current_user: Dict = Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """
     自动修复设备异常状态
     """
-    # 检查用户权限（实际应用中可能需要更详细的权限检查）
-    if "doctor" not in current_user.get("roles", []) and "admin" not in current_user.get("roles", []):
+    # 存在性校验：畸形 ID 与不存在的设备语义一致（404）
+    await _get_device_or_404(device_id)
+
+    # TODO(AUTH01): 对象级授权待收敛（仅角色粗判，未校验医患关系）
+    if current_user.role not in ["doctor", "admin"]:
         raise HTTPException(
             status_code=403,
             detail="权限不足，只有医生或管理员可以执行设备修复操作"
         )
-    
+
     # 调用设备修复服务
     repair_result = await device_service.auto_repair_device(device_id)
     return repair_result
@@ -205,17 +242,14 @@ async def repair_device(
 @router.get("/{device_id}/status", response_model=DeviceStatusResponse)
 async def get_device_status(
     device_id: str,
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """获取设备状态"""
-    # 检查权限
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权访问此设备状态")
-    
+    # 检查权限（存在性 + 属主/角色粗判）
+    device = await _get_device_or_404(device_id)
+    # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
+    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
+
     status = await device_service.get_device_status(device_id)
     return status
 
@@ -224,16 +258,13 @@ async def get_device_status(
 async def configure_device(
     device_id: str,
     config: DeviceConfigUpdate,
-    user=Depends(get_current_user)
+    current_user: Any = Depends(get_current_active_user)
 ):
     """配置设备"""
-    # 检查权限
-    device = await device_service.get_device(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    
-    if device.get("patient_id") != user["_id"] and user.get("role") not in ["doctor", "health_manager", "admin"]:
-        raise HTTPException(status_code=403, detail="无权配置此设备")
+    # 检查权限（存在性 + 属主/角色粗判）
+    device = await _get_device_or_404(device_id)
+    # TODO(AUTH01): 对象级授权待收敛（仅属主/角色粗判，未校验医患关系）
+    _ensure_device_access(device, current_user, ["doctor", "health_manager", "admin"])
     
     result = await device_service.configure_device(device_id, config.dict(exclude_unset=True))
     return result 

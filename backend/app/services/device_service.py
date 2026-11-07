@@ -26,8 +26,10 @@ class DeviceService:
         
         return [{**device, "_id": str(device["_id"])} for device in devices]
     
-    async def get_device(self, device_id: str) -> Dict:
-        """获取设备详情"""
+    async def get_device(self, device_id: str) -> Optional[Dict]:
+        """获取设备详情；畸形 ID 与不存在的设备语义一致，返回 None"""
+        if not ObjectId.is_valid(device_id):
+            return None
         db = await get_db()
         device = await db.devices.find_one({"_id": ObjectId(device_id)})
         if device:
@@ -42,8 +44,11 @@ class DeviceService:
         if "device_type" in device_data and device_data["device_type"] not in [d.value for d in DeviceType]:
             return {"error": "不支持的设备类型"}
             
-        if "firmware_version" in device_data:
-            if not device_data_validator_service.validate_device_firmware(device_data["firmware_version"]):
+        # 注意：路由层传入 device.dict()，未填的可选字段以 None 出现，
+        # 不能用 `"firmware_version" in device_data` 判断是否填写
+        firmware_version = device_data.get("firmware_version")
+        if firmware_version:
+            if not device_data_validator_service.validate_device_firmware(firmware_version):
                 return {"error": "固件版本格式不正确，应为x.y.z格式"}
                 
         device = {
@@ -67,7 +72,9 @@ class DeviceService:
         return device
     
     async def unbind_device(self, user_id: str, device_id: str) -> bool:
-        """解绑用户设备"""
+        """解绑用户设备；畸形 ID 视为设备不存在，返回 False"""
+        if not ObjectId.is_valid(device_id):
+            return False
         db = await get_db()
         result = await db.devices.update_one(
             {"_id": ObjectId(device_id), "patient_id": user_id},
