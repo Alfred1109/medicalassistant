@@ -8,6 +8,7 @@ import json
 import requests
 
 from app.core.config import settings
+from app.core.exceptions import ExternalServiceException
 from app.core.llm import LLMConfigurationError, require_llm_api_key
 from app.schemas.agent import AgentCreate, AgentUpdate, AgentQuery
 
@@ -160,18 +161,11 @@ class AgentService:
         except LLMConfigurationError:
             raise
         except Exception as e:
-            # 记录错误
-            print(f"处理查询时出错: {str(e)}")
-            
-            # 返回错误响应
-            return {
-                "response": f"抱歉，我在处理您的问题时遇到了技术问题。请稍后再试。错误信息: {str(e)}",
-                "thinking": f"处理查询时发生错误: {str(e)}",
-                "metadata": {
-                    "error": True,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            }
+            # LLM 调用失败必须显式暴露，不得返回模拟回复冒充成功（REH02）
+            raise ExternalServiceException(
+                message=f"LLM处理查询失败: {str(e)}",
+                service_name="llm",
+            )
             
     async def generate_agent_parameters(self, config_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Generate agent parameters configuration using LLM"""
@@ -234,15 +228,26 @@ class AgentService:
                     
                     return parameters
                 except json.JSONDecodeError:
-                    print(f"无法解析LLM返回的JSON: {json_str}")
-            
-            print(f"无法从LLM响应中提取JSON: {llm_response}")
-            return None
+                    # 解析失败必须显式暴露，不得静默返回 None/模拟内容（REH02）
+                    raise ExternalServiceException(
+                        message=f"LLM返回的参数配置不是有效JSON: {json_str}",
+                        service_name="llm",
+                    )
+
+            raise ExternalServiceException(
+                message=f"无法从LLM响应中提取JSON: {llm_response}",
+                service_name="llm",
+            )
         except LLMConfigurationError:
+            raise
+        except ExternalServiceException:
             raise
         except Exception as e:
             print(f"生成代理参数时出错: {str(e)}")
-            return None
+            raise ExternalServiceException(
+                message=f"生成代理参数时出错: {str(e)}",
+                service_name="llm",
+            )
             
     async def generate_rehab_plan(self, patient_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Generate a rehabilitation plan using LLM"""
@@ -270,9 +275,14 @@ class AgentService:
             return parsed_plan
         except LLMConfigurationError:
             raise
+        except ExternalServiceException:
+            raise
         except Exception as e:
             print(f"Error generating rehab plan: {str(e)}")
-            return None
+            raise ExternalServiceException(
+                message=f"LLM生成康复计划失败: {str(e)}",
+                service_name="llm",
+            )
     
     def _build_rehab_plan_prompt(self, patient_data: Dict[str, Any]) -> str:
         """构建用于生成康复计划的提示词"""
@@ -453,104 +463,18 @@ class AgentService:
             
             # 日志记录
             print(f"LLM API调用成功，获取到响应")
-            
+
             return response_content
-            
+
         except LLMConfigurationError:
             raise
         except Exception as e:
+            # LLM 调用失败必须显式暴露，不得返回模拟数据冒充成功（REH02）
             print(f"LLM API调用失败: {str(e)}")
-            
-            # 如果API调用失败，使用备用的模拟数据
-            print("使用备用的模拟数据...")
-            
-            # 模拟返回的康复计划JSON
-            mock_response = {
-                "name": f"定制化康复计划 - {datetime.utcnow().strftime('%Y-%m-%d')}",
-                "description": "这个定制化康复计划旨在帮助患者逐步恢复功能，减轻症状，并达到设定的康复目标。",
-                "duration_weeks": 8,
-                "frequency": "每周3-5次",
-                "exercises": [
-                    {
-                        "name": "颈部伸展运动",
-                        "description": "温和地伸展颈部肌肉，减轻紧张感",
-                        "body_part": "颈部",
-                        "difficulty": "简单",
-                        "duration_minutes": 5,
-                        "repetitions": 10,
-                        "sets": 3,
-                        "instructions": [
-                            "坐直，保持肩膀放松",
-                            "慢慢将头向右侧倾斜，直到感觉左侧颈部有轻微拉伸",
-                            "保持15-30秒",
-                            "返回中心位置，然后向左侧重复"
-                        ],
-                        "contraindications": ["急性颈部损伤", "严重颈椎病"],
-                        "benefits": ["改善颈部活动范围", "减轻肌肉紧张"]
-                    },
-                    {
-                        "name": "肩部环绕运动",
-                        "description": "增加肩部活动度和柔韧性",
-                        "body_part": "肩部",
-                        "difficulty": "简单",
-                        "duration_minutes": 3,
-                        "repetitions": 12,
-                        "sets": 2,
-                        "instructions": [
-                            "站立或坐直",
-                            "将双肩向前画圆，做5次",
-                            "然后向后画圆，做5次"
-                        ],
-                        "contraindications": ["肩关节急性炎症"],
-                        "benefits": ["增加肩部活动范围", "改善姿势"]
-                    },
-                    {
-                        "name": "膝关节强化练习",
-                        "description": "增强膝关节周围肌肉力量",
-                        "body_part": "膝关节",
-                        "difficulty": "中等",
-                        "duration_minutes": 10,
-                        "repetitions": 15,
-                        "sets": 3,
-                        "instructions": [
-                            "坐在椅子上，背部挺直",
-                            "慢慢伸直一条腿，抬高到与髋部同高",
-                            "保持5秒钟",
-                            "慢慢放下，重复另一条腿"
-                        ],
-                        "contraindications": ["急性膝关节损伤"],
-                        "benefits": ["增强股四头肌", "改善膝关节稳定性"]
-                    }
-                ],
-                "notes": "请确保在开始任何运动前进行适当的热身，如感到不适应立即停止。逐渐增加强度和持续时间，而不是一次性增加太多。",
-                "phases": [
-                    {
-                        "name": "初始期",
-                        "duration": "2周",
-                        "focus": "适应与基础能力建立",
-                        "description": "初步适应康复训练，建立基础能力"
-                    },
-                    {
-                        "name": "进步期",
-                        "duration": "4周",
-                        "focus": "能力提升",
-                        "description": "提升康复训练强度和复杂度，增强能力"
-                    },
-                    {
-                        "name": "维持期",
-                        "duration": "持续",
-                        "focus": "功能维持与日常融合",
-                        "description": "将康复训练融入日常生活，维持并进一步提升功能"
-                    }
-                ],
-                "progress_tracking": {
-                    "metrics": ["症状改善", "功能恢复", "生活质量提升"],
-                    "methods": ["定期评估", "日志记录", "功能测试"],
-                    "milestones": ["初始期完成", "关键功能恢复", "回归日常活动"]
-                }
-            }
-            
-            return json.dumps(mock_response, ensure_ascii=False)
+            raise ExternalServiceException(
+                message=f"LLM API调用失败: {str(e)}",
+                service_name="llm",
+            )
         
     def _parse_rehab_plan_response(self, llm_response: str, patient_data: Dict[str, Any]) -> Dict[str, Any]:
         """解析LLM响应为结构化康复计划"""
@@ -641,11 +565,14 @@ class AgentService:
             
             # 添加计划调整历史
             plan_data["adjustment_history"] = []
-            
+
             return plan_data
         except Exception as e:
-            print(f"Error parsing LLM response: {str(e)}")
-            return {}
+            # 解析失败必须显式暴露，不得返回空计划冒充成功（REH02）
+            raise ExternalServiceException(
+                message=f"解析LLM康复计划响应失败: {str(e)}",
+                service_name="llm",
+            )
     
     async def approve_generated_plan(self, plan_id: str, modifications: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
         """审核并确认生成的康复计划"""
@@ -711,9 +638,14 @@ class AgentService:
             return parsed_analysis
         except LLMConfigurationError:
             raise
+        except ExternalServiceException:
+            raise
         except Exception as e:
             print(f"Error generating assessment analysis: {str(e)}")
-            return None
+            raise ExternalServiceException(
+                message=f"LLM生成评估分析失败: {str(e)}",
+                service_name="llm",
+            )
     
     def _build_assessment_analysis_prompt(self, assessment_data: Dict[str, Any]) -> str:
         """构建用于生成康复评估分析的提示词"""
@@ -841,17 +773,8 @@ class AgentService:
             
             return analysis_data
         except Exception as e:
-            print(f"Error parsing assessment analysis LLM response: {str(e)}")
-            # 返回一个基本分析以防解析失败
-            return {
-                "summary": "系统无法解析评估结果，请咨询医生获取专业解释。",
-                "progress_analysis": "数据解析错误，无法提供准确分析。",
-                "recommendations": ["请咨询您的医生获取康复建议"],
-                "precautions": ["在获得专业指导前，请遵循之前的康复方案"],
-                "next_goals": ["尽快与康复医师沟通，制定合适的康复目标"],
-                "metadata": {
-                    "error": True,
-                    "message": str(e),
-                    "generation_timestamp": datetime.utcnow().isoformat()
-                }
-            }
+            # 解析失败必须显式暴露，不得返回兜底分析内容冒充真实生成结果（REH02）
+            raise ExternalServiceException(
+                message=f"解析LLM评估分析响应失败: {str(e)}",
+                service_name="llm",
+            )

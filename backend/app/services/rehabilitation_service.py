@@ -105,65 +105,10 @@ class RehabilitationService:
         
         try:
             # 调用代理服务的LLM生成方法
+            # （agent_service.generate_rehab_plan 失败时抛出异常，不再返回 None，
+            #   因此这里不存在"生成失败则使用模拟数据"的回退分支——REH02）
             generated_plan = await self.agent_service.generate_rehab_plan(patient_data)
-            
-            if not generated_plan:
-                # 如果没有生成计划，使用默认模拟数据
-                print("生成计划失败，使用备用模拟数据")
-                current_date = datetime.utcnow().strftime('%Y-%m-%d')
-                generated_plan = {
-                    "name": f"{patient_name}的康复计划 - {current_date}",
-                    "description": f"针对{condition}问题的定制康复计划，目标是{goal}",
-                    "patient_id": patient_id,
-                    "patient_name": patient_name,
-                    "condition": condition,
-                    "goal": goal,
-                    "duration_weeks": 6,
-                    "frequency": "每周3次",
-                    "exercises": [
-                        {
-                            "name": "基础拉伸",
-                            "description": "改善关节活动范围的基础拉伸",
-                            "body_part": condition,
-                            "difficulty": "简单",
-                            "duration_minutes": 5,
-                            "repetitions": 10,
-                            "sets": 2,
-                            "instructions": ["保持正确姿势", "缓慢进行动作", "不要过度拉伸"],
-                            "contraindications": ["急性疼痛"],
-                            "benefits": ["改善灵活性", "减轻肌肉紧张"]
-                        },
-                        {
-                            "name": "肌肉强化",
-                            "description": "增强相关肌群力量",
-                            "body_part": condition,
-                            "difficulty": "中等",
-                            "duration_minutes": 10,
-                            "repetitions": 12,
-                            "sets": 3,
-                            "instructions": ["使用适当重量", "控制动作速度", "注意呼吸"],
-                            "contraindications": ["不适当疼痛"],
-                            "benefits": ["增强肌肉力量", "改善稳定性"]
-                        }
-                    ],
-                    "phases": [
-                        {
-                            "name": "初始期",
-                            "duration": "2周",
-                            "focus": "适应与基础能力建立",
-                            "description": "初步适应康复训练，建立基础能力"
-                        },
-                        {
-                            "name": "进步期",
-                            "duration": "4周",
-                            "focus": "能力提升",
-                            "description": "提升康复训练强度和复杂度，增强能力"
-                        }
-                    ],
-                    "notes": "请根据自身感受调整运动强度，如有不适请立即停止并咨询医生。",
-                    "status": "draft"
-                }
-                
+
             # 将生成的计划保存为草稿状态
             generated_plan["status"] = "draft"  # 标记为草稿状态
             
@@ -179,49 +124,12 @@ class RehabilitationService:
                 generated_plan["db_error"] = "保存到数据库失败，此计划为临时数据"
             
             return generated_plan
-            
+
         except LLMConfigurationError:
             raise
-        except Exception as e:
-            print(f"生成康复计划时发生错误: {str(e)}")
-            # 返回错误信息和基本模拟数据
-            fallback_plan = {
-                "name": f"{patient_name}的应急康复计划",
-                "description": f"针对{condition}的基础康复指导",
-                "patient_id": patient_id,
-                "patient_name": patient_name,
-                "condition": condition,
-                "goal": goal,
-                "duration_weeks": 4,
-                "frequency": "每周2-3次",
-                "exercises": [
-                    {
-                        "name": "基础活动",
-                        "description": "基础康复活动",
-                        "body_part": condition,
-                        "difficulty": "简单",
-                        "duration_minutes": 5,
-                        "repetitions": 10,
-                        "sets": 2,
-                        "instructions": ["遵医嘱进行", "循序渐进"],
-                        "contraindications": ["急性疼痛"],
-                        "benefits": ["维持功能", "预防并发症"]
-                    }
-                ],
-                "notes": "这是系统生成的应急计划，请咨询专业医生获取完整康复方案。",
-                "status": "draft",
-                "error_info": f"生成计划时发生错误: {str(e)}"
-            }
-            
-            try:
-                # 尝试保存到数据库
-                result = await self.plans_collection.insert_one(fallback_plan)
-                fallback_plan["_id"] = str(result.inserted_id)
-            except Exception:
-                # 如果数据库保存失败，添加临时ID
-                fallback_plan["_id"] = f"temp_{datetime.utcnow().timestamp()}"
-                
-            return fallback_plan
+        # LLM 生成失败必须显式暴露，不得返回应急模拟计划冒充成功（REH02）；
+        # 异常（含 LLMConfigurationError / ExternalServiceException）直接向上传播，
+        # 由全局异常处理器返回明确的失败响应。
     
     async def approve_generated_plan(self, plan_id: str, modifications: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
         """审核并确认生成的康复计划"""
