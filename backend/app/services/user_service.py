@@ -118,6 +118,10 @@ class UserService:
         
     async def update_user(self, user_id: str, user_data: UserUpdate) -> Optional[UserResponse]:
         """Update user details"""
+        # 畸形 ID 与读路径语义一致：视为用户不存在（与 get_user_by_id 的 InvalidId 处理对齐）
+        if not ObjectId.is_valid(user_id):
+            logger.warning(f"update_user: user_id '{user_id}' 不是有效的 ObjectId，视为用户不存在")
+            return None
         update_data = {k: v for k, v in user_data.model_dump().items() if v is not None}
         
         if "password" in update_data:
@@ -163,6 +167,11 @@ class UserService:
         - operator_id: 执行操作的用户ID
         - request: HTTP请求对象（可选，用于获取IP地址）
         """
+        # 畸形 ID 与读路径语义一致：视为用户不存在
+        if not ObjectId.is_valid(user_id):
+            logger.warning(f"update_user_permissions: user_id '{user_id}' 不是有效的 ObjectId，视为用户不存在")
+            return None
+
         # 获取当前用户
         user = await self.collection.find_one({"_id": ObjectId(user_id)})
         if not user:
@@ -235,6 +244,11 @@ class UserService:
     
     async def has_permission(self, user_id: str, permission: str) -> bool:
         """检查用户是否具有指定权限"""
+        # 畸形 ID 视为用户不存在，即无权限
+        if not ObjectId.is_valid(user_id):
+            logger.warning(f"has_permission: user_id '{user_id}' 不是有效的 ObjectId，视为无权限")
+            return False
+
         user = await self.collection.find_one({"_id": ObjectId(user_id)})
         if not user:
             return False
@@ -365,6 +379,11 @@ class UserService:
     
     async def deactivate_user(self, user_id: str) -> bool:
         """停用用户账户"""
+        # 畸形 ID 与读路径语义一致：视为用户不存在（返回 False，路由层转 404）
+        if not ObjectId.is_valid(user_id):
+            logger.warning(f"deactivate_user: user_id '{user_id}' 不是有效的 ObjectId，视为用户不存在")
+            return False
+
         result = await self.collection.update_one(
             {"_id": ObjectId(user_id)},
             {"$set": {"is_active": False, "updated_at": datetime.utcnow()}}
@@ -373,6 +392,11 @@ class UserService:
     
     async def activate_user(self, user_id: str) -> bool:
         """激活用户账户"""
+        # 畸形 ID 与读路径语义一致：视为用户不存在（返回 False，路由层转 404）
+        if not ObjectId.is_valid(user_id):
+            logger.warning(f"activate_user: user_id '{user_id}' 不是有效的 ObjectId，视为用户不存在")
+            return False
+
         result = await self.collection.update_one(
             {"_id": ObjectId(user_id)},
             {"$set": {"is_active": True, "updated_at": datetime.utcnow()}}
@@ -531,6 +555,14 @@ class UserService:
         
     async def assign_practitioner(self, patient_id: str, practitioner_id: str) -> Optional[UserResponse]:
         """Assign a practitioner to a patient"""
+        # 畸形 ID 与读路径语义一致：视为用户不存在（get_user_by_id 对 InvalidId 返回 None）
+        if not ObjectId.is_valid(patient_id) or not ObjectId.is_valid(practitioner_id):
+            logger.warning(
+                f"assign_practitioner: patient_id '{patient_id}' 或 practitioner_id "
+                f"'{practitioner_id}' 不是有效的 ObjectId，视为用户不存在"
+            )
+            return None
+
         # Get patient and practitioner to verify they exist
         patient = await self.get_user_by_id(patient_id)
         practitioner = await self.get_user_by_id(practitioner_id)
@@ -557,6 +589,14 @@ class UserService:
     
     async def remove_practitioner(self, patient_id: str, practitioner_id: str) -> Optional[UserResponse]:
         """移除患者的医生/健管师关联"""
+        # 畸形 ID 与读路径语义一致：视为用户不存在（get_user_by_id 对 InvalidId 返回 None）
+        if not ObjectId.is_valid(patient_id) or not ObjectId.is_valid(practitioner_id):
+            logger.warning(
+                f"remove_practitioner: patient_id '{patient_id}' 或 practitioner_id "
+                f"'{practitioner_id}' 不是有效的 ObjectId，视为用户不存在"
+            )
+            return None
+
         # Get patient and practitioner to verify they exist
         patient = await self.get_user_by_id(patient_id)
         practitioner = await self.get_user_by_id(practitioner_id)

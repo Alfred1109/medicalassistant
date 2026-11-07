@@ -16,12 +16,13 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from bson.objectid import ObjectId
 from jose import jwt
 
 from app.core.config import settings
 from app.db.mongodb import get_database
 from app.main import app
-from app.schemas.user import SelfUserUpdate, UserResponse
+from app.schemas.user import SelfUserUpdate, UserResponse, UserUpdate
 from app.services.user_service import UserService
 
 
@@ -294,6 +295,121 @@ class SelfProfileContractTests(unittest.IsolatedAsyncioTestCase):
                 f"/api/users/activate/{self.other_user_id}", headers=self.auth_headers()
             )
         self.assertEqual(response.status_code, 200, response.text)
+
+
+MALFORMED_ID = "not-an-objectid"
+VALID_ID = "507f1f77bcf86cd799439011"
+
+
+class MalformedUserIdGuardContractTests(unittest.IsolatedAsyncioTestCase):
+    """畸形 user_id 防护契约：写路径与读路径 get_user_by_id 语义一致。
+
+    get_user_by_id（backend/app/services/user_service.py）把 bson errors.InvalidId
+    转换为"用户不存在"（返回 None，路由层 404）。所有以字符串 user_id 查询的
+    写方法（update_user / deactivate_user / activate_user / update_user_permissions /
+    assign_practitioner / remove_practitioner，以及权限判定 has_permission）必须
+    保持同一语义：畸形 ObjectId 视为用户不存在，返回 None/False → 路由层 404，
+    绝不因 ObjectId() 构造异常而 500，也不得触达数据库写入。
+    """
+
+    async def asyncSetUp(self):
+        self.admin_oid = ObjectId(VALID_ID)
+        now = datetime.utcnow()
+        # get_current_user / require_permission 会真实查库解析 actor，
+        # 返回一个管理员文档；目标 ID 畸形时防护应短路，不触达任何写入。
+        self.admin_doc = {
+            "_id": self.admin_oid,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "role": "admin",
+            "permissions": [],
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.db = MagicMock()
+        self.db.users.find_one = AsyncMock(return_value=self.admin_doc)
+        self.db.users.update_one = AsyncMock()
+
+        async def fake_database():
+            yield self.db
+
+        app.dependency_overrides[get_database] = fake_database
+        self.client = httpx.AsyncClient(app=app, base_url="http://test")
+
+    async def asyncTearDown(self):
+        await self.client.aclose()
+        app.dependency_overrides.clear()
+
+    def auth_headers(self):
+        payload = {
+            "sub": str(self.admin_oid),
+            "exp": datetime.utcnow() + timedelta(minutes=5),
+            "token_type": "access",
+        }
+        return {"Authorization": f"Bearer {jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)}"}
+
+    async def test_malformed_ids_on_user_write_endpoints_return_404_not_500(self):
+        # 管理员身份下，畸形 ID 的写请求一律 404（与读路径 GET /users/{id} 一致）
+        for method, path, kwargs in (
+            ("put", f"/api/users/{MALFORMED_ID}", {"json": {"name": "x"}}),
+            ("delete", f"/api/users/{MALFORMED_ID}", {}),
+            ("post", f"/api/users/activate/{MALFORMED_ID}", {}),
+            ("post", "/api/users/permissions", {"json": {
+                "user_id": MALFORMED_ID, "permissions": ["user:read"],
+            }}),
+        ):
+            with self.subTest(method=method, path=path):
+                response = await getattr(self.client, method)(path, headers=self.auth_headers(), **kwargs)
+                self.assertEqual(response.status_code, 404, response.text)
+        # 防护必须短路：任何畸形 ID 都不得触达数据库写入
+        self.db.users.update_one.assert_not_awaited()
+
+    async def test_malformed_ids_on_practitioner_endpoints_return_404_not_500(self):
+        # 患者 ID 或医疗人员 ID 任一畸形：分配/移除均 404（practitioner_id 为查询参数）
+        response = await self.client.post(
+            f"/api/users/patients/{MALFORMED_ID}/practitioners",
+            params={"practitioner_id": VALID_ID},
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+
+        response = await self.client.post(
+            f"/api/users/patients/{VALID_ID}/practitioners",
+            params={"practitioner_id": MALFORMED_ID},
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+
+        response = await self.client.delete(
+            f"/api/users/patients/{VALID_ID}/practitioners/{MALFORMED_ID}",
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+
+        response = await self.client.delete(
+            f"/api/users/patients/{MALFORMED_ID}/practitioners/{VALID_ID}",
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+        self.db.users.update_one.assert_not_awaited()
+
+    async def test_service_layer_guards_short_circuit_before_db_access(self):
+        # 服务层直测：畸形 ID 返回与"用户不存在"一致的 None/False，且零数据库访问
+        service = UserService(self.db)
+        self.assertIsNone(await service.update_user(MALFORMED_ID, UserUpdate()))
+        self.assertFalse(await service.deactivate_user(MALFORMED_ID))
+        self.assertFalse(await service.activate_user(MALFORMED_ID))
+        self.assertIsNone(await service.update_user_permissions(
+            MALFORMED_ID, ["user:read"], operator_id=str(self.admin_oid),
+        ))
+        self.assertFalse(await service.has_permission(MALFORMED_ID, "user:read"))
+        self.assertIsNone(await service.assign_practitioner(MALFORMED_ID, str(self.admin_oid)))
+        self.assertIsNone(await service.assign_practitioner(str(self.admin_oid), MALFORMED_ID))
+        self.assertIsNone(await service.remove_practitioner(str(self.admin_oid), MALFORMED_ID))
+        self.assertIsNone(await service.remove_practitioner(MALFORMED_ID, str(self.admin_oid)))
+        self.db.users.update_one.assert_not_awaited()
+        self.db.users.find_one.assert_not_awaited()
 
 
 if __name__ == "__main__":
