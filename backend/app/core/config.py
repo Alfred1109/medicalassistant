@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import AnyHttpUrl, field_validator
+from pydantic import AnyHttpUrl, SecretStr, field_validator
 from typing import List, Optional, Union, Dict, Any
 import os
 from dotenv import load_dotenv
@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     TEST_USER_PASSWORD: str = "password123"
     
     # LLM API配置
-    LLM_API_KEY: str = "bc16c0aa-81fe-49a0-a094-98a1c0b23c76"
+    LLM_API_KEY: Optional[SecretStr] = None
     LLM_API_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     LLM_API_MODEL: str = "deepseek-v3-241226"
     
@@ -141,4 +141,4 @@ class Settings(BaseSettings):
         return result
 
 
-settings = Settings() 
+settings = Settings()

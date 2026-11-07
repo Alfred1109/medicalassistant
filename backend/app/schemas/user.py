@@ -1,5 +1,5 @@
-from pydantic import BaseModel, EmailStr, Field, validator
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, validator
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 # 基础用户模型
@@ -32,6 +32,26 @@ class UserCreate(UserBase):
         if v not in ["patient", "doctor", "health_manager", "admin"]:
             raise ValueError('Role must be one of: patient, doctor, health_manager, admin')
         return v
+
+
+class PublicPatientRegistration(BaseModel):
+    """Legacy registration boundary; authority-controlled fields are never client input."""
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    name: str
+    password: str
+    role: Literal["patient"] = "patient"
+    medical_info: Optional[Dict[str, Any]] = None
+    emergency_contact: Optional[Dict[str, str]] = None
+    demographic_info: Optional[Dict[str, Any]] = None
+
+
+class SelfUserUpdate(BaseModel):
+    """Only a legacy local display name can be edited through this endpoint."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = None
 
 # 用户更新模型
 class UserUpdate(BaseModel):
@@ -220,4 +240,4 @@ class PatientUpdate(UserUpdate):
 class HealthManagerUpdate(UserUpdate):
     certification: Optional[str] = None
     specialty_areas: Optional[List[str]] = None
-    education: Optional[Dict[str, str]] = None 
+    education: Optional[Dict[str, str]] = None

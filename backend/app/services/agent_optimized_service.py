@@ -12,6 +12,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from app.core.config import settings
+from app.core.llm import LLMConfigurationError, require_llm_api_key
 from app.schemas.agent import AgentCreate, AgentUpdate, AgentQuery
 
 # 设置日志
@@ -150,6 +151,7 @@ class AgentOptimizedService:
         Returns:
             响应数据
         """
+        require_llm_api_key()
         # 记录开始时间，用于性能监控
         start_time = time.time()
         
@@ -230,7 +232,7 @@ class AgentOptimizedService:
             # 初始化OpenAI客户端
             client = OpenAI(
                 base_url=settings.LLM_API_BASE_URL,
-                api_key=settings.LLM_API_KEY,
+                api_key=require_llm_api_key(),
             )
             
             # 优化系统提示词
@@ -304,6 +306,8 @@ class AgentOptimizedService:
                     "error": "timeout"
                 }
             }
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             # 记录错误
             logger.error(f"处理查询时出错: {str(e)}")
@@ -485,6 +489,7 @@ class AgentOptimizedService:
             max_tokens: 最大令牌数
             query_id: 查询ID
         """
+        require_llm_api_key()
         try:
             # 记录开始时间
             start_time = time.time()
@@ -494,7 +499,7 @@ class AgentOptimizedService:
             # 初始化OpenAI客户端
             client = OpenAI(
                 base_url=settings.LLM_API_BASE_URL,
-                api_key=settings.LLM_API_KEY,
+                api_key=require_llm_api_key(),
             )
             
             # 优化系统提示词
@@ -588,6 +593,8 @@ class AgentOptimizedService:
                     }
                 )
             
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             logger.error(f"流式调用出错: {str(e)}")
             
@@ -705,6 +712,7 @@ class AgentOptimizedService:
     
     async def generate_agent_parameters(self, config_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """生成代理参数配置"""
+        require_llm_api_key()
         try:
             # 获取配置信息
             agent_type = config_data.get("type", "conversation")
@@ -779,6 +787,8 @@ class AgentOptimizedService:
             
             logger.error(f"无法从LLM响应中提取JSON: {llm_response}")
             return None
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             logger.error(f"生成代理参数时出错: {str(e)}")
-            return None 
+            return None

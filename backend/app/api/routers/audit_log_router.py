@@ -1,15 +1,40 @@
-from typing import Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from datetime import datetime
+from typing import Optional, Literal
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status as http_status
+from pydantic import ValidationError
 
 from app.core.auth import get_current_active_user
 from app.core.permissions import Permission, PermissionChecker
 from app.schemas.user import UserResponse
-from app.schemas.audit_log import AuditLogFilter, AuditLogList, AuditLogResponse
-from app.services.audit_log_service import AuditLogService
+from app.schemas.audit_log import AuditLogCreate, AuditLogFilter, AuditLogList, AuditLogResponse, AuditSortField
+from app.services.audit_log_service import AuditLogService, AuditLogStorageError
 from app.db.mongodb import get_database
 
 router = APIRouter(prefix="/audit-logs", tags=["审计日志"])
+
+
+async def get_audit_service(db=Depends(get_database)):
+    """Audit failures deny the read instead of returning unrecorded protected data."""
+    try:
+        yield AuditLogService(db)
+    except AuditLogStorageError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="审计服务暂不可用，请稍后重试",
+        ) from exc
+
+
+async def require_admin(user: UserResponse, service: AuditLogService, request: Request, endpoint: str):
+    if PermissionChecker.has_permission(user, Permission.SYSTEM_ADMIN):
+        return
+    await service.log_permission_check(
+        user_id=user.id, permission=Permission.SYSTEM_ADMIN, is_granted=False,
+        ip_address=request.client.host if request.client else None,
+        details={"endpoint": endpoint},
+    )
+    raise HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN, detail="您没有访问审计日志的权限",
+    )
 
 
 @router.get("/", response_model=AuditLogList)
@@ -19,15 +44,15 @@ async def get_audit_logs(
     action: Optional[str] = Query(None, description="操作类型"),
     resource_type: Optional[str] = Query(None, description="资源类型"),
     resource_id: Optional[str] = Query(None, description="资源ID"),
-    status: Optional[str] = Query(None, description="操作状态"),
-    start_date: Optional[str] = Query(None, description="开始日期(ISO格式)"),
-    end_date: Optional[str] = Query(None, description="结束日期(ISO格式)"),
+    status: Optional[Literal["success", "failure"]] = Query(None, description="操作状态"),
+    start_date: Optional[datetime] = Query(None, description="开始日期(ISO格式；无时区按UTC)"),
+    end_date: Optional[datetime] = Query(None, description="结束日期(ISO格式；包含边界，无时区按UTC)"),
     skip: int = Query(0, ge=0, description="跳过记录数"),
     limit: int = Query(50, ge=1, le=100, description="返回记录数"),
-    sort_by: str = Query("created_at", description="排序字段"),
+    sort_by: AuditSortField = Query("created_at", description="排序字段"),
     sort_order: int = Query(-1, description="排序顺序 (-1:降序, 1:升序)"),
     current_user: UserResponse = Depends(get_current_active_user),
-    db = Depends(get_database)
+    audit_service: AuditLogService = Depends(get_audit_service)
 ):
     """
     获取审计日志列表
@@ -49,34 +74,23 @@ async def get_audit_logs(
     - 系统管理员或system:admin权限
     """
     # 权限检查
-    if not PermissionChecker.has_permission(current_user, Permission.SYSTEM_ADMIN):
-        # 记录权限检查失败
-        audit_service = AuditLogService(db)
-        await audit_service.log_permission_check(
-            user_id=current_user.id,
-            permission=Permission.SYSTEM_ADMIN,
-            is_granted=False,
-            ip_address=request.client.host if request.client else None,
-            details={"endpoint": "/audit-logs"}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="您没有访问审计日志的权限"
-        )
+    await require_admin(current_user, audit_service, request, "/audit-logs")
+    if sort_order not in (-1, 1):
+        raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail="排序顺序只能为-1或1")
     
     # 构建过滤条件
-    filter_params = AuditLogFilter(
-        user_id=user_id,
-        action=action,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        status=status,
-        start_date=start_date,
-        end_date=end_date
-    )
+    try:
+        filter_params = AuditLogFilter(
+            user_id=user_id, action=action, resource_type=resource_type,
+            resource_id=resource_id, status=status, start_date=start_date, end_date=end_date,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="结束时间不能早于开始时间",
+        ) from exc
     
     # 获取日志列表
-    audit_service = AuditLogService(db)
     result = await audit_service.get_logs(
         filter_params=filter_params,
         skip=skip,
@@ -87,15 +101,15 @@ async def get_audit_logs(
     
     # 记录查询审计日志操作
     await audit_service.create_log(
-        log_data={
-            "user_id": current_user.id,
-            "action": "query",
-            "resource_type": "audit_log",
-            "details": {
-                "filters": filter_params.dict(exclude_none=True),
+        log_data=AuditLogCreate(
+            user_id=current_user.id,
+            action="query",
+            resource_type="audit_log",
+            details={
+                "filters": filter_params.model_dump(exclude_none=True),
                 "results_count": result.get("total", 0)
             }
-        },
+        ),
         ip_address=request.client.host if request.client else None
     )
     
@@ -104,10 +118,10 @@ async def get_audit_logs(
 
 @router.get("/{log_id}", response_model=AuditLogResponse)
 async def get_audit_log_by_id(
-    log_id: str,
     request: Request,
+    log_id: str = Path(..., pattern=r"^[0-9a-fA-F]{24}$", description="审计日志ObjectId"),
     current_user: UserResponse = Depends(get_current_active_user),
-    db = Depends(get_database)
+    audit_service: AuditLogService = Depends(get_audit_service)
 ):
     """
     获取审计日志详情
@@ -119,42 +133,22 @@ async def get_audit_log_by_id(
     - 系统管理员或system:admin权限
     """
     # 权限检查
-    if not PermissionChecker.has_permission(current_user, Permission.SYSTEM_ADMIN):
-        # 记录权限检查失败
-        audit_service = AuditLogService(db)
-        await audit_service.log_permission_check(
-            user_id=current_user.id,
-            permission=Permission.SYSTEM_ADMIN,
-            is_granted=False,
-            ip_address=request.client.host if request.client else None,
-            details={"endpoint": f"/audit-logs/{log_id}"}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="您没有访问审计日志的权限"
-        )
+    await require_admin(current_user, audit_service, request, f"/audit-logs/{log_id}")
     
     # 获取日志详情
-    audit_service = AuditLogService(db)
     log = await audit_service.get_log_by_id(log_id)
-    
-    if not log:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="未找到指定的审计日志"
-        )
     
     # 记录查看审计日志详情操作
     await audit_service.create_log(
-        log_data={
-            "user_id": current_user.id,
-            "action": "view",
-            "resource_type": "audit_log",
-            "resource_id": log_id
-        },
+        log_data=AuditLogCreate(
+            user_id=current_user.id, action="view", resource_type="audit_log",
+            resource_id=log_id, status="success" if log else "failure",
+        ),
         ip_address=request.client.host if request.client else None
     )
     
+    if not log:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="未找到指定的审计日志")
     return log
 
 
@@ -164,7 +158,7 @@ async def get_recent_logs_by_user(
     request: Request,
     limit: int = Query(10, ge=1, le=50, description="返回记录数"),
     current_user: UserResponse = Depends(get_current_active_user),
-    db = Depends(get_database)
+    audit_service: AuditLogService = Depends(get_audit_service)
 ):
     """
     获取用户最近的审计日志
@@ -183,7 +177,6 @@ async def get_recent_logs_by_user(
     
     if not (is_self or has_admin_permission):
         # 记录权限检查失败
-        audit_service = AuditLogService(db)
         await audit_service.log_permission_check(
             user_id=current_user.id,
             permission=Permission.SYSTEM_ADMIN,
@@ -192,28 +185,21 @@ async def get_recent_logs_by_user(
             details={"endpoint": f"/audit-logs/user/{user_id}/recent"}
         )
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="您没有访问该用户审计日志的权限"
         )
     
     # 获取用户最近日志
-    audit_service = AuditLogService(db)
     logs = await audit_service.get_recent_logs_by_user(user_id, limit)
     
     # 记录查询用户最近日志操作
-    if not is_self:
-        await audit_service.create_log(
-            log_data={
-                "user_id": current_user.id,
-                "action": "query",
-                "resource_type": "audit_log",
-                "resource_id": user_id,
-                "details": {
-                    "limit": limit,
-                    "results_count": len(logs)
-                }
-            },
-            ip_address=request.client.host if request.client else None
-        )
+    await audit_service.create_log(
+        log_data=AuditLogCreate(
+            user_id=current_user.id, action="query", resource_type="audit_log",
+            resource_id=user_id,
+            details={"limit": limit, "results_count": len(logs), "self_query": is_self},
+        ),
+        ip_address=request.client.host if request.client else None,
+    )
     
-    return logs 
+    return logs

@@ -1,12 +1,13 @@
 from typing import List, Dict, Any, Optional, Set
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
-from jose import jwt
+from jose import JWTError, jwt
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson.objectid import ObjectId
 from bson import errors
 import bcrypt
 import logging
+import math
 from fastapi import HTTPException, status, Request
 
 from app.core.config import settings
@@ -26,76 +27,6 @@ class UserService:
         self.collection = db.users
         self.audit_service = AuditLogService(db)
         # 初始化时不能在同步函数中调用异步方法，需要在外部调用
-        
-    async def initialize(self):
-        """初始化用户服务，创建默认账户"""
-        await self._ensure_default_users()
-        return self
-        
-    async def _ensure_default_users(self):
-        """确保默认管理员用户存在"""
-        # 创建默认管理员账号
-        default_admin = await self.get_user_by_email("admin@example.com")
-        if not default_admin:
-            logger.info("Creating default admin user")
-            admin_data = UserCreate(
-                name="System Admin",
-                email="admin@example.com",
-                password="Admin123!",  # 使用与前端匹配的密码
-                role="admin"
-            )
-            await self.create_user(admin_data)
-            
-        # 创建默认医生账号
-        default_doctor = await self.get_user_by_email("doctor@example.com")
-        if not default_doctor:
-            logger.info("Creating default doctor user")
-            doctor_data = UserCreate(
-                name="赵医生",
-                email="doctor@example.com",
-                password="Doctor123!",
-                role="doctor",
-                department="康复科",
-                professional_title="主任医师",
-                specialty="神经康复"
-            )
-            await self.create_user(doctor_data)
-            
-        # 创建默认健康管理师账号
-        default_health_manager = await self.get_user_by_email("liujk@example.com")
-        if not default_health_manager:
-            logger.info("Creating default health manager user")
-            health_manager_data = UserCreate(
-                name="刘健康",
-                email="liujk@example.com",
-                password="Manager123!",
-                role="health_manager"
-            )
-            await self.create_user(health_manager_data)
-            
-        # 创建默认患者账号
-        default_patient = await self.get_user_by_email("zhangsan@example.com")
-        if not default_patient:
-            logger.info("Creating default patient user")
-            patient_data = UserCreate(
-                name="张三",
-                email="zhangsan@example.com",
-                password="Patient123!",
-                role="patient"
-            )
-            await self.create_user(patient_data)
-        
-        # 添加默认测试用户
-        test_user = await self.get_user_by_email("test@example.com")
-        if not test_user:
-            logger.info("Creating test user")
-            test_data = UserCreate(
-                name="Test User",
-                email="test@example.com",
-                password="password123",
-                role="patient"
-            )
-            await self.create_user(test_data)
         
     async def create_user(self, user_data: UserCreate) -> UserResponse:
         """Create a new user"""
@@ -174,7 +105,7 @@ class UserService:
             return None
         except Exception as e:
             logging.error(f"UserService: 通过ID获取用户时发生错误: {e}")
-            return None
+            raise
         
     async def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         """Get user by email"""
@@ -457,32 +388,9 @@ class UserService:
             logger.warning(f"[AUTH] 认证失败：邮箱 {email} 未找到")
             return None
         
-        # 特殊处理演示账号
-        is_demo_account = False
-        should_accept_demo_password = False
-        
-        if email == "admin@example.com" and password == "Admin123!":
-            is_demo_account = True
-            should_accept_demo_password = True
-            logger.info(f"[AUTH] 检测到管理员演示账号登录尝试")
-        elif email == "doctor@example.com" and password == "Doctor123!":
-            is_demo_account = True
-            should_accept_demo_password = True
-            logger.info(f"[AUTH] 检测到医生演示账号登录尝试")
-        elif email == "liujk@example.com" and password == "Manager123!":
-            is_demo_account = True
-            should_accept_demo_password = True
-            logger.info(f"[AUTH] 检测到健康管理师演示账号登录尝试")
-        elif email == "zhangsan@example.com" and password == "Patient123!":
-            is_demo_account = True
-            should_accept_demo_password = True
-            logger.info(f"[AUTH] 检测到患者演示账号登录尝试")
-        
-        # 如果是演示账号且使用了前端指定的密码，直接通过验证
-        if is_demo_account and should_accept_demo_password:
-            logger.info(f"[AUTH] 演示账号 {email} 使用预设密码验证通过")
-        # 否则使用普通密码验证
-        elif not self._verify_password(password, user["hashed_password"]):
+        # Every account, including isolated demo accounts, authenticates against
+        # its stored password hash. Never accept credentials by email alone.
+        if not self._verify_password(password, user.get("hashed_password")):
             logger.warning(f"[AUTH] 认证失败：邮箱 {email} 密码错误")
             return None
         
@@ -575,27 +483,38 @@ class UserService:
         """使用刷新令牌获取新的访问令牌"""
         try:
             # 解析刷新令牌
-            payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM],
+                                 options={"require_exp": True})
+            expiry = payload.get("exp")
+            try:
+                valid_expiry = isinstance(expiry, (int, float)) and not isinstance(expiry, bool) and math.isfinite(expiry)
+            except OverflowError:
+                valid_expiry = False
+            if not valid_expiry:
+                raise ValueError("无效的刷新令牌有效期")
             
             # 检查令牌类型
             if payload.get("token_type") != "refresh":
                 raise ValueError("无效的刷新令牌类型")
             
             user_id = payload.get("sub")
-            if not user_id:
+            if not isinstance(user_id, str) or not ObjectId.is_valid(user_id):
                 raise ValueError("刷新令牌中没有用户ID")
             
             # 从数据库获取用户
             user = await self.get_user_by_id(user_id)
-            if not user:
-                raise ValueError("找不到用户")
+            if not user or not user.is_active:
+                raise ValueError("用户不存在或已停用")
                 
             # 验证刷新令牌是否存在于数据库中(可选，如果存储了刷新令牌)
             user_data = await self.collection.find_one(
                 {
                     "_id": ObjectId(user_id),
-                    "refresh_tokens.token": refresh_token,
-                    "refresh_tokens.expires_at": {"$gt": datetime.utcnow()}
+                    "is_active": {"$ne": False},
+                    "refresh_tokens": {"$elemMatch": {
+                        "token": refresh_token,
+                        "expires_at": {"$gt": datetime.utcnow()}
+                    }}
                 }
             )
             
@@ -606,15 +525,9 @@ class UserService:
             # 生成新的令牌
             return await self.create_token_with_refresh(user_data)
             
-        except JWTError as e:
+        except (JWTError, TypeError) as e:
             # 令牌解析错误
-            raise ValueError(f"无效的刷新令牌: {str(e)}")
-        except ValueError as e:
-            # 重新抛出已有的错误
-            raise e
-        except Exception as e:
-            # 其他未预料的错误
-            raise ValueError(f"刷新令牌过程中发生错误: {str(e)}")
+            raise ValueError("无效的刷新令牌") from e
         
     async def assign_practitioner(self, patient_id: str, practitioner_id: str) -> Optional[UserResponse]:
         """Assign a practitioner to a patient"""
@@ -677,8 +590,13 @@ class UserService:
         return hashed.decode()
         
     def _verify_password(self, plain_password: str, hashed_password: str) -> bool:
-        """Verify a password against its hash"""
-        return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
+        """Malformed or missing stored hashes cannot authenticate an account."""
+        if not isinstance(plain_password, str) or not isinstance(hashed_password, str):
+            return False
+        try:
+            return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
+        except (ValueError, TypeError):
+            return False
         
     def _map_user_to_schema(self, user: Dict[str, Any]) -> UserResponse:
         """Map a user document to a UserResponse schema"""
@@ -736,4 +654,4 @@ class UserService:
                 managed_organizations=user.get("managed_organizations", [])
             )
         else:
-            return UserResponse(**base_user) 
+            return UserResponse(**base_user)

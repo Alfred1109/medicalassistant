@@ -1,12 +1,10 @@
-from fastapi import Depends, HTTPException, status, Request
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, status
 from typing import Dict, Any, List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 import json
 from datetime import datetime
 import logging
-from jose import jwt, JWTError
 
 from app.db.mongodb import get_database
 from app.db.crud_services import (
@@ -18,16 +16,16 @@ from app.db.crud_services import (
 from app.services.user_service import UserService
 from app.services.agent_service import AgentService
 from app.services.rehabilitation_service import RehabilitationService
-from app.schemas.user import UserResponse, TokenData
+from app.schemas.user import UserResponse
 from app.core.permissions import PermissionChecker, Permission
 from app.services.health_record_service import HealthRecordService
 from app.services.health_alert_service import HealthAlertService
 from app.core.auth import get_current_user as auth_get_current_user, get_current_active_user
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login")
+# 使用同一认证依赖，避免不同路由以不同方式解释同一令牌。
+get_current_user = auth_get_current_user
 
 # CRUD服务依赖
 async def get_crud(db: AsyncIOMotorDatabase = Depends(get_database)):
@@ -298,58 +296,3 @@ def format_mongo_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
             return obj
             
     return convert(doc)
-
-async def get_current_user(
-    request: Request,
-    token: str = Depends(oauth2_scheme),
-    user_service: UserService = Depends(get_user_service)
-) -> UserResponse:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="无法验证凭据",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        logger.debug(f"Attempting to decode token: {token[:20]}...")
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
-            logger.warning("Token decoding failed: email (sub) not found in token payload.")
-            raise credentials_exception
-        token_data = TokenData(email=email, user_id=payload.get("user_id"))
-        logger.debug(f"Token decoded successfully for email: {email}")
-    except JWTError as e:
-        logger.warning(f"JWTError during token decoding: {str(e)}")
-        raise credentials_exception
-    
-    # 在实际项目中，user_id 应该从 token_data.user_id 获取并使用
-    # user = await user_service.get_user_by_email(token_data.email) # 或者通过ID获取，如果token中有ID
-    # 为了演示，如果你的 token payload 中有 user_id:
-    user_id_from_token = token_data.user_id
-    if not user_id_from_token:
-        logger.warning(f"User ID not found in token for email: {email}")
-        # Fallback or specific error handling if user_id is critical here
-        # For now, let's try to get user by email if ID is missing, though ID is preferred
-        user = await user_service.get_user_by_email_for_auth(token_data.email) # 假设有这个方法返回 UserResponse 兼容的结构
-        if not user:
-            logger.warning(f"No user found by email '{token_data.email}' after token decoding (user_id missing).")
-            raise credentials_exception
-        # Manually construct UserResponse if get_user_by_email_for_auth returns a dict
-        # This part needs to align with what get_user_by_email_for_auth actually returns
-        # For simplicity, assuming it can be mapped or it returns UserResponse compatible dict
-        # This is a placeholder, adapt to your actual User schema and service method return type
-        # It's better to fetch a full UserResponse-compatible object using an ID from token if possible
-        logger.info(f"User '{user.get('email')}' fetched by email for current_user dependency.")
-        # This mapping needs to be correct based on the actual structure of 'user'
-        # If user_service.get_user_by_email_for_auth returns a UserResponse, no mapping is needed.
-        # If it returns a dict, ensure it's compatible or map it:
-        return UserResponse(**user) # This assumes 'user' dict is directly mappable
-
-    logger.debug(f"Fetching user by ID: {user_id_from_token} for current_user dependency")
-    user_response_obj = await user_service.get_user_by_id(user_id_from_token)
-    if user_response_obj is None:
-        logger.warning(f"User with ID '{user_id_from_token}' not found after token decoding.")
-        raise credentials_exception
-    
-    logger.info(f"Current user '{user_response_obj.email}' identified successfully.")
-    return user_response_obj

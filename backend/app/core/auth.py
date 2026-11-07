@@ -7,44 +7,52 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from typing import Optional, Any
 import logging
+import math
 from datetime import datetime
 from bson import ObjectId, errors
 from fastapi import WebSocket
 
 from app.core.config import settings
-from app.schemas.user import UserResponse, TokenData, TokenPayload
+from app.schemas.user import UserResponse
 from app.db.mongodb import get_database
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorClient
 
 # OAuth2 password bearer for token validation
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/users/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login")
+
+
+def _access_token_user_id(token: str) -> Optional[str]:
+    """HTTP 与 WebSocket 共用访问令牌语义；不记录令牌内容。"""
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM],
+                             options={"require_exp": True})
+    except (JWTError, TypeError, ValueError):
+        return None
+    user_id = payload.get("sub")
+    # 旧版访问令牌没有 token_type；带类型的令牌必须明确为 access。
+    expiry = payload.get("exp")
+    try:
+        valid_expiry = isinstance(expiry, (int, float)) and not isinstance(expiry, bool) and math.isfinite(expiry)
+    except OverflowError:
+        valid_expiry = False
+    if not valid_expiry or not isinstance(user_id, str) or not user_id or payload.get("token_type", "access") != "access":
+        return None
+    return user_id
+
 
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: AsyncIOMotorDatabase = Depends(get_database)
 ) -> UserResponse:
     """解析JWT令牌并返回当前登录用户"""
-    logging.info(f"验证用户令牌: {token[:15]}...")
-    
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="无效的认证凭据",
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    try:
-        # 解码JWT令牌
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        user_id: str = payload.get("sub")
-        logging.info(f"令牌解析成功，用户ID (sub): '{user_id}' (类型: {type(user_id)})")
-        
-        if user_id is None:
-            logging.warning("令牌中没有用户ID (sub)")
-            raise credentials_exception
-            
-        token_data = TokenData(user_id=user_id)
-    except JWTError as e:
-        logging.error(f"令牌解析错误: {str(e)}")
+    user_id = _access_token_user_id(token)
+    if user_id is None:
         raise credentials_exception
         
     # 动态导入UserService，避免循环导入
@@ -54,17 +62,12 @@ async def get_current_user(
     user_service = UserService(db=db)
     
     # 获取用户信息
-    try:
-        logging.info(f"尝试通过UserService获取用户，ID: '{token_data.user_id}'")
-        user = await user_service.get_user_by_id(token_data.user_id)
-        if user is None:
-            logging.warning(f"UserService未能通过ID '{token_data.user_id}' 找到用户")
-            raise credentials_exception
-        logging.info(f"成功获取用户: {user.email}, 角色: {user.role}")
-        return user
-    except Exception as e:
-        logging.error(f"获取用户时发生错误: {str(e)}")
+    user = await user_service.get_user_by_id(user_id)
+    if user is None:
         raise credentials_exception
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已被停用")
+    return user
 
 async def get_current_active_user(
     current_user: UserResponse = Depends(get_current_user)
@@ -102,22 +105,12 @@ async def get_current_user_ws(websocket: WebSocket, db: AsyncIOMotorClient) -> O
     if not token:
         return None
     
-    try:
-        payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-        )
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            return None
-            
-        token_data = TokenPayload(**payload)
-        if token_data.exp and datetime.fromtimestamp(token_data.exp) < datetime.now():
-            return None
-    except JWTError:
+    user_id = _access_token_user_id(token)
+    if user_id is None or not ObjectId.is_valid(user_id):
         return None
-    
+
     user = await db.users.find_one({"_id": ObjectId(user_id)})
-    if user is None:
+    if user is None or not user.get("is_active", True):
         return None
     
-    return user 
+    return user

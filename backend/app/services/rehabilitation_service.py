@@ -1,3 +1,4 @@
+from app.core.llm import LLMConfigurationError
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -179,6 +180,8 @@ class RehabilitationService:
             
             return generated_plan
             
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             print(f"生成康复计划时发生错误: {str(e)}")
             # 返回错误信息和基本模拟数据
@@ -914,4 +917,4 @@ class RehabilitationService:
                 # 获取更新后的计划
                 return await self.get_rehab_plan(plan_id)
                 
-        return {"error": "Adjustment not found"} 
+        return {"error": "Adjustment not found"}

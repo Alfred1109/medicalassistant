@@ -8,6 +8,7 @@ import json
 import requests
 
 from app.core.config import settings
+from app.core.llm import LLMConfigurationError, require_llm_api_key
 from app.schemas.agent import AgentCreate, AgentUpdate, AgentQuery
 
 class AgentService:
@@ -97,6 +98,7 @@ class AgentService:
         
     async def process_query(self, agent_id: str, query_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a query with the specified agent"""
+        require_llm_api_key()
         agent = await self.get_agent_by_id(agent_id)
         if not agent:
             return None
@@ -113,7 +115,7 @@ class AgentService:
             # 初始化OpenAI客户端
             client = OpenAI(
                 base_url=settings.LLM_API_BASE_URL,
-                api_key=settings.LLM_API_KEY,
+                api_key=require_llm_api_key(),
             )
             
             # 准备消息
@@ -155,6 +157,8 @@ class AgentService:
             
             return response
         
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             # 记录错误
             print(f"处理查询时出错: {str(e)}")
@@ -171,6 +175,7 @@ class AgentService:
             
     async def generate_agent_parameters(self, config_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Generate agent parameters configuration using LLM"""
+        require_llm_api_key()
         try:
             # 获取配置信息
             agent_type = config_data.get("type", "conversation")
@@ -233,12 +238,15 @@ class AgentService:
             
             print(f"无法从LLM响应中提取JSON: {llm_response}")
             return None
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             print(f"生成代理参数时出错: {str(e)}")
             return None
             
     async def generate_rehab_plan(self, patient_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Generate a rehabilitation plan using LLM"""
+        require_llm_api_key()
         try:
             # 构建提示词
             prompt = self._build_rehab_plan_prompt(patient_data)
@@ -260,6 +268,8 @@ class AgentService:
             })
             
             return parsed_plan
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             print(f"Error generating rehab plan: {str(e)}")
             return None
@@ -411,6 +421,7 @@ class AgentService:
         
     async def _call_llm(self, prompt: str) -> str:
         """调用LLM API获取响应"""
+        require_llm_api_key()
         # 使用华为云方舟平台API
         try:
             from openai import OpenAI
@@ -420,7 +431,7 @@ class AgentService:
                 # 华为云方舟平台API地址
                 base_url=settings.LLM_API_BASE_URL,
                 # 使用API密钥
-                api_key=settings.LLM_API_KEY,
+                api_key=require_llm_api_key(),
             )
             
             # 准备系统提示和用户提示
@@ -445,6 +456,8 @@ class AgentService:
             
             return response_content
             
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             print(f"LLM API调用失败: {str(e)}")
             
@@ -674,6 +687,7 @@ class AgentService:
         
     async def generate_assessment_analysis(self, assessment_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """生成康复评估分析与建议"""
+        require_llm_api_key()
         try:
             # 构建提示词
             prompt = self._build_assessment_analysis_prompt(assessment_data)
@@ -695,6 +709,8 @@ class AgentService:
             })
             
             return parsed_analysis
+        except LLMConfigurationError:
+            raise
         except Exception as e:
             print(f"Error generating assessment analysis: {str(e)}")
             return None
@@ -838,4 +854,4 @@ class AgentService:
                     "message": str(e),
                     "generation_timestamp": datetime.utcnow().isoformat()
                 }
-            } 
+            }

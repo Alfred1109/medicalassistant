@@ -9,7 +9,7 @@ from bson import ObjectId
 from app.core.dependencies import get_user_service, get_current_active_user, get_current_user
 from app.services.user_service import UserService
 from app.schemas.user import (
-    UserCreate, UserUpdate, UserResponse, Token, TokenResponse, RefreshTokenRequest,
+    UserCreate, UserUpdate, PublicPatientRegistration, SelfUserUpdate, UserResponse, Token, TokenResponse, RefreshTokenRequest,
     DoctorResponse, PatientResponse, HealthManagerResponse, PermissionAssignment,
     Organization, DoctorCreate, PatientCreate, HealthManagerCreate,
     DoctorUpdate, PatientUpdate, HealthManagerUpdate
@@ -22,17 +22,12 @@ router = APIRouter()
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(
-    user_data: UserCreate,
+    user_data: PublicPatientRegistration,
     user_service: UserService = Depends(get_user_service)
 ):
     """注册新用户(仅限患者自注册)"""
-    # 限制只能创建患者类型的用户
-    if user_data.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="只能注册患者用户，其他类型用户需要管理员创建"
-        )
-    return await user_service.create_user(user_data)
+    # 权限、状态和角色由服务端决定；该旧入口尚未接入统一身份。
+    return await user_service.create_user(UserCreate(**user_data.model_dump()))
 
 @router.post("/login", response_model=Token)
 async def login(
@@ -152,18 +147,12 @@ async def get_current_user_info(
 
 @router.put("/me", response_model=UserResponse)
 async def update_current_user(
-    user_data: UserUpdate,
+    user_data: SelfUserUpdate,
     current_user: UserResponse = Depends(get_current_user),
     user_service: UserService = Depends(get_user_service)
 ):
-    """更新当前登录用户信息"""
-    # 不允许自己修改角色和权限
-    if user_data.role is not None or user_data.permissions is not None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="不能修改自己的角色或权限"
-        )
-    return await user_service.update_user(current_user.id, user_data)
+    """更新旧版本地显示名；账户与凭据不通过此接口修改。"""
+    return await user_service.update_user(current_user.id, UserUpdate(**user_data.model_dump(exclude_unset=True)))
 
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user(
@@ -301,4 +290,4 @@ async def remove_practitioner(
     result = await user_service.remove_practitioner(patient_id, practitioner_id)
     if not result:
         raise HTTPException(status_code=404, detail="患者或医疗人员不存在")
-    return result 
+    return result

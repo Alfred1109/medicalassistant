@@ -113,21 +113,13 @@ async def startup_db_client():
     try:
         await connect_to_mongodb()
         
-        # 初始化用户服务，确保创建默认用户
-        from app.services.user_service import UserService
-        from app.db.mongodb import db
-        user_service = UserService(db.db)
-        await user_service.initialize()
-        logger.info("用户服务初始化完成，已创建默认用户")
-        
         # 初始化WebSocket服务
         setup_websockets(app)
         logger.info("WebSocket服务已初始化")
     except DatabaseConnectionError as e:
         logger.critical(f"Failed to connect to database: {str(e)}")
-        # 在生产环境可能需要退出应用
-        # import sys
-        # sys.exit(1)
+        # 不启动无法访问数据库的服务。
+        raise
     
 @app.on_event("shutdown")
 async def shutdown_db_client():
@@ -309,4 +301,4 @@ async def health_check():
     return JSONResponse(
         status_code=200 if health.status == "healthy" else 207,
         content=health.model_dump(mode="json")
-    ) 
+    )
