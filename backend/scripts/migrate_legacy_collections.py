@@ -106,6 +106,8 @@ def transform_followup_doc(doc, source_collection, batch_id):
 # enrich: 复制时补齐的字段别名 {目标字段: 来源字段}，
 # 仅当目标字段缺失且来源字段存在时补齐，不改动文档其余内容；
 # transform: 复制时的字段级映射函数（FU01 S3，仅 follow_ups 需要）
+# 注：integration_fill_tasks（FU01 S4 起模型名 FollowUpFillTask，集合名不变）不在本
+# 脚本范围——设计稿 §3.1：试点数据零迁移，集合原样沿用，无需复制/打标。
 MIGRATIONS = [
     {
         "legacy": "follow_ups",

@@ -62,7 +62,7 @@ async def get_fill_task(
     except FormIntegrationError as exc:
         raise _form_error_response(exc) from exc
     body = service.models.serialize_task(doc)
-    session_uuid = (doc.get("session") or {}).get("session_uuid")
+    session_uuid = service.models.active_session(doc).get("session_uuid")
     remote_status: Optional[str] = None
     if session_uuid:
         try:

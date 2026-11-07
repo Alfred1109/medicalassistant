@@ -115,18 +115,45 @@ class FakeTaskCollection:
         return SimpleNamespace(modified_count=1 if doc else 0)
 
 
+class FakeVisitCollection:
+    """模拟 followup_records 集合：仅覆盖节点联动用到的 find_one/update_one。"""
+
+    def __init__(self):
+        self.docs = {}
+
+    async def find_one(self, query):
+        return self.docs.get(query.get("_id"))
+
+    async def update_one(self, query, update):
+        doc = self.docs.get(query.get("_id"))
+        if not doc:
+            return SimpleNamespace(modified_count=0)
+        for key, value in (update.get("$set") or {}).items():
+            doc[key] = value
+        for key, value in (update.get("$addToSet") or {}).items():
+            items = doc.setdefault(key, [])
+            if value not in items:
+                items.append(value)
+        return SimpleNamespace(modified_count=1)
+
+
 def make_database(patient_doc):
     database = MagicMock()
     collection = FakeTaskCollection()
+    visits = FakeVisitCollection()
     users = MagicMock()
     users.find_one = AsyncMock(return_value=patient_doc)
     database.users = users
 
     def getitem(name):
-        return collection if name == task_models.COLLECTION_NAME else MagicMock()
+        if name == task_models.COLLECTION_NAME:
+            return collection
+        if name == "followup_records":
+            return visits
+        return MagicMock()
 
     database.__getitem__.side_effect = getitem
-    return database, collection
+    return database, collection, visits
 
 
 class FakeRemote:
@@ -185,7 +212,7 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         self.operator = make_operator()
         self.patient_doc = make_patient_doc()
         self.remote = FakeRemote()
-        self.database, self.collection = make_database(self.patient_doc)
+        self.database, self.collection, self.visit_collection = make_database(self.patient_doc)
 
         async def fake_database():
             yield self.database
@@ -228,6 +255,22 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         }
         body.update(overrides)
         return body
+
+    def make_visit(self, visit_code="V1", status="awaiting_fill", patient_id=PATIENT_ID):
+        """在内存 followup_records 里落一个随访节点，返回其字符串 ID。"""
+        vid = ObjectId()
+        self.visit_collection.docs[vid] = {
+            "_id": vid, "patient_id": patient_id, "status": status,
+            "visit_code": visit_code,
+        }
+        return str(vid)
+
+    def visit_doc(self, visit_id):
+        return self.visit_collection.docs[ObjectId(visit_id)]
+
+    async def fetch_task(self, task_id):
+        return await self.client.get(
+            f"/api/integrations/forms/fill-tasks/{task_id}", headers=self.auth())
 
     async def test_create_requires_authentication(self):
         response = await self.client.post("/api/integrations/forms/fill-tasks",
@@ -411,6 +454,188 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         admin_view = await self.client.get("/api/integrations/forms/fill-tasks",
                                            headers=self.auth(user=admin))
         self.assertEqual(admin_view.json()["total"], 1)
+
+    # ---- FU01 S4：节点联动（followup_visit_id） ----
+
+    async def test_create_with_visit_link_binds_node_and_inherits_visit_code(self):
+        visit_id = self.make_visit(visit_code="V1")
+        response = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            # 不传 visit_code：应从节点继承（设计稿 §3.3 第 1 步）
+            json=self.payload(visit_code=None, followup_visit_id=visit_id),
+            headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["followupVisitId"], visit_id)
+        self.assertEqual(body["visitCode"], "V1")
+
+        stored = list(self.collection.docs.values())[0]
+        self.assertEqual(stored["followup_visit_id"], visit_id)
+        # 节点反向索引 fill_task_ids 追加任务 ID
+        node = self.visit_doc(visit_id)
+        self.assertEqual([str(t) for t in node["fill_task_ids"]], [body["id"]])
+
+    async def test_create_rejects_missing_or_malformed_visit(self):
+        missing = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=str(ObjectId())), headers=self.auth())
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["detail"]["error"], "FOLLOWUP_VISIT_NOT_FOUND")
+
+        malformed = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id="not-an-objectid"), headers=self.auth())
+        self.assertEqual(malformed.status_code, 422)
+        self.assertEqual(malformed.json()["detail"]["error"], "INVALID_FOLLOWUP_VISIT")
+        self.assertEqual(len(self.collection.docs), 0)
+
+    async def test_create_rejects_visit_of_another_patient(self):
+        visit_id = self.make_visit(patient_id=str(ObjectId()))  # 节点属于其他患者
+        response = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["error"],
+                         "FOLLOWUP_VISIT_PATIENT_MISMATCH")
+        self.assertEqual(len(self.collection.docs), 0)
+
+    async def test_confirm_linked_task_writes_node_in_review(self):
+        visit_id = self.make_visit(visit_code="V1", status="awaiting_fill")
+        created = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        task_id = created.json()["id"]
+        self.remote.session_body["status"] = "submitted"
+        self.remote.session_body["response_id"] = RESPONSE_ID
+
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "confirmed")
+
+        node = self.visit_doc(visit_id)
+        # 节点状态 → in_review（schemas/followup.FollowUpStatus.IN_REVIEW）
+        self.assertEqual(node["status"], "in_review")
+        # effective_response 指向该任务
+        effective = node["effective_response"]
+        self.assertEqual(effective["task_id"], task_id)
+        self.assertEqual(effective["response_id"], RESPONSE_ID)
+        self.assertEqual(effective["visit_code"], "V1")
+        self.assertIn("confirmed_at", effective)
+        # 反向索引含任务 ID（创建时已追加，确认后不重复）
+        self.assertEqual([str(t) for t in node["fill_task_ids"]], [task_id])
+
+    async def test_confirm_rejects_visit_code_mismatch_and_keeps_task_unconfirmed(self):
+        visit_id = self.make_visit(visit_code="V2")  # 节点与任务/答卷访视不一致
+        created = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        task_id = created.json()["id"]
+        self.remote.session_body["status"] = "submitted"
+        self.remote.session_body["response_id"] = RESPONSE_ID
+
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["error"], "RESPONSE_MISMATCH")
+
+        # 任务未落 confirmed、节点未被回写
+        task = await self.fetch_task(task_id)
+        self.assertNotEqual(task.json()["status"], "confirmed")
+        self.assertIsNone(task.json()["confirmation"])
+        node = self.visit_doc(visit_id)
+        self.assertEqual(node["status"], "awaiting_fill")
+        self.assertIsNone(node.get("effective_response"))
+
+    async def test_confirm_rejects_remote_response_from_another_visit(self):
+        visit_id = self.make_visit(visit_code="V1")
+        created = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        task_id = created.json()["id"]
+        self.remote.session_body["status"] = "submitted"
+        self.remote.session_body["response_id"] = RESPONSE_ID
+        self.remote.response_body["visit_code"] = "V9"  # 远端答卷串访视
+
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["error"], "RESPONSE_MISMATCH")
+        self.assertEqual(self.visit_doc(visit_id)["status"], "awaiting_fill")
+
+    async def test_confirm_rejects_terminal_visit(self):
+        visit_id = self.make_visit(status="completed")
+        created = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        task_id = created.json()["id"]
+        self.remote.session_body["status"] = "submitted"
+        self.remote.session_body["response_id"] = RESPONSE_ID
+
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["error"], "FOLLOWUP_VISIT_TERMINAL")
+        self.assertNotEqual(self.visit_doc(visit_id)["status"], "in_review")
+
+    async def test_confirm_without_visit_link_keeps_legacy_behavior(self):
+        # 无 followup_visit_id 的任务（试点调用形态）不触发任何节点状态转换
+        visit_id = self.make_visit()
+        created = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(), headers=self.auth())
+        task_id = created.json()["id"]
+        self.remote.session_body["status"] = "submitted"
+        self.remote.session_body["response_id"] = RESPONSE_ID
+
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "confirmed")
+        self.assertIsNone(response.json()["followupVisitId"])
+        node = self.visit_doc(visit_id)
+        self.assertEqual(node["status"], "awaiting_fill")
+        self.assertIsNone(node.get("effective_response"))
+        self.assertNotIn("fill_task_ids", node)
+
+    async def test_legacy_single_session_doc_confirm_compatibility(self):
+        # 存量文档形状：只有旧单 session 字段、无 fill_sessions，确认路径照常工作
+        legacy = {
+            "_id": ObjectId(),
+            "patient_id": PATIENT_ID,
+            "operator": {"user_id": OPERATOR_ID, "role": "doctor", "remote_user_id": 7},
+            "remote_refs": {"project_id": 1, "center_id": 2, "subject_id": 3,
+                            "questionnaire_id": 4, "remote_operator_user_id": 7},
+            "allowed_origin": ORIGIN,
+            "visit_code": "V1", "visit_name": None, "ma_task_ref": "ma-legacy",
+            "status": "submitted",
+            "session": {"session_uuid": SESSION_UUID, "embed_token_hash": "legacy-hash",
+                        "embed_url": "https://form.example/integration/embed/fs_demo",
+                        "response_id": None, "expires_at": None},
+            "confirmation": None, "last_error": None,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+            "confirmed_at": None,
+        }
+        self.collection.docs[legacy["_id"]] = legacy
+        self.remote.session_body["status"] = "submitted"
+        self.remote.session_body["response_id"] = RESPONSE_ID
+
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{legacy['_id']}/confirm",
+            headers=self.auth())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "confirmed")
+
+        stored = self.collection.docs[legacy["_id"]]
+        # 旧字段镜像被推进（旧字段优先），fill_sessions 渐进补建
+        self.assertEqual(stored["session"]["response_id"], RESPONSE_ID)
+        self.assertEqual(len(stored["fill_sessions"]), 1)
+        self.assertEqual(stored["fill_sessions"][-1]["confirmation"]["response_id"],
+                         RESPONSE_ID)
+        # 兼容读取：旧字段优先 / 数组回退两条路径均可取到活动会话
+        self.assertEqual(task_models.active_session(stored)["session_uuid"], SESSION_UUID)
+        array_only = {"session": {}, "fill_sessions": [{"session_uuid": "sess-new"}]}
+        self.assertEqual(task_models.active_session(array_only)["session_uuid"], "sess-new")
 
 
 if __name__ == "__main__":

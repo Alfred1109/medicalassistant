@@ -3,7 +3,9 @@
 边界：
 - 服务凭证只用于服务端对服务端调用，绝不当作操作者身份；
 - 远端查询结果必须与本任务记录的远端引用一致才可确认（防止状态串号）；
-- 远端失败如实记录 last_error / 任务 failed，不伪装完成。
+- 远端失败如实记录 last_error / 任务 failed，不伪装完成；
+- FU01 S4 节点联动：带 followup_visit_id 的任务在确认成功后回写随访节点
+  （in_review + effective_response），visit_code 不一致拒绝确认（RESPONSE_MISMATCH）。
 """
 
 from typing import Any, Dict, Optional
@@ -70,6 +72,32 @@ async def _verify_patient_assignment(db: AsyncIOMotorDatabase, patient_id: str,
             error_code="PATIENT_NOT_ASSIGNED", status_code=403) from exc
 
 
+# 随访节点终态（confirm 回写前置校验：终态节点不接受答卷回写）
+FOLLOWUP_VISIT_TERMINAL_STATUSES = {"completed", "canceled", "cancelled"}
+
+
+async def _load_followup_visit(db: AsyncIOMotorDatabase,
+                               followup_visit_id: str) -> Dict[str, Any]:
+    """加载 followup_visit_id 指向的随访节点（FU01 S4 节点联动）。
+
+    惰性导入业务模型，保持 forms 集成模块加载期零业务依赖（同上方
+    _verify_patient_access 的处理方式）。
+    """
+    from bson import ObjectId, errors as bson_errors
+    from app.models.health_record import FollowUpRecord
+
+    try:
+        query_id = ObjectId(followup_visit_id)
+    except (bson_errors.InvalidId, TypeError):
+        raise FormIntegrationError("followup_visit_id 格式无效",
+                                   error_code="INVALID_FOLLOWUP_VISIT", status_code=422)
+    visit = await db[FollowUpRecord.collection_name].find_one({"_id": query_id})
+    if not visit:
+        raise FormIntegrationError("关联的随访节点不存在",
+                                   error_code="FOLLOWUP_VISIT_NOT_FOUND", status_code=404)
+    return visit
+
+
 def _extract_remote_refs(payload: Dict[str, Any]) -> Dict[str, Any]:
     refs = {
         "project_id": payload.get("remote_project_id"),
@@ -101,22 +129,41 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
                                    status_code=422)
     await _verify_patient_assignment(db, patient_id, operator_id, operator_role)
 
+    # FU01 S4 创建联动（最小）：带 followup_visit_id 时校验节点存在且归属一致；
+    # 操作者对该患者的归属权限已由上方 ensure_patient_access 覆盖（节点→patient_id 链路）
+    followup_visit_id = payload.get("followup_visit_id")
+    followup_visit: Optional[Dict[str, Any]] = None
+    if followup_visit_id:
+        followup_visit = await _load_followup_visit(db, followup_visit_id)
+        if str(followup_visit.get("patient_id")) != patient_id:
+            raise FormIntegrationError(
+                "随访节点与任务患者不一致", error_code="FOLLOWUP_VISIT_PATIENT_MISMATCH",
+                status_code=409,
+                details={"node_patient_id": str(followup_visit.get("patient_id")),
+                         "task_patient_id": patient_id})
+
     refs = _extract_remote_refs(payload)
     allowed_origin = (payload.get("allowed_origin") or "").strip().rstrip("/")
     if not allowed_origin:
         raise FormIntegrationError("allowed_origin 必填（发起嵌入页面的来源）",
                                    error_code="INVALID_ORIGIN", status_code=422)
 
-    task = models.IntegrationFillTask.new_task(
+    # visit_code 缺省时取节点 visit_code（设计稿 §3.3 第 1 步：visit_code=节点.visit_code）
+    visit_code = payload.get("visit_code")
+    if not visit_code and followup_visit:
+        visit_code = followup_visit.get("visit_code")
+
+    task = models.FollowUpFillTask.new_task(
         patient_id=patient_id,
         operator_id=operator_id,
         operator_role=operator_role,
         remote_refs=refs,
         allowed_origin=allowed_origin,
         ma_task_ref=payload.get("ma_task_ref"),
-        visit_code=payload.get("visit_code"),
+        visit_code=visit_code,
         visit_name=payload.get("visit_name"),
         ttl_seconds=payload.get("ttl_seconds"),
+        followup_visit_id=str(followup_visit_id) if followup_visit_id else None,
     )
 
     remote_payload = {
@@ -150,6 +197,14 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
                                    error_code="FORM_PLATFORM_INVALID_RESPONSE", status_code=502)
 
     result = await db[models.COLLECTION_NAME].insert_one(task.doc)
+    if followup_visit_id:
+        # 节点反向索引：fill_task_ids 追加任务 ID（1..N，多次填报全保留）
+        from bson import ObjectId
+        from app.models.health_record import FollowUpRecord
+        await db[FollowUpRecord.collection_name].update_one(
+            {"_id": ObjectId(followup_visit_id)},
+            {"$addToSet": {"fill_task_ids": result.inserted_id},
+             "$set": {"updated_at": models.utcnow()}})
     body = models.serialize_task(task.doc)
     body["id"] = str(result.inserted_id)
     # 一次性透传：明文令牌只在创建响应出现，不写日志不落库
@@ -181,8 +236,8 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
                             task_id: str, operator: Any) -> Dict[str, Any]:
     """向远端核实会话与答卷真实状态；只有远端确认提交才转 confirmed。"""
     doc = await get_fill_task(db, task_id, operator)
-    task = models.IntegrationFillTask(doc)
-    session_uuid = (doc.get("session") or {}).get("session_uuid")
+    task = models.FollowUpFillTask(doc)
+    session_uuid = models.active_session(doc).get("session_uuid")
 
     if task.status == models.TASK_STATUS_CONFIRMED:
         return doc
@@ -256,6 +311,38 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
         "answers": response_body.get("answers") or [],
         "verified_at": models.utcnow().isoformat() + "Z",
     }
+
+    # FU01 S4 节点联动前置核验：任务带 followup_visit_id 时，答卷/任务与节点的
+    # visit_code 必须一致（防答卷串访视，与 project/subject/questionnaire 核验同级）；
+    # 任一核验失败即拒绝确认，任务不落 confirmed、节点不被回写。
+    followup_visit_id = doc.get("followup_visit_id")
+    node_visit_code: Optional[str] = None
+    if followup_visit_id:
+        visit_doc = await _load_followup_visit(db, followup_visit_id)
+        if str(visit_doc.get("patient_id")) != str(doc.get("patient_id")):
+            raise FormIntegrationError(
+                "随访节点与任务患者不一致，拒绝确认",
+                error_code="FOLLOWUP_VISIT_PATIENT_MISMATCH", status_code=409,
+                details={"node_patient_id": str(visit_doc.get("patient_id")),
+                         "task_patient_id": str(doc.get("patient_id"))})
+        node_visit_code = visit_doc.get("visit_code")
+        if visit_doc.get("status") in FOLLOWUP_VISIT_TERMINAL_STATUSES:
+            raise FormIntegrationError(
+                f"随访节点已处于终态 {visit_doc.get('status')}，不能确认回写",
+                error_code="FOLLOWUP_VISIT_TERMINAL", status_code=409)
+        visit_mismatches = []
+        if node_visit_code:
+            if doc.get("visit_code") and doc["visit_code"] != node_visit_code:
+                visit_mismatches.append({"source": "task", "visit_code": doc["visit_code"]})
+            if evidence.get("visit_code") and evidence["visit_code"] != node_visit_code:
+                visit_mismatches.append({"source": "remote_response",
+                                         "visit_code": evidence["visit_code"]})
+        if visit_mismatches:
+            raise FormIntegrationError(
+                "答卷访视与随访节点不一致，拒绝确认", error_code="RESPONSE_MISMATCH",
+                status_code=409,
+                details={"node_visit_code": node_visit_code, "actual": visit_mismatches})
+
     task.mark_confirmed(evidence)
     await db[models.COLLECTION_NAME].update_one(
         {"_id": doc["_id"]},
@@ -264,9 +351,30 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
             "confirmation": task.doc["confirmation"],
             "confirmed_at": task.doc["confirmed_at"],
             "session.response_id": evidence["response_id"],
+            "fill_sessions": task.doc.get("fill_sessions"),
             "last_error": None,
             "updated_at": task.doc["updated_at"],
         }})
+
+    if followup_visit_id:
+        # 确认成功回写节点（设计稿 §3.3 第 2 步）：awaiting_fill/scheduled → in_review，
+        # effective_response 指向本任务（S5 审阅接口在此基础上选取/退回）
+        from bson import ObjectId
+        from app.models.health_record import FollowUpRecord
+        from app.schemas.followup import FollowUpStatus
+        effective_response = {
+            "task_id": str(doc["_id"]),
+            "response_id": evidence.get("response_id"),
+            "visit_code": node_visit_code or evidence.get("visit_code"),
+            "submitted_at": evidence.get("submitted_at"),
+            "confirmed_at": task.doc["confirmed_at"].isoformat() + "Z",
+        }
+        await db[FollowUpRecord.collection_name].update_one(
+            {"_id": ObjectId(followup_visit_id)},
+            {"$set": {"status": FollowUpStatus.IN_REVIEW.value,
+                      "effective_response": effective_response,
+                      "updated_at": task.doc["updated_at"]},
+             "$addToSet": {"fill_task_ids": doc["_id"]}})
     return doc
 
 
@@ -298,11 +406,11 @@ async def list_fill_tasks(db: AsyncIOMotorDatabase, operator: Any,
 async def cancel_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
                            task_id: str, operator: Any) -> Dict[str, Any]:
     doc = await get_fill_task(db, task_id, operator)
-    task = models.IntegrationFillTask(doc)
+    task = models.FollowUpFillTask(doc)
     if task.status == models.TASK_STATUS_CONFIRMED:
         raise FormIntegrationError("已确认的填报任务不能取消", error_code="TASK_CONFIRMED",
                                    status_code=409)
-    session_uuid = (doc.get("session") or {}).get("session_uuid")
+    session_uuid = models.active_session(doc).get("session_uuid")
     if session_uuid and task.status not in (models.TASK_STATUS_CANCELLED, models.TASK_STATUS_FAILED):
         try:
             await client.cancel_fill_session(session_uuid)
