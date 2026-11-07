@@ -186,13 +186,36 @@ api.interceptors.response.use(
 // API服务方法
 export const apiService = {
   // 设备相关API
-  getUserDevices: (userId: string) => api.get(`/devices/user/${userId}`),
-  bindUserDevice: (userId: string, deviceData: any) => api.post(`/devices/bind`, { ...deviceData, user_id: userId }),
-  unbindUserDevice: (userId: string, deviceId: string) => api.post(`/devices/unbind`, { user_id: userId, device_id: deviceId }),
-  getDeviceData: (deviceId: string, params: any) => api.get(`/devices/${deviceId}/data`, { params }),
+  // 后端 GET /api/devices 返回当前登录用户（token 主体）绑定的设备列表，
+  // 不存在 GET /devices/user/{userId} 路由；userId 参数仅保留兼容旧调用方。
+  getUserDevices: (userId?: string) => api.get('/devices'),
+  // 后端 POST /api/devices/bind 以当前登录用户为绑定主体（body 为 DeviceCreate，
+  // device_type 必填），不再在 body 中传 user_id。
+  bindUserDevice: (userId: string, deviceData: any) => {
+    const { type, ...rest } = deviceData || {};
+    return api.post('/devices/bind', { ...rest, device_type: rest.device_type ?? type });
+  },
+  // 后端为 DELETE /api/devices/{device_id}/unbind，没有 POST /devices/unbind
+  unbindUserDevice: (userId: string, deviceId: string) => api.delete(`/devices/${deviceId}/unbind`),
+  // 后端查询参数为 start_date / end_date / data_type / limit
+  getDeviceData: (deviceId: string, params: any) => api.get(`/devices/${deviceId}/data`, {
+    params: params ? {
+      start_date: params.startDate ?? params.start_date,
+      end_date: params.endDate ?? params.end_date,
+      data_type: params.dataType ?? params.data_type,
+      limit: params.limit,
+    } : undefined,
+  }),
   syncDeviceData: (deviceId: string) => api.post(`/devices/${deviceId}/sync`),
   getDeviceStatus: (deviceId: string) => api.get(`/devices/${deviceId}/status`),
-  configureDevice: (deviceId: string, config: any) => api.post(`/devices/${deviceId}/configure`, config),
+  // 后端为 PUT /api/devices/{device_id}/config（DeviceConfigUpdate: sync_frequency /
+  // notifications_enabled / custom_name / alarm_settings），没有 POST /devices/{id}/configure
+  configureDevice: (deviceId: string, config: any) => api.put(`/devices/${deviceId}/config`, {
+    sync_frequency: config?.syncFrequency ?? config?.sync_frequency,
+    notifications_enabled: config?.notificationsEnabled ?? config?.notifications_enabled,
+    custom_name: config?.customName ?? config?.custom_name,
+    alarm_settings: config?.alarmSettings ?? config?.alarm_settings,
+  }),
   repairDevice: (deviceId: string) => api.post(`/devices/${deviceId}/repair`),
 
   // 认证接口
@@ -323,14 +346,10 @@ export const apiService = {
     getDoctors: (params?: any): Promise<AxiosResponse<Doctor[]>> => 
       api.get('/admin/doctors', { params }),
     
-    createDoctor: (doctorData: Partial<Doctor>): Promise<AxiosResponse<Doctor>> => 
+    createDoctor: (doctorData: Partial<Doctor>): Promise<AxiosResponse<Doctor>> =>
       api.post('/admin/doctors', doctorData),
-    
-    updateDoctor: (doctorId: string, doctorData: Partial<Doctor>): Promise<AxiosResponse<Doctor>> => 
-      api.put(`/admin/doctors/${doctorId}`, doctorData),
-    
-    deleteDoctor: (doctorId: string): Promise<AxiosResponse<any>> => 
-      api.delete(`/admin/doctors/${doctorId}`),
+    // 注意：后端 /api/admin/doctors 仅有 GET/POST，无 PUT/DELETE /admin/doctors/{id}，
+    // 故不提供 updateDoctor / deleteDoctor（后端能力待建设）。
   },
   
   // 患者相关接口

@@ -55,7 +55,8 @@ export const analyticsService = {
   async getTrendData(dataType: ChartDataType, timeRange: TimeRange): Promise<TrendData[]> {
     try {
       const response = await api.get(`analytics/trend`, {
-        params: { dataType, timeRange }
+        // 后端查询参数为 data_type / time_range
+        params: { data_type: dataType, time_range: timeRange }
       });
       
       if (response.data.status === 'error') {
@@ -79,7 +80,8 @@ export const analyticsService = {
   async getDistributionData(dataType: ChartDataType, timeRange: TimeRange): Promise<DistributionData[]> {
     try {
       const response = await api.get(`analytics/distribution`, {
-        params: { dataType, timeRange }
+        // 后端查询参数为 data_type / time_range
+        params: { data_type: dataType, time_range: timeRange }
       });
       
       if (response.data.status === 'error') {
@@ -108,7 +110,8 @@ export const analyticsService = {
   ): Promise<ComparisonData[]> {
     try {
       const response = await api.get(`analytics/comparison`, {
-        params: { dataType, timeRange, compareWith }
+        // 后端查询参数为 data_type / time_range / compare_with
+        params: { data_type: dataType, time_range: timeRange, compare_with: compareWith }
       });
       
       if (response.data.status === 'error') {
@@ -124,32 +127,8 @@ export const analyticsService = {
     }
   },
   
-  /**
-   * 导出报表数据
-   * @param dataType 数据类型
-   * @param timeRange 时间范围
-   * @param format 导出格式
-   */
-  async exportReport(
-    dataType: ChartDataType, 
-    timeRange: TimeRange,
-    format: 'csv' | 'xlsx' | 'pdf'
-  ): Promise<Blob> {
-    try {
-      const response = await api.get(`analytics/export`, {
-        params: { dataType, timeRange, format },
-        responseType: 'blob',
-        headers: { 
-          Accept: format === 'pdf' ? 'application/pdf' : 'application/octet-stream' 
-        }
-      });
-      
-      return response.data;
-    } catch (error) {
-      console.error(`导出${dataType}报表数据失败:`, error);
-      throw error;
-    }
-  },
+  // 注意：后端 /api/analytics 下无导出报表端点（原 GET /analytics/export 已删除），
+  // 导出报表为后端能力待建设，不再提供 exportReport 死链方法。
 
   /**
    * 获取高级预测分析数据

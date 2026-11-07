@@ -1,5 +1,4 @@
 import { apiService } from './api';
-import api from './api';
 
 // 设备类型定义
 export interface Device {
@@ -238,22 +237,6 @@ const deviceService = {
         }
       }, 2500);
     });
-  },
-  
-  // 获取设备异常预警
-  getDeviceAnomalies: async (userId: string, timeRange?: string): Promise<any[]> => {
-    try {
-      const response = await api.get(`/devices/anomalies`, {
-        params: { 
-          user_id: userId,
-          time_range: timeRange || 'week'
-        }
-      });
-      return response.data;
-    } catch (error) {
-      console.error('获取设备异常预警失败:', error);
-      throw error;
-    }
   }
 };
 

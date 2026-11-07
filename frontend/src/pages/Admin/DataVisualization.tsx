@@ -14,7 +14,7 @@ import {
   Tabs,
   Tab,
   Button,
-  CircularProgress,
+  Tooltip,
   SelectChangeEvent,
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -83,7 +83,6 @@ const DataVisualization: React.FC = () => {
   const [distributionData, setDistributionData] = useState<DistributionData[]>([]);
   const [comparisonData, setComparisonData] = useState<ComparisonData[]>([]);
   const [exportLoading, setExportLoading] = useState(false);
-
   // 处理类型变更
   const handleDataTypeChange = (event: SelectChangeEvent<string>) => {
     setDataType(event.target.value as ChartDataType);
@@ -97,30 +96,6 @@ const DataVisualization: React.FC = () => {
   // 处理标签切换
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
-  };
-
-  // 导出数据
-  const handleExportData = async (format: 'csv' | 'xlsx' | 'pdf') => {
-    try {
-      setExportLoading(true);
-      const blob = await analyticsService.exportReport(dataType, timeRange, format);
-      
-      // 创建下载链接
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${dataType}_report_${timeRange}.${format}`;
-      document.body.appendChild(a);
-      a.click();
-      
-      // 清理
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (error) {
-      console.error('导出数据失败:', error);
-    } finally {
-      setExportLoading(false);
-    }
   };
 
   // 加载数据
@@ -187,15 +162,19 @@ const DataVisualization: React.FC = () => {
             </Select>
           </FormControl>
           
-          <Button 
-            variant="outlined" 
-            size="small"
-            startIcon={<DownloadIcon />}
-            onClick={() => handleExportData('xlsx')}
-            disabled={exportLoading}
-          >
-            {exportLoading ? <CircularProgress size={16} /> : '导出'}
-          </Button>
+          {/* 后端 /api/analytics 无导出端点（能力待建设），导出按钮禁用 */}
+          <Tooltip title="后端导出报表能力待建设，暂不可用">
+            <span>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<DownloadIcon />}
+                disabled
+              >
+                导出
+              </Button>
+            </span>
+          </Tooltip>
         </Box>
       </Box>
 

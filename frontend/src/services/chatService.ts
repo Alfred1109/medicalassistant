@@ -1,5 +1,8 @@
 import api from './api';
 
+// 后端通信路由挂载于 /api/communications（见 backend/app/api/routers/communication_router.py），
+// 本服务历史上指向不存在的 /chat/* 前缀，已全部修正为后端实际注册的路径。
+
 // 消息类型
 export interface ChatMessage {
   id: string;
@@ -36,10 +39,10 @@ export interface Conversation {
 
 // 创建聊天API服务
 export const chatApi = {
-  // 获取用户的所有对话
-  async getConversations() {
+  // 获取用户的所有对话（后端 GET /communications/conversations）
+  async getConversations(params?: { limit?: number; skip?: number; status?: string }) {
     try {
-      const response = await api.get('/chat/conversations');
+      const response = await api.get('/communications/conversations', { params });
       return response.data;
     } catch (error) {
       console.error('获取对话列表失败:', error);
@@ -47,15 +50,18 @@ export const chatApi = {
     }
   },
 
-  // 获取特定对话的消息
+  // 获取特定对话的消息（后端 GET /communications/conversations/{id}/messages，
+  // 分页参数为 limit / before_id）
   async getMessages(conversationId: string, limit = 30, before?: string) {
     try {
-      let url = `/chat/conversations/${conversationId}/messages`;
       const params: Record<string, any> = { limit };
       if (before) {
-        params.before = before;
+        params.before_id = before;
       }
-      const response = await api.get(url, { params });
+      const response = await api.get(
+        `/communications/conversations/${conversationId}/messages`,
+        { params }
+      );
       return response.data;
     } catch (error) {
       console.error('获取消息失败:', error);
@@ -63,44 +69,31 @@ export const chatApi = {
     }
   },
 
-  // 发送消息
-  async sendMessage(conversationId: string, content: string, attachments: File[] = []) {
+  // 发送消息（后端 POST /communications/conversations/{id}/messages，
+  // body 为 MessageCreate: { content, type?, attachments?, metadata? }，JSON 而非 FormData）
+  async sendMessage(conversationId: string, content: string, attachments?: Array<Record<string, any>>) {
     try {
-      // 如果有附件，使用FormData
-      if (attachments.length > 0) {
-        const formData = new FormData();
-        formData.append('content', content);
-        formData.append('conversationId', conversationId);
-        
-        attachments.forEach((file, index) => {
-          formData.append(`attachment_${index}`, file);
-        });
-        
-        const response = await api.post('/chat/messages', formData, {
-          headers: {
-            'Content-Type': 'multipart/form-data'
-          }
-        });
-        return response.data;
-      } else {
-        // 无附件的简单消息
-        const response = await api.post('/chat/messages', {
+      const response = await api.post(
+        `/communications/conversations/${conversationId}/messages`,
+        {
           content,
-          conversationId
-        });
-        return response.data;
-      }
+          ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        }
+      );
+      return response.data;
     } catch (error) {
       console.error('发送消息失败:', error);
       throw error;
     }
   },
 
-  // 创建新对话
-  async createConversation(participantIds: string[]) {
+  // 创建新对话（后端 POST /communications/conversations，body 为
+  // ConversationCreate: { participant_id, type? }，单个参与者）
+  async createConversation(participantId: string, type = 'chat') {
     try {
-      const response = await api.post('/chat/conversations', {
-        participantIds
+      const response = await api.post('/communications/conversations', {
+        participant_id: participantId,
+        type,
       });
       return response.data;
     } catch (error) {
@@ -109,12 +102,11 @@ export const chatApi = {
     }
   },
 
-  // 标记消息为已读
-  async markAsRead(messageIds: string[]) {
+  // 标记单条消息为已读（后端 PUT /communications/messages/{message_id}/read；
+  // 后端无批量已读端点，整段对话请配合 markConversationAsRead）
+  async markAsRead(messageId: string) {
     try {
-      const response = await api.post('/chat/messages/read', {
-        messageIds
-      });
+      const response = await api.put(`/communications/messages/${messageId}/read`);
       return response.data;
     } catch (error) {
       console.error('标记消息已读失败:', error);
@@ -122,10 +114,21 @@ export const chatApi = {
     }
   },
 
-  // 删除消息
+  // 标记对话所有消息为已读（后端 PUT /communications/conversations/{conversation_id}/read）
+  async markConversationAsRead(conversationId: string) {
+    try {
+      const response = await api.put(`/communications/conversations/${conversationId}/read`);
+      return response.data;
+    } catch (error) {
+      console.error('标记对话已读失败:', error);
+      throw error;
+    }
+  },
+
+  // 删除消息（后端 DELETE /communications/messages/{message_id}，软删除）
   async deleteMessage(messageId: string) {
     try {
-      const response = await api.delete(`/chat/messages/${messageId}`);
+      const response = await api.delete(`/communications/messages/${messageId}`);
       return response.data;
     } catch (error) {
       console.error('删除消息失败:', error);
@@ -133,21 +136,10 @@ export const chatApi = {
     }
   },
 
-  // 获取离线消息
-  async getOfflineMessages() {
-    try {
-      const response = await api.get('/chat/messages/offline');
-      return response.data;
-    } catch (error) {
-      console.error('获取离线消息失败:', error);
-      throw error;
-    }
-  },
-
-  // 获取未读消息数量
+  // 获取未读消息数量（后端 GET /communications/unread-count）
   async getUnreadCount() {
     try {
-      const response = await api.get('/chat/messages/unread/count');
+      const response = await api.get('/communications/unread-count');
       return response.data;
     } catch (error) {
       console.error('获取未读消息数量失败:', error);
@@ -155,18 +147,30 @@ export const chatApi = {
     }
   },
 
-  // 搜索消息
-  async searchMessages(query: string, conversationId?: string) {
+  // 获取特定对话详情（后端 GET /communications/conversations/{conversation_id}）
+  async getConversation(conversationId: string) {
     try {
-      const params: Record<string, any> = { query };
-      if (conversationId) {
-        params.conversationId = conversationId;
-      }
-      const response = await api.get('/chat/messages/search', { params });
+      const response = await api.get(`/communications/conversations/${conversationId}`);
       return response.data;
     } catch (error) {
-      console.error('搜索消息失败:', error);
+      console.error('获取对话详情失败:', error);
+      throw error;
+    }
+  },
+
+  // 同步离线消息（后端 POST /communications/sync，body 为 { last_sync_time }）
+  async syncOfflineMessages(lastSyncTime: string) {
+    try {
+      const response = await api.post('/communications/sync', {
+        last_sync_time: lastSyncTime,
+      });
+      return response.data;
+    } catch (error) {
+      console.error('同步离线消息失败:', error);
       throw error;
     }
   }
+
+  // 注意：后端 /api/communications 无消息搜索端点，原 searchMessages 死链已删除
+  //（后端能力待建设）。
 };

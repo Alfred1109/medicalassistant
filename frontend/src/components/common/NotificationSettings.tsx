@@ -1,11 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Box, Typography, Switch, FormGroup, FormControlLabel,
-  Divider, Paper, Button, Alert, Snackbar,
-  CircularProgress, Card, CardContent
+  Divider, Button, Alert,
+  Card, CardContent
 } from '@mui/material';
-import { notificationApi, NotificationSettings as NotificationSettingsType } from '../../services/notificationService';
+import { NotificationSettings as NotificationSettingsType } from '../../services/notificationService';
 
+/**
+ * 通知偏好设置面板。
+ *
+ * 后端 /api/notifications 目前没有 GET/PUT /notifications/settings 端点，
+ * 偏好设置的读取与保存为后端能力待建设：本面板仅保留本地演示状态，
+ * 保存按钮禁用，不再发起注定 404 的请求。
+ */
 const NotificationSettings: React.FC = () => {
   const [settings, setSettings] = useState<NotificationSettingsType>({
     enableEmail: true,
@@ -18,80 +25,15 @@ const NotificationSettings: React.FC = () => {
     notifyOnFollowUp: true,
     dailySummary: false
   });
-  
-  const [loading, setLoading] = useState(false);
-  const [saveLoading, setSaveLoading] = useState(false);
-  const [notification, setNotification] = useState({ 
-    open: false, 
-    message: '', 
-    severity: 'success' as 'success' | 'error' | 'info' | 'warning' 
-  });
-  
-  // 加载设置
-  useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        setLoading(true);
-        const response = await notificationApi.getSettings();
-        setSettings(response.data);
-      } catch (error) {
-        console.error('加载通知设置失败:', error);
-        setNotification({
-          open: true,
-          message: '加载通知设置失败',
-          severity: 'error'
-        });
-      } finally {
-        setLoading(false);
-      }
-    };
-    
-    loadSettings();
-  }, []);
-  
-  // 处理设置变更
+
+  // 处理设置变更（仅本地演示状态，不会持久化）
   const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     setSettings({
       ...settings,
       [event.target.name]: event.target.checked
     });
   };
-  
-  // 保存设置
-  const handleSave = async () => {
-    try {
-      setSaveLoading(true);
-      await notificationApi.updateSettings(settings);
-      setNotification({
-        open: true,
-        message: '通知设置已保存',
-        severity: 'success'
-      });
-    } catch (error) {
-      console.error('保存通知设置失败:', error);
-      setNotification({
-        open: true,
-        message: '保存通知设置失败',
-        severity: 'error'
-      });
-    } finally {
-      setSaveLoading(false);
-    }
-  };
-  
-  // 关闭通知
-  const handleCloseNotification = () => {
-    setNotification({ ...notification, open: false });
-  };
-  
-  if (loading) {
-    return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="300px">
-        <CircularProgress />
-      </Box>
-    );
-  }
-  
+
   return (
     <Card>
       <CardContent>
@@ -99,7 +41,12 @@ const NotificationSettings: React.FC = () => {
           <Typography variant="h6" gutterBottom>通知设置</Typography>
           <Divider />
         </Box>
-        
+
+        <Alert severity="info" sx={{ mb: 3 }}>
+          通知偏好设置的后端接口尚未建设（GET/PUT /api/notifications/settings 不存在），
+          以下开关仅为本地演示，暂无法保存。
+        </Alert>
+
         <Box mb={4}>
           <Typography variant="subtitle1" gutterBottom>通知方式</Typography>
           <FormGroup>
@@ -117,7 +64,7 @@ const NotificationSettings: React.FC = () => {
             />
           </FormGroup>
         </Box>
-        
+
         <Box mb={4}>
           <Typography variant="subtitle1" gutterBottom>通知类型</Typography>
           <FormGroup>
@@ -143,7 +90,7 @@ const NotificationSettings: React.FC = () => {
             />
           </FormGroup>
         </Box>
-        
+
         <Box mb={4}>
           <Typography variant="subtitle1" gutterBottom>其他设置</Typography>
           <FormGroup>
@@ -153,32 +100,19 @@ const NotificationSettings: React.FC = () => {
             />
           </FormGroup>
         </Box>
-        
+
         <Box display="flex" justifyContent="flex-end">
-          <Button 
-            variant="contained" 
-            color="primary" 
-            onClick={handleSave}
-            disabled={saveLoading}
-            startIcon={saveLoading ? <CircularProgress size={20} /> : null}
+          <Button
+            variant="contained"
+            color="primary"
+            disabled
           >
-            {saveLoading ? '保存中...' : '保存设置'}
+            保存设置
           </Button>
         </Box>
-        
-        <Snackbar
-          open={notification.open}
-          autoHideDuration={6000}
-          onClose={handleCloseNotification}
-          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-        >
-          <Alert onClose={handleCloseNotification} severity={notification.severity}>
-            {notification.message}
-          </Alert>
-        </Snackbar>
       </CardContent>
     </Card>
   );
 };
 
-export default NotificationSettings; 
+export default NotificationSettings;

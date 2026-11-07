@@ -32,12 +32,12 @@ export interface NotificationSettings {
 
 // 创建通知API服务
 export const notificationApi = {
-  // 获取通知列表
-  async getNotifications(params?: { 
-    page?: number;
+  // 获取通知列表（后端 GET /api/notifications 参数为 limit / skip / type / read）
+  async getNotifications(params?: {
     limit?: number;
+    skip?: number;
     type?: string;
-    isRead?: boolean;
+    read?: boolean;
   }) {
     try {
       const response = await api.get('/notifications', { params });
@@ -101,27 +101,8 @@ export const notificationApi = {
       console.error('获取未读通知数量失败:', error);
       throw error;
     }
-  },
-  
-  // 获取通知设置
-  async getSettings() {
-    try {
-      const response = await api.get('/notifications/settings');
-      return response.data;
-    } catch (error) {
-      console.error('获取通知设置失败:', error);
-      throw error;
-    }
-  },
-  
-  // 更新通知设置
-  async updateSettings(settings: NotificationSettings) {
-    try {
-      const response = await api.put('/notifications/settings', settings);
-      return response.data;
-    } catch (error) {
-      console.error('更新通知设置失败:', error);
-      throw error;
-    }
   }
+
+  // 注意：后端 /api/notifications 无 GET/PUT /notifications/settings 端点，
+  // 通知偏好设置为后端能力待建设，原 getSettings / updateSettings 死链已删除。
 };
