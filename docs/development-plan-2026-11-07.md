@@ -4,7 +4,7 @@
 - 状态：开发计划草案；已确认架构方向，临床与机构决策尚待确认。
 - medicalassistant 基线：`f25ffa9388045786a40183b075ea4276bf1daf74`。
 - 计划范围：113.44 表单嵌入和接入、综合康复管理、肾脏 ICF 与质控、远程随访、多中心协作、联邦学习和同态加密。
-- 当前状态：已开始BASE01—BASE03与AUTH01部分基础工作；其余任务未完成。运行和验证记录见[基线核查记录](./baseline-2026-11-07.md)，不代表功能已上线或完成临床验证。
+- 当前状态：BASE01—BASE03（集合与 schema 收敛）、AUTH01（康复/设备/统计域对象级授权）已实质推进；WS01、FU01、EMB01 隔离试点及 113.44 侧 API03 部分推进；WS01 契约冻结未做，FU01-S2 与 WS03 read_receipt 工作区在途未提交。逐项完成标准对照见 §9 交付记录，当前待决策见 §10。运行和验证记录见[基线核查记录](./baseline-2026-11-07.md)，不代表功能已上线或完成临床验证。
 - 身份契约：[113.44与medicalassistant统一身份及授权契约草案](./identity-integration-contract.md)；接口、单点登录、嵌入和跨平台撤权尚未实现。
 - 设备前置评估：[Joeme Fit / Veepoo SDK接入评估](./device-sdk-assessment-2026-11-07.md)；当前仅核查原生SDK文档，没有真实设备验证。
 - 用户已确认首期设备目标为 JMD-540 和 Android；固件版本、支持指标与实机结果待确认。
@@ -108,7 +108,7 @@ flowchart TD
 
 ## 4. 工作包与开发任务
 
-除BASE01—BASE03、AUTH01及审计和前端基础已开展部分工作外，任务均未完成；上述事项尚未完整验收。负责人栏为责任角色，具体姓名和排期在 D10 后填写。提到的新目录与接口均是拟建位置，不代表代码已存在。
+除 §9 交付记录（2026-11-08）列明已实质推进的任务外，任务均未完成；已开展事项均尚未完整验收。负责人栏为责任角色，具体姓名和排期在 D10 后填写。提到的新目录与接口均是拟建位置，不代表代码已存在。
 
 ### WP0：环境、基线与安全基础
 
@@ -344,5 +344,74 @@ M1中的API05可先通过契约测试客户端验证初始化、并发变更与�
 2. FORM01与API01：复核肾病项目表单清单、版本和接口契约；不修改线上业务表单和患者记录。
 3. 同步开展D01—D12决策，优先身份协议与撤权时限、数据驻留、机构节点和隐私计算任务，避免临近验收才发现架构不成立。
 4. 决策通过后按依赖启动API02—API06、DATA01及EMB01；临床与算法工作包并行。
+
+## 9. 交付记录（2026-11-08）
+
+按 §8.2 约定以任务 ID 记录。覆盖本会话批次 fc3c776 → 415dba5 共 40 个提交（medicalassistant）及 113.44 仓库同期 4 条集成提交。责任人未定（D10 未决策）；无上线版本（全部未部署）。测试数字均引自各提交 message 或 [基线核查记录](./baseline-2026-11-07.md)，未注明实跑者即为提交时点数字。
+
+### AUTH01（进行中，部分满足）
+
+- 交付物：1629e6d（rehabilitation 26 端点 + agent 8 端点补强制认证）、2496a8e、119163c + e79f1d7（权限审计身份提取与中间件注册）、836d160（康复患者端点对象级授权第一层，`backend/app/core/dependencies.py` 共享 ensure_patient_access）、7c5d690（康复第二层：13 个 plan_id/assessment_id 端点归属校验，rehabilitation_router TODO(AUTH01) 清零）、cb4811a（设备域 8 处 TODO 清零：device_router / device_analysis_router）、5f9d342 / bf27efe / 37684dc（设备域守卫修复与角色语义统一）、4b55c15（/doctors/patient-monitoring/{id} 由存根改真实聚合并补对象级授权）、b5f9fbe（TOKEN_COOKIE_NAME）、1f6c611（演示凭据双重门控）。
+- 完成标准对照：康复域与设备域对象级授权已落地（满足部分）；通用自助资料接口与演示账号认证收紧为此前批次完成（计划文档头部「账号安全基础已开始收紧」行已记录）。未满足：其余域（健康档案、通信、随访、管理端、followup 试点路由）对象级覆盖未逐域核验；「重启/多 worker 验证」未做；113.44 侧权威主体对接（AUTH03/AUTH04 依赖）未开始。
+- 测试证据：cb4811a 时点全量 347 passed / 22 skipped；rehab 授权契约 16 例（7c5d690）、device 契约 25+17 例（cb4811a）、analytics 契约 31 例（4b55c15）。
+- 遗留：baseline 记录的 21 处 TODO(AUTH01) 中康复与设备域已清零，其余域未见对应处置提交。
+
+### BASE03（进行中，部分满足）
+
+- 交付物：9133342（集合名统一到服务层正典集合 followup_records/rehab_plans/rehab_progress；附 `backend/scripts/migrate_legacy_collections.py`，默认 dry-run、显式 --apply、永不删除；8 迁移测试）、e7e8706（健康档案服务层对齐生效 schema）、9dfabcc（孤儿集合读取标记 TODO(orphan-read) + 6 例空库安全测试）、44884fb（FU01-S1 随访 schema 收敛，见 FU01 条目）。
+- 完成标准对照：「确定唯一领域入口」在 followup 领域进行中——`backend/app/services/followup_service.py` 与路由收敛测试已存在工作区但未提交（FU01-S2 在途）；rehab 域两代集合名已统一。「形成数据与调用图」未成文交付。迁移脚本满足「不以只注册路由掩盖结构问题」的最低要求，但 legacy 集合处置（迁移 vs 归档）待决策（FU01 D-4、orphan-read）。
+- 测试证据：9133342 时点全量 156 passed / 22 skipped；44884fb 后 215 / 22；b50c7a5 后 230 / 22。
+
+### WS01（进行中，部分满足——「冻结契约」未达成）
+
+- 交付物：731f968（[WS01 消息结构盘点](./wp5-ws01-message-structure-inventory-2026-11-07.md)，11 个契约冻结决策点 D1—D11 + 8 步实施序）、135a5d9（WS 消息真实落库、DB 失败不广播、client_message_id 幂等键 HTTP/WS 共用、会话成员校验 4403、结构 A 死代码删除；15 契约测试）、214e54f（partial unique 索引基建 `backend/app/db/indexes.py` + 消息分页/同步游标改按 _id 单调；15→20 契约测试）。
+- 决策点冻结状态：D4（幂等键）已按盘点建议实现、待评审追认冻结；D7（事件信封）部分落地（message/ack/error/typing 在用，server_seq 未实现）；D10（通知边界）离线→通知桥保留（135a5d9/b335c69）；D11 转入 WS04 设计稿（054cdb5）。**未冻结**：D1 会话成员模型、D2 中心/诊疗授权字段、D3 ConversationPolicy、D5 已读语义、D6 删除语义、D8 附件、D9 连接凭据——均无决议记录。
+- WS03 read_receipt：工作区已实现（websockets.py 落库+广播、communication_service.py mark_conversation_as_read、test_communication_contract.py +223 行），**未提交**，不计入完成。
+- 完成标准对照：「不丢历史或既有功能」——迁移脚本与存量文档兼容路径有测试覆盖（部分）；「明确真实对话成员、中心及诊疗授权」未满足（D1/D2 开放）；「冻结统一契约」未满足。
+
+### WS04（未开始实现；设计稿已交付）
+
+- 交付物：054cdb5（[多 worker 广播设计稿](./wp5-ws04-multiworker-design-draft-2026-11-07.md)：影响面 I1—I7、四案对比、推荐 A2 capped collection + C1 单 worker 护栏先行、§7 六项用户决策）。
+- 完成标准对照：未满足（跨 worker 广播、broker 故障、慢消费者均不可验证；ConnectionManager 仍为进程内存单例）。
+
+### FU01（进行中；S1/S3/S4 已提交，S2 在途，S5/S6 未开始）
+
+- S1 完成：44884fb（schemas/followup.py 拆出为唯一契约、第一代死定义删除、FollowUpStatus 扩展占位、metadata.* 缝合写入清零；215 passed / 22 skipped）。
+- S3 完成：b50c7a5（迁移脚本 enrich 升级：legacy_source 打标、status/cancelled 拼写映射、dry-run 差异报告；节点增强字段全 Optional 免回填；迁移测试 8→17 例；230 passed / 22 skipped）。
+- S4 完成：fbfec82（IntegrationFillTask 更名 FollowUpFillTask、fill_sessions[] 多会话化、创建/confirm 与随访节点联动核验；forms 契约 13→22 例；282 passed / 22 skipped）。
+- S2 在途：`backend/app/services/followup_service.py`、doctor_router/health_manager_router/health_record_router 收敛改动、test_followup_route_convergence.py / test_followup_service_contract.py 均在工作区**未提交**，完成与否以提交后验收为准。
+- S5/S6 未开始。D-2（手工录入语义）阻塞 S5；D03（=D-1）阻塞 form_binding 升级（S4 已按「结构先行、语义待定」以直传 remote_refs 实现）。
+- 完成标准对照：「无假 ID」——doctor_router 假 POST 与 new_follow_up_id 在 S2 在途改动中处置，未提交前不算满足；「任务与答卷状态分别建模」S4 已建立（部分）；「唯一随访领域服务」待 S2 提交。
+
+### EMB01 与集成试点（进行中，部分满足——隔离技术验证完成，正式条件未满足）
+
+- 交付物（本仓库）：a736855（forms 集成填报模块 + FormFillEmbedPage 严格 postMessage 校验 + 令牌仅存哈希）、0be9ead（fill-task 列表端点与医护任务列表页；任务创建留 API 驱动待 DATA01）、0da0ab3（E2E 修复 + [试点记录](./first-integration-pilot.md)）。
+- 交付物（113.44 仓库）：006a488（受控 fill-session API）、ad17bd5（SM4 试点 seed）、e44a10f（客户端密钥 SHA-256 → PBKDF2 加盐哈希 + 惰性迁移 + 双活轮换窗口默认 24h）、1b01f06（API03 只读目录与结果接口：scopes 默认拒绝、keyset 游标分页；评分/单位/缺失语义待 API04、限流未做、version_state 未映射枚举）。
+- 完成标准对照：CSP/frame-ancestors、跨站 Cookie（SameSite=None; Secure 仅委托会话）、一次性令牌重放拒绝、伪造 postMessage 忽略、患者归属默认拒绝已实测（试点文档）；**未满足**：撤权失效未验证、CSRF 未单列验收、可信 HTTPS/统一身份/患者账号关联未满足（计划 §11 行已声明）。API03 归属 WP1，见下。
+- 测试证据：113.44 全量 2438（试点时点）→ 2442（e44a10f）→ 2453 passed / 64 skipped（1b01f06 后，取自各自 commit message，本轮未实跑，见基线核查记录:82）；medicalassistant 试点时点 52 passed / 22 skipped。
+
+### 其余任务现状（2026-11-08 盘点）
+
+- API01/API02/API04—API06：未开始（113.44 侧 API03 已交付，见 EMB01 条）。
+- FORM01/FORM02：未开始（表单清单盘点无交付记录）。DATA01—DATA04：未开始。AUTH02—AUTH05：未开始。
+- CLIN01/CLIN02、REH01/REH02：未开始。REH03：部分前置（8ddd785 计划统计与运动趋势端点从真实聚合实现、原必 500；55f1808 前端接线；256 passed / 22 skipped）；四类干预规则与状态机未做。
+- AGT01/AGT02：未开始（72a5be3 删除 LLM 失败模拟回退、1f6c611 透出错误码属前置诚实化）。
+- FU02/FU03：未开始。QC01—QC05：未开始（4b55c15/6a39d90 统计域诚实化为 QC02 前置）。
+- REM01—REM05：未开始（D08 未决策）。WS02/WS05：未开始。
+- MC01—MC03、FED01—FED04、HE01—HE03、AC01—AC06：未开始。
+- 无任务 ID 的本批次交付：前端全面去模拟化与路径审计（2538970、89462c6、4c54b96、6a39d90、6756c0b、55f1808、415dba5）、通知域诚实化（b335c69）、医生随访页接真实 API（5c94557）、批次运行记录（88d075e）。
+
+## 10. 当前待决策清单（2026-11-08 汇总）
+
+汇总自计划 §3 与各设计稿决策位；原表不再逐条复制，此处登记条目与出处。
+
+1. **计划 §3 D01—D12**（本文件 :96-107）：12 条，全部开放。其中 D03/D05 与 FU01 设计稿 D-1/D-5 同源，D04/D11 阻塞 AUTH03/AUTH04 及 WS02。
+2. **FU01 设计稿 §六**（docs/wp3-fu01-domain-design-draft-2026-11-07.md:315-319）：D-1（=D03）、**D-2** 无表单随访手工录入语义（阻塞 S5）、**D-3** missed/overdue/lost 口径（阻塞 FU03）、**D-4** follow_ups 遗留造数迁移 vs 归档（阻塞 S3 收尾与迁移执行）、D-5（=D05）。新增开放 3 条（D-2/D-3/D-4）。
+3. **WS01 盘点 §4.2 D1—D11**（docs/wp5-ws01-message-structure-inventory-2026-11-07.md:154-164）：11 条开放；其中 D4 已按建议实现待评审追认冻结，D10 部分落地，D11 由 WS04 设计稿接手。冻结评审（盘点 WS01-a 步骤）未做。
+4. **WS04 设计稿 §七 1—6**（docs/wp5-ws04-multiworker-design-draft-2026-11-07.md:248-254）：是否引入 Redis、Mongo 转单节点 replica set、presence TTL/心跳数值、瞬态事件跨 worker 一致性、C1 过渡期验收口径、ws_events 容量与保留策略——6 条，全部待用户决策。
+5. **康复契约核查 §五**（docs/rehabilitation-contract-review-2026-11-07.md:68-72）：患者归属核验规则、四领域处方必需信息与签署职责、训练执行记录口径、生成依据与输出审查——4 条。另：RehabPlanForm 审核端 `modifications` 裸字典无字段白名单、含 `_id` 进 `$set` 的缺陷仍未修复（同文档 :23 记录；`backend/app/services/rehabilitation_service.py:134-137` 现状复核仍为透传）。
+6. **孤儿集合处置 TODO(orphan-read)**（backend/app/services/analytics_service.py:27、backend/app/services/report_scheduler_service.py:318；9dfabcc 登记三个选项）：rehabilitation_records / rehabilitation_sessions 迁移映射、归档或保留只读，待业务决策。
+
+共计约 40 条开放决策位（12+5+11+6+4+2，含同源项按出处分别计数）。发起清单中提及的 healthDataService / PersonalizedDashboard 决策位：在本仓库 docs/ 全部文档与全部提交 message 中 grep 未见对应记录，无法溯源，暂不列入；如有会话外出处请补充后再登记。
 
 本文为开发计划，未授权或执行生产修改、账号启用、数据迁移、外部共享、GitHub推送或上线。实施时沿用已明确的任务授权和对应环境的发布流程。
