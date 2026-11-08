@@ -1,0 +1,20 @@
+name: rehabman-mongodb
+
+services:
+  mongo:
+    image: mongo:7.0.16
+    command: ["mongod", "--replSet", "rehab_rs", "--bind_ip_all"]
+    ports:
+      - "127.0.0.1:${REHAB_MONGO_PORT:-37021}:27017"
+    volumes:
+      - data:/data/db
+      - ./init-replica.js:/opt/rehab/init-replica.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "if (!db.hello().isWritablePrimary) quit(1)"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  data:
