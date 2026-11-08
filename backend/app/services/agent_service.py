@@ -573,7 +573,7 @@ class AgentService:
                 message=f"解析LLM康复计划响应失败: {str(e)}",
                 service_name="llm",
             )
-    
+
     async def generate_assessment_analysis(self, assessment_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """生成康复评估分析与建议"""
         require_llm_api_key()
