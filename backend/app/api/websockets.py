@@ -112,16 +112,6 @@ class ConnectionManager:
                 except Exception as e:
                     logger.error(f"Error sending notification to user {user_id}: {str(e)}")
     
-    async def broadcast(self, message: Dict[str, Any], exclude_user_id: Optional[str] = None):
-        """向所有连接的用户广播消息，可选择排除特定用户"""
-        for user_id, connections in self.active_connections.items():
-            if user_id != exclude_user_id:
-                for connection_id, websocket in connections.items():
-                    try:
-                        await websocket.send_json(message)
-                    except Exception as e:
-                        logger.error(f"Error broadcasting message to user {user_id}: {str(e)}")
-    
     def get_active_users_in_chat(self, conversation_id: str) -> Set[str]:
         """获取聊天室中的活跃用户ID集合"""
         if conversation_id in self.chat_rooms:
@@ -247,7 +237,11 @@ def setup_websockets(app: FastAPI):
                             "message": message_response,
                         })
                     elif message_data.get("type") == "typing":
-                        # 广播用户正在输入状态
+                        # 纯瞬态信号（WS03 处置：维持仅转发，不落库）。理由：
+                        # 1) "正在输入"无持久化语义，落库反而不诚实；
+                        # 2) 房间内成员均已在入房时通过 is_conversation_participant
+                        #    校验，转发只发生在已校验房间内，逐帧重复查库纯属浪费；
+                        # 3) 前端（chatWsService.ts）明确不发送不消费该帧。
                         await manager.send_chat_message(
                             {
                                 "type": "typing",
@@ -258,21 +252,35 @@ def setup_websockets(app: FastAPI):
                             conversation_id
                         )
                     elif message_data.get("type") == "read_receipt":
-                        # 处理消息已读回执
-                        message_ids = message_data.get("message_ids", [])
-                        if message_ids:
-                            # 更新消息状态为已读
-                            # 这里可以添加数据库更新代码
-                            
-                            # 广播消息已读状态
-                            await manager.send_chat_message(
-                                {
-                                    "type": "read_receipt",
-                                    "user_id": user_id,
-                                    "message_ids": message_ids
-                                },
-                                conversation_id
-                            )
+                        # WS03：已读回执真实落库。语义与 REST
+                        # PUT /communications/conversations/{id}/read 一致——把本会话中
+                        # 发给当前用户的所有未读消息标记已读（HTTP/WS 共用同一服务方法，
+                        # DB 单一事实源）；落库成功后由服务方法向房间广播 read_receipt
+                        # 帧（conversation_id/reader_id/message_ids/read_at），对方客户端
+                        # 实时感知"对方已读"。落库失败回错误帧，不广播。
+                        # 帧不携带消息粒度：单条已读走 REST
+                        # PUT /communications/messages/{message_id}/read。
+                        if not await CommunicationService.is_conversation_participant(db, conversation_id, user_id):
+                            # 连接期间被移出会话：与 message 分支同语义，拒绝并断连
+                            await websocket.send_json({
+                                "type": "error",
+                                "error_code": "NOT_CONVERSATION_PARTICIPANT",
+                                "message": "用户不是该会话参与者",
+                            })
+                            manager.disconnect(user_id, connection_id)
+                            await websocket.close(code=4403)
+                            return
+                        try:
+                            await CommunicationService.mark_conversation_as_read(db, conversation_id, user_id)
+                        except Exception as e:
+                            # 数据库失败：向发送者回错误帧，不广播
+                            logger.error(f"Failed to persist read receipt in conversation {conversation_id}: {str(e)}")
+                            await websocket.send_json({
+                                "type": "error",
+                                "error_code": "READ_RECEIPT_PERSIST_FAILED",
+                                "message": "已读回执落库失败，请重试",
+                            })
+                            continue
             except WebSocketDisconnect:
                 # 用户断开连接
                 manager.disconnect(user_id, connection_id)
@@ -349,4 +357,4 @@ def setup_websockets(app: FastAPI):
 
 # 暴露管理器实例，供其他模块使用
 def get_connection_manager():
-    return manager 
+    return manager

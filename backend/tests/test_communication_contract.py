@@ -6,6 +6,9 @@ WS01 通信契约测试
 - client_message_id 幂等键（HTTP 与 WS 入站同键，重复投递返回既有消息不重复落库）
 - WS：非成员入房被拒（close 4403 / NOT_CONVERSATION_PARTICIPANT）、
   成员发消息落库且广播载荷带真实服务端 id、重复 client_message_id 幂等
+- WS03 已读回执：read_receipt 帧真实落库 + 广播形状（conversation_id/reader_id/
+  message_ids/read_at）、非成员拒绝、落库失败错误帧不广播、
+  read_at 谓词怪癖修正（广播不依赖墙钟秒边界）
 - 死代码删除后 import app.main 正常（本模块顶部 import 即隐式覆盖）
 """
 import asyncio
@@ -217,6 +220,13 @@ class UniqueRaceCollection(FakeCollection):
                         (doc["conversation_id"], doc["sender_id"], doc["client_message_id"]):
                     raise DuplicateKeyError("E11000 duplicate key")
         return await super().insert_one(doc)
+
+
+class ExplodingUpdateManyCollection(FakeCollection):
+    """模拟 mark 路径数据库故障：update_many 一律抛错（find 正常）。"""
+
+    async def update_many(self, query, update):
+        raise RuntimeError("db down")
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +522,201 @@ class ObjectIdPaginationTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+# WS03 已读回执（服务层：mark_conversation_as_read / mark_message_as_read）
+# ---------------------------------------------------------------------------
+
+class _StubManager:
+    """捕获服务层广播的连接管理器桩。"""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send_chat_message(self, message, conversation_id):
+        self.sent.append((message, conversation_id))
+
+    def get_active_users_in_chat(self, conversation_id):
+        return set()
+
+
+class _ScriptedDatetime:
+    """按脚本逐次返回 utcnow()，超次数调用即失败——用于钉死
+    mark_conversation_as_read 不再调用第二个 utcnow 构造时间谓词。"""
+
+    def __init__(self, moments):
+        self._moments = list(moments)
+
+    def utcnow(self):
+        if not self._moments:
+            raise AssertionError(
+                "utcnow 被调用次数超出脚本：疑似重新引入双时钟 read_at 谓词"
+            )
+        return self._moments.pop(0)
+
+
+class MarkConversationAsReadTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.db = FakeDB()
+        self.alice = make_user("Alice", "doctor")
+        self.bob = make_user("Bob", "patient")
+        self.conversation_id = seed_conversation(self.db, self.alice, self.bob)
+        self.manager = _StubManager()
+        self.manager_patch = patch(
+            "app.api.websockets.get_connection_manager",
+            return_value=self.manager,
+        )
+        self.manager_patch.start()
+
+    def tearDown(self):
+        self.manager_patch.stop()
+
+    async def test_marks_only_unread_messages_addressed_to_reader(self):
+        unread_1 = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "u1")
+        unread_2 = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "u2")
+        already_read = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "r")
+        already_read["read"] = True
+        old_read_at = datetime(2025, 1, 1)
+        already_read["read_at"] = old_read_at
+        # 发给 bob 的消息：alice 标已读不得波及
+        to_bob = make_message_doc(
+            self.conversation_id, str(self.alice["_id"]), str(self.bob["_id"]), "to-bob")
+        self.db.messages.docs.extend([unread_1, unread_2, already_read, to_bob])
+
+        marked = await CommunicationService.mark_conversation_as_read(
+            self.db, self.conversation_id, str(self.alice["_id"]),
+        )
+
+        self.assertEqual(marked, 2)  # REST 路由 marked_count 契约：返回 int
+        self.assertEqual(len(self.manager.sent), 1)
+        broadcast, broadcast_conversation_id = self.manager.sent[0]
+        self.assertEqual(broadcast_conversation_id, self.conversation_id)
+        # 广播形状：conversation_id / reader_id / message_ids / read_at
+        self.assertEqual(broadcast["type"], "read_receipt")
+        self.assertEqual(broadcast["conversation_id"], self.conversation_id)
+        self.assertEqual(broadcast["reader_id"], str(self.alice["_id"]))
+        self.assertEqual(
+            sorted(broadcast["message_ids"]),
+            sorted([str(unread_1["_id"]), str(unread_2["_id"])]),
+        )
+        self.assertIsNotNone(datetime.fromisoformat(broadcast["read_at"]))
+
+        # 落库：仅发给 alice 的未读消息被标记
+        self.assertTrue(unread_1["read"])
+        self.assertTrue(unread_2["read"])
+        self.assertIsInstance(unread_1["read_at"], datetime)
+        # 已读消息不被触碰（read_at 保持原值）
+        self.assertEqual(already_read["read_at"], old_read_at)
+        # 发给 bob 的消息不受 alice 的已读操作影响
+        self.assertFalse(to_bob["read"])
+
+    async def test_get_then_explicit_mark_emits_receipt_once(self):
+        message = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "m")
+        self.db.messages.docs.append(message)
+        messages = await CommunicationService.get_messages(
+            self.db, self.conversation_id, str(self.alice["_id"]))
+        marked = await CommunicationService.mark_conversation_as_read(
+            self.db, self.conversation_id, str(self.alice["_id"]))
+        self.assertTrue(messages[0]["read"])
+        self.assertEqual(messages[0]["read_at"], message["read_at"].isoformat())
+        self.assertEqual(marked, 0)
+        self.assertEqual(len(self.manager.sent), 1)
+        self.assertEqual(self.manager.sent[0][0]["message_ids"], [str(message["_id"])])
+
+    async def test_duplicate_single_mark_preserves_first_read_time(self):
+        message = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "m")
+        self.db.messages.docs.append(message)
+        for _ in range(2):
+            self.assertTrue(await CommunicationService.mark_message_as_read(
+                self.db, str(message["_id"]), str(self.alice["_id"])))
+            if len(self.manager.sent) == 1:
+                first_read_at = self.manager.sent[0][0]["read_at"]
+        self.assertEqual(message["read_at"].isoformat(), first_read_at)
+        self.assertEqual(len(self.manager.sent), 1)
+
+    async def test_rest_read_operations_deny_removed_member_without_changes(self):
+        message = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "m")
+        self.db.messages.docs.append(message)
+        self.db.conversations.docs.clear()
+        app.dependency_overrides[get_database] = lambda: self.db
+        app.dependency_overrides[get_current_active_user] = lambda: self.alice
+        try:
+            async with httpx.AsyncClient(app=app, base_url="http://test") as client:
+                for endpoint in [f"conversations/{self.conversation_id}", f"messages/{message['_id']}"]:
+                    response = await client.put(f"/api/communications/{endpoint}/read")
+                    self.assertEqual(response.status_code, 403)
+        finally:
+            app.dependency_overrides.clear()
+        self.assertFalse(message["read"])
+        self.assertEqual(self.manager.sent, [])
+
+    async def test_noop_when_no_unread_messages(self):
+        marked = await CommunicationService.mark_conversation_as_read(
+            self.db, self.conversation_id, str(self.alice["_id"]),
+        )
+        self.assertEqual(marked, 0)
+        self.assertEqual(self.manager.sent, [])
+
+    async def test_broadcast_does_not_depend_on_second_boundary(self):
+        """read_at 怪癖回归测试：更新在 10:00:00.900 落库、旧实现若在下一秒
+        （10:00:01.000 截断后）反查将一无所获导致广播静默丢失；修正后
+        广播基于更新前取好的 _id 列表，且整个过程只调用一次 utcnow。"""
+        unread = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "u1")
+        self.db.messages.docs.append(unread)
+
+        update_moment = datetime(2026, 1, 1, 10, 0, 0, 900000)
+        scripted = _ScriptedDatetime([update_moment])
+        with patch("app.services.communication_service.datetime", scripted):
+            marked = await CommunicationService.mark_conversation_as_read(
+                self.db, self.conversation_id, str(self.alice["_id"]),
+            )
+
+        self.assertEqual(marked, 1)
+        self.assertEqual(len(self.manager.sent), 1)
+        broadcast, _ = self.manager.sent[0]
+        self.assertEqual(broadcast["message_ids"], [str(unread["_id"])])
+        self.assertEqual(broadcast["read_at"], update_moment.isoformat())
+        self.assertEqual(unread["read_at"], update_moment)
+
+    async def test_mark_message_as_read_broadcasts_same_shape(self):
+        message = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "m")
+        self.db.messages.docs.append(message)
+
+        success = await CommunicationService.mark_message_as_read(
+            self.db, str(message["_id"]), str(self.alice["_id"]),
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(len(self.manager.sent), 1)
+        broadcast, broadcast_conversation_id = self.manager.sent[0]
+        self.assertEqual(broadcast_conversation_id, self.conversation_id)
+        self.assertEqual(broadcast["type"], "read_receipt")
+        self.assertEqual(broadcast["conversation_id"], self.conversation_id)
+        self.assertEqual(broadcast["reader_id"], str(self.alice["_id"]))
+        self.assertEqual(broadcast["message_ids"], [str(message["_id"])])
+        self.assertTrue(message["read"])
+
+    async def test_mark_message_as_read_rejects_message_addressed_to_other(self):
+        message = make_message_doc(
+            self.conversation_id, str(self.alice["_id"]), str(self.bob["_id"]), "m")
+        self.db.messages.docs.append(message)
+
+        # alice 不是该消息的接收者：不落库、不广播
+        success = await CommunicationService.mark_message_as_read(
+            self.db, str(message["_id"]), str(self.alice["_id"]),
+        )
+        self.assertFalse(success)
+        self.assertEqual(self.manager.sent, [])
+        self.assertFalse(message["read"])
+
+
+# ---------------------------------------------------------------------------
 # WS 契约（/ws/chat/{conversation_id}）
 # ---------------------------------------------------------------------------
 
@@ -659,6 +864,67 @@ class WebSocketChatContractTests(unittest.TestCase):
             broadcast = self.skip_join(ws)
             self.assertEqual(broadcast["message"]["sender_id"], str(self.bob["_id"]))
         self.assertEqual(len(self.db.messages.docs), 1)
+
+    # ---- WS03：read_receipt 真实落库 ----
+
+    def test_ws_read_receipt_persists_and_broadcasts_shape(self):
+        m1 = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "m1")
+        m2 = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "m2")
+        self.db.messages.docs.extend([m1, m2])
+
+        with self.connect(self.alice) as ws:
+            ws.send_json({"type": "read_receipt"})
+            broadcast = self.skip_join(ws)
+
+        self.assertEqual(broadcast["type"], "read_receipt")
+        self.assertEqual(broadcast["conversation_id"], self.conversation_id)
+        self.assertEqual(broadcast["reader_id"], str(self.alice["_id"]))
+        self.assertEqual(
+            sorted(broadcast["message_ids"]),
+            sorted([str(m1["_id"]), str(m2["_id"])]),
+        )
+        self.assertIsNotNone(datetime.fromisoformat(broadcast["read_at"]))
+        # 落库验证：未读消息被标记已读
+        for doc in self.db.messages.docs:
+            self.assertTrue(doc["read"])
+            self.assertIsInstance(doc["read_at"], datetime)
+
+    def test_ws_read_receipt_rejected_for_member_removed_mid_session(self):
+        with self.connect(self.alice) as ws:
+            self.assertEqual(ws.receive_json()["type"], "user_joined")
+            # 连接期间被移出会话（入房校验已过，帧级成员校验须兜底）
+            self.db.conversations.docs.clear()
+            ws.send_json({"type": "read_receipt"})
+            error = ws.receive_json()
+
+        self.assertEqual(error["type"], "error")
+        self.assertEqual(error["error_code"], "NOT_CONVERSATION_PARTICIPANT")
+        # 与 message 分支同语义：拒绝并断连
+        # （close 帧由服务端发出；上下文退出即关闭，不另断言 close code）
+        self.assertEqual(len(self.db.messages.docs), 0)
+
+    def test_ws_read_receipt_persist_failure_sends_error_without_broadcast(self):
+        self.db.messages = ExplodingUpdateManyCollection()
+        m1 = make_message_doc(
+            self.conversation_id, str(self.bob["_id"]), str(self.alice["_id"]), "m1")
+        self.db.messages.docs.append(m1)
+
+        with self.connect(self.alice) as ws:
+            self.assertEqual(ws.receive_json()["type"], "user_joined")
+            ws.send_json({"type": "read_receipt"})
+            error = self.skip_join(ws)
+            self.assertEqual(error["type"], "error")
+            self.assertEqual(error["error_code"], "READ_RECEIPT_PERSIST_FAILED")
+            # 再次发送：仍只回错误帧——若误广播，这里会先收到 read_receipt 帧
+            ws.send_json({"type": "read_receipt"})
+            error2 = self.skip_join(ws)
+            self.assertEqual(error2["type"], "error")
+            self.assertEqual(error2["error_code"], "READ_RECEIPT_PERSIST_FAILED")
+
+        # 未落库
+        self.assertEqual(self.db.messages.docs[0]["read"], False)
 
 
 # ---------------------------------------------------------------------------

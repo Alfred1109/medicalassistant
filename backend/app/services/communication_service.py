@@ -254,21 +254,21 @@ class CommunicationService:
         messages = await cursor.to_list(length=limit)
         messages.reverse()  # 将消息按时间正序排列
         
-        # 格式化消息
+        # 保留读取即已读行为，并复用显式标读的授权、落库和事件路径。
+        incoming_ids = [str(message["_id"]) for message in messages
+                        if message.get("recipient_id") == user_id and not message.get("read", False)]
+        if incoming_ids:
+            await CommunicationService._mark_messages_as_read(db, conversation_id, user_id, incoming_ids)
+            refreshed = {str(doc["_id"]): doc async for doc in db.messages.find(
+                {"_id": {"$in": [ObjectId(mid) for mid in incoming_ids]}})}
+            messages = [refreshed.get(str(message["_id"]), message) for message in messages]
+
         for message in messages:
-            message["id"] = str(message["_id"])
-            del message["_id"]
+            message["id"] = str(message.pop("_id"))
             message["timestamp"] = message["timestamp"].isoformat()
-            
-            # 如果消息发送者不是当前用户，标记为已读
-            if message["sender_id"] != user_id and not message.get("read", False):
-                await db.messages.update_one(
-                    {"_id": ObjectId(message["id"])},
-                    {"$set": {"read": True, "read_at": datetime.utcnow()}}
-                )
-                message["read"] = True
-                message["read_at"] = datetime.utcnow().isoformat()
-        
+            if isinstance(message.get("read_at"), datetime):
+                message["read_at"] = message["read_at"].isoformat()
+
         return messages
     
     @staticmethod
@@ -426,94 +426,67 @@ class CommunicationService:
         return count
     
     @staticmethod
-    async def mark_message_as_read(
-        db: AsyncIOMotorClient,
-        message_id: str,
-        user_id: str
-    ) -> bool:
-        """将消息标记为已读"""
-        message = await db.messages.find_one({
-            "_id": ObjectId(message_id),
-            "recipient_id": user_id
-        })
-        
-        if not message:
-            return False
-        
-        result = await db.messages.update_one(
-            {"_id": ObjectId(message_id)},
-            {"$set": {"read": True, "read_at": datetime.utcnow()}}
-        )
-        
-        # 通过WebSocket推送消息状态更新
-        if result.modified_count > 0:
-            try:
-                from app.api.websockets import get_connection_manager
-                manager = get_connection_manager()
-                
-                # 发送消息状态更新
-                await manager.send_chat_message(
-                    {
-                        "type": "read_receipt",
-                        "user_id": user_id,
-                        "message_ids": [message_id]
-                    },
-                    message["conversation_id"]
-                )
-            except Exception as e:
-                logger.warning(f"推送消息已读状态失败: {str(e)}")
-        
-        return result.modified_count > 0
-    
-    @staticmethod
-    async def mark_conversation_as_read(
+    async def _mark_messages_as_read(
         db: AsyncIOMotorClient,
         conversation_id: str,
-        user_id: str
+        user_id: str,
+        message_ids: Optional[List[str]] = None,
     ) -> int:
-        """将对话中所有消息标记为已读"""
+        """所有已读入口的统一授权、持久化与事件路径。"""
+        if not await CommunicationService.is_conversation_participant(db, conversation_id, user_id):
+            raise ValueError("用户不是该会话参与者")
+        unread_filter = {
+            "conversation_id": conversation_id,
+            "recipient_id": user_id,
+            "read": False,
+        }
+        if message_ids is not None:
+            unread_filter["_id"] = {"$in": [ObjectId(mid) for mid in message_ids]}
+        marked_ids = [doc["_id"] async for doc in db.messages.find(unread_filter)]
+        if not marked_ids:
+            return 0
+        now = datetime.utcnow()
         result = await db.messages.update_many(
-            {
-                "conversation_id": conversation_id,
-                "recipient_id": user_id,
-                "read": False
-            },
-            {"$set": {"read": True, "read_at": datetime.utcnow()}}
+            {**unread_filter, "_id": {"$in": marked_ids}},
+            {"$set": {"read": True, "read_at": now}},
         )
-
-        # 通过WebSocket推送消息状态更新
-        if result.modified_count > 0:
+        if result.modified_count == 0:
+            return 0
+        # 精确取回本次写入，排除被并发请求先标读的文档。
+        persisted_ids = [str(doc["_id"]) async for doc in db.messages.find({
+            "_id": {"$in": marked_ids}, "read": True, "read_at": now,
+        })]
+        if persisted_ids:
             try:
-                # 获取标记为已读的消息ID
-                cursor = db.messages.find({
+                from app.api.websockets import get_connection_manager
+                await get_connection_manager().send_chat_message({
+                    "type": "read_receipt",
                     "conversation_id": conversation_id,
-                    "recipient_id": user_id,
-                    "read": True,
-                    "read_at": {"$gte": datetime.utcnow().replace(microsecond=0)}  # 近似查询刚被标记为已读的消息
-                })
-                
-                message_ids = []
-                async for message in cursor:
-                    message_ids.append(str(message["_id"]))
-                
-                if message_ids:
-                    from app.api.websockets import get_connection_manager
-                    manager = get_connection_manager()
-                    
-                    # 发送消息状态更新
-                    await manager.send_chat_message(
-                        {
-                            "type": "read_receipt",
-                            "user_id": user_id,
-                            "message_ids": message_ids
-                        },
-                        conversation_id
-                    )
+                    "reader_id": user_id,
+                    "message_ids": persisted_ids,
+                    "read_at": now.isoformat(),
+                }, conversation_id)
             except Exception as e:
-                logger.warning(f"推送对话已读状态失败: {str(e)}")
-        
+                logger.warning(f"推送已读状态失败: {str(e)}")
         return result.modified_count
-    
+
+    @staticmethod
+    async def mark_message_as_read(db: AsyncIOMotorClient, message_id: str, user_id: str) -> bool:
+        """接收者且仍为会话成员才能标读；重试保留首次已读时间。"""
+        if not ObjectId.is_valid(message_id):
+            return False
+        message = await db.messages.find_one({"_id": ObjectId(message_id), "recipient_id": user_id})
+        if not message:
+            return False
+        await CommunicationService._mark_messages_as_read(
+            db, message["conversation_id"], user_id, [message_id])
+        return True
+
+    @staticmethod
+    async def mark_conversation_as_read(db: AsyncIOMotorClient, conversation_id: str, user_id: str) -> int:
+        """标记会话中发给当前成员的未读消息；返回实际修改数量。"""
+        return await CommunicationService._mark_messages_as_read(db, conversation_id, user_id)
+
     @staticmethod
     async def delete_message(
         db: AsyncIOMotorClient,

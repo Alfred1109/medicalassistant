@@ -17,8 +17,8 @@
  * - 心跳：后端无应用层 ping/pong（未知 type 的入站帧被静默忽略，无法做往返探测），
  *   因此不发明私有心跳；保活依赖 uvicorn 协议层 ping，断连后靠本服务的重连 +
  *   页面 REST 轮询兜底。
- * - typing / read_receipt 服务端仅转发不落库（WS03 范围），已读状态仍以 REST 为准：
- *   本服务不发送、也不消费这两类帧，不假装已读回执实时生效。
+ * - 已读由 REST/WS 服务统一落库后广播 read_receipt；本服务校验后交给页面更新。
+ * - typing 为瞬态事件，本服务不发送也不消费。
  *
  * 设计：独立文件而非并入 chatService.ts——后者是无状态 REST/DTO 层，本文件是
  * 有状态连接生命周期管理器（重连退避、pending 队列、事件回调），职责分开后
@@ -50,7 +50,29 @@ export interface ChatWsStatusInfo {
   errorCode?: string;
 }
 
+export interface ChatReadReceipt {
+  conversation_id: string;
+  reader_id: string;
+  message_ids: string[];
+  read_at: string;
+}
+
+/** 只更新当前会话中由本用户发送、由回执读者接收的消息。 */
+export function applyChatReadReceipt(
+  messages: MessageDto[], receipt: ChatReadReceipt, conversationId: string | null, userId: string,
+): MessageDto[] {
+  if (receipt.conversation_id !== conversationId || receipt.reader_id === userId) return messages;
+  const ids = new Set(receipt.message_ids);
+  return messages.map((message) =>
+    message.conversation_id === conversationId && message.sender_id === userId &&
+    message.recipient_id === receipt.reader_id && ids.has(message.id)
+      ? { ...message, read: true, read_at: receipt.read_at }
+      : message
+  );
+}
+
 export interface ChatWsHandlers {
+  onReadReceipt?: (receipt: ChatReadReceipt) => void;
   onStatusChange?: (status: ChatWsStatus, info: ChatWsStatusInfo) => void;
   /** 房间广播的落库消息（含本人发送的消息，页面按 id/client_message_id 去重） */
   onBroadcastMessage?: (message: WsChatMessage) => void;
@@ -82,6 +104,7 @@ function parseServerMessage(value: unknown): WsChatMessage | null {
 }
 
 type ServerFrame =
+  | { kind: 'read_receipt'; receipt: ChatReadReceipt }
   | { kind: 'broadcast'; message: WsChatMessage }
   | { kind: 'ack'; message: WsChatMessage; clientMessageId: string | null }
   | { kind: 'error'; errorCode: string; errorMessage?: string }
@@ -96,6 +119,14 @@ function parseServerFrame(raw: string): ServerFrame {
   }
   if (!isRecord(data) || typeof data.type !== 'string') return { kind: 'ignored' };
 
+  if (data.type === 'read_receipt') {
+    if (typeof data.conversation_id !== 'string' || typeof data.reader_id !== 'string' ||
+        !Array.isArray(data.message_ids) || !data.message_ids.every((id) => typeof id === 'string') ||
+        typeof data.read_at !== 'string' || Number.isNaN(Date.parse(data.read_at))) {
+      return { kind: 'ignored' };
+    }
+    return { kind: 'read_receipt', receipt: data as unknown as ChatReadReceipt };
+  }
   if (data.type === 'message') {
     const message = parseServerMessage(data.message);
     return message ? { kind: 'broadcast', message } : { kind: 'ignored' };
@@ -115,7 +146,7 @@ function parseServerFrame(raw: string): ServerFrame {
       errorMessage: typeof data.message === 'string' ? data.message : undefined,
     };
   }
-  // user_joined / user_left / typing / read_receipt / notification_count 等：本轮不消费
+  // user_joined / user_left / typing / notification_count 等：本轮不消费
   return { kind: 'ignored' };
 }
 
@@ -293,6 +324,9 @@ export class ChatWsClient {
     if (typeof data !== 'string') return;
     const frame = parseServerFrame(data);
     switch (frame.kind) {
+      case 'read_receipt':
+        this.handlers.onReadReceipt?.(frame.receipt);
+        break;
       case 'broadcast':
         // 本人消息的广播先于 ack 到达时，也直接结算 pending（幂等）
         if (frame.message.client_message_id) {

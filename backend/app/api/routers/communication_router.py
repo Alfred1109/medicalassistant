@@ -135,9 +135,10 @@ async def mark_message_as_read(
     """将特定消息标记为已读"""
     user_id = str(current_user["_id"])
     
-    success = await CommunicationService.mark_message_as_read(
-        db, message_id, user_id
-    )
+    try:
+        success = await CommunicationService.mark_message_as_read(db, message_id, user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     
     if not success:
         raise HTTPException(status_code=404, detail="消息不存在或无权操作")
@@ -154,9 +155,10 @@ async def mark_conversation_as_read(
     """将对话中所有消息标记为已读"""
     user_id = str(current_user["_id"])
     
-    marked_count = await CommunicationService.mark_conversation_as_read(
-        db, conversation_id, user_id
-    )
+    try:
+        marked_count = await CommunicationService.mark_conversation_as_read(db, conversation_id, user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     
     return {"marked_count": marked_count}
 
