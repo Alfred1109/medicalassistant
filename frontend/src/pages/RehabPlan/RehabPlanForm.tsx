@@ -1,3 +1,4 @@
+import httpClient from '../../services/httpClient';
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
@@ -52,8 +53,6 @@ import {
   fetchRehabPlanById
 } from '../../store/slices/rehabSlice';
 import { RehabPlan } from '../../types/rehab';
-import axios from 'axios';
-import { API_BASE_URL } from '../../config/constants';
 
 
 // 生成计划所需的患者信息类型
@@ -202,8 +201,8 @@ const RehabPlanForm: React.FC = () => {
     
     try {
       // 调用后端API生成计划
-      const response = await axios.post(
-        `${API_BASE_URL}/rehabilitation/plans/generate`,
+      const response = await httpClient.post(
+        `/rehabilitation/plans/generate`,
         patientInfo
       );
       
@@ -278,8 +277,8 @@ const RehabPlanForm: React.FC = () => {
       const modifications = { name, description, duration_weeks, frequency, exercises, notes };
       
       // 调用后端API确认计划
-      const response = await axios.post(
-        `${API_BASE_URL}/rehabilitation/plans/${modifiedPlan._id}/approve`,
+      const response = await httpClient.post(
+        `/rehabilitation/plans/${modifiedPlan._id}/approve`,
         { modifications, expected_updated_at: generatedPlan?.updated_at,
           expected_revision: generatedPlan?.content_revision }
       );

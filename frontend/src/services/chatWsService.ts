@@ -2,9 +2,8 @@
  * 医生/患者通信 WebSocket 服务（后端 /ws/chat/{conversation_id}）。
  *
  * 协议确认（backend/app/api/websockets.py + app/core/auth.py，commit 135a5d9）：
- * - 认证：get_current_user_ws 依次尝试 query 参数 token 与名为 access_token 的
- *   cookie。本系统登录流程不写 cookie（后端无任何 set_cookie 调用），access token
- *   仅存 localStorage，因此这里通过 ?token= 传递。token 缺失/失效时后端在 accept
+ * - 认证：统一登录使用同源 HttpOnly 会话 Cookie；legacy 模式使用 token 查询参数。
+ *   transport 先验证配置，统一登录不会读取或发送 localStorage bearer。失效时后端在 accept
  *   前直接 close(1008)（无错误帧）；非会话成员则 accept 后先收到
  *   {"type":"error","error_code":"NOT_CONVERSATION_PARTICIPANT"} 再 close(4403)。
  * - 入站：{"type":"message","content":...,"client_message_id":...}；成功逐帧回
@@ -26,7 +25,7 @@
  */
 
 import { API_BASE_URL } from '../config/api';
-import { STORAGE_KEYS } from '../config/constants';
+import { authenticatedWebSocketUrl } from './authSession';
 import type { MessageDto } from './chatService';
 
 // 广播/ack 载荷比 REST MessageDto 多一个可选幂等键
@@ -173,7 +172,7 @@ export function resolveChatWsBaseUrl(): string {
     return withoutApi.replace(/^http/i, 'ws');
   }
   // 根相对路径：挂到当前页面 origin（http→ws / https→wss 由 replace 之外的分支处理）
-  return `${window.location.origin}${withoutApi}`;
+  return `${window.location.origin.replace(/^http/, 'ws')}${withoutApi}`;
 }
 
 // ---- 连接客户端 ----
@@ -192,6 +191,7 @@ export class ChatWsClient {
   private ws: WebSocket | null = null;
   private conversationId: string | null = null;
   private manualClose = false;
+  private connectionGeneration = 0;
   private attempt = 0;
   private reconnectTimer: number | null = null;
   private status: ChatWsStatus = 'idle';
@@ -224,28 +224,23 @@ export class ChatWsClient {
     this.openConnection(conversationId);
   }
 
-  private openConnection(conversationId: string): void {
+  private async openConnection(conversationId: string): Promise<void> {
     this.disconnect();
     this.manualClose = false;
     this.conversationId = conversationId;
 
-    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
-    if (!token) {
-      this.setStatus('degraded', { reason: 'auth' });
-      return;
-    }
-
-    const base = resolveChatWsBaseUrl();
-    const url = `${base}/ws/chat/${encodeURIComponent(conversationId)}?token=${encodeURIComponent(token)}`;
+    const generation = this.connectionGeneration;
     this.setStatus('connecting');
-
-    let ws: WebSocket;
+    let url: string;
     try {
-      ws = new WebSocket(url);
+      url = await authenticatedWebSocketUrl(`${resolveChatWsBaseUrl()}/ws/chat/${encodeURIComponent(conversationId)}`);
     } catch {
-      this.scheduleReconnect();
+      if (generation === this.connectionGeneration) this.setStatus('degraded', { reason: 'auth' });
       return;
     }
+    if (generation !== this.connectionGeneration || this.manualClose) return;
+    let ws: WebSocket;
+    try { ws = new WebSocket(url); } catch { this.scheduleReconnect(); return; }
     this.ws = ws;
 
     ws.onopen = () => {
@@ -281,6 +276,7 @@ export class ChatWsClient {
 
   /** 主动断开（切换会话/卸载页面），不触发重连 */
   disconnect(): void {
+    this.connectionGeneration += 1;
     this.manualClose = true;
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);

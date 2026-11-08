@@ -1,3 +1,4 @@
+import httpClient from '../../services/httpClient';
 import * as React from 'react';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
@@ -35,8 +36,6 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import InfoIcon from '@mui/icons-material/Info';
 import WarningIcon from '@mui/icons-material/Warning';
 import ErrorIcon from '@mui/icons-material/Error';
-import axios from 'axios';
-import { API_BASE_URL } from '../../config/constants';
 
 
 // 健康数据阈值接口
@@ -178,13 +177,13 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       setError(null);
 
       // 构建查询参数
-      let url = `${API_BASE_URL}/health/alerts/thresholds`;
+      let url = `/health/alerts/thresholds`;
       if (patientId) {
         url += `?patient_id=${patientId}`;
       }
 
       // 调用API获取阈值列表
-      const response = await axios.get(url);
+      const response = await httpClient.get(url);
       setThresholds(response.data);
     } catch (err) {
       console.error('加载健康数据阈值失败:', err);
@@ -320,8 +319,8 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       let response;
       if (currentThresholdId) {
         // 更新现有阈值
-        response = await axios.put(
-          `${API_BASE_URL}/health/alerts/thresholds/${currentThresholdId}`,
+        response = await httpClient.put(
+          `/health/alerts/thresholds/${currentThresholdId}`,
           submitData
         );
         setSnackbar({
@@ -331,8 +330,8 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
         });
       } else {
         // 创建新阈值
-        response = await axios.post(
-          `${API_BASE_URL}/health/alerts/thresholds`,
+        response = await httpClient.post(
+          `/health/alerts/thresholds`,
           submitData
         );
         setSnackbar({
@@ -374,7 +373,7 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       setLoading(true);
       
       // 获取阈值详情
-      const response = await axios.get(`${API_BASE_URL}/health/alerts/thresholds/${id}`);
+      const response = await httpClient.get(`/health/alerts/thresholds/${id}`);
       const threshold = response.data;
       
       // 转换为表单数据格式
@@ -431,7 +430,7 @@ const HealthThresholdManagement = ({ patientId }: HealthThresholdManagementProps
       setLoading(true);
       
       // 调用删除API
-      await axios.delete(`${API_BASE_URL}/health/alerts/thresholds/${currentThresholdId}`);
+      await httpClient.delete(`/health/alerts/thresholds/${currentThresholdId}`);
       
       setSnackbar({
         open: true,

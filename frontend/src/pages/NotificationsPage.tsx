@@ -1,17 +1,15 @@
+import { API_COLLECTION_PATHS } from '../config/apiPaths';
 import React, { useState, useEffect } from 'react';
 import { Box, Typography, Container, Paper, CircularProgress, Alert } from '@mui/material';
 import NotificationCenter from '../components/Patient/NotificationCenter';
 import api from '../services/api';
 import { Notification } from '../services/notificationService';
-import { useNavigate } from 'react-router-dom';
-import { ROUTES, STORAGE_KEYS } from '../config/constants';
 
 /**
  * 通知页面
  * 集成NotificationCenter组件，提供通知数据和操作
  */
 const NotificationsPage: React.FC = () => {
-  const navigate = useNavigate();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -21,20 +19,9 @@ const NotificationsPage: React.FC = () => {
     setLoading(true);
     setError(null);
     
-    // 检查token是否存在
-    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
-    if (!token) {
-      console.log('用户未登录，请先登录');
-      setError('您需要登录才能查看通知');
-      setLoading(false);
-      // 可选：重定向到登录页
-      // navigate(ROUTES.LOGIN);
-      return;
-    }
-    
     try {
       // 使用api服务而不是直接使用axios，api服务会自动添加token
-      const response = await api.get('notifications');
+      const response = await api.get(API_COLLECTION_PATHS.NOTIFICATIONS);
       setNotifications(response.data || []);
     } catch (error) {
       console.error('获取通知列表失败:', error);

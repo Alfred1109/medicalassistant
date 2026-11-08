@@ -1,6 +1,6 @@
+import { API_COLLECTION_PATHS } from '../../config/apiPaths';
+import httpClient from '../../services/httpClient';
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
-import axios from 'axios';
-import { API_BASE_URL } from '../../config/constants';
 import { ThunkApiConfig } from '../types';
 
 
@@ -74,7 +74,7 @@ export const fetchAgents = createAsyncThunk<Agent[], void, ThunkApiConfig>(
   'agents/fetchAgents',
   async (_, { rejectWithValue }) => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/agents`);
+      const response = await httpClient.get(API_COLLECTION_PATHS.AGENTS);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '获取助手列表失败');
@@ -86,7 +86,7 @@ export const fetchAgentById = createAsyncThunk<Agent, string, ThunkApiConfig>(
   'agents/fetchAgentById',
   async (id: string, { rejectWithValue }) => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/agents/${id}`);
+      const response = await httpClient.get(`/agents/${id}`);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '获取助手详情失败');
@@ -98,7 +98,7 @@ export const createAgent = createAsyncThunk<Agent, Partial<Agent>, ThunkApiConfi
   'agents/createAgent',
   async (agentData: Partial<Agent>, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/agents`, agentData);
+      const response = await httpClient.post(API_COLLECTION_PATHS.AGENTS, agentData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '创建助手失败');
@@ -114,7 +114,7 @@ export const updateAgent = createAsyncThunk<
   'agents/updateAgent',
   async ({ id, agentData }: { id: string; agentData: Partial<Agent> }, { rejectWithValue }) => {
     try {
-      const response = await axios.put(`${API_BASE_URL}/agents/${id}`, agentData);
+      const response = await httpClient.put(`/agents/${id}`, agentData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '更新助手失败');
@@ -126,7 +126,7 @@ export const deleteAgent = createAsyncThunk<string, string, ThunkApiConfig>(
   'agents/deleteAgent',
   async (id: string, { rejectWithValue }) => {
     try {
-      await axios.delete(`${API_BASE_URL}/agents/${id}`);
+      await httpClient.delete(`/agents/${id}`);
       return id;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '删除助手失败');
@@ -142,7 +142,7 @@ export const queryAgent = createAsyncThunk<
   'agents/queryAgent',
   async ({ id, query }: { id: string; query: string }, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/agents/${id}/query`, { query });
+      const response = await httpClient.post(`/agents/${id}/query`, { query });
       return response.data as AgentQueryResult;
     } catch (error: any) {
       const status: number | null = error?.response?.status ?? null;

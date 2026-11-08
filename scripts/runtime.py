@@ -194,6 +194,29 @@ def backend_python():
                          "set MEDICALASSISTANT_PYTHON or prepare backend/venv.")
 
 
+def verify_websocket_runtime(python):
+    """Import the selected Uvicorn protocol, not merely the HTTP server package.
+
+    Uvicorn's base installation can serve healthy HTTP while silently having no
+    WebSocket implementation. requirements.txt pins the chosen websockets backend.
+    """
+    probe = "from uvicorn.protocols.websockets.websockets_impl import WebSocketProtocol; assert callable(WebSocketProtocol)"
+    try:
+        result = subprocess.run([python, "-c", probe], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeFailure("Backend WebSocket protocol validation could not finish") from exc
+    if result.returncode:
+        raise RuntimeFailure("Selected backend Python lacks compatible Uvicorn WebSocket support. "
+                             "Install backend/requirements.txt into that environment before starting.")
+
+
+def backend_command(python, host, port):
+    # No automatic fallback to an HTTP-only Uvicorn installation.
+    return [python, "-m", "uvicorn", "app.main:app", "--host", host,
+            "--port", str(port), "--ws", "websockets"]
+
+
 def preflight():
     if os.environ.get("DEBUG", "false").lower() not in {
             "1", "0", "true", "false", "yes", "no", "on", "off", "y", "n", "t", "f"}:
@@ -204,6 +227,7 @@ def preflight():
     vite = ROOT / "frontend/node_modules/vite/bin/vite.js"
     if not node or not vite.is_file():
         raise RuntimeFailure("Node.js/Vite dependencies missing. Prepare frontend dependencies first.")
+    verify_websocket_runtime(python)
     # Use application configuration without importing app.main (which has side effects).
     # Fail closed on dependency, configuration or DB errors; never print credentials.
     probe = """
@@ -317,8 +341,8 @@ def start(check_only=False):
     children = []
     try:
         env = os.environ.copy()
-        child, record = spawn("backend", [python, "-m", "uvicorn", "app.main:app",
-            "--host", host, "--port", str(backend_port)], ROOT / "backend", env, ROOT / "logs")
+        child, record = spawn("backend", backend_command(python, host, backend_port),
+                              ROOT / "backend", env, ROOT / "logs")
         started.append(record); children.append(child); save_state(started)
         wait_http(child, f"http://{local}:{backend_port}/health", timeout, database=True)
         # Browser API URLs belong to the public deployment configuration. A

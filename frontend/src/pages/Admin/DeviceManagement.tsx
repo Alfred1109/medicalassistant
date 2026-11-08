@@ -1,3 +1,4 @@
+import { API_COLLECTION_PATHS } from '../../config/apiPaths';
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box,
@@ -49,7 +50,7 @@ const DeviceManagement: React.FC = () => {
       setError(null);
 
       try {
-        const response = await apiClient.get('/devices');
+        const response = await apiClient.get(API_COLLECTION_PATHS.DEVICES);
         if (!cancelled) {
           setDevices(Array.isArray(response.data) ? response.data : []);
         }

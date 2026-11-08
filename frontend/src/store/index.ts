@@ -26,10 +26,16 @@ import { api } from './api';
 // Redux持久化配置
 const persistConfig = {
   key: 'root',
-  version: 1,
+  version: 2,
   storage,
   // 白名单 - 只持久化这些reducer
-  whitelist: ['auth'],
+  // Authentication is always revalidated; never persist bearer or cookie identity projections.
+  whitelist: [],
+  migrate: async (state: any) => {
+    if (!state) return state;
+    const { auth: _oldAuthentication, ...remaining } = state;
+    return remaining;
+  },
   // 黑名单 - 不持久化这些reducer
   blacklist: ['ui'],
 };
@@ -47,11 +53,13 @@ const rootReducer = combineReducers({
 const persistedReducer = persistReducer(persistConfig, rootReducer);
 
 // 仅记录动作类型，避免在开发者控制台泄露患者数据、答卷或身份凭据。
-const logger: Middleware = () => (next) => (action) => {
+const logger: Middleware = (storeApi) => (next) => (action) => {
   if (import.meta.env.DEV && typeof action?.type === 'string') {
     console.debug(`Action: ${action.type}`);
   }
-  return next(action);
+  const result = next(action);
+  if (action?.type === 'auth/logout') storeApi.dispatch(api.util.resetApiState());
+  return result;
 };
 
 // 创建store

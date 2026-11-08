@@ -31,7 +31,7 @@ import { register, clearAuthError } from '../../store/slices/authSlice';
 const Register: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
-  const { loading, registerLoading, error } = useSelector((state: RootState) => state.auth);
+  const { loading, registerLoading, error, mode, loginUrl } = useSelector((state: RootState) => state.auth);
   
   // 使用registerLoading状态，如果不存在则回退到通用loading状态
   const isLoading = registerLoading !== undefined ? registerLoading : loading;
@@ -134,6 +134,12 @@ const Register: React.FC = () => {
       // Error is handled by the reducer
     }
   };
+
+  if (mode === 'oidc') {
+    return <Box><Typography variant="h6" gutterBottom>统一账号</Typography>
+      <Typography sx={{ mb: 2 }}>请在统一登录入口使用或创建问卷系统账号。</Typography>
+      <Button variant="contained" disabled={!loginUrl} onClick={() => { if (loginUrl) window.location.assign(loginUrl); }}>前往统一登录</Button></Box>;
+  }
 
   return (
     <Box component="form" onSubmit={handleSubmit} noValidate>

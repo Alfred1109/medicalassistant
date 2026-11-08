@@ -22,6 +22,7 @@ function fixture() {
     localStorage: { getItem: () => 'test-token' },
     window: { location: { origin: 'http://localhost' }, setTimeout, clearTimeout },
     require(name) {
+      if (name === './authSession') return { authenticatedWebSocketUrl: async url => url + '?token=test-token' };
       if (name === '../config/api') return { API_BASE_URL: 'http://localhost/api' };
       if (name === '../config/constants') return { STORAGE_KEYS: { TOKEN: 'token' } };
       throw new Error(`Unexpected import: ${name}`);
@@ -32,7 +33,7 @@ function fixture() {
 const receipt = { type: 'read_receipt', conversation_id: 'conversation', reader_id: 'patient',
   message_ids: ['own'], read_at: '2026-11-08T01:02:03.000Z' };
 
-test('real WS client validates and dispatches persisted receipts to the page update', () => {
+test('real WS client validates and dispatches persisted receipts to the page update', async () => {
   const { ChatWsClient, applyChatReadReceipt, sockets } = fixture();
   let messages = [
     { id: 'own', conversation_id: 'conversation', sender_id: 'doctor', recipient_id: 'patient', read: false },
@@ -45,6 +46,7 @@ test('real WS client validates and dispatches persisted receipts to the page upd
     messages = applyChatReadReceipt(messages, event, 'conversation', 'doctor');
   } });
   client.connect('conversation');
+  await new Promise(resolve => setImmediate(resolve));
   sockets[0].onmessage({ data: JSON.stringify(receipt) });
   assert.equal(callbacks, 1);
   assert.equal(messages[0].read, true);

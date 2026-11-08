@@ -15,6 +15,7 @@ from app.schemas.user import UserCreate, UserUpdate, UserResponse, Token, Permis
 from app.core.permissions import ROLE_PERMISSIONS, Permission
 from app.db.mongodb import get_database
 from app.services.audit_log_service import AuditLogService
+from app.integrations.identity.access import reject_legacy_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +278,7 @@ class UserService:
             query["role"] = role
         
         users = await self.db.users.find(query).skip(skip).limit(limit).to_list(length=limit)
-        return [self._user_doc_to_response(user) for user in users]
+        return [self._map_user_to_schema(user) for user in users]
         
     async def get_doctors(self, 
                           status: Optional[str] = None, 
@@ -405,6 +406,7 @@ class UserService:
         
     async def authenticate_user(self, email: str, password: str) -> Optional[Dict[str, Any]]:
         """Authenticate a user"""
+        reject_legacy_credentials()
         logger.info(f"[AUTH] 开始认证用户: {email}")
         user = await self.get_user_by_email(email)
         
@@ -443,6 +445,7 @@ class UserService:
         
     async def create_token(self, user: Dict[str, Any]) -> Token:
         """Create access token for user"""
+        reject_legacy_credentials()
         user_obj = self._map_user_to_schema(user)
         expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         
@@ -460,6 +463,7 @@ class UserService:
     
     async def create_token_with_refresh(self, user: Dict[str, Any]) -> TokenResponse:
         """创建包含刷新令牌的访问令牌"""
+        reject_legacy_credentials()
         user_obj = self._map_user_to_schema(user)
         
         # 创建访问令牌 (短期)
@@ -505,6 +509,7 @@ class UserService:
     
     async def refresh_access_token(self, refresh_token: str) -> TokenResponse:
         """使用刷新令牌获取新的访问令牌"""
+        reject_legacy_credentials()
         try:
             # 解析刷新令牌
             payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM],

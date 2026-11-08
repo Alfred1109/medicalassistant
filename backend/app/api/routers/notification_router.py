@@ -7,7 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from ...core.auth import get_current_user
 from ...db.mongodb import get_database
 from ...models.communication import Notification
-from ...models.user import User
+from app.schemas.user import UserResponse
 from ...services.notification_service import NotificationService
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -19,29 +19,29 @@ async def get_notifications(
     type: Optional[str] = None,
     read: Optional[bool] = None,
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """获取当前用户的通知"""
-    user_id = current_user["_id"]
+    user_id = current_user.id
     return await NotificationService.get_notifications(db, user_id, limit, skip, type, read)
 
 @router.get("/unread/count", response_model=int)
 async def get_unread_count(
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """获取未读通知数量"""
-    user_id = current_user["_id"]
+    user_id = current_user.id
     return await NotificationService.get_unread_count(db, user_id)
 
 @router.put("/{notification_id}/read")
 async def mark_as_read(
     notification_id: str,
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """将特定通知标记为已读"""
-    user_id = current_user["_id"]
+    user_id = current_user.id
     success = await NotificationService.mark_as_read(db, notification_id, user_id)
     
     if not success:
@@ -55,10 +55,10 @@ async def mark_as_read(
 @router.put("/read-all")
 async def mark_all_as_read(
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """将所有通知标记为已读"""
-    user_id = current_user["_id"]
+    user_id = current_user.id
     modified_count = await NotificationService.mark_all_as_read(db, user_id)
     
     return {"message": f"共{modified_count}条通知已标记为已读"}
@@ -67,10 +67,10 @@ async def mark_all_as_read(
 async def delete_notification(
     notification_id: str,
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """删除特定通知"""
-    user_id = current_user["_id"]
+    user_id = current_user.id
     success = await NotificationService.delete_notification(db, notification_id, user_id)
     
     if not success:
@@ -84,10 +84,10 @@ async def delete_notification(
 @router.delete("/clear-all")
 async def clear_all_notifications(
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """清空所有通知"""
-    user_id = current_user["_id"]
+    user_id = current_user.id
     deleted_count = await NotificationService.clear_all_notifications(db, user_id)
     
     return {"message": f"共{deleted_count}条通知已清空"} 

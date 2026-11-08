@@ -26,6 +26,7 @@ from app.db.mongodb import get_database
 from app.main import app
 from app.services.communication_service import CommunicationService
 from app.services.notification_service import NotificationService
+from app.schemas.user import UserResponse
 
 OBJECT_ID_PATTERN = re.compile(r"^[0-9a-f]{24}$")
 
@@ -390,7 +391,8 @@ class NotificationRouterContractTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_database] = lambda: db
 
         async def fake_current_user():
-            return bob
+            return UserResponse(id=str(bob["_id"]), name=bob["name"], email="bob@example.com",
+                role=bob["role"], is_active=True, createdAt=datetime.utcnow(), updatedAt=datetime.utcnow())
 
         app.dependency_overrides[get_current_user] = fake_current_user
         # follow_redirects：路由为 "/notifications/"，前端实际请求 /notifications 靠 307 跟随

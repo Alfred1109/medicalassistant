@@ -42,6 +42,15 @@ function fixture(token = 'token-A', apiRoot, prefix) {
   const loaded = new Module(filename, module);
   loaded.filename = filename;
   loaded.paths = Module._nodeModulePaths(__dirname);
+  const inheritedRequire = loaded.require.bind(loaded);
+  let proxy;
+  proxy = new Proxy(axios, { get(target, key) {
+    if (key === 'default') return proxy;
+    if (key === 'get') return (url, ...args) => url.endsWith('/auth/config')
+      ? Promise.resolve({ data: { mode: 'legacy' } }) : axios.get(url, ...args);
+    return Reflect.get(target, key);
+  } });
+  loaded.require = (name) => name === 'axios' ? proxy : inheritedRequire(name);
   loaded._compile(compile(apiRoot, prefix), filename);
   const actions = loaded.exports;
   const store = configureStore({ reducer: { auth: actions.default } });

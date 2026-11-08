@@ -22,6 +22,10 @@ from app.api.routers import health_record_router
 from app.db.mongodb import connect_to_mongodb, close_mongodb_connection, DatabaseConnectionError, db as mongodb_state
 # 启动期索引基建（通信域唯一索引等）
 from app.db.indexes import ensure_communication_indexes
+from app.integrations.identity.config import oidc_settings
+from app.integrations.identity.service import ensure_identity_indexes
+from app.integrations.identity.router import router as identity_router
+from app.integrations.identity.access import IdentityCsrfMiddleware
 
 # 导入WebSocket服务
 from app.api.websockets import setup_websockets
@@ -45,6 +49,7 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     description="A dynamic agent system for medical rehabilitation assistance",
     version="0.1.0",
+    root_path=settings.MEDICALASSISTANT_ROOT_PATH,
 )
 
 # 异常处理中间件
@@ -87,6 +92,7 @@ async def add_process_time_header(request: Request, call_next):
 # 直接短路、不会进入审计，且所有响应（含被审计路径）仍携带 CORS 头。
 # 审计为旁路记录：身份从 JWT 解出、落库失败仅记日志，不影响业务请求。
 app.add_middleware(PermissionAuditMiddleware)
+app.add_middleware(IdentityCsrfMiddleware)
 
 # 配置CORS
 origins = settings.BACKEND_CORS_ORIGINS
@@ -129,6 +135,8 @@ async def startup_db_client():
 
         # 启动期声明通信域索引（幂等；失败仅告警，不阻断启动）
         await ensure_communication_indexes(mongodb_state.db)
+        if oidc_settings.enabled:
+            await ensure_identity_indexes(mongodb_state.db)
     except DatabaseConnectionError as e:
         logger.critical(f"Failed to connect to database: {str(e)}")
         # 不启动无法访问数据库的服务。
@@ -243,6 +251,7 @@ app.include_router(analytics_router, prefix="/api", tags=["analytics"])
 # 表单平台（113.44）集成填报路由
 from app.integrations.forms.router import router as integration_forms_router
 app.include_router(integration_forms_router, prefix="/api", tags=["form-integration"])
+app.include_router(identity_router, prefix="/api")
 
 @app.get("/api")
 async def api_root():

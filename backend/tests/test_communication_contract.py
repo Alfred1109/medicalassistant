@@ -30,8 +30,16 @@ from app.db.indexes import ensure_communication_indexes
 from app.db.mongodb import get_database
 from app.main import app
 from app.services.communication_service import CommunicationService
+from app.schemas.user import UserResponse
 
 OBJECT_ID_PATTERN = re.compile(r"^[0-9a-f]{24}$")
+
+
+def authenticated_user(doc):
+    """Authentication's real contract is a response model, not a Mongo dictionary."""
+    return UserResponse(id=str(doc["_id"]), email=doc.get("email", "actor@example.com"),
+        name=doc["name"], role=doc["role"], is_active=True,
+        createdAt=datetime.utcnow(), updatedAt=datetime.utcnow())
 
 
 def run(coro):
@@ -253,7 +261,7 @@ class RestCommunicationContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("is_group", stored)
 
         async def fake_current_user():
-            return alice
+            return authenticated_user(alice)
 
         app.dependency_overrides[get_current_active_user] = fake_current_user
         async with httpx.AsyncClient(app=app, base_url="http://test") as client:
@@ -304,7 +312,7 @@ class RestCommunicationContractTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_database] = lambda: db
 
         async def fake_current_user():
-            return mallory
+            return authenticated_user(mallory)
 
         app.dependency_overrides[get_current_active_user] = fake_current_user
         async with httpx.AsyncClient(app=app, base_url="http://test") as client:
@@ -643,7 +651,7 @@ class MarkConversationAsReadTests(unittest.IsolatedAsyncioTestCase):
         self.db.messages.docs.append(message)
         self.db.conversations.docs.clear()
         app.dependency_overrides[get_database] = lambda: self.db
-        app.dependency_overrides[get_current_active_user] = lambda: self.alice
+        app.dependency_overrides[get_current_active_user] = lambda: authenticated_user(self.alice)
         try:
             async with httpx.AsyncClient(app=app, base_url="http://test") as client:
                 for endpoint in [f"conversations/{self.conversation_id}", f"messages/{message['_id']}"]:

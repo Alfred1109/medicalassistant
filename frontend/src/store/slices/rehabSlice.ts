@@ -1,5 +1,6 @@
+import httpClient from '../../services/httpClient';
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
-import axios, { AxiosError, AxiosResponse } from 'axios';
+import type { AxiosError, AxiosResponse } from 'axios';
 import {
   RehabPlan,
   Exercise,
@@ -8,7 +9,6 @@ import {
   ExerciseCompletionParams,
   RecommendationRequest
 } from '../../types/rehab';
-import { API_BASE_URL } from '../../config/constants';
 import { ThunkApiConfig } from '../types';
 
 // 领域类型统一放在 types/rehab,这里再导出一次,方便组件从 slice 统一引入
@@ -46,7 +46,7 @@ export const fetchRehabPlans = createAsyncThunk<RehabPlan[], void, ThunkApiConfi
   'rehab/fetchRehabPlans',
   async (_: void, { rejectWithValue }) => {
     try {
-      const response: AxiosResponse<RehabPlan[]> = await axios.get(`${API_BASE_URL}/rehabilitation/plans`);
+      const response: AxiosResponse<RehabPlan[]> = await httpClient.get(`/rehabilitation/plans`);
       return response.data;
     } catch (error) {
       const axiosError = error as AxiosError<ApiErrorPayload>;
@@ -59,7 +59,7 @@ export const fetchRehabPlanById = createAsyncThunk<RehabPlan, string, ThunkApiCo
   'rehab/fetchRehabPlanById',
   async (id: string, { rejectWithValue }) => {
     try {
-      const response: AxiosResponse<RehabPlan> = await axios.get(`${API_BASE_URL}/rehabilitation/plans/${id}`);
+      const response: AxiosResponse<RehabPlan> = await httpClient.get(`/rehabilitation/plans/${id}`);
       return response.data;
     } catch (error) {
       const axiosError = error as AxiosError<ApiErrorPayload>;
@@ -72,7 +72,7 @@ export const createRehabPlan = createAsyncThunk<RehabPlan, Partial<RehabPlan>, T
   'rehab/createRehabPlan',
   async (planData: Partial<RehabPlan>, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/rehabilitation/plans`, planData);
+      const response = await httpClient.post(`/rehabilitation/plans`, planData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '创建康复计划失败');
@@ -88,7 +88,7 @@ export const updateRehabPlan = createAsyncThunk<
   'rehab/updateRehabPlan',
   async ({ id, planData }: { id: string; planData: Partial<RehabPlan> }, { rejectWithValue }) => {
     try {
-      const response = await axios.put(`${API_BASE_URL}/rehabilitation/plans/${id}`, planData);
+      const response = await httpClient.put(`/rehabilitation/plans/${id}`, planData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '更新康复计划失败');
@@ -100,7 +100,7 @@ export const deleteRehabPlan = createAsyncThunk<string, string, ThunkApiConfig>(
   'rehab/deleteRehabPlan',
   async (id: string, { rejectWithValue }) => {
     try {
-      await axios.delete(`${API_BASE_URL}/rehabilitation/plans/${id}`);
+      await httpClient.delete(`/rehabilitation/plans/${id}`);
       return id;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '删除康复计划失败');
@@ -112,7 +112,7 @@ export const fetchExercises = createAsyncThunk<Exercise[], void, ThunkApiConfig>
   'rehab/fetchExercises',
   async (_, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/rehabilitation/exercises/list`, {
+      const response = await httpClient.post(`/rehabilitation/exercises/list`, {
         category: null,
         difficulty: null,
         body_parts: [],
@@ -130,7 +130,7 @@ export const createExercise = createAsyncThunk<Exercise, ExerciseFormValues, Thu
   'rehab/createExercise',
   async (exerciseData: ExerciseFormValues, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/rehabilitation/exercises`, exerciseData);
+      const response = await httpClient.post(`/rehabilitation/exercises`, exerciseData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.detail || 'Failed to create exercise');
@@ -147,8 +147,8 @@ export const updateExerciseCompletion = createAsyncThunk<
   'rehab/updateExerciseCompletion',
   async ({ planId, exerciseId, completed }: ExerciseCompletionParams, { rejectWithValue }) => {
     try {
-      const response = await axios.post(
-        `${API_BASE_URL}/rehabilitation/plans/${planId}/exercises/${exerciseId}/progress`,
+      const response = await httpClient.post(
+        `/rehabilitation/plans/${planId}/exercises/${exerciseId}/progress`,
         { completed }
       );
       return response.data;
@@ -163,7 +163,7 @@ export const getRecommendedExercises = createAsyncThunk(
   'rehab/getRecommendedExercises',
   async ({ patientId, condition, goal, agentId }: RecommendationRequest, { rejectWithValue }) => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/rehabilitation/exercises/recommendations`, {
+      const response = await httpClient.get(`/rehabilitation/exercises/recommendations`, {
         params: { patient_id: patientId, condition, goal, agent_id: agentId },
       });
       return response.data;
@@ -181,7 +181,7 @@ export const addExercisesToPlan = createAsyncThunk<
   'rehab/addExercisesToPlan',
   async ({ planId, exerciseIds }: { planId: string; exerciseIds: string[] }, { rejectWithValue }) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/rehabilitation/plans/${planId}/exercises`, {
+      const response = await httpClient.post(`/rehabilitation/plans/${planId}/exercises`, {
         exercise_ids: exerciseIds,
       });
       return response.data;
@@ -200,7 +200,7 @@ export const getRecommendations = createAsyncThunk<
   'rehab/getRecommendations',
   async ({ patientId, condition, goal, agentId }: RecommendationRequest, { rejectWithValue }) => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/rehabilitation/exercises/recommendations`, {
+      const response = await httpClient.get(`/rehabilitation/exercises/recommendations`, {
         params: {
           patient_id: patientId,
           condition,
@@ -219,7 +219,7 @@ export const fetchExerciseById = createAsyncThunk<Exercise, string, ThunkApiConf
   'rehab/fetchExerciseById',
   async (id: string, { rejectWithValue }) => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/rehabilitation/exercises/${id}`);
+      const response = await httpClient.get(`/rehabilitation/exercises/${id}`);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.detail || '获取运动详情失败');
@@ -231,7 +231,7 @@ export const deleteExercise = createAsyncThunk<string, string, ThunkApiConfig>(
   'rehab/deleteExercise',
   async (id: string, { rejectWithValue }) => {
     try {
-      await axios.delete(`${API_BASE_URL}/rehabilitation/exercises/${id}`);
+      await httpClient.delete(`/rehabilitation/exercises/${id}`);
       return id;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '删除运动失败');
@@ -247,7 +247,7 @@ export const updateExercise = createAsyncThunk<
   'rehab/updateExercise',
   async ({ id, exerciseData }: { id: string; exerciseData: Partial<Exercise> }, { rejectWithValue }) => {
     try {
-      const response = await axios.put(`${API_BASE_URL}/rehabilitation/exercises/${id}`, exerciseData);
+      const response = await httpClient.put(`/rehabilitation/exercises/${id}`, exerciseData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || '更新运动失败');

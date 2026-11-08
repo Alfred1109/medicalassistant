@@ -2,6 +2,7 @@ import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import axios, { AxiosResponse } from 'axios';
 import type { ThunkApiConfig } from '../types';
 import { API_BASE_URL } from '../../config/api';
+import { AuthMode, authRequestOptions, clearLegacyCredentials, getAuthConfig } from '../../services/authSession';
 
 // User interface
 export interface User {
@@ -17,6 +18,9 @@ export interface User {
 // Auth state interface
 export interface AuthState {
   user: User | null;
+  mode: AuthMode | null;
+  loginUrl: string | null;
+  identityState: 'bound' | 'pending_binding' | null;
   token: string | null;
   checking: boolean;
   sessionCheckRequestId: string | null;
@@ -24,6 +28,7 @@ export interface AuthState {
   loading: boolean;
   loginLoading: boolean;  // 专门用于登录操作的loading状态
   registerLoading: boolean;  // 专门用于注册操作的loading状态
+  profileRequestId: string | null;
   profileLoading: boolean;  // 专门用于个人资料操作的loading状态
   error: string | null;
 }
@@ -31,6 +36,9 @@ export interface AuthState {
 // Initial state
 const initialState: AuthState = {
   user: null,
+  mode: null,
+  loginUrl: null,
+  identityState: null,
   token: localStorage.getItem('token'),
   checking: true,
   sessionCheckRequestId: null,
@@ -38,6 +46,7 @@ const initialState: AuthState = {
   loading: false,
   loginLoading: false,
   registerLoading: false,
+  profileRequestId: null,
   profileLoading: false,
   error: null,
 };
@@ -61,6 +70,7 @@ export const register = createAsyncThunk<
   'auth/register',
   async (userData, { rejectWithValue }) => {
     try {
+      if ((await getAuthConfig()).mode === 'oidc') return rejectWithValue('请通过统一登录入口注册或登录');
       const response: AxiosResponse<{ user: User; token: string }> = await axios.post(
         `${API_BASE_URL}/users/register`,
         {
@@ -87,6 +97,7 @@ export const login = createAsyncThunk<
   'auth/login',
   async (credentials, { rejectWithValue }) => {
     try {
+      if ((await getAuthConfig()).mode === 'oidc') return rejectWithValue('请使用统一登录入口');
       const params = new URLSearchParams();
       params.append('username', credentials.email);
       params.append('password', credentials.password);
@@ -157,27 +168,49 @@ export const login = createAsyncThunk<
   }
 );
 
-// Check token validity and get user data
-export const checkAuthStatus = createAsyncThunk<
-  User, // Returned
-  void, // ThunkArg (no argument for this one)
-  ThunkApiConfig
->(
+// Verify server-side identity before exposing any protected route.
+export const checkAuthStatus = createAsyncThunk<User | null, void, ThunkApiConfig>(
   'auth/checkStatus',
-  async (_, { rejectWithValue, getState }) => {
-    const { auth } = getState();
-    if (!auth.token) {
-      return rejectWithValue('No token found');
-    }
+  async (_, { rejectWithValue, getState, dispatch, requestId }) => {
+    const token = getState().auth.token;
     try {
-      const response: AxiosResponse<User> = await axios.get(`${API_BASE_URL}/users/me`, {
-        headers: { Authorization: `Bearer ${auth.token}` }
-      });
-      return response.data;
+      const config = await getAuthConfig();
+      dispatch(authSlice.actions.configurationLoaded({ ...config, requestId }));
+      if (config.mode === 'oidc') {
+        const { data } = await axios.get(`${API_BASE_URL}/auth/session`, { withCredentials: true, timeout: 10000 });
+        if (data?.authenticated !== true) return null;
+        if (data.identity_state !== 'bound' && data.identity_state !== 'pending_binding') throw new Error('身份会话响应无效');
+        dispatch(authSlice.actions.identityLoaded({ state: data.clinical_access === true ? data.identity_state : 'pending_binding', requestId }));
+        if (data.identity_state === 'pending_binding' || data.clinical_access !== true) return null;
+        const user = data.user;
+        if (!user || typeof user.id !== 'string' || !user.id || !['patient', 'doctor', 'health_manager', 'admin'].includes(user.role)) {
+          throw new Error('身份尚未关联有效的业务账号');
+        }
+        return user as User;
+      }
+      if (!token) return null;
+      return (await axios.get<User>(`${API_BASE_URL}/users/me`, { headers: { Authorization: `Bearer ${token}` } })).data;
     } catch (error: any) {
-      return rejectWithValue(error.response?.data?.detail || 'Session expired');
+      if (error.response?.status === 401 && getState().auth.mode === 'oidc') return null;
+      if (error.response?.status === 503) return rejectWithValue('身份服务暂时不可用，请稍后重试');
+      return rejectWithValue(error.response?.data?.detail || error.message || '登录状态验证失败');
     }
   }
+);
+
+/** A failed remote logout must remain visible and retryable. */
+export const signOut = createAsyncThunk<void, void, ThunkApiConfig>(
+  'auth/signOut',
+  async (_, { dispatch, rejectWithValue }) => {
+    try {
+      if ((await getAuthConfig()).mode === 'oidc') {
+        await axios.post(`${API_BASE_URL}/auth/logout`, undefined, { ...await authRequestOptions('POST'), timeout: 10000 });
+      }
+      dispatch(authSlice.actions.logout());
+    } catch {
+      return rejectWithValue('退出失败，请重试；当前会话尚未确认退出');
+    }
+  },
 );
 
 interface UpdateUserProfileArg {
@@ -196,12 +229,12 @@ export const updateUserProfile = createAsyncThunk<
   'auth/updateProfile',
   async (userData, { rejectWithValue, getState }) => {
     const { auth } = getState();
-    if (!auth.token) {
-      return rejectWithValue('No token found');
-    }
     try {
+      const configuration = await getAuthConfig();
+      if (configuration.mode !== 'oidc' && !auth.token) return rejectWithValue('请先登录');
+      const options = await authRequestOptions('PUT');
       const response: AxiosResponse<User> = await axios.put(`${API_BASE_URL}/users/profile`, userData, {
-        headers: { Authorization: `Bearer ${auth.token}` }
+        ...options, headers: configuration.mode === 'oidc' ? options.headers : { Authorization: `Bearer ${auth.token}` }
       });
       return response.data;
     } catch (error: any) {
@@ -216,6 +249,8 @@ export const updateUserProfile = createAsyncThunk<
 
 // A token replacement or logout invalidates every validation of the previous session.
 function invalidateSessionCheck(state: AuthState) {
+  state.profileRequestId = null;
+  state.profileLoading = false;
   state.checking = false;
   state.sessionCheckRequestId = null;
   state.sessionCheckToken = null;
@@ -235,8 +270,19 @@ const authSlice = createSlice({
       state.user = null;
       state.token = null;
       state.error = null;
-      localStorage.removeItem('token');
-      localStorage.removeItem('userRole');
+      state.identityState = null;
+      clearLegacyCredentials();
+    },
+    configurationLoaded: (state: AuthState, action: PayloadAction<{ mode: AuthMode; login_url: string | null; requestId: string }>) => {
+      state.mode = action.payload.mode;
+      state.loginUrl = action.payload.login_url;
+      if (state.mode === 'oidc') {
+        state.token = null;
+        if (state.sessionCheckRequestId === action.payload.requestId) state.sessionCheckToken = null;
+      }
+    },
+    identityLoaded: (state: AuthState, action: PayloadAction<{ state: 'bound' | 'pending_binding'; requestId: string }>) => {
+      if (state.sessionCheckRequestId === action.payload.requestId) state.identityState = action.payload.state;
     },
     clearAuthError: (state: AuthState) => {
       state.error = null;
@@ -286,6 +332,7 @@ const authSlice = createSlice({
       // Check auth status cases
       .addCase(checkAuthStatus.pending, (state: AuthState, action) => {
         state.checking = true;
+        state.identityState = null;
         state.sessionCheckRequestId = action.meta.requestId;
         state.sessionCheckToken = state.token;
         state.error = null;
@@ -308,17 +355,24 @@ const authSlice = createSlice({
         state.error = action.payload as string;
       })
 
+      .addCase(signOut.rejected, (state, action) => { state.error = action.payload || '退出失败，请重试'; })
+
       // Update user profile cases
-      .addCase(updateUserProfile.pending, (state: AuthState) => {
+      .addCase(updateUserProfile.pending, (state: AuthState, action) => {
+        state.profileRequestId = action.meta.requestId;
         state.profileLoading = true;
         state.error = null;
       })
-      .addCase(updateUserProfile.fulfilled, (state: AuthState, action: PayloadAction<User>) => {
+      .addCase(updateUserProfile.fulfilled, (state: AuthState, action) => {
+        if (state.profileRequestId !== action.meta.requestId || !state.user) return;
+        state.profileRequestId = null;
         state.profileLoading = false;
         state.user = action.payload;
         state.error = null;
       })
       .addCase(updateUserProfile.rejected, (state: AuthState, action) => {
+        if (state.profileRequestId !== action.meta.requestId) return;
+        state.profileRequestId = null;
         state.profileLoading = false;
         state.error = action.payload as string;
       })

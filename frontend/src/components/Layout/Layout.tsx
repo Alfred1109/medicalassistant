@@ -70,8 +70,8 @@ import {
   Notifications as NotificationsIcon
 } from '@mui/icons-material';
 import { AppDispatch, RootState } from '../../store';
-import { logout } from '../../store/slices/authSlice';
-import { toggleSidebar } from '../../store/slices/uiSlice';
+import { signOut } from '../../store/slices/authSlice';
+import { showSnackbar, toggleSidebar } from '../../store/slices/uiSlice';
 import NotificationPusher from '../common/NotificationPusher';
 
 // Drawer width for desktop
@@ -403,10 +403,14 @@ const Layout: React.FC = () => {
     setAnchorEl(null);
   };
   
-  const handleLogout = () => {
+  const handleLogout = async () => {
     handleMenuClose();
-    dispatch(logout());
-    navigate('/auth');
+    try {
+      await dispatch(signOut()).unwrap();
+      navigate('/auth');
+    } catch {
+      dispatch(showSnackbar({ message: '退出失败，请重试；当前会话尚未确认退出', severity: 'error' }));
+    }
   };
   
   const handleNavigate = (path: string) => {

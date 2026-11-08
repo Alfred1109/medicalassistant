@@ -11,7 +11,6 @@ from app.services.dashboard_service import DashboardService
 from app.services.device_service import device_service
 from app.services.communication_service import CommunicationService
 from app.services.health_record_service import HealthRecordService
-from app.models.user import User
 from datetime import date, datetime, timedelta, timezone
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 from pymongo.errors import PyMongoError
@@ -479,61 +478,61 @@ async def get_patient_statistics(
 @router.get("/dashboard-data", response_model=Dict[str, Any])
 async def get_dashboard_data(
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """获取患者仪表盘所需的所有数据"""
-    if current_user["role"] != "patient":
+    if current_user.role != "patient":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="只有患者用户才能访问此接口"
         )
         
-    user_id = str(current_user["_id"])
+    user_id = str(current_user.id)
     return await DashboardService.get_all_dashboard_data(db, user_id)
 
 @router.get("/health-metrics", response_model=List[Dict[str, Any]])
 async def get_health_metrics(
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """获取患者健康指标数据"""
-    if current_user["role"] != "patient":
+    if current_user.role != "patient":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="只有患者用户才能访问此接口"
         )
         
-    user_id = str(current_user["_id"])
+    user_id = str(current_user.id)
     return await DashboardService.get_health_metrics(db, user_id)
 
 @router.get("/todo-items", response_model=List[Dict[str, Any]])
 async def get_todo_items(
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """获取患者待办事项"""
-    if current_user["role"] != "patient":
+    if current_user.role != "patient":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="只有患者用户才能访问此接口"
         )
         
-    user_id = str(current_user["_id"])
+    user_id = str(current_user.id)
     return await DashboardService.get_todo_items(db, user_id)
 
 @router.get("/rehab-progress", response_model=Dict[str, Any])
 async def get_rehab_progress(
     db: AsyncIOMotorClient = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """获取患者康复进度"""
-    if current_user["role"] != "patient":
+    if current_user.role != "patient":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="只有患者用户才能访问此接口"
         )
         
-    user_id = str(current_user["_id"])
+    user_id = str(current_user.id)
     rehab_progress = await DashboardService.get_rehab_progress(db, user_id)
     
     if not rehab_progress:

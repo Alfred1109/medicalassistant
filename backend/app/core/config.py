@@ -4,6 +4,7 @@ from typing import List, Optional, Union, Dict, Any
 import os
 from dotenv import load_dotenv
 import secrets
+import re
 
 load_dotenv()
 
@@ -14,6 +15,18 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     DEBUG: bool = os.getenv("DEBUG", "False").lower() in ("true", "1", "t")
     API_VERSION: str = "0.1.0"
+    # Trusted deployment configuration, never inferred from public proxy headers.
+    # The proxy strips this prefix before forwarding to the /api and /ws routes.
+    MEDICALASSISTANT_ROOT_PATH: str = ""
+
+    @field_validator("MEDICALASSISTANT_ROOT_PATH")
+    def validate_root_path(cls, value: str) -> str:
+        if value in {"", "/"}:
+            return ""
+        if (not re.fullmatch(r"(?:/[A-Za-z0-9._~-]+)+", value)
+                or any(part in {".", ".."} for part in value.split("/"))):
+            raise ValueError("MEDICALASSISTANT_ROOT_PATH must be an absolute path without trailing slash or traversal")
+        return value
     
     # CORS Settings
     BACKEND_CORS_ORIGINS: List[str] = ["*"]

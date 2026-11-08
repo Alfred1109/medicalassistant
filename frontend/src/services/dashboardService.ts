@@ -1,3 +1,4 @@
+import { API_COLLECTION_PATHS } from '../config/apiPaths';
 import apiClient from './apiClient';
 import { API_BASE_URL } from '../config/constants';
 
@@ -94,7 +95,7 @@ const dashboardService = {
    * 获取通知列表
    */
   getNotifications: (limit: number = 5): Promise<Notification[]> => {
-    return apiClient.get<Notification[]>(`/notifications?limit=${limit}`);
+    return apiClient.get<Notification[]>(API_COLLECTION_PATHS.NOTIFICATIONS, { params: { limit } });
   },
   
   /**

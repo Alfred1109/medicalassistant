@@ -1,6 +1,7 @@
+import { API_COLLECTION_PATHS } from '../../config/apiPaths';
 import React from 'react';
 import axios from 'axios';
-import { API_BASE_URL } from '../../config/constants';
+import api from '../../services/api';
 import dashboardService from '../../services/dashboardService';
 import { deviceService, Device as DeviceInfo } from '../../services/deviceService';
 import {
@@ -166,20 +167,7 @@ const PatientMainDashboard: React.FC = () => {
         setNotificationsLoading(true);
         console.log('开始获取通知数据...');
 
-        // 获取认证令牌
-        const token = localStorage.getItem('token');
-        if (!token) {
-          console.error('认证令牌不存在，无法获取通知数据');
-          setNotificationsLoading(false);
-          return;
-        }
-
-        // 从API获取通知数据
-        const response = await axios.get(`${API_BASE_URL}/notifications?limit=5`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
+        const response = await api.get(API_COLLECTION_PATHS.NOTIFICATIONS, { params: { limit: 5 } });
 
         console.log('通知数据API响应:', response.data);
 

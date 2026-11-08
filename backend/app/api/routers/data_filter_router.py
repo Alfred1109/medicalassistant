@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from ...services.data_filter_service import data_filter_service
 from ...core.dependencies import get_current_user
+from app.schemas.user import UserResponse
 
 router = APIRouter(prefix="/data-filters", tags=["data-filters"])
 
@@ -104,7 +105,7 @@ def format_filter(filter_data: Dict[str, Any]) -> Dict[str, Any]:
 @router.post("/apply", response_model=FilterResult)
 async def apply_filter(
     filter_request: FilterRequest = Body(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     应用过滤条件查询数据
@@ -145,7 +146,7 @@ async def apply_filter(
 @router.get("/schema/{collection}", response_model=List[FieldInfo])
 async def get_collection_schema(
     collection: str = Path(..., description="集合名称"),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     获取集合字段结构
@@ -167,7 +168,7 @@ async def get_collection_schema(
 @router.post("/save", response_model=Dict[str, str])
 async def save_filter(
     filter_data: SavedFilterRequest = Body(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     保存过滤器配置
@@ -179,14 +180,14 @@ async def save_filter(
     - 过滤器ID
     """
     # 验证权限
-    if filter_data.global_ and current_user.get("role") not in ["admin"]:
+    if filter_data.global_ and current_user.role not in ["admin"]:
         raise HTTPException(status_code=403, detail="只有管理员可以创建全局过滤器")
     
     try:
         # 准备数据
         data = filter_data.dict(by_alias=True)
-        data["createdBy"] = current_user.get("_id")
-        data["createdByName"] = current_user.get("name") or current_user.get("username")
+        data["createdBy"] = current_user.id
+        data["createdByName"] = current_user.name
         
         # 保存过滤器
         filter_id = await data_filter_service.save_filter(data)
@@ -199,7 +200,7 @@ async def save_filter(
 async def update_filter(
     filter_id: str = Path(..., description="过滤器ID"),
     filter_data: FilterUpdateRequest = Body(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     更新过滤器配置
@@ -217,12 +218,12 @@ async def update_filter(
         raise HTTPException(status_code=404, detail="过滤器不存在")
     
     # 验证权限
-    if (current_user.get("role") not in ["admin"] and 
-        existing_filter.get("createdBy") != current_user.get("_id")):
+    if (current_user.role not in ["admin"] and
+        existing_filter.get("createdBy") != current_user.id):
         raise HTTPException(status_code=403, detail="没有权限更新此过滤器")
     
     # 如果更新全局状态，验证权限
-    if filter_data.global_ and current_user.get("role") not in ["admin"]:
+    if filter_data.global_ and current_user.role not in ["admin"]:
         raise HTTPException(status_code=403, detail="只有管理员可以创建全局过滤器")
     
     try:
@@ -242,7 +243,7 @@ async def update_filter(
 @router.delete("/{filter_id}", response_model=Dict[str, str])
 async def delete_filter(
     filter_id: str = Path(..., description="过滤器ID"),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     删除过滤器
@@ -259,8 +260,8 @@ async def delete_filter(
         raise HTTPException(status_code=404, detail="过滤器不存在")
     
     # 验证权限
-    if (current_user.get("role") not in ["admin"] and 
-        existing_filter.get("createdBy") != current_user.get("_id")):
+    if (current_user.role not in ["admin"] and
+        existing_filter.get("createdBy") != current_user.id):
         raise HTTPException(status_code=403, detail="没有权限删除此过滤器")
     
     try:
@@ -278,7 +279,7 @@ async def delete_filter(
 async def get_filters(
     collection: Optional[str] = Query(None, description="集合名称"),
     global_only: bool = Query(False, description="是否只返回全局过滤器"),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     获取保存的过滤器列表
@@ -293,7 +294,7 @@ async def get_filters(
     try:
         # 获取过滤器列表
         filters = await data_filter_service.get_saved_filters(
-            user_id=current_user.get("_id"),
+            user_id=current_user.id,
             collection=collection,
             global_only=global_only
         )
@@ -307,7 +308,7 @@ async def get_filters(
 @router.get("/{filter_id}", response_model=SavedFilterResponse)
 async def get_filter(
     filter_id: str = Path(..., description="过滤器ID"),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     获取单个过滤器配置
@@ -325,8 +326,8 @@ async def get_filter(
     
     # 验证权限
     if (not filter_data.get("global", False) and 
-        current_user.get("role") not in ["admin"] and 
-        filter_data.get("createdBy") != current_user.get("_id")):
+        current_user.role not in ["admin"] and
+        filter_data.get("createdBy") != current_user.id):
         raise HTTPException(status_code=403, detail="没有权限查看此过滤器")
     
     # 格式化并返回

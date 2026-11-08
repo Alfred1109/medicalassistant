@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.services.audit_log_service import AuditLogService
 from app.schemas.audit_log import AuditLogCreate
 from app.core.permissions import AUDITED_PERMISSIONS
+from app.integrations.identity.access import unified_authentication
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # 检查是否需要审计此路径
-        path = request.url.path
+        path = request.scope["path"]
 
         # 排除不需要审计的路径
         if any(path.startswith(prefix) for prefix in self.exclude_paths):
@@ -129,7 +130,7 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
         if not token:
             # 部分客户端通过 cookie 携带令牌（与 WebSocket 认证一致）
             token = request.cookies.get(settings.TOKEN_COOKIE_NAME)
-        if token:
+        if token and not unified_authentication():
             user_id, role = _extract_identity_from_token(token)
             if user_id is None:
                 logger.warning("Audit identity extraction failed: invalid or expired access token")
@@ -141,6 +142,9 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
         start_time = datetime.utcnow()
         response = await call_next(request)
         duration = (datetime.utcnow() - start_time).total_seconds()
+        if unified_authentication():
+            user_id = getattr(request.state, "authenticated_actor_id", None)
+            role = getattr(request.state, "authenticated_actor_role", None)
         
         # 确定操作结果状态
         status = "success" if response.status_code < 400 else "failure"
@@ -225,7 +229,7 @@ class ResourcePermissionTracker:
         # 关键权限或访问失败时才记录
         if permission in AUDITED_PERMISSIONS or not is_granted:
             try:
-                if self.db:
+                if self.db is not None:
                     audit_service = AuditLogService(self.db)
                     await audit_service.log_permission_check(
                         user_id=user_id,
@@ -264,7 +268,7 @@ class ResourcePermissionTracker:
         - details: 其他详细信息
         """
         try:
-            if self.db:
+            if self.db is not None:
                 audit_service = AuditLogService(self.db)
                 await audit_service.create_log(
                     log_data=AuditLogCreate(
@@ -291,4 +295,4 @@ async def get_permission_tracker(db=None):
         except Exception as e:
             logger.error(f"获取数据库连接失败: {str(e)}")
     
-    return ResourcePermissionTracker(db) 
+    return ResourcePermissionTracker(db)

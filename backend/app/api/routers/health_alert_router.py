@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Path, status
 from fastapi.responses import JSONResponse
 
 from app.services.health_alert_service import HealthAlertService
+from app.schemas.user import UserResponse
 from app.core.dependencies import get_current_user, get_health_alert_service
 from app.models.health_data_threshold import HealthDataThreshold, HealthDataAlert
 from app.schemas.health_data_threshold import (
@@ -24,7 +25,7 @@ router = APIRouter(
 @router.post("/thresholds", response_model=ThresholdResponse)
 async def create_threshold(
     data: ThresholdCreate,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """创建健康数据阈值配置"""
@@ -42,7 +43,7 @@ async def create_threshold(
                     applies_to=data.applies_to,
                     is_default=data.is_default,
                     metadata=data.metadata,
-                    created_by=current_user["id"]
+                    created_by=current_user.id
                 )
             else:
                 threshold = await service.create_single_value_threshold(
@@ -56,7 +57,7 @@ async def create_threshold(
                     applies_to=data.applies_to,
                     is_default=data.is_default,
                     metadata=data.metadata,
-                    created_by=current_user["id"]
+                    created_by=current_user.id
                 )
         elif data.data_type == "lab_results":
             threshold = await service.create_threshold(
@@ -71,7 +72,7 @@ async def create_threshold(
                 applies_to=data.applies_to,
                 is_default=data.is_default,
                 metadata=data.metadata,
-                created_by=current_user["id"]
+                created_by=current_user.id
             )
         else:
             threshold = await service.create_threshold(
@@ -87,7 +88,7 @@ async def create_threshold(
                 applies_to=data.applies_to,
                 is_default=data.is_default,
                 metadata=data.metadata,
-                created_by=current_user["id"]
+                created_by=current_user.id
             )
         
         return threshold
@@ -101,7 +102,7 @@ async def create_threshold(
 async def get_threshold(
     threshold_id: str = Path(..., description="阈值配置ID"),
     service: HealthAlertService = Depends(get_health_alert_service),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """获取健康数据阈值配置"""
     threshold = await service.get_threshold(threshold_id)
@@ -116,14 +117,14 @@ async def get_threshold(
 async def update_threshold(
     threshold_id: str,
     data: ThresholdUpdate,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """更新健康数据阈值配置"""
     try:
         # 补充更新者信息
         data_dict = data.dict(exclude_unset=True)
-        data_dict["updated_by"] = current_user["id"]
+        data_dict["updated_by"] = current_user.id
         
         # 更新阈值配置
         threshold = await service.update_threshold(threshold_id, data_dict)
@@ -142,7 +143,7 @@ async def update_threshold(
 @router.delete("/thresholds/{threshold_id}", response_model=ResponseModel)
 async def delete_threshold(
     threshold_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """删除健康数据阈值配置"""
@@ -163,7 +164,7 @@ async def list_thresholds(
     is_default: Optional[bool] = Query(None, description="是否默认过滤"),
     skip: int = Query(0, description="分页偏移量"),
     limit: int = Query(100, description="每页数量"),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """列出健康数据阈值配置"""
@@ -195,7 +196,7 @@ async def check_health_data(
     test_name: Optional[str] = Query(None, description="实验室检查名称"),
     value: Optional[float] = Query(None, description="数值"),
     unit: Optional[str] = Query(None, description="单位"),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """检查健康数据是否异常"""
@@ -220,7 +221,7 @@ async def check_health_data(
 @router.post("/alerts", response_model=AlertResponse)
 async def create_alert(
     data: AlertCreate,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """手动创建健康数据预警"""
@@ -237,7 +238,7 @@ async def create_alert(
 async def get_alert(
     alert_id: str = Path(..., description="预警ID"),
     service: HealthAlertService = Depends(get_health_alert_service),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """获取健康数据预警详情"""
     alert = await service.get_alert(alert_id)
@@ -252,7 +253,7 @@ async def get_alert(
 async def update_alert(
     alert_id: str,
     data: AlertUpdate,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """更新健康数据预警状态"""
@@ -274,14 +275,14 @@ async def update_alert(
 async def resolve_alert(
     alert_id: str,
     resolution_notes: Optional[str] = Query(None, description="解决备注"),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """解决健康数据预警"""
     try:
         alert = await service.resolve_alert(
             alert_id=alert_id,
-            resolved_by=current_user["id"],
+            resolved_by=current_user.id,
             resolution_notes=resolution_notes
         )
         if not alert:
@@ -300,14 +301,14 @@ async def resolve_alert(
 async def ignore_alert(
     alert_id: str,
     resolution_notes: Optional[str] = Query(None, description="忽略原因"),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """忽略健康数据预警"""
     try:
         alert = await service.ignore_alert(
             alert_id=alert_id,
-            resolved_by=current_user["id"],
+            resolved_by=current_user.id,
             resolution_notes=resolution_notes
         )
         if not alert:
@@ -333,7 +334,7 @@ async def list_alerts(
     end_date: Optional[datetime] = Query(None, description="结束日期过滤"),
     skip: int = Query(0, description="分页偏移量"),
     limit: int = Query(100, description="每页数量"),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """列出健康数据预警"""
@@ -359,7 +360,7 @@ async def list_alerts(
 @router.get("/stats", response_model=AlertStatistics)
 async def get_alerts_stats(
     patient_id: Optional[str] = Query(None, description="患者ID，如果提供则返回该患者的统计"),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """获取健康数据预警统计"""

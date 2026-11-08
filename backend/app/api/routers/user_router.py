@@ -15,12 +15,13 @@ from app.schemas.user import (
     DoctorUpdate, PatientUpdate, HealthManagerUpdate
 )
 from app.core.permissions import require_permission, Permission, PermissionChecker
+from app.integrations.identity.access import reject_legacy_credentials
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(reject_legacy_credentials)])
 async def register_user(
     user_data: PublicPatientRegistration,
     user_service: UserService = Depends(get_user_service)
@@ -29,7 +30,7 @@ async def register_user(
     # 权限、状态和角色由服务端决定；该旧入口尚未接入统一身份。
     return await user_service.create_user(UserCreate(**user_data.model_dump()))
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=Token, dependencies=[Depends(reject_legacy_credentials)])
 async def login(
     request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -77,7 +78,7 @@ async def login(
             detail="登录过程中发生内部错误",
         )
 
-@router.post("/login/refresh", response_model=TokenResponse)
+@router.post("/login/refresh", response_model=TokenResponse, dependencies=[Depends(reject_legacy_credentials)])
 async def login_with_refresh(
     request: Request, 
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -110,7 +111,7 @@ async def login_with_refresh(
             detail=f"登录过程中发生错误: {str(e)}",
         )
 
-@router.post("/refresh-token", response_model=TokenResponse)
+@router.post("/refresh-token", response_model=TokenResponse, dependencies=[Depends(reject_legacy_credentials)])
 async def refresh_token(
     request: Request,
     refresh_request: RefreshTokenRequest,

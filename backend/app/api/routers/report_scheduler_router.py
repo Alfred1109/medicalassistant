@@ -8,6 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, EmailStr
 
 from ...core.dependencies import get_current_user
+from app.schemas.user import UserResponse
 from ...services.report_scheduler_service import report_scheduler_service
 
 router = APIRouter(prefix="/report-schedules", tags=["report-schedules"])
@@ -91,7 +92,7 @@ def format_schedule(schedule: dict) -> dict:
 @router.post("", response_model=dict)
 async def create_report_schedule(
     schedule: ReportScheduleCreate = Body(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     创建报表调度计划
@@ -103,12 +104,12 @@ async def create_report_schedule(
     - 创建的调度计划ID
     """
     # 验证权限
-    if current_user.get("role") not in ["admin", "doctor", "health_manager"]:
+    if current_user.role not in ["admin", "doctor", "health_manager"]:
         raise HTTPException(status_code=403, detail="没有创建报表调度计划的权限")
     
     # 准备数据
     schedule_data = schedule.dict()
-    schedule_data["createdBy"] = current_user.get("_id")
+    schedule_data["createdBy"] = current_user.id
     
     # 创建调度计划
     try:
@@ -122,7 +123,7 @@ async def create_report_schedule(
 async def update_report_schedule(
     schedule_id: str = Path(..., description="调度计划ID"),
     schedule: ReportScheduleUpdate = Body(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     更新报表调度计划
@@ -140,8 +141,8 @@ async def update_report_schedule(
         raise HTTPException(status_code=404, detail="调度计划不存在")
     
     # 验证权限
-    if (current_user.get("role") not in ["admin"] and 
-        existing_schedule.get("createdBy") != current_user.get("_id")):
+    if (current_user.role not in ["admin"] and
+        existing_schedule.get("createdBy") != current_user.id):
         raise HTTPException(status_code=403, detail="没有更新该调度计划的权限")
     
     # 准备更新数据
@@ -161,7 +162,7 @@ async def update_report_schedule(
 @router.delete("/{schedule_id}", response_model=dict)
 async def delete_report_schedule(
     schedule_id: str = Path(..., description="调度计划ID"),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     删除报表调度计划
@@ -178,8 +179,8 @@ async def delete_report_schedule(
         raise HTTPException(status_code=404, detail="调度计划不存在")
     
     # 验证权限
-    if (current_user.get("role") not in ["admin"] and 
-        existing_schedule.get("createdBy") != current_user.get("_id")):
+    if (current_user.role not in ["admin"] and
+        existing_schedule.get("createdBy") != current_user.id):
         raise HTTPException(status_code=403, detail="没有删除该调度计划的权限")
     
     # 删除调度计划
@@ -196,7 +197,7 @@ async def delete_report_schedule(
 @router.get("/{schedule_id}", response_model=ReportScheduleResponse)
 async def get_report_schedule(
     schedule_id: str = Path(..., description="调度计划ID"),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     获取单个报表调度计划
@@ -213,8 +214,8 @@ async def get_report_schedule(
         raise HTTPException(status_code=404, detail="调度计划不存在")
     
     # 验证权限
-    if (current_user.get("role") not in ["admin"] and 
-        schedule.get("createdBy") != current_user.get("_id")):
+    if (current_user.role not in ["admin"] and
+        schedule.get("createdBy") != current_user.id):
         raise HTTPException(status_code=403, detail="没有查看该调度计划的权限")
     
     # 格式化并返回
@@ -225,7 +226,7 @@ async def get_report_schedule(
 async def get_report_schedules(
     report_id: Optional[str] = Query(None, description="按报表ID筛选"),
     user_id: Optional[str] = Query(None, description="按用户ID筛选"),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     获取报表调度计划列表
@@ -238,12 +239,12 @@ async def get_report_schedules(
     - 调度计划列表
     """
     # 验证权限
-    if current_user.get("role") not in ["admin"] and user_id and user_id != current_user.get("_id"):
+    if current_user.role not in ["admin"] and user_id and user_id != current_user.id:
         raise HTTPException(status_code=403, detail="没有查看其他用户调度计划的权限")
     
     # 如果不是管理员且未指定用户ID，则只查看当前用户的调度计划
-    if current_user.get("role") not in ["admin"] and not user_id:
-        user_id = current_user.get("_id")
+    if current_user.role not in ["admin"] and not user_id:
+        user_id = current_user.id
     
     # 获取调度计划列表
     schedules = await report_scheduler_service.get_schedules(user_id, report_id)
@@ -256,7 +257,7 @@ async def get_report_schedules(
 async def toggle_report_schedule(
     schedule_id: str = Path(..., description="调度计划ID"),
     enabled: bool = Query(..., description="启用状态"),
-    current_user: dict = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """
     启用或禁用报表调度计划
@@ -274,8 +275,8 @@ async def toggle_report_schedule(
         raise HTTPException(status_code=404, detail="调度计划不存在")
     
     # 验证权限
-    if (current_user.get("role") not in ["admin"] and 
-        existing_schedule.get("createdBy") != current_user.get("_id")):
+    if (current_user.role not in ["admin"] and
+        existing_schedule.get("createdBy") != current_user.id):
         raise HTTPException(status_code=403, detail="没有权限操作该调度计划")
     
     # 切换状态

@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
+import { authenticatedWebSocketUrl } from '../services/authSession';
 
 interface UseWebSocketOptions {
   reconnectInterval?: number;
@@ -31,6 +32,7 @@ export default function useWebSocket(
     onError
   } = options;
   
+  const generationRef = useRef(0);
   const webSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
@@ -43,7 +45,8 @@ export default function useWebSocket(
   }, []);
   
   // 建立WebSocket连接
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
+    const generation = ++generationRef.current;
     // 如果之前有连接，先关闭
     if (webSocketRef.current) {
       webSocketRef.current.close();
@@ -51,9 +54,12 @@ export default function useWebSocket(
     
     try {
       // 创建新的WebSocket连接
-      const ws = new WebSocket(url);
+      const authenticatedUrl = await authenticatedWebSocketUrl(url);
+      if (generation !== generationRef.current) return;
+      const ws = new WebSocket(authenticatedUrl);
       
       ws.onopen = (event) => {
+        if (generation !== generationRef.current) return;
         setIsConnected(true);
         setReconnectCount(0);
         setError(null);
@@ -61,6 +67,7 @@ export default function useWebSocket(
       };
       
       ws.onmessage = (event) => {
+        if (generation !== generationRef.current) return;
         const message: WebSocketMessage = {
           data: event.data,
           type: 'message',
@@ -70,6 +77,7 @@ export default function useWebSocket(
       };
       
       ws.onclose = (event) => {
+        if (generation !== generationRef.current) return;
         setIsConnected(false);
         if (onClose) onClose(event);
         
@@ -84,6 +92,7 @@ export default function useWebSocket(
       };
       
       ws.onerror = (event) => {
+        if (generation !== generationRef.current) return;
         const wsError = new Error(`WebSocket error: ${event}`);
         setError(wsError);
         if (onError) onError(event);
@@ -91,6 +100,7 @@ export default function useWebSocket(
       
       webSocketRef.current = ws;
     } catch (err) {
+      if (generation !== generationRef.current) return;
       const error = err instanceof Error ? err : new Error('Failed to create WebSocket connection');
       setError(error);
       
@@ -116,6 +126,7 @@ export default function useWebSocket(
   
   // 关闭连接
   const disconnect = useCallback(() => {
+    generationRef.current += 1;
     if (webSocketRef.current) {
       webSocketRef.current.close();
       webSocketRef.current = null;
@@ -130,6 +141,7 @@ export default function useWebSocket(
     
     // 清理函数
     return () => {
+      generationRef.current += 1;
       if (webSocketRef.current) {
         webSocketRef.current.close();
       }

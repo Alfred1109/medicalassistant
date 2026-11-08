@@ -153,9 +153,9 @@ export const ForceLoadComponent = (
 
 // Protected Route Component
 export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { token, user, checking } = useSelector((state: RootState) => state.auth);
-  if (checking && token) return <LoadingFallback />;
-  const isAuthenticated = Boolean(token && user);
+  const { token, user, checking, mode } = useSelector((state: RootState) => state.auth);
+  if (checking) return <LoadingFallback />;
+  const isAuthenticated = Boolean(user && (mode === 'oidc' || token));
   
   if (!isAuthenticated) {
     // Redirect to login if not authenticated
@@ -167,11 +167,11 @@ export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ childr
 
 // Public Route Component (accessible only if NOT authenticated)
 export const PublicRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { token, user, checking } = useSelector((state: RootState) => state.auth);
-  if (checking && token) return <LoadingFallback />;
-  const isAuthenticated = Boolean(token && user);
+  const { token, user, checking, mode } = useSelector((state: RootState) => state.auth);
+  if (checking) return <LoadingFallback />;
+  const isAuthenticated = Boolean(user && (mode === 'oidc' || token));
   
-  if (isAuthenticated) {
+  if (isAuthenticated && !new URLSearchParams(window.location.search).has('error')) {
     // Redirect to dashboard if already authenticated
     return <Navigate to="/app/dashboard" replace />;
   }
@@ -181,9 +181,9 @@ export const PublicRoute: React.FC<{ children: React.ReactNode }> = ({ children 
 
 // 角色路由守卫组件
 export const RoleRoute: React.FC<{ children: React.ReactNode, allowedRoles: string[] }> = ({ children, allowedRoles }) => {
-  const { token, user, checking } = useSelector((state: RootState) => state.auth);
-  if (checking && token) return <LoadingFallback />;
-  const isAuthenticated = Boolean(token && user);
+  const { token, user, checking, mode } = useSelector((state: RootState) => state.auth);
+  if (checking) return <LoadingFallback />;
+  const isAuthenticated = Boolean(user && (mode === 'oidc' || token));
   
   if (!isAuthenticated) {
     return <Navigate to="/auth" replace />;
@@ -230,6 +230,7 @@ const AppRoutes: React.FC = () => (
       <Route index element={<Navigate to="/auth/login" replace />} />
       <Route path="login" element={<Login />} />
       <Route path="register" element={<Register />} />
+      <Route path="oidc/complete" element={<Login />} />
     </Route>
     
     {/* Protected routes (App) */}

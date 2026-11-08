@@ -1,3 +1,4 @@
+import httpClient from '../../services/httpClient';
 import React from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
@@ -24,12 +25,10 @@ import {
   Save as SaveIcon,
   AutoFixHigh as AutoFixHighIcon
 } from '@mui/icons-material';
-import axios from 'axios';
 
 // 导入store类型和action
 import { RootState, AppDispatch } from '../../store';
 import { fetchAgentById, createAgent, updateAgent } from '../../store/slices/agentSlice';
-import { API_BASE_URL } from '../../config/constants';
 
 
 // 助手类型选项
@@ -134,8 +133,8 @@ const AgentForm = () => {
       };
       
       // 调用API生成参数
-      const response = await axios.post(
-        `${API_BASE_URL}/agents/generate-parameters`,
+      const response = await httpClient.post(
+        `/agents/generate-parameters`,
         requestData
       );
       

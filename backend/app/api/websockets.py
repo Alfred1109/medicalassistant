@@ -7,6 +7,7 @@ from datetime import datetime
 import logging
 
 from app.core.auth import get_current_user_ws
+from app.integrations.identity.access import unified_authentication
 from app.db.mongodb import get_database
 from app.models.user import User
 from app.services.communication_service import CommunicationService
@@ -14,6 +15,26 @@ from app.services.notification_service import NotificationService
 
 # 配置日志
 logger = logging.getLogger(__name__)
+IDENTITY_RECHECK_SECONDS = 5
+
+
+async def receive_authorized(websocket):
+    """Recheck idle connections every 5s and every inbound frame; never use stale identity."""
+    validator = websocket.scope.get("identity_validator")
+    if validator is None:
+        return await websocket.receive_text()
+    while True:
+        try:
+            value = await asyncio.wait_for(websocket.receive_text(), timeout=IDENTITY_RECHECK_SECONDS)
+        except asyncio.TimeoutError:
+            if await validator():
+                continue
+            await websocket.close(code=4401)
+            raise WebSocketDisconnect(code=4401)
+        if not await validator():
+            await websocket.close(code=4401)
+            raise WebSocketDisconnect(code=4401)
+        return value
 
 # 维护活跃连接的管理器
 class ConnectionManager:
@@ -80,32 +101,40 @@ class ConnectionManager:
                     del self.chat_rooms[conversation_id][user_id]
                 if not self.chat_rooms[conversation_id]:
                     del self.chat_rooms[conversation_id]
+
+    async def _send_authorized(self, websocket, user_id, connection_id, message):
+        validator = websocket.scope.get("identity_validator")
+        if validator is not None and not await validator():
+            self.disconnect(user_id, connection_id)
+            await websocket.close(code=4401)
+            return
+        await websocket.send_json(message)
     
     async def send_personal_message(self, message: Dict[str, Any], user_id: str):
         """向特定用户发送消息"""
         if user_id in self.active_connections:
-            for connection_id, websocket in self.active_connections[user_id].items():
+            for connection_id, websocket in list(self.active_connections[user_id].items()):
                 try:
-                    await websocket.send_json(message)
+                    await self._send_authorized(websocket, user_id, connection_id, message)
                 except Exception as e:
                     logger.error(f"Error sending message to user {user_id}: {str(e)}")
     
     async def send_chat_message(self, message: Dict[str, Any], conversation_id: str):
         """向聊天室中的所有用户发送消息"""
         if conversation_id in self.chat_rooms:
-            for user_id, connections in self.chat_rooms[conversation_id].items():
-                for connection_id, websocket in connections.items():
+            for user_id, connections in list(self.chat_rooms[conversation_id].items()):
+                for connection_id, websocket in list(connections.items()):
                     try:
-                        await websocket.send_json(message)
+                        await self._send_authorized(websocket, user_id, connection_id, message)
                     except Exception as e:
                         logger.error(f"Error sending chat message to user {user_id} in conversation {conversation_id}: {str(e)}")
     
     async def send_notification(self, notification: Dict[str, Any], user_id: str):
         """向用户发送通知"""
         if user_id in self.notification_connections:
-            for connection_id, websocket in self.notification_connections[user_id].items():
+            for connection_id, websocket in list(self.notification_connections[user_id].items()):
                 try:
-                    await websocket.send_json({
+                    await self._send_authorized(websocket, user_id, connection_id, {
                         "type": "notification",
                         "data": notification
                     })
@@ -146,6 +175,16 @@ def setup_websockets(app: FastAPI):
             
             user_id = str(user["_id"])
 
+            if unified_authentication():
+                async def valid_identity():
+                    try:
+                        current = await get_current_user_ws(websocket, db)
+                        return bool(current and str(current["_id"]) == user_id and
+                            await CommunicationService.is_conversation_participant(db, conversation_id, user_id))
+                    except Exception:
+                        return False
+                websocket.scope["identity_validator"] = valid_identity
+
             # 会话成员校验（WS02 前置）：非会话参与者拒绝入房。
             # 房间名即会话 id（/ws/chat/{conversation_id}，Mongo ObjectId 字符串），
             # 沿用现有约定，不做别名映射。
@@ -181,7 +220,7 @@ def setup_websockets(app: FastAPI):
             try:
                 while True:
                     # 接收消息
-                    data = await websocket.receive_text()
+                    data = await receive_authorized(websocket)
                     message_data = json.loads(data)
                     
                     # 根据消息类型处理
@@ -323,13 +362,22 @@ def setup_websockets(app: FastAPI):
                 return
             
             user_id = str(user["_id"])
+
+            if unified_authentication():
+                async def valid_identity():
+                    try:
+                        current = await get_current_user_ws(websocket, db)
+                        return bool(current and str(current["_id"]) == user_id)
+                    except Exception:
+                        return False
+                websocket.scope["identity_validator"] = valid_identity
             
             # 建立连接
             await manager.connect_to_notifications(websocket, user_id, connection_id)
             
             # 发送初始未读通知数量
             unread_count = await NotificationService.get_unread_count(db, user_id)
-            await websocket.send_json({
+            await manager._send_authorized(websocket, user_id, connection_id, {
                 "type": "notification_count",
                 "count": unread_count
             })
@@ -338,7 +386,7 @@ def setup_websockets(app: FastAPI):
             try:
                 while True:
                     # 保持连接活跃，接收可能的客户端消息
-                    data = await websocket.receive_text()
+                    data = await receive_authorized(websocket)
                     # 这里可以处理客户端发送的配置消息，如通知设置等
             except WebSocketDisconnect:
                 # 用户断开连接

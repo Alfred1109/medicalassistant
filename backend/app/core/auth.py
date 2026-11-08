@@ -2,7 +2,7 @@
 认证模块
 处理用户认证、Token验证和当前用户获取
 """
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from typing import Optional, Any
@@ -16,9 +16,12 @@ from app.core.config import settings
 from app.schemas.user import UserResponse
 from app.db.mongodb import get_database
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorClient
+from app.integrations.identity.config import oidc_settings
+from app.integrations.identity.access import unified_authentication, trusted_origin, SESSION_COOKIE
+from app.integrations.identity.service import OidcClient, OidcUnavailable
 
 # OAuth2 password bearer for token validation
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login", auto_error=False)
 
 
 def _access_token_user_id(token: str) -> Optional[str]:
@@ -41,7 +44,8 @@ def _access_token_user_id(token: str) -> Optional[str]:
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    request: Request,
+    token: Optional[str] = Depends(oauth2_scheme),
     db: AsyncIOMotorDatabase = Depends(get_database)
 ) -> UserResponse:
     """解析JWT令牌并返回当前登录用户"""
@@ -51,7 +55,26 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    user_id = _access_token_user_id(token)
+    if unified_authentication():
+        # Legacy Bearer credentials are never a fallback when the source is down.
+        if request.headers.get("authorization"):
+            raise credentials_exception
+        try:
+            record, actor = await OidcClient(db, oidc_settings).actor_for_session(request.cookies.get(SESSION_COOKIE))
+        except OidcUnavailable:
+            raise HTTPException(503, detail={"code": "IDENTITY_SOURCE_UNAVAILABLE"}) from None
+        if record is None:
+            raise credentials_exception
+        if actor is None:
+            raise HTTPException(403, detail={"code": "IDENTITY_BINDING_REQUIRED"})
+        from app.services.user_service import UserService
+        request.state.identity_subject = record["subject"]
+        request.state.identity_issuer = record["issuer"]
+        request.state.authenticated_actor_id = str(actor["_id"])
+        request.state.authenticated_actor_role = actor["role"]
+        return UserService(db)._map_user_to_schema(actor)
+
+    user_id = _access_token_user_id(token) if token else None
     if user_id is None:
         raise credentials_exception
         
@@ -86,6 +109,15 @@ async def get_current_user_ws(websocket: WebSocket, db: AsyncIOMotorClient) -> O
     从WebSocket连接中获取当前用户信息
     WebSocket连接应在查询参数或cookie中包含token
     """
+    if unified_authentication():
+        if (not trusted_origin(websocket.headers.get("origin")) or websocket.query_params.get("token")
+                or websocket.headers.get("authorization")):
+            return None
+        try:
+            _, actor = await OidcClient(db, oidc_settings).actor_for_session(websocket.cookies.get(SESSION_COOKIE))
+            return actor
+        except OidcUnavailable:
+            return None
     token = None
     
     # 首先尝试从查询参数中获取token

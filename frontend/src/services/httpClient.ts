@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { API_BASE_URL, STORAGE_KEYS } from '../config/constants';
+import { assertSameOrigin, csrfHeaders, getAuthConfig, loginPageUrl } from './authSession';
 
 // Response and data-only API adapters share one authentication boundary.
 const httpClient = axios.create({
@@ -19,7 +20,7 @@ const isCurrentSession = (token: string, refreshToken: string) =>
 function clearAuthentication(): void {
   for (const key of [STORAGE_KEYS.TOKEN, STORAGE_KEYS.REFRESH_TOKEN,
     STORAGE_KEYS.USER, STORAGE_KEYS.TOKEN_EXPIRY]) localStorage.removeItem(key);
-  if (!window.location.pathname.includes('/login')) window.location.href = '/login';
+  if (!window.location.pathname.includes('/login')) window.location.href = loginPageUrl();
 }
 
 async function refreshAccessToken(token: string, refreshToken: string): Promise<string> {
@@ -45,6 +46,14 @@ async function refreshAccessToken(token: string, refreshToken: string): Promise<
 }
 
 httpClient.interceptors.request.use(async (config) => {
+  const authentication = await getAuthConfig();
+  if (authentication.mode === 'oidc') {
+    assertSameOrigin(new URL(config.url || '', new URL(`${API_BASE_URL}/`, window.location.origin)).href);
+    config.withCredentials = true;
+    config.headers.delete('Authorization');
+    for (const [name, value] of Object.entries(csrfHeaders(config.method))) config.headers.set(name, value);
+    return config;
+  }
   let token = localStorage.getItem(STORAGE_KEYS.TOKEN);
   const expiry = localStorage.getItem(STORAGE_KEYS.TOKEN_EXPIRY);
   const refreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN);
@@ -67,7 +76,14 @@ httpClient.interceptors.request.use(async (config) => {
 
 httpClient.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
+    const authentication = await getAuthConfig().catch(() => null);
+    if (authentication?.mode === 'oidc') {
+      if (error.response?.status === 401 && !/\/auth\//.test(error.config?.url || '')) {
+        window.location.href = loginPageUrl();
+      }
+      return Promise.reject(error);
+    }
     if (error.response?.status === 401 && error.config && !isCredentialRequest(error.config.url)) {
       const sent = error.config.headers?.get?.('Authorization') ?? error.config.headers?.Authorization;
       const current = localStorage.getItem(STORAGE_KEYS.TOKEN);

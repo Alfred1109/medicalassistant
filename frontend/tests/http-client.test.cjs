@@ -29,8 +29,10 @@ function fixture(refresh = async () => ({ data: { access_token: 'new-token', ref
     vm.runInNewContext(compiled.outputText, {
       module, exports: module.exports, localStorage, window, console, Date,
       require(specifier) {
-        if (specifier === 'axios') return { create: axios.create, post: async (...args) => { refreshCalls.push(args); return refresh(...args); } };
-        if (specifier === '../config/constants') return { API_BASE_URL: '/deployment/api', STORAGE_KEYS: keys };
+        if (specifier === 'axios') return { create: axios.create, get: async () => ({ data: { mode: 'legacy' } }), post: async (...args) => { refreshCalls.push(args); return refresh(...args); } };
+        if (specifier === '../config/apiPaths') return { API_COLLECTION_PATHS: { AGENTS: '/agents/', NOTIFICATIONS: '/notifications/', DEVICES: '/devices/' } };
+        if (specifier === '../config/api') return { API_BASE_URL: '/deployment/api' };
+        if (specifier === '../config/constants') return { API_BASE_URL: '/deployment/api', API_PREFIX: '/deployment', STORAGE_KEYS: keys };
         if (specifier.startsWith('./')) return load(specifier.slice(2));
         throw new Error(`unexpected module ${specifier}`);
       },
@@ -114,7 +116,7 @@ test('refresh failure rejects all pending requests without sending protected req
   assert.equal(f.refreshCalls.length, 1);
   assert.equal(f.calls.length, 0);
   assert.equal(f.values.size, 0);
-  assert.equal(f.window.location.href, '/login');
+  assert.equal(f.window.location.href, '/deployment/auth/login');
 });
 
 test('invalid refresh response cannot become an Authorization header', async () => {
@@ -137,7 +139,7 @@ test('credential entry has no old bearer or recursive refresh; protected 401 cle
   session(f, 'current', 'refresh', Date.now() + 3600000);
   await assert.rejects(f.client.get('/protected'));
   assert.equal(f.values.size, 0);
-  assert.equal(f.window.location.href, '/login');
+  assert.equal(f.window.location.href, '/deployment/auth/login');
   session(f, 'current', 'refresh', Date.now() + 3600000);
   f.window.location.href = '';
   await assert.rejects(f.api.post('/users/login', {}));

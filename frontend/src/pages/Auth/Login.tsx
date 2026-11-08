@@ -27,7 +27,7 @@ import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import InfoIcon from '@mui/icons-material/Info';
 
 import { AppDispatch, RootState } from '../../store';
-import { login, clearAuthError, User } from '../../store/slices/authSlice';
+import { login, clearAuthError, checkAuthStatus, signOut, User } from '../../store/slices/authSlice';
 
 // 演示登录入口仅限本地开发，需同时满足两个条件：
 // 1. dev 构建（import.meta.env.DEV 在生产构建中被 Vite 静态替换为 false，
@@ -84,7 +84,7 @@ const debounce = (func: Function, wait: number) => {
 const Login: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
-  const { loading, loginLoading, error, user, token } = useSelector((state: RootState) => state.auth);
+  const { loading, loginLoading, error, user, token, mode, loginUrl, identityState } = useSelector((state: RootState) => state.auth);
 
   // 添加上一次用户状态的引用，用于比较
   const prevUserRef = useRef<User | null>(null);
@@ -201,7 +201,7 @@ const Login: React.FC = () => {
     const userChanged = user !== prevUserRef.current;
     const tokenChanged = token !== prevTokenRef.current;
 
-    if (user && token && (userChanged || tokenChanged)) {
+    if (user && (mode === 'oidc' || token) && (userChanged || tokenChanged) && !new URLSearchParams(window.location.search).has('error')) {
       // 更新引用值
       prevUserRef.current = user;
       prevTokenRef.current = token;
@@ -209,7 +209,7 @@ const Login: React.FC = () => {
       // 使用防抖函数来避免短时间内多次导航
       debouncedRedirect(user.role);
     }
-  }, [user, token, debouncedRedirect]);
+  }, [user, token, mode, debouncedRedirect]);
 
   const handleClickShowPassword = () => {
     setShowPassword(!showPassword);
@@ -256,6 +256,21 @@ const Login: React.FC = () => {
       // 真实认证错误由authSlice显示；不回退到模拟登录。
     }
   };
+
+  if (mode === 'oidc') {
+    const callbackFailed = new URLSearchParams(window.location.search).has('error');
+    return <Box sx={{ textAlign: 'center' }}>
+      <Typography component="h1" variant="h5" gutterBottom>统一登录</Typography>
+      <Typography color="text.secondary" sx={{ mb: 3 }}>使用问卷系统账号登录康复系统</Typography>
+      {(error || callbackFailed) && <Alert severity="error" sx={{ mb: 2 }}>{error || '登录验证未完成，请重新尝试'}</Alert>}
+      {identityState === 'pending_binding' && <Alert severity="info" sx={{ mb: 2 }}>身份已验证，账号尚待关联或重新审核。完成关联前无法访问业务资料。</Alert>}
+      <Button variant="contained" fullWidth disabled={!loginUrl} onClick={() => { if (loginUrl) window.location.assign(loginUrl); }}>前往统一登录</Button>
+      {identityState === 'pending_binding' && <Box sx={{ mt: 2 }}>
+        <Button onClick={() => dispatch(checkAuthStatus())}>重新检查关联状态</Button>
+        <Button onClick={() => dispatch(signOut())}>退出当前身份</Button>
+      </Box>}
+    </Box>;
+  }
 
   return (
     <Box component="form" onSubmit={handleSubmit} noValidate>

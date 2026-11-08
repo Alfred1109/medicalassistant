@@ -1,26 +1,34 @@
-import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react';
+import { API_COLLECTION_PATHS } from '../config/apiPaths';
+import { createApi, fetchBaseQuery, BaseQueryFn, FetchArgs, FetchBaseQueryError } from '@reduxjs/toolkit/query/react';
 import { API_BASE_URL } from '../config/constants';
+import { assertSameOrigin, csrfHeaders, getAuthConfig, loginPageUrl } from '../services/authSession';
 
-// 设置API基础URL
-const baseUrl = API_BASE_URL;
+const rawBaseQuery = fetchBaseQuery({ baseUrl: API_BASE_URL });
+const authenticatedBaseQuery: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQueryError> = async (args, api, extra) => {
+  try {
+    const config = await getAuthConfig();
+    const request = typeof args === 'string' ? { url: args } : { ...args };
+    const headers = new Headers(request.headers as HeadersInit | undefined);
+    if (config.mode === 'oidc') {
+      assertSameOrigin(new URL(request.url, new URL(`${API_BASE_URL}/`, window.location.origin)).href);
+      headers.delete('Authorization');
+      for (const [name, value] of Object.entries(csrfHeaders(request.method))) headers.set(name, value);
+      request.credentials = 'include';
+    } else {
+      const token = (api.getState() as { auth: { token: string | null } }).auth.token;
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+    }
+    const result = await rawBaseQuery({ ...request, headers }, api, extra);
+    if (config.mode === 'oidc' && result.error?.status === 401) window.location.href = loginPageUrl();
+    return result;
+  } catch (error) {
+    return { error: { status: 'CUSTOM_ERROR', error: error instanceof Error ? error.message : '登录状态验证失败' } };
+  }
+};
 
-// 创建API服务
 export const api = createApi({
   reducerPath: 'api',
-  baseQuery: fetchBaseQuery({ 
-    baseUrl: API_BASE_URL,
-    prepareHeaders: (headers, { getState }) => {
-      // 从state中获取token
-      const token = (getState() as any).auth.token;
-      
-      // 如果存在token，则在头部中添加Authorization
-      if (token) {
-        headers.set('Authorization', `Bearer ${token}`);
-      }
-      
-      return headers;
-    },
-  }),
+  baseQuery: authenticatedBaseQuery,
   tagTypes: ['Patients', 'Doctors', 'HealthManagers', 'RehabPlans', 'Exercises', 'Agents'],
   endpoints: (builder) => ({
     // 患者相关端点
@@ -93,7 +101,7 @@ export const api = createApi({
     // 智能代理相关端点
     getAgents: builder.query({
       query: (params) => ({
-        url: 'agents',
+        url: API_COLLECTION_PATHS.AGENTS,
         params,
       }),
       providesTags: ['Agents'],
@@ -104,7 +112,7 @@ export const api = createApi({
     }),
     createAgent: builder.mutation({
       query: (agent) => ({
-        url: 'agents',
+        url: API_COLLECTION_PATHS.AGENTS,
         method: 'POST',
         body: agent,
       }),

@@ -3,34 +3,22 @@ import { useDispatch, useSelector } from 'react-redux';
 import { RootState, AppDispatch } from './store';
 import { checkAuthStatus } from './store/slices/authSlice';
 import { closeSnackbar } from './store/slices/uiSlice';
-import { Snackbar, Alert } from '@mui/material';
+import { Snackbar, Alert, Box, Button } from '@mui/material';
 import AppRoutes, { LoadingFallback } from './routes';
 
 const App: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
-  const { checking, token } = useSelector((state: RootState) => state.auth);
-  const [validatedToken, setValidatedToken] = React.useState<string | null | undefined>(undefined);
+  const { checking, token, mode, error } = useSelector((state: RootState) => state.auth);
   const { snackbar } = useSelector((state: RootState) => state.ui);
 
   React.useEffect(() => {
-    let active = true;
-
-    if (!token) {
-      setValidatedToken(null);
-      return;
-    }
-
-    dispatch(checkAuthStatus()).finally(() => {
-      if (active) setValidatedToken(token);
-    });
-
-    return () => {
-      active = false;
-    };
+    dispatch(checkAuthStatus());
   }, [dispatch, token]);
 
-  if (validatedToken !== token || (token && checking)) {
-    return <LoadingFallback />;
+  if (checking) return <LoadingFallback />;
+  if (!mode) {
+    return <Box sx={{ p: 3 }}><Alert severity="error">{error || '登录配置加载失败'}</Alert>
+      <Button onClick={() => dispatch(checkAuthStatus())}>重新连接</Button></Box>;
   }
 
   return (

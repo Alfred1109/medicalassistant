@@ -241,7 +241,7 @@ class PermissionChecker:
         has_permission = PermissionChecker.has_permission(user, permission)
         
         # 记录审计日志（仅针对重要权限或权限检查失败的情况）
-        if db and (not has_permission or permission in AUDITED_PERMISSIONS):
+        if db is not None and (not has_permission or permission in AUDITED_PERMISSIONS):
             try:
                 # 获取IP地址
                 ip_address = None
@@ -338,4 +338,4 @@ def get_user_permissions(user: UserResponse) -> Set[str]:
     # if hasattr(user, 'permissions'):
     #     permissions.update(user.permissions)
     
-    return permissions 
+    return permissions

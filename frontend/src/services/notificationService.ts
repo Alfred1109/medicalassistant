@@ -1,3 +1,4 @@
+import { API_COLLECTION_PATHS } from '../config/apiPaths';
 import api from './api';
 
 // 通知类型定义（与后端 Notification 模型对齐：models/communication.py + notification_service.py）
@@ -42,7 +43,7 @@ export const notificationApi = {
     read?: boolean;
   }) {
     try {
-      const response = await api.get('/notifications', { params });
+      const response = await api.get(API_COLLECTION_PATHS.NOTIFICATIONS, { params });
       return response.data;
     } catch (error) {
       console.error('获取通知失败:', error);
