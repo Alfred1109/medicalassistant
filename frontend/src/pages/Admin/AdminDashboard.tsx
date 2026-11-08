@@ -1,7 +1,6 @@
 import React, { useEffect } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Box, CircularProgress, Typography } from '@mui/material';
-// import SideMenu from '../../components/Admin/SideMenu'; // Removed redundant SideMenu import
 // import { Grid } from '@mui/material'; // Removed unused Grid import
 
 const AdminDashboard: React.FC = () => {
@@ -37,4 +36,4 @@ const AdminDashboard: React.FC = () => {
   );
 };
 
-export default AdminDashboard; 
+export default AdminDashboard;
