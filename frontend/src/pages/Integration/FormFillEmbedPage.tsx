@@ -3,12 +3,12 @@
  *
  * 职责：
  * - 从后端取一次性 embed_url 并在 iframe 中打开；
- * - 严格校验 postMessage：origin 必须等于后端登记的 allowedOrigin，
- *   且消息满足 source/type/结构与 sessionId 匹配，才触发后端 confirm；
+ * - 校验 postMessage 的实际 iframe 窗口、表单平台 origin、消息结构和会话标识，
+ *   全部匹配才触发后端 confirm；
  * - 状态展示：过期/失败/已确认各自有明确提示；不缓存任何令牌材料。
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Alert,
@@ -22,7 +22,7 @@ import {
 
 import {
   formIntegrationService,
-  isFormPlatformFillStatusMessage,
+  isTrustedFormPlatformFillStatusEvent,
   EmbedUrlResult,
   FillTask,
 } from '../../services/formIntegrationService';
@@ -36,6 +36,7 @@ const FormFillEmbedPage: React.FC = () => {
   const [embed, setEmbed] = useState<EmbedUrlResult | null>(null);
   const [task, setTask] = useState<FillTask | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const loadTask = useCallback(async (id: string) => {
     try {
@@ -86,21 +87,8 @@ const FormFillEmbedPage: React.FC = () => {
   useEffect(() => {
     if (!taskId || !embed) return;
 
-    // event.origin 是消息发送方（表单平台 iframe）的来源，
-    // 必须等于 embed_url 的来源；allowedOrigin 是本页面自身来源（postMessage 的目标），二者不能混用。
-    const formPlatformOrigin = (() => {
-      try {
-        return new URL(embed.embedUrl).origin;
-      } catch {
-        return '';
-      }
-    })();
-
     const handler = (event: MessageEvent) => {
-      // 严格校验 origin：必须与表单平台来源完全一致
-      if (!formPlatformOrigin || event.origin !== formPlatformOrigin) return;
-      if (!isFormPlatformFillStatusMessage(event.data)) return;
-      if (embed.sessionUuid && event.data.sessionSid !== embed.sessionUuid) return;
+      if (!isTrustedFormPlatformFillStatusEvent(event, iframeRef.current?.contentWindow ?? null, embed)) return;
       if (event.data.status !== 'submitted') return;
 
       setPhase('confirming');
@@ -201,6 +189,7 @@ const FormFillEmbedPage: React.FC = () => {
           }}
         >
           <iframe
+            ref={iframeRef}
             title="113.44 填报表单"
             src={embed.embedUrl}
             style={{ width: '100%', height: '100%', border: 'none' }}

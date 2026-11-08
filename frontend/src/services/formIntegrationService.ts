@@ -77,6 +77,12 @@ export interface EmbedUrlResult {
   allowedOrigin: string;
 }
 
+export interface FillTaskListPage {
+  status: string;
+  page: number;
+  pageSize: number;
+}
+
 export const FORM_PLATFORM_POST_MESSAGE_SOURCE = 'form11344';
 
 export interface FormPlatformFillStatusMessage {
@@ -100,6 +106,23 @@ export const isFormPlatformFillStatusMessage = (
     (candidate.responseId === null || typeof candidate.responseId === 'number') &&
     typeof candidate.status === 'string'
   );
+};
+
+/** Only the iframe opened for this task may report its fill status. */
+export const isTrustedFormPlatformFillStatusEvent = (
+  event: Pick<MessageEvent, 'origin' | 'source' | 'data'>,
+  frameWindow: Window | null,
+  embed: Pick<EmbedUrlResult, 'embedUrl' | 'sessionUuid'>,
+): event is Pick<MessageEvent<FormPlatformFillStatusMessage>, 'origin' | 'source' | 'data'> => {
+  if (!frameWindow || event.source !== frameWindow || !embed.sessionUuid) return false;
+  let url: URL;
+  try {
+    url = new URL(embed.embedUrl);
+  } catch {
+    return false;
+  }
+  if (!['https:', 'http:'].includes(url.protocol) || event.origin !== url.origin) return false;
+  return isFormPlatformFillStatusMessage(event.data) && event.data.sessionSid === embed.sessionUuid;
 };
 
 const buildCreatePayload = (payload: CreateFillTaskPayload): Record<string, unknown> => ({
@@ -131,6 +154,28 @@ export const formIntegrationService = {
       '/integrations/forms/fill-tasks',
       { params: query },
     );
+  },
+
+  async listFillTaskPage(query: FillTaskListPage): Promise<{
+    items: FillTask[]; total: number; page: number;
+  }> {
+    if (!Number.isInteger(query.page) || query.page < 0 ||
+        !Number.isInteger(query.pageSize) || query.pageSize < 1 || query.pageSize > 100) {
+      throw new RangeError('填报任务分页参数无效');
+    }
+    const fetch = (page: number) => this.listFillTasks({
+      ...(query.status ? { status: query.status } : {}),
+      skip: page * query.pageSize,
+      limit: query.pageSize,
+    });
+    let page = query.page;
+    let result = await fetch(page);
+    // 筛选、撤权或取消后总数可能缩小；重新取得仍存在的末页。
+    while (page > Math.max(0, Math.ceil(result.total / query.pageSize) - 1)) {
+      page = Math.max(0, Math.ceil(result.total / query.pageSize) - 1);
+      result = await fetch(page);
+    }
+    return { items: result.items, total: result.total, page };
   },
 
   async createFillTask(payload: CreateFillTaskPayload): Promise<CreateFillTaskResult> {

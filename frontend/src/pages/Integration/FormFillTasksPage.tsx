@@ -9,7 +9,7 @@
  *   映射（DATA01）就绪后另行设计，这里不做模拟创建。
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import {
@@ -25,6 +25,7 @@ import {
   TableCell,
   TableContainer,
   TableHead,
+  TablePagination,
   TableRow,
   TextField,
   Typography,
@@ -34,6 +35,7 @@ import { RootState } from '../../store';
 import {
   formIntegrationService,
   FillTask,
+  FillTaskListPage,
 } from '../../services/formIntegrationService';
 
 const STATUS_LABELS: Record<string, string> = {
@@ -61,32 +63,42 @@ const FormFillTasksPage: React.FC = () => {
   const user = useSelector((state: RootState) => state.auth.user);
   const [tasks, setTasks] = useState<FillTask[]>([]);
   const [total, setTotal] = useState(0);
-  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [query, setQuery] = useState<FillTaskListPage>({ status: '', page: 0, pageSize: 20 });
+  const queryRef = useRef(query);
+  const requestId = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
 
   const rolePrefix = user?.role === 'health_manager' ? 'health-manager' : 'doctor';
 
-  const load = useCallback(async (status: string) => {
+  const load = useCallback(async (nextQuery: FillTaskListPage) => {
+    const currentRequest = ++requestId.current;
+    queryRef.current = nextQuery;
+    setQuery(nextQuery);
     setLoading(true);
     setError(null);
+    setTasks([]);
     try {
-      const result = await formIntegrationService.listFillTasks(
-        status ? { status } : undefined,
-      );
+      const result = await formIntegrationService.listFillTaskPage(nextQuery);
+      if (currentRequest !== requestId.current) return;
       setTasks(result.items);
       setTotal(result.total);
+      const currentQuery = { ...nextQuery, page: result.page };
+      queryRef.current = currentQuery;
+      setQuery(currentQuery);
     } catch (err) {
+      if (currentRequest !== requestId.current) return;
       setError(err instanceof Error && err.message ? err.message : '加载填报任务列表失败');
     } finally {
-      setLoading(false);
+      if (currentRequest === requestId.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void load(statusFilter);
-  }, [load, statusFilter]);
+    void load(queryRef.current);
+    return () => { requestId.current += 1; };
+  }, [load]);
 
   const handleOpen = (task: FillTask) => {
     navigate(`/app/${rolePrefix}/form-fill/${task.id}`);
@@ -96,8 +108,8 @@ const FormFillTasksPage: React.FC = () => {
     setBusyTaskId(task.id);
     setError(null);
     try {
-      const updated = await formIntegrationService.confirmFillTask(task.id);
-      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      await formIntegrationService.confirmFillTask(task.id);
+      await load(queryRef.current);
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : '确认失败：远端状态核验未通过');
     } finally {
@@ -110,8 +122,8 @@ const FormFillTasksPage: React.FC = () => {
     setBusyTaskId(task.id);
     setError(null);
     try {
-      const updated = await formIntegrationService.cancelFillTask(task.id);
-      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      await formIntegrationService.cancelFillTask(task.id);
+      await load(queryRef.current);
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : '取消失败');
     } finally {
@@ -126,7 +138,7 @@ const FormFillTasksPage: React.FC = () => {
     <Box sx={{ p: 3 }}>
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
         <Typography variant="h5">表单填报任务（113.44 嵌入）</Typography>
-        <Button variant="outlined" onClick={() => void load(statusFilter)} disabled={loading}>
+        <Button variant="outlined" onClick={() => void load(queryRef.current)} disabled={loading || busyTaskId !== null}>
           刷新
         </Button>
       </Box>
@@ -137,8 +149,9 @@ const FormFillTasksPage: React.FC = () => {
           label="状态过滤"
           size="small"
           sx={{ width: 200 }}
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
+          value={query.status}
+          disabled={busyTaskId !== null}
+          onChange={(e) => void load({ ...queryRef.current, status: e.target.value, page: 0 })}
         >
           <MenuItem value="">全部</MenuItem>
           {STATUS_OPTIONS.map((status) => (
@@ -163,7 +176,7 @@ const FormFillTasksPage: React.FC = () => {
           <CircularProgress />
         </Box>
       ) : (
-        <TableContainer component={Paper}>
+        <TableContainer component={Paper} aria-busy={loading}>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -181,7 +194,7 @@ const FormFillTasksPage: React.FC = () => {
                 <TableRow>
                   <TableCell colSpan={7} align="center">
                     <Typography variant="body2" color="text.secondary" py={2}>
-                      暂无填报任务。任务创建暂通过后端 API 发起（试点阶段）。
+                      {error ? '任务加载失败，请重试。' : '暂无填报任务。任务创建暂通过后端 API 发起（试点阶段）。'}
                     </Typography>
                   </TableCell>
                 </TableRow>
@@ -246,6 +259,22 @@ const FormFillTasksPage: React.FC = () => {
           </Table>
         </TableContainer>
       )}
+
+      <TablePagination
+        component="div"
+        count={total}
+        page={loading ? Math.min(query.page, Math.max(0, Math.ceil(total / query.pageSize) - 1)) : query.page}
+        rowsPerPage={query.pageSize}
+        rowsPerPageOptions={[10, 20, 50, 100]}
+        labelRowsPerPage="每页任务数"
+        labelDisplayedRows={({ from, to, count }) => `${from}–${to}，共 ${count} 条`}
+        getItemAriaLabel={(type) => type === 'next' ? '下一页' : type === 'previous' ? '上一页' : type === 'first' ? '第一页' : '最后一页'}
+        backIconButtonProps={{ disabled: loading || busyTaskId !== null || query.page === 0 }}
+        nextIconButtonProps={{ disabled: loading || busyTaskId !== null || (query.page + 1) * query.pageSize >= total }}
+        SelectProps={{ disabled: loading || busyTaskId !== null }}
+        onPageChange={(_, page) => void load({ ...queryRef.current, page })}
+        onRowsPerPageChange={(event) => void load({ ...queryRef.current, pageSize: Number(event.target.value), page: 0 })}
+      />
 
       <Typography sx={{ mt: 2 }} variant="caption" color="text.secondary">
         嵌入链接为一次性令牌：关闭或过期后需重新创建任务；“待审阅（已核实）”表示后端已向

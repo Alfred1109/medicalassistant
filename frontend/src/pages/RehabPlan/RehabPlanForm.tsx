@@ -92,6 +92,8 @@ interface GeneratedPlan {
   exercises: Exercise[];
   notes: string;
   status: string;
+  updated_at?: string;
+  content_revision?: number;
   metadata?: {
     generated_by: string;
     is_approved: boolean;
@@ -272,16 +274,14 @@ const RehabPlanForm: React.FC = () => {
     
     try {
       // 计算修改内容
-      const modifications = {};
-      
-      if (modifiedPlan !== generatedPlan) {
-        Object.assign(modifications, modifiedPlan);
-      }
+      const { name, description, duration_weeks, frequency, exercises, notes } = modifiedPlan;
+      const modifications = { name, description, duration_weeks, frequency, exercises, notes };
       
       // 调用后端API确认计划
       const response = await axios.post(
         `${API_BASE_URL}/rehabilitation/plans/${modifiedPlan._id}/approve`,
-        { modifications }
+        { modifications, expected_updated_at: generatedPlan?.updated_at,
+          expected_revision: generatedPlan?.content_revision }
       );
       
       // 导航到计划详情页面
@@ -935,4 +935,4 @@ const RehabPlanForm: React.FC = () => {
   );
 };
 
-export default RehabPlanForm; 
+export default RehabPlanForm;
