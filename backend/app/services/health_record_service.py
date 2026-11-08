@@ -1,82 +1,42 @@
 """
 健康档案服务
-提供健康档案、随访记录和健康数据的业务逻辑实现
+提供健康档案和健康数据的业务逻辑实现
+
+FU01 S2：随访方法组已拆出至 app/services/followup_service.py（唯一随访服务入口），
+本服务保留健康档案域；健康档案统计中的随访计数经 FollowupService 转调。
 """
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
-from app.models.health_record import HealthRecord, FollowUpRecord, HealthData, MedicalTimeline
-from app.schemas.followup import (
-    FollowUpRecordCreate, FollowUpRecordUpdate, FollowUpRecordResponse,
-    CompleteFollowUpRequest, CancelFollowUpRequest, RescheduleFollowUpRequest,
-    FollowUpStatus,
-)
+from app.models.health_record import HealthRecord, HealthData, MedicalTimeline
 from app.schemas.health_record import (
     HealthRecordCreate, HealthRecordUpdate, HealthRecordResponse,
     HealthDataCreate, HealthDataResponse, HealthRecordStats, HealthTimelineItem,
     RecordType
 )
-
-
-# FollowUpRecordDB 存储模型的正式扩展字段（FU01 S1 起直接落顶层，全部 Optional）。
-# 存量文档（e7e8706 缝合层约定）对应数据在 metadata.* 下，读取时兼容回退；
-# models.FollowUpRecord.from_mongo 按显式关键字构造，顶层未知键会抛 TypeError，
-# 故读取前先摘出（见 HealthRecordService._followup_from_mongo）。
-_FOLLOWUP_FORMAL_FIELDS = (
-    "provider_id", "template_id", "reminder_before",
-    "completion_data", "cancellation_data", "next_follow_up_id",
-    "follow_up_result",
-    # FU01 S3 节点字段增强（schemas/followup.py FollowUpRecordDB）+ 迁移打标，
-    # 同样只在读取侧摘出挂回，models.FollowUpRecord 构造器不认识这些顶层键
-    "visit_code", "form_binding", "fill_task_ids", "effective_response",
-    "review", "previous_visit_id", "next_visit_id",
-    "legacy_source",
-)
+from app.services.followup_service import FollowupService
 
 
 class HealthRecordService:
-    """健康档案服务类，提供健康档案、随访记录和健康数据的业务逻辑实现"""
-    
+    """健康档案服务类，提供健康档案和健康数据的业务逻辑实现"""
+
     def __init__(self, db: AsyncIOMotorDatabase):
         """初始化服务类
-        
+
         Args:
             db: MongoDB数据库连接
         """
         self.db = db
         # 健康档案集合
         self.health_records = db[HealthRecord.collection_name]
-        # 随访记录集合
-        self.followup_records = db[FollowUpRecord.collection_name]
         # 健康数据集合
         self.health_data = db[HealthData.collection_name]
         # 医疗时间线集合
         self.medical_timelines = db[MedicalTimeline.collection_name]
-    
-    # -------- 随访读取兼容层（FU01 S1） --------
-
-    def _followup_from_mongo(self, mongo_doc) -> Optional[FollowUpRecord]:
-        """从 followup_records 集合文档构建 FollowUpRecord。
-
-        models.FollowUpRecord.from_mongo 按显式关键字参数构造，文档出现存储模型
-        未声明的顶层键会抛 TypeError；S1 起正式扩展字段（_FOLLOWUP_FORMAL_FIELDS）
-        直接落顶层，读取时先摘出、再 setattr 挂回实例，供映射层按
-        「正式字段优先、metadata.* 回退」取值（存量 demo 文档不迁移、不破坏）。
-        """
-        if not mongo_doc:
-            return None
-        doc = dict(mongo_doc)
-        formal = {}
-        for field in _FOLLOWUP_FORMAL_FIELDS:
-            value = doc.pop(field, None)
-            if value is not None:
-                formal[field] = value
-        record = FollowUpRecord.from_mongo(doc)
-        for field, value in formal.items():
-            setattr(record, field, value)
-        return record
+        # 随访域唯一入口（FU01 S2）：统计域随访计数转调，不在本服务直连随访集合
+        self.followup_service = FollowupService(db)
 
     # -------- 健康档案相关方法 --------
     
@@ -333,12 +293,10 @@ class HealthRecordService:
         if latest_record_doc:
             latest_record = self._map_health_record_to_response(HealthRecord.from_mongo(latest_record_doc))
         
-        # 获取即将到来的随访数量
-        upcoming_followups = await self.followup_records.count_documents({
-            "patient_id": patient_id,
-            "status": "scheduled",
-            "scheduled_date": {"$gte": datetime.utcnow()}
-        })
+        # 获取即将到来的随访数量（FU01 S2：经 FollowupService 转调）
+        upcoming_followups = await self.followup_service.count_upcoming(
+            patient_id, since=datetime.utcnow()
+        )
         
         # 获取最近的活动
         recent_timeline_cursor = self.medical_timelines.find(
@@ -378,481 +336,6 @@ class HealthRecordService:
             completion_percentage=completion_percentage,
             total_attachments=total_attachments
         )
-    
-    # -------- 随访记录相关方法 --------
-    
-    async def create_followup_record(self, followup_data: FollowUpRecordCreate) -> FollowUpRecordResponse:
-        """创建随访记录
-        
-        Args:
-            followup_data: 随访记录创建请求数据
-            
-        Returns:
-            FollowUpRecordResponse: 创建成功的随访记录响应
-        """
-        # 按生效 schema（schemas/followup.py FollowUpRecordCreate）修正：
-        # notes / health_record_ids 为第一代字段，生效模型上不存在，停止访问；
-        # 生效字段映射：description -> 存储字段 notes，related_records -> 存储字段 health_record_ids，
-        # created_by 缺省时回退到必填的 provider_id。
-        # S1 起扩展数据停止写 metadata.*：provider_id / template_id / reminder_before
-        # 直接落顶层正式字段（FollowUpRecordDB 已声明，全部 Optional）。
-        followup_metadata = dict(followup_data.metadata or {})
-
-        # 创建随访记录对象
-        followup_record = FollowUpRecord(
-            patient_id=followup_data.patient_id,
-            created_by=followup_data.created_by or followup_data.provider_id,
-            follow_up_type=followup_data.follow_up_type,
-            scheduled_date=followup_data.scheduled_date,
-            notes=followup_data.description,
-            # 按生效 schema 修正：questions 为 pydantic 模型，须转 dict 才能落库
-            questions=[q.model_dump() for q in followup_data.questions],
-            health_record_ids=followup_data.related_records,
-            metadata=followup_metadata
-        )
-        # 正式扩展字段落顶层（存储模型 __init__ 未声明，to_mongo 复制 __dict__ 带出）
-        followup_record.provider_id = followup_data.provider_id
-        if followup_data.template_id:
-            followup_record.template_id = followup_data.template_id
-        if followup_data.reminder_before is not None:
-            followup_record.reminder_before = followup_data.reminder_before
-        
-        # 插入数据库
-        result = await self.followup_records.insert_one(followup_record.to_mongo())
-        
-        # 更新ID
-        followup_record._id = str(result.inserted_id)
-        
-        # 创建关联的时间线项目
-        timeline_item = MedicalTimeline.from_follow_up(followup_record)
-        await self.medical_timelines.insert_one(timeline_item.to_mongo())
-        
-        # 返回响应
-        return self._map_followup_record_to_response(followup_record)
-    
-    async def get_followup_record(self, followup_id: str) -> Optional[FollowUpRecordResponse]:
-        """获取随访记录
-        
-        Args:
-            followup_id: 随访记录ID
-            
-        Returns:
-            Optional[FollowUpRecordResponse]: 随访记录响应，不存在则返回None
-        """
-        # 查询数据库
-        followup_doc = await self.followup_records.find_one({"_id": ObjectId(followup_id)})
-        if not followup_doc:
-            return None
-        
-        # 创建对象并返回响应
-        followup_record = self._followup_from_mongo(followup_doc)
-        return self._map_followup_record_to_response(followup_record)
-    
-    async def update_followup_record(self, followup_id: str, followup_data: FollowUpRecordUpdate) -> Optional[FollowUpRecordResponse]:
-        """更新随访记录
-        
-        Args:
-            followup_id: 随访记录ID
-            followup_data: 随访记录更新请求数据
-            
-        Returns:
-            Optional[FollowUpRecordResponse]: 更新后的随访记录响应，不存在则返回None
-        """
-        # 查询数据库
-        followup_doc = await self.followup_records.find_one({"_id": ObjectId(followup_id)})
-        if not followup_doc:
-            return None
-        
-        # 创建对象
-        followup_record = self._followup_from_mongo(followup_doc)
-        
-        # 更新字段。按生效 schema（FollowUpRecordUpdate:484-494）修正：
-        # notes / health_record_ids 为第一代字段，停止访问；
-        # 生效字段映射：description -> 存储字段 notes，related_records -> 存储字段 health_record_ids
-        update_data = {}
-        if followup_data.follow_up_type:
-            update_data["follow_up_type"] = followup_data.follow_up_type
-        if followup_data.scheduled_date:
-            update_data["scheduled_date"] = followup_data.scheduled_date
-        if followup_data.status:
-            # 按生效 schema 修正：status 为枚举，落库取其字符串值
-            update_data["status"] = followup_data.status.value
-        if followup_data.description is not None:
-            update_data["notes"] = followup_data.description
-        if followup_data.questions is not None:
-            # 按生效 schema 修正：questions 为 pydantic 模型，须转 dict 才能进 $set
-            update_data["questions"] = [q.model_dump() for q in followup_data.questions]
-        if followup_data.related_records is not None:
-            update_data["health_record_ids"] = followup_data.related_records
-        if followup_data.provider_id is not None:
-            # S1 起落顶层正式字段（此前入参被静默丢弃）
-            update_data["provider_id"] = followup_data.provider_id
-        if followup_data.reminder_before is not None:
-            update_data["reminder_before"] = followup_data.reminder_before
-        if followup_data.metadata is not None:
-            update_data["metadata"] = followup_data.metadata
-        
-        # 添加更新时间
-        update_data["updated_at"] = datetime.utcnow()
-        
-        # 更新数据库
-        await self.followup_records.update_one(
-            {"_id": ObjectId(followup_id)},
-            {"$set": update_data}
-        )
-        
-        # 如果状态改变，更新时间线
-        if followup_data.status:
-            followup = self._followup_from_mongo(await self.followup_records.find_one({"_id": ObjectId(followup_id)}))
-            timeline_item = MedicalTimeline.from_follow_up(followup)
-            
-            status_desc = {
-                "scheduled": "已安排",
-                "completed": "已完成",
-                "canceled": "已取消",
-                "missed": "已错过",
-                "rescheduled": "已重新安排"
-            }
-            
-            await self.medical_timelines.update_one(
-                {"related_ids": followup_id, "item_type": "follow_up"},
-                {"$set": {
-                    "description": f"随访状态: {status_desc.get(followup.status, followup.status)}",
-                    "occurred_at": followup.actual_date if followup.actual_date else followup.scheduled_date,
-                    "metadata.status": followup.status
-                }}
-            )
-        
-        # 返回更新后的记录
-        return await self.get_followup_record(followup_id)
-    
-    async def complete_followup(self, followup_id: str, data: CompleteFollowUpRequest) -> Optional[FollowUpRecordResponse]:
-        """完成随访
-        
-        Args:
-            followup_id: 随访记录ID
-            data: 完成随访请求数据
-            
-        Returns:
-            Optional[FollowUpRecordResponse]: 更新后的随访记录响应，不存在则返回None
-        """
-        # 查询数据库
-        followup_doc = await self.followup_records.find_one({"_id": ObjectId(followup_id)})
-        if not followup_doc:
-            return None
-        
-        # 创建对象
-        followup_record = self._followup_from_mongo(followup_doc)
-        
-        # 按生效 schema 修正：answers 为 pydantic 模型（FollowUpAnswer），须转 dict 才能落库（bson InvalidDocument）
-        answers_data = [a.model_dump() for a in data.answers]
-
-        # 更新随访状态
-        followup_record.complete_followup(
-            actual_date=data.actual_date,
-            notes=data.notes,
-            answers=answers_data
-        )
-
-        # 完成数据
-        completion_data = {
-            "completed_at": datetime.utcnow(),
-            "result": data.follow_up_result,
-            "notes": data.notes
-        }
-
-        # 更新数据库。S1 起完成数据写顶层正式字段（FollowUpRecordDB 已声明），
-        # 停止 metadata.completion_data / metadata.result 顶层数据；
-        # 存量文档的 metadata.* 由读取侧回退兼容（_followup_from_mongo + 映射层）。
-        await self.followup_records.update_one(
-            {"_id": ObjectId(followup_id)},
-            {"$set": {
-                "status": "completed",
-                "actual_date": data.actual_date,
-                "answers": answers_data,
-                "notes": data.notes if data.notes else followup_record.notes,
-                "updated_at": datetime.utcnow(),
-                "completion_data": completion_data,
-                "follow_up_result": data.follow_up_result
-            }}
-        )
-        
-        # 如果提供了下次随访日期，创建新的随访记录
-        if data.next_follow_up_date:
-            # 基于当前随访创建新的随访记录
-            new_followup = FollowUpRecord(
-                patient_id=followup_record.patient_id,
-                created_by=followup_record.created_by,
-                follow_up_type=followup_record.follow_up_type,
-                scheduled_date=data.next_follow_up_date,
-                notes=f"基于上次随访({followup_record._id})创建的后续随访",
-                questions=followup_record.questions,
-                health_record_ids=followup_record.health_record_ids
-            )
-            
-            # 插入数据库
-            new_result = await self.followup_records.insert_one(new_followup.to_mongo())
-            
-            # 更新原随访记录的next_follow_up_id（S1 起写顶层正式字段，读取侧回退兼容存量 metadata.*）
-            await self.followup_records.update_one(
-                {"_id": ObjectId(followup_id)},
-                {"$set": {"next_follow_up_id": str(new_result.inserted_id)}}
-            )
-            
-            # 创建关联的时间线项目
-            new_followup._id = str(new_result.inserted_id)
-            timeline_item = MedicalTimeline.from_follow_up(new_followup)
-            await self.medical_timelines.insert_one(timeline_item.to_mongo())
-        
-        # 更新时间线
-        timeline_item = MedicalTimeline.from_follow_up(followup_record)
-        await self.medical_timelines.update_one(
-            {"related_ids": followup_id, "item_type": "follow_up"},
-            {"$set": {
-                "description": "随访状态: 已完成",
-                "occurred_at": data.actual_date,
-                "metadata.status": "completed",
-                "metadata.result": data.follow_up_result
-            }}
-        )
-        
-        # 返回更新后的记录
-        return await self.get_followup_record(followup_id)
-    
-    async def cancel_followup(self, followup_id: str, data: CancelFollowUpRequest) -> Optional[FollowUpRecordResponse]:
-        """取消随访
-        
-        Args:
-            followup_id: 随访记录ID
-            data: 取消随访请求数据
-            
-        Returns:
-            Optional[FollowUpRecordResponse]: 更新后的随访记录响应，不存在则返回None
-        """
-        # 查询数据库
-        followup_doc = await self.followup_records.find_one({"_id": ObjectId(followup_id)})
-        if not followup_doc:
-            return None
-        
-        # 创建对象
-        followup_record = self._followup_from_mongo(followup_doc)
-        
-        # 更新随访状态
-        followup_record.cancel_followup(
-            reason=data.cancel_reason,
-            reschedule_date=data.reschedule_date
-        )
-        
-        # 取消数据
-        cancellation_data = {
-            "canceled_at": datetime.utcnow(),
-            "canceled_by": data.canceled_by,
-            "reason": data.cancel_reason,
-            "reschedule_date": data.reschedule_date
-        }
-        
-        # 更新字段。S1 起取消数据写顶层正式字段（FollowUpRecordDB 已声明），
-        # 停止 metadata.cancellation_data 顶层数据；存量文档由读取侧回退兼容
-        update_data = {
-            "status": "canceled",
-            "notes": followup_record.notes,
-            "updated_at": datetime.utcnow(),
-            "cancellation_data": cancellation_data
-        }
-        
-        # 更新数据库
-        await self.followup_records.update_one(
-            {"_id": ObjectId(followup_id)},
-            {"$set": update_data}
-        )
-        
-        # 如果要重新安排随访，创建新的随访记录
-        if data.reschedule_date:
-            # 基于当前随访创建新的随访记录
-            new_followup = FollowUpRecord(
-                patient_id=followup_record.patient_id,
-                created_by=followup_record.created_by,
-                follow_up_type=followup_record.follow_up_type,
-                scheduled_date=data.reschedule_date,
-                notes=f"由于取消原随访({followup_record._id})而重新安排的随访: {data.cancel_reason}",
-                questions=followup_record.questions,
-                health_record_ids=followup_record.health_record_ids
-            )
-            
-            # 插入数据库
-            new_result = await self.followup_records.insert_one(new_followup.to_mongo())
-            
-            # 更新原随访记录的next_follow_up_id（S1 起写顶层正式字段，读取侧回退兼容存量 metadata.*）
-            await self.followup_records.update_one(
-                {"_id": ObjectId(followup_id)},
-                {"$set": {"next_follow_up_id": str(new_result.inserted_id)}}
-            )
-            
-            # 创建关联的时间线项目
-            new_followup._id = str(new_result.inserted_id)
-            timeline_item = MedicalTimeline.from_follow_up(new_followup)
-            await self.medical_timelines.insert_one(timeline_item.to_mongo())
-        
-        # 更新时间线
-        timeline_item = MedicalTimeline.from_follow_up(followup_record)
-        await self.medical_timelines.update_one(
-            {"related_ids": followup_id, "item_type": "follow_up"},
-            {"$set": {
-                "description": f"随访状态: 已取消 - {data.cancel_reason}",
-                "metadata.status": "canceled",
-                "metadata.reason": data.cancel_reason
-            }}
-        )
-        
-        # 返回更新后的记录
-        return await self.get_followup_record(followup_id)
-    
-    async def reschedule_followup(self, followup_id: str, data: RescheduleFollowUpRequest) -> Optional[FollowUpRecordResponse]:
-        """重新安排随访时间
-        
-        Args:
-            followup_id: 随访记录ID
-            data: 重新安排随访请求数据
-            
-        Returns:
-            Optional[FollowUpRecordResponse]: 更新后的随访记录响应，不存在则返回None
-        """
-        # 查询数据库
-        followup_doc = await self.followup_records.find_one({"_id": ObjectId(followup_id)})
-        if not followup_doc:
-            return None
-        
-        # 创建对象
-        followup_record = self._followup_from_mongo(followup_doc)
-        
-        # 更新随访状态
-        followup_record.reschedule(
-            new_date=data.new_date,
-            reason=data.reason
-        )
-        
-        # 更新数据库
-        await self.followup_records.update_one(
-            {"_id": ObjectId(followup_id)},
-            {"$set": {
-                "status": "rescheduled",
-                "scheduled_date": data.new_date,
-                "notes": followup_record.notes,
-                "updated_at": datetime.utcnow(),
-                "metadata.reschedule_reason": data.reason,
-                "metadata.reschedule_time": datetime.utcnow()
-            }}
-        )
-        
-        # 更新时间线
-        timeline_item = MedicalTimeline.from_follow_up(followup_record)
-        await self.medical_timelines.update_one(
-            {"related_ids": followup_id, "item_type": "follow_up"},
-            {"$set": {
-                "description": f"随访状态: 已重新安排至 {data.new_date.strftime('%Y-%m-%d %H:%M')}",
-                "occurred_at": data.new_date,
-                "metadata.status": "rescheduled",
-                "metadata.reason": data.reason
-            }}
-        )
-        
-        # 返回更新后的记录
-        return await self.get_followup_record(followup_id)
-    
-    async def list_followup_records(
-        self, 
-        patient_id: str, 
-        status: Optional[List[str]] = None,
-        follow_up_type: Optional[str] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        skip: int = 0, 
-        limit: int = 100
-    ) -> List[FollowUpRecordResponse]:
-        """列出患者的随访记录
-        
-        Args:
-            patient_id: 患者ID
-            status: 状态列表过滤
-            follow_up_type: 随访类型过滤
-            start_date: 开始日期过滤
-            end_date: 结束日期过滤
-            skip: 分页偏移量
-            limit: 每页数量
-            
-        Returns:
-            List[FollowUpRecordResponse]: 随访记录响应列表
-        """
-        # 构建查询条件
-        query = {"patient_id": patient_id, "deleted": {"$ne": True}}
-        
-        if status:
-            query["status"] = {"$in": status}
-            
-        if follow_up_type:
-            query["follow_up_type"] = follow_up_type
-            
-        date_query = {}
-        if start_date:
-            date_query["$gte"] = start_date
-        if end_date:
-            date_query["$lte"] = end_date
-            
-        if date_query:
-            query["scheduled_date"] = date_query
-        
-        # 查询数据库
-        cursor = self.followup_records.find(query).sort("scheduled_date", 1).skip(skip).limit(limit)
-        followups = await cursor.to_list(length=limit)
-        
-        # 转换为响应对象
-        return [self._map_followup_record_to_response(self._followup_from_mongo(doc)) for doc in followups]
-    
-    async def get_upcoming_followups(self, patient_id: Optional[str] = None, days: int = 7) -> List[FollowUpRecordResponse]:
-        """获取即将到来的随访记录
-        
-        Args:
-            patient_id: 患者ID，不提供则获取所有患者的即将到来的随访
-            days: 未来几天内的随访
-            
-        Returns:
-            List[FollowUpRecordResponse]: 随访记录响应列表
-        """
-        # 构建查询条件
-        query = {
-            "status": {"$in": ["scheduled", "rescheduled"]},
-            "scheduled_date": {
-                "$gte": datetime.utcnow(),
-                "$lte": datetime.utcnow() + timedelta(days=days)
-            },
-            "deleted": {"$ne": True}
-        }
-        
-        if patient_id:
-            query["patient_id"] = patient_id
-        
-        # 查询数据库
-        cursor = self.followup_records.find(query).sort("scheduled_date", 1)
-        followups = await cursor.to_list(length=100)
-        
-        # 转换为响应对象
-        return [self._map_followup_record_to_response(self._followup_from_mongo(doc)) for doc in followups]
-    
-    async def get_followups_by_health_record(self, record_id: str) -> List[FollowUpRecordResponse]:
-        """获取与健康档案关联的随访记录
-        
-        Args:
-            record_id: 健康档案ID
-            
-        Returns:
-            List[FollowUpRecordResponse]: 随访记录响应列表
-        """
-        # 查询数据库
-        cursor = self.followup_records.find({"health_record_ids": record_id, "deleted": {"$ne": True}}).sort("scheduled_date", -1)
-        followups = await cursor.to_list(length=100)
-        
-        # 转换为响应对象
-        return [self._map_followup_record_to_response(self._followup_from_mongo(doc)) for doc in followups]
     
     # -------- 健康数据相关方法 --------
     
@@ -1135,56 +618,6 @@ class HealthRecordService:
             related_follow_ups=health_record.related_follow_ups if hasattr(health_record, 'related_follow_ups') else [],
             updated_by=health_record.updated_by if hasattr(health_record, 'updated_by') else None,
             metadata=health_record.metadata
-        )
-    
-    def _map_followup_record_to_response(self, followup_record: FollowUpRecord) -> FollowUpRecordResponse:
-        """将随访记录对象映射为响应对象
-
-        扩展数据取值兼容（FU01 S1）：正式字段（顶层）优先，
-        缺省回退存量文档的 metadata.*（e7e8706 缝合层约定），对外响应形状不变。
-
-        Args:
-            followup_record: 随访记录对象
-
-        Returns:
-            FollowUpRecordResponse: 随访记录响应对象
-        """
-        metadata = followup_record.metadata or {}
-
-        def formal_or_meta(field: str, meta_key: str):
-            value = getattr(followup_record, field, None)
-            if value is not None:
-                return value
-            return metadata.get(meta_key)
-
-        reminder_before = formal_or_meta("reminder_before", "reminder_before")
-        if reminder_before is None:
-            # 存量文档无正式字段与 metadata.reminder_before 时沿用原兜底（提醒设置）
-            reminder_before = followup_record.reminder_settings.get("days_before") if hasattr(followup_record, 'reminder_settings') and followup_record.reminder_settings else None
-
-        return FollowUpRecordResponse(
-            id=followup_record._id,
-            patient_id=followup_record.patient_id,
-            created_by=followup_record.created_by,
-            follow_up_type=followup_record.follow_up_type,
-            scheduled_date=followup_record.scheduled_date,
-            provider_id=formal_or_meta("provider_id", "provider_id") or followup_record.created_by,  # 无正式字段时使用创建者
-            description=followup_record.notes,  # 存储字段 notes -> 响应字段 description
-            questions=followup_record.questions,
-            related_records=followup_record.health_record_ids,
-            metadata=followup_record.metadata,
-            created_at=followup_record.created_at,
-            updated_at=followup_record.updated_at,
-            status=followup_record.status,
-            actual_date=followup_record.actual_date,
-            answers=followup_record.answers,
-            notes=followup_record.notes,
-            follow_up_result=formal_or_meta("follow_up_result", "result"),
-            next_follow_up_id=formal_or_meta("next_follow_up_id", "next_follow_up_id"),
-            template_id=formal_or_meta("template_id", "template_id"),
-            reminder_before=reminder_before,
-            completion_data=formal_or_meta("completion_data", "completion_data"),
-            cancellation_data=formal_or_meta("cancellation_data", "cancellation_data")
         )
     
     def _map_health_data_to_response(self, health_data: HealthData) -> HealthDataResponse:

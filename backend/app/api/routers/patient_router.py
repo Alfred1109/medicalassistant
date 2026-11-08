@@ -1,9 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from typing import List, Optional, Dict, Any
 from app.schemas.user import UserResponse
-from app.core.dependencies import get_current_user, get_database
+from app.schemas.health_record import HealthRecordResponse
+from app.core.dependencies import (
+    get_current_user, get_database, get_health_record_service,
+)
+from app.core.patient_access import ensure_patient_access
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from app.services.dashboard_service import DashboardService
+from app.services.device_service import device_service
+from app.services.communication_service import CommunicationService
+from app.services.health_record_service import HealthRecordService
 from app.models.user import User
 from datetime import date, datetime, timedelta, timezone
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
@@ -15,14 +22,66 @@ router = APIRouter()
 
 # 患者功能路由
 
-# 健康档案
-@router.get("/health-records", response_model=dict)
-async def get_health_record(current_user: UserResponse = Depends(get_current_user)):
-    """获取当前患者的健康档案"""
-    if current_user.role != "patient":
+
+# ── 对象级授权（患者本人语义 / 医护归属语义分离，AUTH01 共享实现） ─────────
+_PATIENT_SCOPED_ROLES = ("patient", "doctor", "health_manager", "admin")
+
+
+async def _resolve_scoped_patient_id(db: AsyncIOMotorDatabase, current_user, patient_id: Optional[str]) -> str:
+    """解析本次查询的目标患者 ID，两种授权语义分开：
+
+    - patient（本人语义）：仅限查自己；显式指定他人 patient_id → 403，
+      不暴露他人数据存在性；
+    - doctor / health_manager（归属语义）：指定 patient_id 后经共享
+      ensure_patient_access 校验（患者不存在 → 404 PATIENT_NOT_FOUND，
+      非归属医护 → 403 PATIENT_NOT_ASSIGNED）；
+    - admin：豁免归属校验，可指定任意 patient_id；
+    - 未指定 patient_id 时回落操作者本人（含 admin，如实返回其名下数据）。
+    """
+    uid = str(current_user.id)
+    if not patient_id or patient_id == uid:
+        return uid
+    if current_user.role == "patient":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问其他患者的数据")
+    if current_user.role not in _PATIENT_SCOPED_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {}
+    await ensure_patient_access(db, patient_id, uid, current_user.role)
+    return patient_id
+
+
+# 健康档案
+@router.get("/health-records", response_model=List[HealthRecordResponse])
+async def get_health_record(
+    patient_id: Optional[str] = None,
+    record_type: Optional[str] = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    health_record_service: HealthRecordService = Depends(get_health_record_service),
+):
+    """列出健康档案（2026-11-08 替换存根空对象）
+
+    复用 HealthRecordService.list_health_records（health_records 集合，
+    deleted!=True），无数据时如实返回空列表，不做伪造填充：
+    - patient：本人档案；显式指定他人 patient_id → 403；
+    - doctor / health_manager：指定 patient_id 且经归属校验（无归属 403）；
+    - admin：豁免归属校验；
+    - 支持 skip/limit 分页与 record_type 过滤（service 层真实过滤）。
+    """
+    if current_user.role not in _PATIENT_SCOPED_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
+    target_patient_id = await _resolve_scoped_patient_id(db, current_user, patient_id)
+    try:
+        records = await health_record_service.list_health_records(
+            patient_id=target_patient_id,
+            record_type=record_type,
+            skip=skip,
+            limit=limit,
+        )
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="读取健康档案失败，请稍后重试")
+    return records
 
 # 日常记录：保留历史集合名称，避免未经迁移让已有记录消失。
 DAILY_RECORDS_COLLECTION = "patientmanager.daily_records"
@@ -197,55 +256,169 @@ async def delete_daily_record(
     return None
 
 # 设备绑定
-@router.get("/devices", response_model=List[dict])
-async def get_bound_devices(current_user: UserResponse = Depends(get_current_user)):
-    """获取已绑定的设备列表"""
-    if current_user.role != "patient":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return []
+def _normalize_device(device: Dict[str, Any]) -> Dict[str, Any]:
+    """device_service 返回原始文档：_id 已为 str 但无 id 字段，
+    patient_id 可能以 ObjectId 形态存储；统一规范化后输出。"""
+    normalized = dict(device)
+    if "_id" in normalized:
+        normalized["id"] = str(normalized["_id"])
+    if normalized.get("patient_id") is not None:
+        normalized["patient_id"] = str(normalized["patient_id"])
+    return normalized
 
-@router.post("/devices", status_code=status.HTTP_201_CREATED)
+
+class PatientDeviceBind(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    device_type: str
+    name: str
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    connection_type: Optional[str] = None
+    firmware_version: Optional[str] = None
+    settings: Optional[Dict[str, Any]] = None
+
+
+@router.get("/devices", response_model=List[dict])
+async def get_bound_devices(
+    patient_id: Optional[str] = None,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """获取设备列表（2026-11-08 替换存根空列表）
+
+    复用 device_service.get_user_devices（devices 集合 patient_id 字段，
+    排除 deleted），无设备时如实返回空列表：
+    - patient：本人设备；显式指定他人 patient_id → 403；
+    - doctor / health_manager：指定 patient_id 且经归属校验（无归属 403）；
+    - admin：豁免归属校验。
+    """
+    if current_user.role not in _PATIENT_SCOPED_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
+    target_patient_id = await _resolve_scoped_patient_id(db, current_user, patient_id)
+    try:
+        devices = await device_service.get_user_devices(target_patient_id)
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="读取设备列表失败，请稍后重试")
+    return [_normalize_device(device) for device in devices]
+
+
+@router.post("/devices", status_code=status.HTTP_201_CREATED, response_model=dict)
 async def bind_device(
-    device_data: dict,
+    device_data: PatientDeviceBind,
     current_user: UserResponse = Depends(get_current_user)
 ):
-    """绑定新设备"""
+    """绑定新设备到本人（2026-11-08 替换存根假 ID）
+
+    复用 device_service.bind_device（设备类型/固件版本真实校验，
+    patient_id 即操作者本人，创建路径不触及他人对象）。
+    """
     if current_user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {"id": "new_device_binding_id"}
+    try:
+        result = await device_service.bind_device(
+            str(current_user.id), device_data.model_dump())
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="绑定设备失败，请稍后重试")
+    if isinstance(result, dict) and result.get("error"):
+        # service 层设备类型/固件版本校验失败，如实返回 400
+        raise HTTPException(status_code=400, detail=result["error"])
+    return _normalize_device(result)
+
 
 @router.delete("/devices/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def unbind_device(
     device_id: str,
     current_user: UserResponse = Depends(get_current_user)
 ):
-    """解绑设备"""
+    """解绑本人设备（2026-11-08 替换存根）
+
+    复用 device_service.unbind_device：查询条件含 patient_id=操作者本人，
+    属主语义对象级隔离（他人设备/不存在/畸形 ID 一律 False → 404）。
+    """
     if current_user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
+    try:
+        result = await device_service.unbind_device(str(current_user.id), device_id)
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="解绑设备失败，请稍后重试")
+    if not result:
+        raise HTTPException(status_code=404, detail="设备不存在或无权解绑")
     return None
 
 # 医患沟通
-@router.get("/communications", response_model=List[dict])
-async def get_communications(current_user: UserResponse = Depends(get_current_user)):
-    """获取与医生/健康管理师的沟通记录"""
-    if current_user.role != "patient":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return []
+class PatientMessageSend(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    conversation_id: str
+    content: str = Field(min_length=1)
+    message_type: str = "text"
+    attachments: Optional[List[Dict[str, Any]]] = None
+    metadata: Optional[Dict[str, Any]] = None
+    client_message_id: Optional[str] = None
 
-@router.post("/communications", status_code=status.HTTP_201_CREATED)
-async def create_communication(
-    message_data: dict,
-    current_user: UserResponse = Depends(get_current_user)
+
+@router.get("/communications", response_model=List[dict])
+async def get_communications(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """发送新消息"""
+    """本人会话列表（2026-11-08 替换存根空列表）
+
+    复用 CommunicationService.get_conversations（conversations 集合，
+    participant1/2_id 任一匹配本人），含真实未读计数与对方用户信息；
+    无会话时如实返回空列表。
+    """
     if current_user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {"id": "new_message_id"}
+    try:
+        conversations = await CommunicationService.get_conversations(
+            db, str(current_user.id), limit=limit, skip=skip)
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="读取沟通记录失败，请稍后重试")
+    return conversations
+
+
+@router.post("/communications", status_code=status.HTTP_201_CREATED, response_model=dict)
+async def create_communication(
+    message_data: PatientMessageSend,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """向本人参与的会话发送消息（2026-11-08 替换存根假 ID）
+
+    复用 CommunicationService.send_message —— 与 /api/communications 写路径
+    共用唯一消息服务实现（幂等键、会话摘要更新、WS 推送均由 service 承担），
+    不另起第二条写路径。会话不存在 → 404，非会话参与者 → 403。
+    """
+    if current_user.role != "patient":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
+    uid = str(current_user.id)
+    conversation_id = message_data.conversation_id
+    if not ObjectId.is_valid(conversation_id):
+        raise HTTPException(status_code=422, detail="会话ID格式无效")
+    try:
+        conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="发送消息失败，请稍后重试")
+    if not conversation:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if not await CommunicationService.is_conversation_participant(db, conversation_id, uid):
+        raise HTTPException(status_code=403, detail="无权向该会话发送消息")
+    try:
+        message = await CommunicationService.send_message(
+            db, conversation_id, uid, message_data.content,
+            message_type=message_data.message_type,
+            attachments=message_data.attachments,
+            metadata=message_data.metadata,
+            client_message_id=message_data.client_message_id,
+        )
+    except ValueError:
+        # service 层参与者校验兜底（与前置校验同一判定来源）
+        raise HTTPException(status_code=403, detail="无权向该会话发送消息")
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="发送消息失败，请稍后重试")
+    return message
 
 # 数据统计
 @router.get("/statistics", response_model=dict)
@@ -369,4 +542,4 @@ async def get_rehab_progress(
             detail="未找到康复进度数据"
         )
     
-    return rehab_progress 
+    return rehab_progress

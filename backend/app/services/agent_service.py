@@ -574,44 +574,6 @@ class AgentService:
                 service_name="llm",
             )
     
-    async def approve_generated_plan(self, plan_id: str, modifications: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
-        """审核并确认生成的康复计划"""
-        try:
-            # 获取计划
-            plan = await self.db.rehab_plans.find_one({"_id": ObjectId(plan_id)})
-            if not plan:
-                return None
-                
-            # 应用修改（如果有）
-            if modifications:
-                for key, value in modifications.items():
-                    if key != "_id":
-                        plan[key] = value
-                        
-            # 更新元数据
-            if "metadata" not in plan:
-                plan["metadata"] = {}
-                
-            plan["metadata"]["is_approved"] = True
-            plan["metadata"]["approval_timestamp"] = datetime.utcnow().isoformat()
-            plan["metadata"]["approval_history"].append({
-                "timestamp": datetime.utcnow().isoformat(),
-                "status": "approved",
-                "modifications": bool(modifications)
-            })
-            
-            # 更新计划
-            await self.db.rehab_plans.update_one(
-                {"_id": ObjectId(plan_id)},
-                {"$set": plan}
-            )
-            
-            plan["_id"] = str(plan["_id"])
-            return plan
-        except Exception as e:
-            print(f"Error approving plan: {str(e)}")
-            return None
-        
     async def generate_assessment_analysis(self, assessment_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """生成康复评估分析与建议"""
         require_llm_api_key()

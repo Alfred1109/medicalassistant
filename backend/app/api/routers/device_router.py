@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ...db.mongodb import get_database
-from ...core.dependencies import ensure_patient_access
+from ...core.patient_access import ensure_patient_access
 from ...services.device_service import (
     device_service,
     DEVICE_READ_ROLES,
@@ -308,4 +308,4 @@ async def configure_device(
     await _ensure_device_access(device, current_user, db, list(DEVICE_MUTATE_ROLES))
 
     result = await device_service.configure_device(device_id, config.dict(exclude_unset=True))
-    return result 
+    return result

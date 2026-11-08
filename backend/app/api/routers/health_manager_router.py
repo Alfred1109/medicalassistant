@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from typing import List, Optional
 from app.schemas.user import UserResponse
-from app.core.dependencies import get_current_user
+from app.schemas.followup import FollowUpRecordCreate, FollowUpRecordResponse
+from app.core.dependencies import get_current_user, get_followup_service
+from app.services.followup_service import FollowupService
+from app.core.followup_access import ensure_followup_patient_access, followup_patient_scope
 
 router = APIRouter()
 
@@ -29,27 +32,38 @@ async def get_patient_health_record(
     return {}
 
 # 随访管理
-@router.get("/follow-ups", response_model=List[dict])
+# FU01 S2 收敛：/api/health-managers/follow-ups 转调 FollowupService（唯一随访服务入口），
+# 与唯一正典入口 /api/health-records/followups 同源同形状，
+# 删除 new_follow_up_id 假 ID 存根
+@router.get("/follow-ups", response_model=List[FollowUpRecordResponse])
 async def get_follow_ups(
-    status: Optional[str] = None,
-    current_user: UserResponse = Depends(get_current_user)
+    patient_id: Optional[str] = Query(None, description="患者ID，不提供则返回全部随访"),
+    followup_status: Optional[str] = Query(None, alias="status"),
+    current_user: UserResponse = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service)
 ):
-    """获取随访列表"""
+    """获取随访列表（转调 FollowupService，同源同形状）"""
     if current_user.role != "health_manager":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return []
+    if patient_id:
+        await ensure_followup_patient_access(followup_service.db, patient_id, current_user)
+    scope = await followup_patient_scope(followup_service.db, current_user)
+    return await followup_service.list_all_followups(
+        patient_id=patient_id, status=followup_status, patient_ids=scope)
 
-@router.post("/follow-ups", status_code=status.HTTP_201_CREATED)
+@router.post("/follow-ups", status_code=status.HTTP_201_CREATED, response_model=FollowUpRecordResponse)
 async def create_follow_up(
-    follow_up_data: dict,
-    current_user: UserResponse = Depends(get_current_user)
+    follow_up_data: FollowUpRecordCreate,
+    current_user: UserResponse = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service)
 ):
-    """创建随访计划"""
+    """创建随访计划（转调 FollowupService，返回真实记录 ID 与响应契约）"""
     if current_user.role != "health_manager":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {"id": "new_follow_up_id"}
+    # 创建人缺省为当前健康管理师（与 canonical 创建端点一致；provider_id 为必填契约字段）
+    await ensure_followup_patient_access(followup_service.db, follow_up_data.patient_id, current_user, write=True)
+    follow_up_data.created_by = current_user.id
+    return await followup_service.create_followup_record(follow_up_data)
 
 # 数据监测
 @router.get("/patient-monitoring/{patient_id}", response_model=dict)

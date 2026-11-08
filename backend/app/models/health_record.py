@@ -131,7 +131,7 @@ class FollowUpRecord:
         follow_up_type: str = "general",  # general, phone, in_person, video, etc.
         scheduled_date: datetime = None,
         actual_date: datetime = None,
-        status: str = "scheduled",  # scheduled, completed, cancelled, missed, rescheduled
+        status: str = "scheduled",  # scheduled, completed, canceled, missed, rescheduled
         notes: str = None,
         questions: List[Dict[str, Any]] = None,
         answers: List[Dict[str, Any]] = None,
@@ -201,17 +201,20 @@ class FollowUpRecord:
             self.attachments.extend(attachments)
         self.updated_at = datetime.utcnow()
     
-    def cancel_followup(self, reason: str = None, reschedule_date: datetime = None):
-        """取消随访"""
-        self.status = "cancelled"
+    def cancel_followup(self, reason: str = None):
+        """取消随访
+
+        FU01 S2 语义归一（设计稿 §2.2）：
+        - 状态一律 canceled（拼写与 FollowUpStatus.CANCELED 枚举归一，
+          原实现为 cancelled，由迁移脚本对存量文档做 cancelled->canceled 映射）；
+        - 「取消 + 改期」= 关闭当前节点（canceled）并由服务层新建节点
+          （previous_visit_id 关联），不再在本节点上把状态改写为 rescheduled
+          （原实现的语义冲突在此修正）。
+        """
+        self.status = "canceled"
         if reason:
             self.notes = f"已取消: {reason}"
-        
-        # 如果提供了重新安排日期，则创建新的随访
-        if reschedule_date:
-            self.notes += f"\n已重新安排到: {reschedule_date.strftime('%Y-%m-%d %H:%M')}"
-            self.status = "rescheduled"
-            
+
         self.updated_at = datetime.utcnow()
     
     def reschedule(self, new_date: datetime, reason: str = None):
@@ -415,7 +418,7 @@ class MedicalTimeline:
         status_desc = {
             "scheduled": "已安排",
             "completed": "已完成",
-            "cancelled": "已取消",
+            "canceled": "已取消",
             "missed": "已错过",
             "rescheduled": "已重新安排"
         }

@@ -7,6 +7,7 @@
 
 import json
 import unittest
+from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -23,6 +24,7 @@ from app.services.user_service import UserService
 from app.integrations.forms import models as task_models
 from app.integrations.forms.client import FormPlatformClient
 from app.integrations.forms.router import get_form_platform_client
+from followup_transaction_fake import FakeTransactionClient
 
 ORIGIN = "https://127.0.0.1:5502"
 OPERATOR_ID = "507f1f77bcf86cd799439011"
@@ -48,8 +50,16 @@ def _doc_matches(doc, query):
         current = doc
         for part in key.split("."):
             if not isinstance(current, dict) or part not in current:
-                return False
+                current = None
+                break
             current = current[part]
+        if isinstance(value, dict):
+            if "$in" in value and not (any(item in value["$in"] for item in current)
+                                       if isinstance(current, list) else current in value["$in"]):
+                return False
+            if "$ne" in value and current == value["$ne"]:
+                return False
+            continue
         if current != value:
             return False
     return True
@@ -93,14 +103,18 @@ class FakeTaskCollection:
     def __init__(self):
         self.docs = {}
 
-    async def insert_one(self, doc):
-        _id = ObjectId()
+    async def insert_one(self, doc, **kwargs):
+        _id = doc.get("_id") or ObjectId()
         doc["_id"] = _id
-        self.docs[_id] = doc
+        if _id in self.docs:
+            from pymongo.errors import DuplicateKeyError
+            raise DuplicateKeyError("duplicate task")
+        self.docs[_id] = deepcopy(doc)
         return SimpleNamespace(inserted_id=_id)
 
-    async def find_one(self, query):
-        return self.docs.get(query["_id"])
+    async def find_one(self, query, **kwargs):
+        doc = self.docs.get(query["_id"])
+        return deepcopy(doc) if doc and _doc_matches(doc, query) else None
 
     def find(self, query):
         return FakeCursor([d for d in self.docs.values() if _doc_matches(d, query)])
@@ -108,11 +122,19 @@ class FakeTaskCollection:
     async def count_documents(self, query):
         return len([d for d in self.docs.values() if _doc_matches(d, query)])
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, **kwargs):
         doc = self.docs.get(query["_id"])
-        if doc:
-            doc.update(update["$set"])
-        return SimpleNamespace(modified_count=1 if doc else 0)
+        matched = bool(doc and _doc_matches(doc, query))
+        if matched:
+            for key, value in update.get("$set", {}).items():
+                target = doc
+                parts = key.split(".")
+                for part in parts[:-1]:
+                    target = target.setdefault(part, {})
+                target[parts[-1]] = deepcopy(value)
+            for key, value in update.get("$inc", {}).items():
+                doc[key] = doc.get(key, 0) + value
+        return SimpleNamespace(modified_count=int(matched), matched_count=int(matched))
 
 
 class FakeVisitCollection:
@@ -121,38 +143,50 @@ class FakeVisitCollection:
     def __init__(self):
         self.docs = {}
 
-    async def find_one(self, query):
-        return self.docs.get(query.get("_id"))
-
-    async def update_one(self, query, update):
+    async def find_one(self, query, **kwargs):
         doc = self.docs.get(query.get("_id"))
-        if not doc:
-            return SimpleNamespace(modified_count=0)
+        return deepcopy(doc) if doc and _doc_matches(doc, query) else None
+
+    async def update_one(self, query, update, **kwargs):
+        doc = self.docs.get(query.get("_id"))
+        if not doc or not _doc_matches(doc, query):
+            return SimpleNamespace(modified_count=0, matched_count=0)
         for key, value in (update.get("$set") or {}).items():
             doc[key] = value
         for key, value in (update.get("$addToSet") or {}).items():
             items = doc.setdefault(key, [])
             if value not in items:
                 items.append(value)
-        return SimpleNamespace(modified_count=1)
+        for key, value in update.get("$inc", {}).items():
+            doc[key] = doc.get(key, 0) + value
+        return SimpleNamespace(modified_count=1, matched_count=1)
 
 
 def make_database(patient_doc):
     database = MagicMock()
     collection = FakeTaskCollection()
     visits = FakeVisitCollection()
+    recovery_events = FakeTaskCollection()
     users = MagicMock()
     users.find_one = AsyncMock(return_value=patient_doc)
+    users.find = lambda query, projection=None: FakeCursor(
+        [patient_doc] if patient_doc and _doc_matches(patient_doc, query) else [])
     database.users = users
+    database.command = AsyncMock(return_value={"setName": "test_rs", "logicalSessionTimeoutMinutes": 30})
 
     def getitem(name):
         if name == task_models.COLLECTION_NAME:
             return collection
         if name == "followup_records":
             return visits
+        if name == "integration_recovery_events":
+            return recovery_events
         return MagicMock()
 
     database.__getitem__.side_effect = getitem
+    database.client = FakeTransactionClient({task_models.COLLECTION_NAME: collection,
+                                             "followup_records": visits,
+                                             "integration_recovery_events": recovery_events})
     return database, collection, visits
 
 
@@ -455,6 +489,48 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
                                            headers=self.auth(user=admin))
         self.assertEqual(admin_view.json()["total"], 1)
 
+    async def test_patient_assignment_revocation_blocks_all_task_access_before_remote_calls(self):
+        created = await self.client.post("/api/integrations/forms/fill-tasks",
+                                        json=self.payload(), headers=self.auth())
+        task_id = created.json()["id"]
+        self.patient_doc["practitioners"] = []
+        self.remote.requests.clear()
+        for method, suffix in (("get", ""), ("get", "/embed-url"),
+                               ("post", "/confirm"), ("post", "/cancel")):
+            with self.subTest(method=method, suffix=suffix):
+                response = await getattr(self.client, method)(
+                    f"/api/integrations/forms/fill-tasks/{task_id}{suffix}", headers=self.auth())
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json()["detail"]["error"], "PATIENT_NOT_ASSIGNED")
+        listed = await self.client.get("/api/integrations/forms/fill-tasks", headers=self.auth())
+        self.assertEqual(listed.json()["items"], [])
+        self.assertEqual(listed.json()["total"], 0)
+        explicit = await self.client.get("/api/integrations/forms/fill-tasks",
+            params={"patient_id": PATIENT_ID}, headers=self.auth())
+        self.assertEqual(explicit.status_code, 403)
+        self.assertEqual(self.remote.requests, [])
+        self.assertEqual(self.collection.docs[ObjectId(task_id)]["status"], "session_created")
+
+    async def test_patient_role_cannot_reuse_previous_medical_task_identity(self):
+        created = await self.client.post("/api/integrations/forms/fill-tasks",
+                                        json=self.payload(), headers=self.auth())
+        task_id = created.json()["id"]
+        downgraded = make_operator(role="patient")
+        self.remote.requests.clear()
+        for path in (f"/api/integrations/forms/fill-tasks/{task_id}", "/api/integrations/forms/fill-tasks"):
+            response = await self.client.get(path, headers=self.auth(user=downgraded))
+            self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.remote.requests, [])
+
+    async def test_admin_retains_existing_task_access_after_local_assignment_removed(self):
+        created = await self.client.post("/api/integrations/forms/fill-tasks",
+                                        json=self.payload(), headers=self.auth())
+        self.patient_doc["practitioners"] = []
+        admin = make_operator(role="admin", user_id="507f1f77bcf86cd7994390aa")
+        response = await self.client.get(f"/api/integrations/forms/fill-tasks/{created.json()['id']}",
+                                         headers=self.auth(user=admin))
+        self.assertEqual(response.status_code, 200, response.text)
+
     # ---- FU01 S4：节点联动（followup_visit_id） ----
 
     async def test_create_with_visit_link_binds_node_and_inherits_visit_code(self):
@@ -564,11 +640,12 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.visit_doc(visit_id)["status"], "awaiting_fill")
 
     async def test_confirm_rejects_terminal_visit(self):
-        visit_id = self.make_visit(status="completed")
+        visit_id = self.make_visit()
         created = await self.client.post(
             "/api/integrations/forms/fill-tasks",
             json=self.payload(followup_visit_id=visit_id), headers=self.auth())
         task_id = created.json()["id"]
+        self.visit_doc(visit_id)["status"] = "completed"
         self.remote.session_body["status"] = "submitted"
         self.remote.session_body["response_id"] = RESPONSE_ID
 
@@ -597,6 +674,172 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(node["status"], "awaiting_fill")
         self.assertIsNone(node.get("effective_response"))
         self.assertNotIn("fill_task_ids", node)
+
+    async def test_create_terminal_visit_rejected_before_remote_session(self):
+        visit_id = self.make_visit(status="canceled")
+        response = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.remote.requests, [])
+        self.assertEqual(self.collection.docs, {})
+
+    async def test_linked_creation_failure_rolls_back_link_and_cancels_remote(self):
+        from pymongo.errors import OperationFailure
+        visit_id = self.make_visit()
+        original_insert = self.collection.insert_one
+        attempts = 0
+
+        async def fail_first_insert(doc, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationFailure("injected insert failure")
+            return await original_insert(doc, **kwargs)
+
+        self.collection.insert_one = fail_first_insert
+        response = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(self.remote.session_body["status"], "cancelled")
+        self.assertFalse(self.visit_doc(visit_id).get("fill_task_ids"))
+        audit = next(iter(self.collection.docs.values()))
+        self.assertEqual(audit["status"], "failed")
+        self.assertFalse(audit["cleanup_required"])
+        self.assertNotIn("fs_demo_token_value", repr(audit))
+
+    async def test_unlinked_creation_failure_records_audit_and_cancels_remote(self):
+        from pymongo.errors import OperationFailure
+        original_insert = self.collection.insert_one
+
+        async def fail_transaction_insert(doc, **kwargs):
+            if kwargs.get("session") is not None:
+                raise OperationFailure("injected independent task insert failure")
+            return await original_insert(doc, **kwargs)
+
+        self.collection.insert_one = fail_transaction_insert
+        response = await self.client.post("/api/integrations/forms/fill-tasks",
+            json=self.payload(), headers=self.auth())
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(self.remote.session_body["status"], "cancelled")
+        audit = next(iter(self.collection.docs.values()))
+        self.assertEqual(audit["status"], "failed")
+        self.assertFalse(audit["cleanup_required"])
+        self.assertIsNone(audit["followup_visit_id"])
+        self.assertNotIn("fs_demo_token_value", repr(audit))
+
+    async def test_unlinked_unknown_commit_retains_remote_and_records_recovery(self):
+        from app.core.exceptions import AppBaseException
+        unknown = AppBaseException("unknown", status_code=503,
+                                   details={"commit_result_unknown": True})
+        self.remote_client.cancel_fill_session = AsyncMock()
+        with patch("app.db.transactions.run_followup_transaction", AsyncMock(side_effect=unknown)):
+            response = await self.client.post("/api/integrations/forms/fill-tasks",
+                json=self.payload(), headers=self.auth())
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"]["error"], "FILL_TASK_COMMIT_UNCERTAIN")
+        self.remote_client.cancel_fill_session.assert_not_awaited()
+        recovery = next(iter(self.database["integration_recovery_events"].docs.values()))
+        self.assertIsNone(recovery["followup_visit_id"])
+        self.assertEqual(recovery["session_uuid"], SESSION_UUID)
+        self.assertEqual(self.remote.session_body["status"], "created")
+        self.assertEqual(self.collection.docs, {})
+
+    async def test_standalone_rejected_before_any_remote_creation(self):
+        self.database.command.return_value = {"logicalSessionTimeoutMinutes": 30}
+        response = await self.client.post("/api/integrations/forms/fill-tasks",
+            json=self.payload(), headers=self.auth())
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"]["error"], "FOLLOWUP_TRANSACTION_UNAVAILABLE")
+        self.assertEqual(self.remote.requests, [])
+        self.assertEqual(self.collection.docs, {})
+
+    async def test_linked_creation_cleanup_failure_is_durable_and_explicit(self):
+        from pymongo.errors import OperationFailure
+        from app.integrations.forms.client import FormPlatformUnavailable
+        visit_id = self.make_visit()
+        original_insert = self.collection.insert_one
+        attempts = 0
+
+        async def fail_first_insert(doc, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationFailure("injected insert failure")
+            return await original_insert(doc, **kwargs)
+
+        self.collection.insert_one = fail_first_insert
+        self.remote_client.cancel_fill_session = AsyncMock(side_effect=FormPlatformUnavailable("offline"))
+        response = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"]["error"], "FILL_TASK_CLEANUP_REQUIRED")
+        audit = next(iter(self.collection.docs.values()))
+        self.assertTrue(audit["cleanup_required"])
+        self.assertFalse(self.visit_doc(visit_id).get("fill_task_ids"))
+
+    async def test_unknown_creation_commit_keeps_remote_and_records_recovery(self):
+        from app.core.exceptions import AppBaseException
+        visit_id = self.make_visit()
+        unknown = AppBaseException("unknown", status_code=503,
+                                   details={"commit_result_unknown": True})
+        self.remote_client.cancel_fill_session = AsyncMock()
+        with patch("app.db.transactions.run_followup_transaction", AsyncMock(side_effect=unknown)):
+            response = await self.client.post(
+                "/api/integrations/forms/fill-tasks",
+                json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"]["error"], "FILL_TASK_COMMIT_UNCERTAIN")
+        self.remote_client.cancel_fill_session.assert_not_awaited()
+        recovery = next(iter(self.database["integration_recovery_events"].docs.values()))
+        self.assertEqual(recovery["status"], "pending_commit_verification")
+        self.assertEqual(recovery["session_uuid"], SESSION_UUID)
+        self.assertNotIn("fs_demo_token_value", repr(recovery))
+        self.assertEqual(self.collection.docs, {})
+
+    async def test_linked_confirmation_failure_rolls_back_both_documents(self):
+        from pymongo.errors import OperationFailure
+        visit_id = self.make_visit()
+        created = await self.client.post("/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        task_id = created.json()["id"]
+        self.remote.session_body.update(status="submitted", response_id=RESPONSE_ID)
+        original_update = self.collection.update_one
+
+        async def fail_confirmation(query, update, **kwargs):
+            if update.get("$set", {}).get("status") == "confirmed":
+                raise OperationFailure("injected task failure")
+            return await original_update(query, update, **kwargs)
+
+        self.collection.update_one = fail_confirmation
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(self.visit_doc(visit_id)["status"], "awaiting_fill")
+        self.assertIsNone(self.visit_doc(visit_id).get("effective_response"))
+        self.assertNotEqual(self.collection.docs[ObjectId(task_id)]["status"], "confirmed")
+
+    async def test_cancel_during_remote_confirmation_cannot_resurrect_visit(self):
+        visit_id = self.make_visit()
+        created = await self.client.post("/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        task_id = created.json()["id"]
+        self.remote.session_body.update(status="submitted", response_id=RESPONSE_ID)
+        original_response = self.remote_client.get_response
+
+        async def cancel_before_response(response_id):
+            body = await original_response(response_id)
+            self.visit_doc(visit_id).update(status="canceled", mutation_version=2)
+            return body
+
+        self.remote_client.get_response = cancel_before_response
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.visit_doc(visit_id)["status"], "canceled")
+        self.assertNotEqual(self.collection.docs[ObjectId(task_id)]["status"], "confirmed")
 
     async def test_legacy_single_session_doc_confirm_compatibility(self):
         # 存量文档形状：只有旧单 session 字段、无 fill_sessions，确认路径照常工作

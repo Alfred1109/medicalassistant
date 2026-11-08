@@ -3,11 +3,16 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson.objectid import ObjectId
+from pymongo import ReturnDocument
+from pymongo.errors import PyMongoError
+from copy import deepcopy
+from app.core.exceptions import AppBaseException
 import numpy as np
 
 from app.schemas.rehabilitation import (
     RehabPlanCreate, 
     RehabPlanUpdate,
+    GeneratedPlanEdits,
     ExerciseCreate,
     AssessmentCreate,
     AssessmentUpdate,
@@ -36,32 +41,80 @@ class RehabilitationService:
         
     async def get_rehab_plan(self, plan_id: str) -> Optional[Dict[str, Any]]:
         """Get rehabilitation plan by ID"""
+        if not ObjectId.is_valid(plan_id):
+            return None
         try:
             plan = await self.plans_collection.find_one({"_id": ObjectId(plan_id)})
             if plan:
                 plan["_id"] = str(plan["_id"])
                 return plan
-        except Exception:
-            return None
+        except PyMongoError as exc:
+            raise AppBaseException("康复计划读取失败，请稍后重试", status_code=503,
+                                   error_code="REHAB_PLAN_READ_FAILED") from exc
         return None
         
+    @staticmethod
+    def _is_generated_plan(plan: Dict[str, Any]) -> bool:
+        metadata = plan.get("metadata")
+        return (plan.get("generation_source") == "llm" or
+                isinstance(metadata, dict) and metadata.get("generated_by") == "llm")
+
     async def update_rehab_plan(self, plan_id: str, plan_data: RehabPlanUpdate) -> Optional[Dict[str, Any]]:
-        """Update an existing rehabilitation plan"""
+        """普通计划保留既有编辑能力，生成计划的审核状态与证据由审核入口拥有。"""
+        if not ObjectId.is_valid(plan_id):
+            return None
         try:
-            update_data = plan_data.dict(exclude_unset=True)
+            plan = await self.plans_collection.find_one({"_id": ObjectId(plan_id)})
+            if plan is None:
+                return None
+            update_data = plan_data.model_dump(exclude_unset=True)
             update_data["updated_at"] = datetime.utcnow()
-            
+            if self._is_generated_plan(plan):
+                if "status" in update_data and update_data["status"] != plan.get("status"):
+                    raise AppBaseException("生成计划的状态须经对应审核操作变更", status_code=409,
+                                           error_code="REHAB_PLAN_APPROVAL_REQUIRED")
+                if "metadata" in update_data:
+                    original = plan.get("metadata") or {}
+                    if not isinstance(original, dict):
+                        raise AppBaseException("计划审核元数据结构异常，请核查原记录", status_code=409,
+                                               error_code="REHAB_PLAN_INVALID_HISTORY")
+                    incoming = update_data["metadata"]
+                    if incoming is None:
+                        raise AppBaseException("不能清除生成计划审核元数据", status_code=409,
+                                               error_code="REHAB_PLAN_APPROVAL_REQUIRED")
+                    owned = {key for key in original if key.startswith("approval_")}
+                    owned.update({"generated_by", "generation_timestamp", "is_approved",
+                                  "approved_by", "version", "last_updated"})
+                    for key in incoming:
+                        if ((key in owned or key.startswith("approval_")) and
+                                (key not in original or incoming[key] != original[key])):
+                            raise AppBaseException("不能通过普通编辑修改生成或审核证据", status_code=409,
+                                                   error_code="REHAB_PLAN_APPROVAL_REQUIRED")
+                    update_data["metadata"] = {**incoming,
+                        **{key: deepcopy(value) for key, value in original.items() if key in owned}}
+                # 保留旧标识，防止普通编辑先去除generated_by再绕过审核保护。
+                query = {"_id": ObjectId(plan_id), "patient_id": plan.get("patient_id"),
+                         "status": plan.get("status"), "metadata": plan.get("metadata"),
+                         "generation_source": plan.get("generation_source"),
+                         "content_revision": plan.get("content_revision"),
+                         "updated_at": plan.get("updated_at")}
+                updated = await self.plans_collection.find_one_and_update(
+                    query, {"$set": update_data, "$inc": {"content_revision": 1}},
+                    return_document=ReturnDocument.AFTER)
+                if updated is None:
+                    raise AppBaseException("计划已被其他请求修改，请重新读取", status_code=409,
+                                           error_code="REHAB_PLAN_CONFLICT")
+                updated["_id"] = str(updated["_id"])
+                return updated
             result = await self.plans_collection.update_one(
-                {"_id": ObjectId(plan_id)},
-                {"$set": update_data}
-            )
-            
+                {"_id": ObjectId(plan_id)}, {"$inc": {"content_revision": 1}, "$set": update_data})
             if result.modified_count:
                 return await self.get_rehab_plan(plan_id)
-        except Exception:
-            return None
+        except PyMongoError as exc:
+            raise AppBaseException("康复计划更新失败，请稍后重试", status_code=503,
+                                   error_code="REHAB_PLAN_UPDATE_FAILED") from exc
         return None
-        
+
     async def delete_rehab_plan(self, plan_id: str) -> bool:
         """Delete a rehabilitation plan"""
         try:
@@ -111,18 +164,22 @@ class RehabilitationService:
 
             # 将生成的计划保存为草稿状态
             generated_plan["status"] = "draft"  # 标记为草稿状态
+            generated_plan["patient_id"] = patient_id
+            generated_plan["generation_source"] = "llm"
+            generated_plan["content_revision"] = 0
             
-            # 保存到数据库
+            # 持久化成功才有可审核的计划；保存失败不能产生临时业务ID。
+            now = datetime.utcnow()
+            generated_plan["created_at"] = now
+            generated_plan["updated_at"] = now
             try:
                 result = await self.plans_collection.insert_one(generated_plan)
-                generated_plan["_id"] = str(result.inserted_id)
-            except Exception as e:
-                print(f"保存到数据库失败: {str(e)}")
-                # 如果数据库保存失败，仍然返回计划但添加错误标记
-                if "_id" not in generated_plan:
-                    generated_plan["_id"] = f"temp_{datetime.utcnow().timestamp()}"
-                generated_plan["db_error"] = "保存到数据库失败，此计划为临时数据"
-            
+            except PyMongoError as exc:
+                raise AppBaseException(
+                    "康复计划保存失败，请稍后重试", status_code=503,
+                    error_code="REHAB_PLAN_SAVE_FAILED") from exc
+            generated_plan["_id"] = str(result.inserted_id)
+
             return generated_plan
 
         except LLMConfigurationError:
@@ -131,23 +188,62 @@ class RehabilitationService:
         # 异常（含 LLMConfigurationError / ExternalServiceException）直接向上传播，
         # 由全局异常处理器返回明确的失败响应。
     
-    async def approve_generated_plan(self, plan_id: str, modifications: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
-        """审核并确认生成的康复计划"""
-        # 使用代理服务的审核方法
-        approved_plan = await self.agent_service.approve_generated_plan(plan_id, modifications)
-        
-        if approved_plan:
-            # 将计划状态从草稿改为活跃
-            approved_plan["status"] = "active"
-            
-            # 更新数据库
-            await self.plans_collection.update_one(
-                {"_id": ObjectId(plan_id)},
-                {"$set": {"status": "active"}}
-            )
-            
-        return approved_plan
-        
+    async def approve_generated_plan(
+        self, plan_id: str, modifications: GeneratedPlanEdits,
+        *, approved_by: str, patient_id: str, expected_updated_at: Optional[datetime] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """在一个原子写中应用审核内容、证据和既有 active 状态流转。
+
+        active 沿用现有行为，不代表新增的临床签署或发布验收。
+        """
+        if not ObjectId.is_valid(plan_id):
+            return None
+        try:
+            plan = await self.plans_collection.find_one({"_id": ObjectId(plan_id)})
+            if not plan:
+                return None
+            if str(plan.get("patient_id")) != str(patient_id):
+                raise AppBaseException("计划归属已改变，请重新读取", status_code=409,
+                                       error_code="REHAB_PLAN_CONFLICT")
+            if plan.get("status") != "draft":
+                raise AppBaseException("仅草稿计划可审核", status_code=409,
+                                       error_code="REHAB_PLAN_CONFLICT")
+            now = datetime.utcnow()
+            metadata = deepcopy(plan.get("metadata") or {})
+            if not isinstance(metadata, dict):
+                raise AppBaseException("计划审核元数据结构异常，请核查原记录", status_code=409,
+                                       error_code="REHAB_PLAN_INVALID_HISTORY")
+            history = metadata.get("approval_history") or []
+            if not isinstance(history, list):
+                raise AppBaseException("计划审核历史结构异常，请核查原记录", status_code=409,
+                                       error_code="REHAB_PLAN_INVALID_HISTORY")
+            changes = modifications.model_dump(exclude_unset=True, exclude_none=True)
+            metadata.update(is_approved=True, approval_timestamp=now.isoformat(),
+                            approved_by=approved_by,
+                            approval_history=[*history, {"timestamp": now.isoformat(),
+                                "status": "approved", "approved_by": approved_by,
+                                "modifications": bool(changes)}])
+            # Mongo将日期比较值编码为毫秒，与前端JSON往返及BSON存储精度一致。
+            expected = expected_updated_at if expected_updated_at is not None else plan.get("updated_at")
+            query = {"_id": ObjectId(plan_id), "patient_id": plan["patient_id"],
+                     "status": "draft", "updated_at": expected,
+                     "content_revision": (expected_revision if expected_revision is not None
+                                          else plan.get("content_revision")),
+                     "metadata": plan.get("metadata")}
+            updated = await self.plans_collection.find_one_and_update(
+                query, {"$set": {**changes, "metadata": metadata, "status": "active", "updated_at": now},
+                        "$inc": {"content_revision": 1}},
+                return_document=ReturnDocument.AFTER)
+            if updated is None:
+                raise AppBaseException("计划已被其他请求修改，请重新读取后审核", status_code=409,
+                                       error_code="REHAB_PLAN_CONFLICT")
+            updated["_id"] = str(updated["_id"])
+            return updated
+        except PyMongoError as exc:
+            raise AppBaseException("康复计划审核写入失败，请重新读取后重试", status_code=503,
+                                   error_code="REHAB_PLAN_APPROVAL_FAILED") from exc
+
     async def add_exercises_to_plan(self, plan_id: str, exercise_ids: List[str]) -> Optional[Dict[str, Any]]:
         """Add existing exercises to a rehabilitation plan"""
         plan = await self.get_rehab_plan(plan_id)
@@ -179,7 +275,7 @@ class RehabilitationService:
         try:
             result = await self.plans_collection.update_one(
                 {"_id": ObjectId(plan_id)},
-                {
+                {"$inc": {"content_revision": 1},
                     "$push": {"exercises": {"$each": exercises_to_add}},
                     "$set": {"updated_at": datetime.utcnow()}
                 }
@@ -338,7 +434,7 @@ class RehabilitationService:
         if "plan_id" in assessment and assessment["plan_id"]:
             await self.plans_collection.update_one(
                 {"_id": ObjectId(assessment["plan_id"])},
-                {
+                {"$inc": {"content_revision": 1},
                     "$push": {"assessments": str(result.inserted_id)},
                     "$set": {"updated_at": datetime.utcnow()}
                 }
@@ -622,7 +718,7 @@ class RehabilitationService:
             # 更新数据库
             await self.plans_collection.update_one(
                 {"_id": ObjectId(plan_id)},
-                {
+                {"$inc": {"content_revision": 1},
                     "$set": {
                         "execution_status": execution_status,
                         "updated_at": datetime.utcnow()
@@ -691,7 +787,7 @@ class RehabilitationService:
                     # 更新数据库
                     await self.plans_collection.update_one(
                         {"_id": ObjectId(plan_id)},
-                        {
+                        {"$inc": {"content_revision": 1},
                             "$set": {
                                 f"exercises.{i}": exercise,
                                 "execution_status": execution_status,
@@ -759,7 +855,7 @@ class RehabilitationService:
             # 更新调整历史
             await self.plans_collection.update_one(
                 {"_id": ObjectId(plan_id)},
-                {"$push": {"adjustment_history": adjustment_record}}
+                {"$inc": {"content_revision": 1}, "$push": {"adjustment_history": adjustment_record}}
             )
     
     async def apply_plan_adjustment(
@@ -807,14 +903,14 @@ class RehabilitationService:
                             # 更新数据库中的运动信息
                             await self.plans_collection.update_one(
                                 {"_id": ObjectId(plan_id)},
-                                {"$set": {f"exercises.{j}": ex}}
+                                {"$inc": {"content_revision": 1}, "$set": {f"exercises.{j}": ex}}
                             )
                             break
                 
                 # 更新调整历史
                 await self.plans_collection.update_one(
                     {"_id": ObjectId(plan_id)},
-                    {
+                    {"$inc": {"content_revision": 1},
                         "$set": {
                             f"adjustment_history.{i}": adj,
                             "updated_at": datetime.utcnow()

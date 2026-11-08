@@ -135,7 +135,7 @@ class FollowUpRecordDB(FollowUpBase, TimestampModel):
     S1 起扩展数据正式落顶层：provider_id / template_id / reminder_before /
     completion_data / cancellation_data / next_follow_up_id 全部 Optional，
     存量文档缺省免回填（读取侧按「正式字段优先、metadata.* 回退」兼容，
-    见 health_record_service._followup_from_mongo）。
+    见 services/followup_service.followup_from_mongo（FU01 S2 起随访域唯一入口）。
     """
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     # 覆盖 FollowUpBase 必填声明：存量文档无顶层 provider_id / description
@@ -167,6 +167,10 @@ class FollowUpRecordDB(FollowUpBase, TimestampModel):
     deleted: bool = False
     deleted_at: Optional[datetime] = None
     deleted_by: Optional[str] = None
+    mutation_version: int = 0
+    cancellation_operation: Optional[str] = None
+    completion_operation: Optional[str] = None
+    reschedule_operation: Optional[str] = None
 
 
 class FollowUpRecordResponse(FollowUpBase, TimestampModel):

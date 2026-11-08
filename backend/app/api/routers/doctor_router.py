@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from typing import List, Optional
 from datetime import datetime, timedelta
 from app.schemas.user import UserResponse
-from app.core.dependencies import get_current_user, get_database, format_mongo_doc, get_health_record_for_patient
+from app.schemas.followup import FollowUpRecordCreate, FollowUpRecordResponse
+from app.core.dependencies import get_current_user, get_database, format_mongo_doc, get_health_record_for_patient, get_followup_service
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.db.crud_services import PatientCRUD, DoctorCRUD
 from app.models.user import Doctor, Patient
-from app.models.health_record import FollowUpRecord
+from app.services.followup_service import FollowupService
+from app.core.followup_access import ensure_followup_patient_access, followup_patient_scope
 from bson.objectid import ObjectId
 
 router = APIRouter()
@@ -134,38 +136,23 @@ async def get_patient_health_record(
         )
 
 # 随访管理
-@router.get("/follow-ups", response_model=List[dict])
+# FU01 S2 收敛：/api/doctors/follow-ups 与唯一正典入口 /api/health-records/followups
+# 同源（FollowupService）同形状（FollowUpRecordResponse 响应契约），
+# 删除路由层直连 followup_records 集合与 new_follow_up_id 假 ID 逻辑
+@router.get("/follow-ups", response_model=List[FollowUpRecordResponse])
 async def get_follow_ups(
-    status: Optional[str] = None,
+    followup_status: Optional[str] = Query(None, alias="status"),
     current_user: UserResponse = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    followup_service: FollowupService = Depends(get_followup_service)
 ):
-    """获取随访列表"""
+    """获取当前医生的随访列表（转调 FollowupService，同源同形状）"""
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
 
     try:
-        # 获取当前医生的所有随访记录
-        # 服务层（HealthRecordService）写入的创建人字段是 created_by，
-        # 读取按服务层写入形状对齐，集合收敛为 followup_records 唯一名
-        doctor_id = current_user.id
-        query = {"created_by": doctor_id}
-
-        # 如果指定了状态，添加到查询条件
-        if status:
-            query["status"] = status
-
-        follow_up_collection = db[FollowUpRecord.collection_name]
-        follow_ups = []
-        
-        # 执行查询
-        cursor = follow_up_collection.find(query)
-        async for follow_up in cursor:
-            # 转换ObjectId为字符串
-            follow_up["_id"] = str(follow_up["_id"])
-            follow_ups.append(follow_up)
-        
-        return follow_ups
+        scope = await followup_patient_scope(followup_service.db, current_user)
+        return await followup_service.list_followups_for_provider(
+            current_user.id, status=followup_status, patient_ids=scope)
     except Exception as e:
         print(f"获取随访列表时出错: {str(e)}")
         raise HTTPException(
@@ -173,16 +160,19 @@ async def get_follow_ups(
             detail="获取随访列表失败，请稍后重试"
         )
 
-@router.post("/follow-ups", status_code=status.HTTP_201_CREATED)
+@router.post("/follow-ups", status_code=status.HTTP_201_CREATED, response_model=FollowUpRecordResponse)
 async def create_follow_up(
-    follow_up_data: dict,
-    current_user: UserResponse = Depends(get_current_user)
+    follow_up_data: FollowUpRecordCreate,
+    current_user: UserResponse = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service)
 ):
-    """创建随访计划"""
+    """创建随访计划（转调 FollowupService，返回真实记录 ID 与响应契约）"""
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {"id": "new_follow_up_id"}
+    # 创建人缺省为当前医生（与 canonical 创建端点一致；provider_id 为必填契约字段）
+    await ensure_followup_patient_access(followup_service.db, follow_up_data.patient_id, current_user, write=True)
+    follow_up_data.created_by = current_user.id
+    return await followup_service.create_followup_record(follow_up_data)
 
 # 数据监测
 @router.get("/patient-monitoring/{patient_id}", response_model=dict)

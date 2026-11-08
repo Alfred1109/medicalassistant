@@ -7,15 +7,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path
 from datetime import datetime
 
 from app.core.dependencies import (
-    get_current_user, 
+    get_current_user,
     get_health_record_service,
-    check_permission, 
-    is_doctor, 
-    is_medical_staff, 
+    get_followup_service,
+    check_permission,
+    is_doctor,
+    is_medical_staff,
     is_patient,
     is_health_manager
 )
 from app.services.health_record_service import HealthRecordService
+from app.services.followup_service import FollowupService
+from app.core.followup_access import ensure_followup_patient_access, followup_patient_scope
 from app.models.user import User
 from app.schemas.health_record import (
     HealthRecordCreate, HealthRecordUpdate, HealthRecordResponse,
@@ -24,7 +27,8 @@ from app.schemas.health_record import (
     HealthDataCreate, HealthDataResponse, HealthRecordStats, HealthTimelineItem,
     RecordType, FollowUpType, FollowUpStatus
 )
-from app.core.permissions import Permission, PermissionChecker
+from app.core.permissions import Permission
+from app.core.health_record_access import ensure_health_record_patient_access
 
 router = APIRouter(prefix="/health-records", tags=["健康档案"])
 
@@ -35,7 +39,7 @@ async def create_health_record(
     record_data: HealthRecordCreate,
     current_user: User = Depends(get_current_user),
     health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(is_medical_staff)
+    _: bool = Depends(is_medical_staff())
 ):
     """
     创建健康档案
@@ -43,9 +47,8 @@ async def create_health_record(
     - **只有医疗人员可以创建健康档案**
     - 需要提供患者ID、记录类型、标题和内容
     """
-    # 设置创建者为当前用户
-    if not record_data.created_by:
-        record_data.created_by = current_user.id
+    await ensure_health_record_patient_access(health_record_service.db, record_data.patient_id, current_user)
+    record_data.created_by = current_user.id
     
     # 创建档案
     result = await health_record_service.create_health_record(record_data)
@@ -60,7 +63,7 @@ async def update_health_record(
     record_id: str = Path(..., description="健康档案ID"),
     current_user: User = Depends(get_current_user),
     health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(is_medical_staff)
+    _: bool = Depends(is_medical_staff())
 ):
     """
     更新健康档案
@@ -74,6 +77,8 @@ async def update_health_record(
     if not record:
         raise HTTPException(status_code=404, detail="健康档案不存在")
     
+    await ensure_health_record_patient_access(health_record_service.db, record.patient_id, current_user)
+
     # 更新档案
     result = await health_record_service.update_health_record(
         record_id=record_id,
@@ -98,6 +103,11 @@ async def delete_health_record(
     
     - **需要删除健康档案权限**
     """
+    record = await health_record_service.get_health_record(record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="健康档案不存在")
+    await ensure_health_record_patient_access(health_record_service.db, record.patient_id, current_user)
+
     # 删除档案
     result = await health_record_service.delete_health_record(record_id)
     if not result:
@@ -124,10 +134,7 @@ async def list_health_records(
     - 健康管理员可以查看所有档案
     - 可以按记录类型和日期范围筛选
     """
-    # 访问控制
-    if (current_user.role == "patient" and patient_id != current_user.id and 
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该患者的健康档案")
+    await ensure_health_record_patient_access(health_record_service.db, patient_id, current_user)
     
     # 获取档案列表
     result = await health_record_service.list_health_records(
@@ -159,10 +166,7 @@ async def get_health_record_version(
     if not record:
         raise HTTPException(status_code=404, detail="健康档案不存在")
     
-    # 访问控制
-    if (current_user.role == "patient" and record.patient_id != current_user.id and 
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该健康档案")
+    await ensure_health_record_patient_access(health_record_service.db, record.patient_id, current_user)
     
     # 获取版本
     version = await health_record_service.get_health_record_version(record_id, version_number)
@@ -182,10 +186,7 @@ async def get_health_record_stats(
     
     - 返回总记录数、记录类型分布、最近更新、即将到来的随访等统计信息
     """
-    # 访问控制
-    if (current_user.role == "patient" and patient_id != current_user.id and 
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该患者的健康档案")
+    await ensure_health_record_patient_access(health_record_service.db, patient_id, current_user)
     
     # 获取统计信息
     result = await health_record_service.get_health_record_stats(patient_id)
@@ -198,21 +199,21 @@ async def get_health_record_stats(
 async def create_followup_record(
     followup_data: FollowUpRecordCreate,
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(is_medical_staff)
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
 ):
     """
     创建随访记录
-    
+
     - **只有医疗人员可以创建随访记录**
     - 需要提供患者ID、随访类型、计划日期等信息
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
-    # 设置创建者为当前用户
-    if not followup_data.created_by:
-        followup_data.created_by = current_user.id
-    
+    await ensure_followup_patient_access(followup_service.db, followup_data.patient_id, current_user, write=True)
+    followup_data.created_by = current_user.id
+
     # 创建随访记录
-    result = await health_record_service.create_followup_record(followup_data)
+    result = await followup_service.create_followup_record(followup_data)
     if not result:
         raise HTTPException(status_code=500, detail="创建随访记录失败")
     
@@ -228,7 +229,7 @@ async def list_followup_records(
     skip: int = Query(0, description="分页偏移量"),
     limit: int = Query(100, description="每页数量"),
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service)
+    followup_service: FollowupService = Depends(get_followup_service)
 ):
     """
     列出患者的随访记录
@@ -237,14 +238,12 @@ async def list_followup_records(
     - 医疗人员可以查看其负责的患者随访记录
     - 健康管理员可以查看所有随访记录
     - 可以按状态、类型和日期范围筛选
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
-    # 访问控制
-    if (current_user.role == "patient" and patient_id != current_user.id and
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该患者的随访记录")
+    await ensure_followup_patient_access(followup_service.db, patient_id, current_user)
 
     # 获取随访记录列表
-    result = await health_record_service.list_followup_records(
+    result = await followup_service.list_followup_records(
         patient_id=patient_id,
         status=status,
         follow_up_type=follow_up_type,
@@ -261,7 +260,7 @@ async def get_upcoming_followups(
     patient_id: Optional[str] = Query(None, description="患者ID，不提供则获取所有患者的即将到来的随访"),
     days: int = Query(7, description="未来几天内的随访"),
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service)
+    followup_service: FollowupService = Depends(get_followup_service)
 ):
     """
     获取即将到来的随访记录
@@ -270,17 +269,12 @@ async def get_upcoming_followups(
     - 医疗人员可以查看其负责的患者随访记录
     - 健康管理员可以查看所有随访记录
     - 默认返回未来7天内的随访记录
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
-    # 访问控制
-    if patient_id and current_user.role == "patient" and patient_id != current_user.id:
-        raise HTTPException(status_code=403, detail="无权访问该患者的随访记录")
-
-    # 如果是患者，限制只能查看自己的随访
-    if current_user.role == "patient" and not patient_id:
-        patient_id = current_user.id
-
-    # 获取即将到来的随访记录
-    result = await health_record_service.get_upcoming_followups(patient_id, days)
+    if patient_id:
+        await ensure_followup_patient_access(followup_service.db, patient_id, current_user)
+    scope = await followup_patient_scope(followup_service.db, current_user)
+    result = await followup_service.get_upcoming_followups(patient_id, days, patient_ids=scope)
 
     return result
 
@@ -288,24 +282,22 @@ async def get_upcoming_followups(
 async def get_followup_record(
     followup_id: str = Path(..., description="随访记录ID"),
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service)
+    followup_service: FollowupService = Depends(get_followup_service)
 ):
     """
     获取随访记录
-    
+
     - 患者只能查看自己的随访记录
     - 医疗人员可以查看其负责的患者随访记录
     - 健康管理员可以查看所有随访记录
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
     # 获取随访记录
-    result = await health_record_service.get_followup_record(followup_id)
+    result = await followup_service.get_followup_record(followup_id)
     if not result:
         raise HTTPException(status_code=404, detail="随访记录不存在")
     
-    # 访问控制
-    if (current_user.role == "patient" and result.patient_id != current_user.id and 
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该随访记录")
+    await ensure_followup_patient_access(followup_service.db, result.patient_id, current_user)
     
     return result
 
@@ -314,22 +306,25 @@ async def update_followup_record(
     followup_data: FollowUpRecordUpdate,
     followup_id: str = Path(..., description="随访记录ID"),
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(is_medical_staff)
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
 ):
     """
     更新随访记录
-    
+
     - **只有医疗人员可以更新随访记录**
     - 可以更新随访类型、日期、状态、备注等字段
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
     # 获取随访记录
-    followup = await health_record_service.get_followup_record(followup_id)
+    followup = await followup_service.get_followup_record(followup_id)
     if not followup:
         raise HTTPException(status_code=404, detail="随访记录不存在")
-    
+
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+
     # 更新随访记录
-    result = await health_record_service.update_followup_record(
+    result = await followup_service.update_followup_record(
         followup_id=followup_id,
         followup_data=followup_data
     )
@@ -344,17 +339,23 @@ async def complete_followup(
     data: CompleteFollowUpRequest,
     followup_id: str = Path(..., description="随访记录ID"),
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(is_medical_staff)
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
 ):
     """
     完成随访
-    
+
     - **只有医疗人员可以完成随访**
     - 需要提供实际日期、备注、回答等信息
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+
     # 完成随访
-    result = await health_record_service.complete_followup(followup_id, data)
+    result = await followup_service.complete_followup(followup_id, data)
     if not result:
         raise HTTPException(status_code=404, detail="随访记录不存在")
     
@@ -365,18 +366,25 @@ async def cancel_followup(
     data: CancelFollowUpRequest,
     followup_id: str = Path(..., description="随访记录ID"),
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(is_medical_staff)
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
 ):
     """
     取消随访
-    
+
     - **只有医疗人员可以取消随访**
     - 需要提供取消原因
-    - 可以选择性地提供重新安排日期
+    - 可以选择性地提供重新安排日期（取消+改期 = 关闭当前节点并新建节点，§2.2）
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+    data.canceled_by = current_user.id
+
     # 取消随访
-    result = await health_record_service.cancel_followup(followup_id, data)
+    result = await followup_service.cancel_followup(followup_id, data)
     if not result:
         raise HTTPException(status_code=404, detail="随访记录不存在")
     
@@ -387,17 +395,23 @@ async def reschedule_followup(
     data: RescheduleFollowUpRequest,
     followup_id: str = Path(..., description="随访记录ID"),
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(is_medical_staff)
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
 ):
     """
     重新安排随访时间
-    
+
     - **只有医疗人员可以重新安排随访时间**
     - 需要提供新的日期和变更原因
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+
     # 重新安排随访
-    result = await health_record_service.reschedule_followup(followup_id, data)
+    result = await followup_service.reschedule_followup(followup_id, data)
     if not result:
         raise HTTPException(status_code=404, detail="随访记录不存在")
     
@@ -407,25 +421,24 @@ async def reschedule_followup(
 async def get_followups_by_health_record(
     record_id: str = Path(..., description="健康档案ID"),
     current_user: User = Depends(get_current_user),
-    health_record_service: HealthRecordService = Depends(get_health_record_service)
+    health_record_service: HealthRecordService = Depends(get_health_record_service),
+    followup_service: FollowupService = Depends(get_followup_service)
 ):
     """
     获取与健康档案关联的随访记录
-    
+
     - 返回与特定健康档案关联的所有随访记录
+    - FU01 S2：经 FollowupService 唯一入口转调
     """
     # 获取健康档案
     record = await health_record_service.get_health_record(record_id)
     if not record:
         raise HTTPException(status_code=404, detail="健康档案不存在")
     
-    # 访问控制
-    if (current_user.role == "patient" and record.patient_id != current_user.id and 
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该健康档案")
-    
-    # 获取关联的随访记录
-    result = await health_record_service.get_followups_by_health_record(record_id)
+    await ensure_followup_patient_access(followup_service.db, record.patient_id, current_user)
+
+    # 获取关联的随访记录（FU01 S2：经 FollowupService 唯一入口转调）
+    result = await followup_service.get_followups_by_health_record(record_id, patient_id=record.patient_id)
     
     return result
 
@@ -444,13 +457,8 @@ async def create_health_data(
     - 医疗人员可以为其负责的患者创建健康数据
     - 需要提供患者ID、数据类型和数据内容
     """
-    # 访问控制
-    if current_user.role == "patient" and data.patient_id != current_user.id:
-        raise HTTPException(status_code=403, detail="无法为其他患者创建健康数据")
-    
-    # 设置记录者为当前用户
-    if not data.recorded_by:
-        data.recorded_by = current_user.id
+    await ensure_health_record_patient_access(health_record_service.db, data.patient_id, current_user)
+    data.recorded_by = current_user.id
     
     # 创建健康数据
     result = await health_record_service.create_health_data(data)
@@ -477,10 +485,7 @@ async def get_health_data(
     if not result:
         raise HTTPException(status_code=404, detail="健康数据不存在")
     
-    # 访问控制
-    if (current_user.role == "patient" and result.patient_id != current_user.id and 
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该健康数据")
+    await ensure_health_record_patient_access(health_record_service.db, result.patient_id, current_user)
     
     return result
 
@@ -503,10 +508,7 @@ async def list_health_data(
     - 健康管理员可以查看所有健康数据
     - 可以按数据类型和日期范围筛选
     """
-    # 访问控制
-    if (current_user.role == "patient" and patient_id != current_user.id and 
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该患者的健康数据")
+    await ensure_health_record_patient_access(health_record_service.db, patient_id, current_user)
     
     # 获取健康数据列表
     result = await health_record_service.list_health_data(
@@ -539,9 +541,7 @@ async def create_vital_sign(
     - 医疗人员可以为其负责的患者创建生命体征记录
     - 需要提供患者ID、体征类型和测量值
     """
-    # 访问控制
-    if current_user.role == "patient" and patient_id != current_user.id:
-        raise HTTPException(status_code=403, detail="无法为其他患者创建生命体征记录")
+    await ensure_health_record_patient_access(health_record_service.db, patient_id, current_user)
     
     # 创建生命体征记录
     result = await health_record_service.create_vital_sign(
@@ -574,7 +574,7 @@ async def create_lab_result(
     notes: Optional[str] = Body(None, description="备注"),
     current_user: User = Depends(get_current_user),
     health_record_service: HealthRecordService = Depends(get_health_record_service),
-    _: bool = Depends(is_medical_staff)
+    _: bool = Depends(is_medical_staff())
 ):
     """
     创建实验室检查结果记录
@@ -582,6 +582,8 @@ async def create_lab_result(
     - **只有医疗人员可以创建实验室检查结果记录**
     - 需要提供患者ID、检测名称和结果值
     """
+    await ensure_health_record_patient_access(health_record_service.db, patient_id, current_user)
+
     # 创建实验室检查结果记录
     result = await health_record_service.create_lab_result(
         patient_id=patient_id,
@@ -622,10 +624,7 @@ async def get_medical_timeline(
     - 健康管理员可以查看所有患者的医疗时间线
     - 可以按日期范围和项目类型筛选
     """
-    # 访问控制
-    if (current_user.role == "patient" and patient_id != current_user.id and 
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该患者的医疗时间线")
+    await ensure_health_record_patient_access(health_record_service.db, patient_id, current_user)
     
     # 获取医疗时间线
     result = await health_record_service.get_medical_timeline(
@@ -659,9 +658,6 @@ async def get_health_record(
     if not result:
         raise HTTPException(status_code=404, detail="健康档案不存在")
 
-    # 访问控制
-    if (current_user.role == "patient" and result.patient_id != current_user.id and
-        not PermissionChecker.has_permission(current_user, Permission.VIEW_ANY_HEALTH_RECORD)):
-        raise HTTPException(status_code=403, detail="无权访问该健康档案")
+    await ensure_health_record_patient_access(health_record_service.db, result.patient_id, current_user)
 
     return result 

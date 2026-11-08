@@ -1,25 +1,19 @@
 from fastapi import Depends, HTTPException, Request, status
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
-import json
 from datetime import datetime
 import logging
 
 from app.db.mongodb import get_database
-from app.db.crud_services import (
-    get_crud_services, UserCRUD, DoctorCRUD, PatientCRUD, HealthManagerCRUD,
-    OrganizationCRUD, HealthRecordCRUD, FollowUpRecordCRUD,
-    RehabilitationPlanCRUD, ExerciseCRUD, ProgressRecordCRUD,
-    DeviceCRUD, DeviceDataCRUD, AgentCRUD
-)
 from app.services.user_service import UserService
 from app.services.agent_service import AgentService
 from app.services.rehabilitation_service import RehabilitationService
 from app.schemas.user import UserResponse
-from app.core.permissions import PermissionChecker, Permission
-from app.core.exceptions import AppBaseException
+from app.core.permissions import PermissionChecker
+from app.core.patient_access import PatientAccessError, load_patient_doc, ensure_patient_access
 from app.services.health_record_service import HealthRecordService
+from app.services.followup_service import FollowupService
 from app.services.health_alert_service import HealthAlertService
 from app.core.auth import get_current_user as auth_get_current_user, get_current_active_user
 
@@ -27,72 +21,6 @@ logger = logging.getLogger(__name__)
 
 # 使用同一认证依赖，避免不同路由以不同方式解释同一令牌。
 get_current_user = auth_get_current_user
-
-# CRUD服务依赖
-async def get_crud(db: AsyncIOMotorDatabase = Depends(get_database)):
-    """获取CRUD服务字典"""
-    return get_crud_services(db)
-
-# 用户相关CRUD依赖
-async def get_user_crud(crud=Depends(get_crud)):
-    """获取用户CRUD服务"""
-    return crud["user"]
-
-async def get_doctor_crud(crud=Depends(get_crud)):
-    """获取医生CRUD服务"""
-    return crud["doctor"]
-
-async def get_patient_crud(crud=Depends(get_crud)):
-    """获取患者CRUD服务"""
-    return crud["patient"]
-
-async def get_health_manager_crud(crud=Depends(get_crud)):
-    """获取健康管理师CRUD服务"""
-    return crud["health_manager"]
-
-# 组织相关CRUD依赖
-async def get_organization_crud(crud=Depends(get_crud)):
-    """获取组织CRUD服务"""
-    return crud["organization"]
-
-# 健康记录相关CRUD依赖
-async def get_health_record_crud(crud=Depends(get_crud)):
-    """获取健康记录CRUD服务"""
-    return crud["health_record"]
-
-async def get_followup_record_crud(crud=Depends(get_crud)):
-    """获取随访记录CRUD服务"""
-    return crud["followup_record"]
-
-# 康复相关CRUD依赖
-async def get_rehabilitation_plan_crud(crud=Depends(get_crud)):
-    """获取康复计划CRUD服务"""
-    return crud["rehabilitation_plan"]
-
-async def get_exercise_crud(crud=Depends(get_crud)):
-    """获取锻炼CRUD服务"""
-    return crud["exercise"]
-
-async def get_progress_record_crud(crud=Depends(get_crud)):
-    """获取进度记录CRUD服务"""
-    return crud["progress_record"]
-
-# 设备相关CRUD依赖
-async def get_device_crud(crud=Depends(get_crud)):
-    """获取设备CRUD服务"""
-    return crud["device"]
-
-async def get_device_data_crud(crud=Depends(get_crud)):
-    """获取设备数据CRUD服务"""
-    return crud["device_data"]
-
-# 代理相关CRUD依赖
-async def get_agent_crud(crud=Depends(get_crud)):
-    """获取代理CRUD服务"""
-    return crud["agent"]
-
-# 注：原 get_message_crud / get_conversation_crud 已随 WS01 死代码清理删除
-# （全仓库无调用方）；通信域统一走 CommunicationService。
 
 # 业务服务依赖
 async def get_user_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> UserService:
@@ -113,8 +41,7 @@ async def get_user_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> 
         )
 
 async def get_agent_service(
-    db: AsyncIOMotorDatabase = Depends(get_database),
-    agent_crud: AgentCRUD = Depends(get_agent_crud)
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """获取代理服务"""
     return AgentService(db=db)
@@ -217,50 +144,7 @@ def is_medical_staff():
         return current_user
     return dependency
 
-# ── AUTH01 对象级授权：患者归属校验（共享实现） ────────────────────────────
-# 错误码与 integrations/forms 侧约定一致：PATIENT_NOT_FOUND / PATIENT_NOT_ASSIGNED
-
-class PatientAccessError(AppBaseException):
-    """患者归属校验失败（对象级授权）。"""
-
-    def __init__(self, message: str, error_code: str = "PATIENT_NOT_ASSIGNED",
-                 status_code: int = status.HTTP_403_FORBIDDEN,
-                 details: Optional[Dict[str, Any]] = None):
-        super().__init__(message=message, status_code=status_code,
-                         error_code=error_code, details=details)
-
-
-async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str) -> Dict[str, Any]:
-    """按 ID 加载患者 users 文档（兼容 ObjectId 与非 ObjectId 主键），不存在则 404。"""
-    query: Dict[str, Any] = {}
-    if ObjectId.is_valid(patient_id):
-        query["_id"] = ObjectId(patient_id)
-    else:
-        query["_id"] = patient_id
-    doc = await db.users.find_one({**query, "role": "patient"})
-    if not doc:
-        raise PatientAccessError("患者不存在", error_code="PATIENT_NOT_FOUND",
-                                 status_code=status.HTTP_404_NOT_FOUND)
-    return doc
-
-
-async def ensure_patient_access(db: AsyncIOMotorDatabase, patient_id: str,
-                                operator_id: str, operator_role: str) -> Dict[str, Any]:
-    """默认拒绝：操作者必须在患者档案的 practitioners 列表中，admin 豁免。
-
-    返回患者文档（admin 豁免时不查库，返回空 dict）。
-    """
-    if operator_role == "admin":
-        return {}
-    patient = await load_patient_doc(db, patient_id)
-    practitioners = {str(item) for item in (patient.get("practitioners") or [])}
-    if str(operator_id) not in practitioners:
-        raise PatientAccessError(
-            "当前用户不是该患者的主治医生，无权访问该患者的康复数据",
-            error_code="PATIENT_NOT_ASSIGNED", status_code=status.HTTP_403_FORBIDDEN)
-    return patient
-
-
+# 对象授权内核从 patient_access 转发，保留旧导入兼容；这里只组装 HTTP 依赖。
 def verify_patient_access(source: str = "query", name: str = "patient_id",
                           required: bool = True):
     """依赖工厂：从 path/query 提取患者标识并校验当前用户归属（AUTH01 第一层）。
@@ -297,6 +181,10 @@ def verify_patient_access(source: str = "query", name: str = "patient_id",
 async def get_health_record_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> HealthRecordService:
     """获取健康记录服务"""
     return HealthRecordService(db=db)
+
+async def get_followup_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> FollowupService:
+    """获取随访服务（FU01 S2 唯一随访服务入口，路由层一律经此转调）"""
+    return FollowupService(db=db)
 
 async def get_health_alert_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> HealthAlertService:
     """获取健康预警服务"""

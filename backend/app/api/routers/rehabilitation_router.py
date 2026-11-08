@@ -8,6 +8,7 @@ from app.schemas.rehabilitation import (
     RehabPlanCreate,
     RehabPlanUpdate,
     RehabPlanResponse,
+    GeneratedPlanApprovalRequest,
     ExerciseCreate,
     ExerciseUpdate,
     ExerciseResponse,
@@ -19,9 +20,9 @@ from app.services.rehabilitation_service import RehabilitationService
 from app.core.dependencies import (
     get_rehabilitation_service,
     get_database,
-    ensure_patient_access,
     verify_patient_access,
 )
+from app.core.patient_access import ensure_patient_access
 from app.core.auth import get_current_active_user
 
 router = APIRouter()
@@ -104,16 +105,22 @@ async def generate_rehab_plan(
 @router.post("/plans/{plan_id}/approve", response_model=Dict[str, Any])
 async def approve_generated_plan(
     plan_id: str,
-    modifications: Optional[Dict[str, Any]] = None,
+    data: Optional[GeneratedPlanApprovalRequest] = Body(default=None),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """审核并确认LLM生成的康复计划"""
     # AUTH01：先加载计划文档取 patient_id，再校验归属（404 优先于 403）
-    await _check_plan_access(plan_id, current_user, rehab_service, db)
+    if current_user.role not in {"doctor", "health_manager", "admin"}:
+        raise HTTPException(status_code=403, detail="需要医疗人员审核权限")
+    plan = await _check_plan_access(plan_id, current_user, rehab_service, db)
+    data = data or GeneratedPlanApprovalRequest()
 
-    approved_plan = await rehab_service.approve_generated_plan(plan_id, modifications)
+    approved_plan = await rehab_service.approve_generated_plan(
+        plan_id, data.modifications, approved_by=str(current_user.id),
+        patient_id=str(plan["patient_id"]), expected_updated_at=data.expected_updated_at,
+        expected_revision=data.expected_revision)
     
     if not approved_plan:
         raise HTTPException(
@@ -572,4 +579,4 @@ async def get_exercise_trends(
     if not trends:
         raise HTTPException(status_code=404, detail="Trend data not found")
     
-    return trends 
+    return trends

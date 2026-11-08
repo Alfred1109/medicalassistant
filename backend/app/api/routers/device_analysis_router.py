@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ...db.mongodb import get_database
-from ...core.dependencies import ensure_patient_access
+from ...core.patient_access import ensure_patient_access
 from ...services.device_service import device_service, DEVICE_READ_ROLES
 from ...services.device_analysis_service import device_analysis_service
 from ...core.auth import get_current_active_user
@@ -376,4 +376,4 @@ async def predict_device_data_advanced(
     if result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result.get("message", "预测分析失败"))
         
-    return result 
+    return result

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.schemas.base import PydanticConfig
@@ -74,6 +74,24 @@ class RehabPlanUpdate(BaseModel):
     notes: Optional[str] = None
     status: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+
+
+class GeneratedPlanEdits(BaseModel):
+    """审核页可修改的内容；身份、状态和审核证据只能由服务写入。"""
+    model_config = ConfigDict(extra="forbid")
+    name: Optional[str] = None
+    description: Optional[str] = None
+    duration_weeks: Optional[int] = None
+    frequency: Optional[str] = None
+    exercises: Optional[List[Dict[str, Any]]] = None
+    notes: Optional[str] = None
+
+
+class GeneratedPlanApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    modifications: GeneratedPlanEdits = Field(default_factory=GeneratedPlanEdits)
+    expected_updated_at: Optional[datetime] = None
+    expected_revision: Optional[int] = Field(default=None, ge=0, strict=True)
     
 class RehabPlanResponse(RehabPlanBase):
     id: str = Field(..., alias="_id")
@@ -218,4 +236,4 @@ class AssessmentResponse(AssessmentBase):
     ai_analysis: Optional[Dict[str, Any]] = None  # AI生成的评估分析
     
     class Config(PydanticConfig):
-        pass 
+        pass
