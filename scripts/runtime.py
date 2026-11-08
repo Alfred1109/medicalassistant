@@ -12,13 +12,16 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
+import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -353,6 +356,132 @@ def stop():
     print("Project processes stopped. External database services were not changed.")
 
 
+def legacy_process_identity(pid):
+    """Read an explicit PID identity and its owned TCP listeners; never infer targets."""
+    info = process_info(pid)
+    if info is None:
+        raise RuntimeFailure(f"Legacy PID {pid} is not running")
+    base = Path(f"/proc/{pid}")
+    try:
+        uid_line = next(line for line in (base / "status").read_text().splitlines()
+                        if line.startswith("Uid:"))
+        uids = [int(value) for value in uid_line.split()[1:]]
+        if len(set(uids)) != 1:
+            raise RuntimeFailure(f"Legacy PID {pid} has mixed UID credentials")
+        inodes = set()
+        for fd in (base / "fd").iterdir():
+            try:
+                target = os.readlink(fd)
+            except FileNotFoundError:
+                continue
+            if target.startswith("socket:["):
+                inodes.add(target[8:-1])
+        listeners = []
+        for filename, family in (("tcp", socket.AF_INET), ("tcp6", socket.AF_INET6)):
+            for line in (base / "net" / filename).read_text().splitlines()[1:]:
+                fields = line.split()
+                if fields[3] != "0A" or fields[9] not in inodes:
+                    continue
+                address, port = fields[1].split(":")
+                raw = bytes.fromhex(address)
+                raw = (raw[::-1] if family == socket.AF_INET else
+                       b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4)))
+                listeners.append({"host": socket.inet_ntop(family, raw), "port": int(port, 16)})
+        arguments = (base / "cmdline").read_bytes().split(b"\0")
+        if arguments and arguments[-1] == b"":
+            arguments.pop()
+        identity = {
+            "pid": pid, "start_ticks": info["start"], "uid": uids[0],
+            "cwd": os.readlink(base / "cwd"), "exe": os.readlink(base / "exe"),
+            "cmdline": [os.fsdecode(value) for value in arguments],
+            "listeners": sorted(listeners, key=lambda item: (item["host"], item["port"])),
+        }
+    except (OSError, ValueError, StopIteration, IndexError) as exc:
+        raise RuntimeFailure(f"Cannot verify legacy PID {pid}") from exc
+    if process_info(pid) != info:
+        raise RuntimeFailure(f"Legacy PID {pid} changed during inspection")
+    return identity
+
+
+def stop_legacy(receipt_path, *, confirm=False, timeout=6.0):
+    """One-time explicit migration stop. Receipt validation alone sends no signals."""
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise RuntimeFailure("Legacy stop requires Linux pidfd support")
+    path = Path(receipt_path).absolute()
+    handles = []
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                    or stat.S_IMODE(metadata.st_mode) & 0o077):
+                raise RuntimeFailure("Legacy receipt must be a private file owned by the current user")
+            raw = source.read()
+        receipt = json.loads(raw)
+        if receipt.get("version") != 1 or receipt.get("controller_root") != str(ROOT):
+            raise RuntimeFailure("Legacy receipt controller root/version mismatch")
+        legacy_root = Path(receipt["legacy_root"])
+        if (not legacy_root.is_absolute() or legacy_root.resolve() != legacy_root
+                or not (legacy_root / "backend/app/main.py").is_file()
+                or not (legacy_root / "frontend/package.json").is_file()):
+            raise RuntimeFailure("Legacy receipt does not identify an existing project root")
+        processes = receipt["processes"]
+        if not isinstance(processes, list) or not processes or len(processes) > 2:
+            raise RuntimeFailure("Legacy receipt requires one or two explicit application PIDs")
+        seen = set()
+        for expected in processes:
+            pid = expected["pid"]
+            if (type(pid) is not int or pid <= 1 or pid == os.getpid() or pid in seen
+                    or expected["uid"] != os.geteuid()
+                    or expected["cwd"] not in {str(legacy_root / "backend"), str(legacy_root / "frontend")}
+                    or not expected["listeners"]):
+                raise RuntimeFailure("Invalid explicit legacy process scope")
+            seen.add(pid)
+            handle = os.pidfd_open(pid)
+            handles.append((handle, expected))
+            if legacy_process_identity(pid) != expected:
+                raise RuntimeFailure(f"Legacy PID {pid} does not match its receipt")
+        marker = path.with_name(path.name + ".used")
+        if marker.exists() or marker.is_symlink():
+            raise RuntimeFailure("Legacy receipt has already been used")
+        if not confirm:
+            print(f"Validated {len(handles)} legacy PID identities; no processes stopped. "
+                  "Use --confirm-legacy-stop with this receipt to stop them once.")
+            return
+        # Verify every identity again before any process receives a signal.
+        for _, expected in handles:
+            if legacy_process_identity(expected["pid"]) != expected:
+                raise RuntimeFailure("Legacy process changed before stop; no signals sent")
+        audit = {"receipt_sha256": hashlib.sha256(raw).hexdigest(), "controller_root": str(ROOT),
+                 "legacy_root": str(legacy_root), "pids": sorted(seen), "started_at": time.time(),
+                 "status": "stopping"}
+        audit_fd = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(audit_fd, "w+") as destination:
+            json.dump(audit, destination); destination.flush(); os.fsync(destination.fileno())
+            for handle, _ in handles:
+                try:
+                    signal.pidfd_send_signal(handle, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            deadline = time.monotonic() + timeout
+            pending = []
+            for handle, expected in handles:
+                if not select.select([handle], [], [], max(0, deadline - time.monotonic()))[0]:
+                    pending.append(expected["pid"])
+            audit.update(finished_at=time.time(), status="stopped" if not pending else "incomplete", pending_pids=pending)
+            destination.seek(0); destination.truncate()
+            json.dump(audit, destination, indent=2)
+            destination.write("\n"); destination.flush(); os.fsync(destination.fileno())
+        if pending:
+            raise RuntimeFailure(f"Legacy PIDs did not exit after SIGTERM: {pending}; no force kill attempted")
+        print(f"Stopped {len(handles)} verified legacy application PIDs. Database services were not changed.")
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise RuntimeFailure("Legacy receipt/process verification failed") from exc
+    finally:
+        for handle, _ in handles:
+            os.close(handle)
+
+
 def status():
     records = read_state()
     if not records:
@@ -369,13 +498,22 @@ def main():
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--check", action="store_true")
     group.add_argument("--status", action="store_true")
+    parser.add_argument("--legacy-receipt", type=Path,
+                        help="Private explicit legacy PID receipt; validates only unless confirmed")
+    parser.add_argument("--confirm-legacy-stop", action="store_true")
     args = parser.parse_args()
     if args.action == "stop" and args.check:
         parser.error("--check is only valid for start")
+    if args.legacy_receipt and (args.action != "stop" or args.status or args.check):
+        parser.error("--legacy-receipt is only valid for an explicit stop")
+    if args.confirm_legacy_stop and not args.legacy_receipt:
+        parser.error("--confirm-legacy-stop requires --legacy-receipt")
     if not Path("/proc/self/stat").exists():
         raise RuntimeFailure("This runtime requires Linux /proc for safe process identity checks")
     with runtime_lock():
-        if args.status:
+        if args.legacy_receipt:
+            stop_legacy(args.legacy_receipt, confirm=args.confirm_legacy_stop)
+        elif args.status:
             status()
         elif args.action == "stop":
             stop()
