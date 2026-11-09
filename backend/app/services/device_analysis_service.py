@@ -1,6 +1,14 @@
 """
 设备数据分析服务
 用于检测设备数据异常、分析趋势并提供预警
+
+诚实数据约定（去模拟化，2026-11-09）：
+- 所有分析均基于 device_data 集合的真实存量数据；无数据/数据不足时
+  如实返回空列表或 error 状态，不生成任何模拟数据；
+- 设备状态（monitor/预警）来自 device_service.get_device_status，
+  仅由设备文档真实字段（last_connected）推导；电量/信号强度无真实
+  上报时为 None，按"未上报"处理（不计分、不虚构问题与建议），
+  不再消费随机生成的电量与信号格数。
 """
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union, Tuple, Any
@@ -517,21 +525,23 @@ class DeviceAnalysisService:
         elif status.get("status") == "idle":
             score += 20
         
-        # 检查电池电量
-        battery_level = status.get("battery_level", 0)
-        if battery_level < 10:
-            score += 50
-        elif battery_level < 20:
-            score += 30
-        elif battery_level < 30:
-            score += 10
-            
-        # 检查信号强度
-        signal_strength = status.get("signal_strength", 0)
-        if signal_strength <= 1:
-            score += 30
-        elif signal_strength == 2:
-            score += 10
+        # 检查电池电量（未上报为 None：如实不计分，不按 0% 误判为电量耗尽）
+        battery_level = status.get("battery_level")
+        if battery_level is not None:
+            if battery_level < 10:
+                score += 50
+            elif battery_level < 20:
+                score += 30
+            elif battery_level < 30:
+                score += 10
+
+        # 检查信号强度（未上报为 None：如实不计分）
+        signal_strength = status.get("signal_strength")
+        if signal_strength is not None:
+            if signal_strength <= 1:
+                score += 30
+            elif signal_strength == 2:
+                score += 10
             
         # 检查最后同步时间
         last_sync_time = status.get("last_sync_time")
@@ -573,24 +583,25 @@ class DeviceAnalysisService:
                 "severity": "medium"
             })
             
-        # 检查电池电量
-        battery_level = status.get("battery_level", 0)
-        if battery_level < 10:
-            issues.append({
-                "type": "battery",
-                "message": f"设备电量严重不足 ({battery_level}%)",
-                "severity": "high"
-            })
-        elif battery_level < 20:
-            issues.append({
-                "type": "battery",
-                "message": f"设备电量不足 ({battery_level}%)",
-                "severity": "medium"
-            })
-            
-        # 检查信号强度
-        signal_strength = status.get("signal_strength", 0)
-        if signal_strength <= 1:
+        # 检查电池电量（未上报为 None：如实不产出电量问题，不伪造"电量不足"）
+        battery_level = status.get("battery_level")
+        if battery_level is not None:
+            if battery_level < 10:
+                issues.append({
+                    "type": "battery",
+                    "message": f"设备电量严重不足 ({battery_level}%)",
+                    "severity": "high"
+                })
+            elif battery_level < 20:
+                issues.append({
+                    "type": "battery",
+                    "message": f"设备电量不足 ({battery_level}%)",
+                    "severity": "medium"
+                })
+
+        # 检查信号强度（未上报为 None：如实不产出信号问题）
+        signal_strength = status.get("signal_strength")
+        if signal_strength is not None and signal_strength <= 1:
             issues.append({
                 "type": "signal",
                 "message": "设备信号极弱",
@@ -647,14 +658,14 @@ class DeviceAnalysisService:
         elif device_status == "offline":
             recommendations.append("检查设备是否开启、电池是否充足，并确保设备在信号范围内")
             
-        # 根据电池电量提供建议
-        battery_level = status.get("battery_level", 0)
-        if battery_level < 20:
+        # 根据电池电量提供建议（未上报为 None：不虚构充电建议）
+        battery_level = status.get("battery_level")
+        if battery_level is not None and battery_level < 20:
             recommendations.append("请尽快为设备充电")
-            
-        # 根据信号强度提供建议
-        signal_strength = status.get("signal_strength", 0)
-        if signal_strength <= 2:
+
+        # 根据信号强度提供建议（未上报为 None：不虚构信号建议）
+        signal_strength = status.get("signal_strength")
+        if signal_strength is not None and signal_strength <= 2:
             recommendations.append("将设备移至信号更强的区域，减少干扰物")
             
         # 根据同步时间提供建议

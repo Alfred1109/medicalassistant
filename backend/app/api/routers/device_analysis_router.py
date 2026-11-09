@@ -1,6 +1,11 @@
 """
 设备分析路由器
 提供设备数据分析和预警相关的API接口
+
+诚实数据约定（去模拟化，2026-11-09）：所有分析端点均基于 device_data
+集合的真实存量数据计算；无数据/数据不足时如实返回空列表或错误状态，
+不返回模拟分析结果。设备状态与预警依赖 device_service.get_device_status，
+其中电量/信号强度无真实上报时为 null（未上报），不再消费随机模拟值。
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, List, Optional

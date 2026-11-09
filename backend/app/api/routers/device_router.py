@@ -113,9 +113,9 @@ class DeviceResponse(DeviceBase):
 
 
 class DeviceStatusResponse(BaseModel):
-    status: str = Field(..., description="设备状态")
-    battery_level: int = Field(..., description="电池电量")
-    signal_strength: int = Field(..., description="信号强度")
+    status: str = Field(..., description="设备状态（由最后连接时间推导：online/idle/offline/error）")
+    battery_level: Optional[int] = Field(None, description="电池电量；设备未上报时为 null，不返回模拟值")
+    signal_strength: Optional[int] = Field(None, description="信号强度；设备未上报时为 null，不返回模拟值")
     last_sync_time: Optional[datetime] = Field(None, description="最后同步时间")
     message: Optional[str] = Field(None, description="状态消息")
 
@@ -245,37 +245,21 @@ async def sync_device_data(
 ):
     """
     同步设备数据
+
+    去模拟化（REM02）：设备真实数据源（设备 SDK / 厂商云 API）尚未接入
+    （评估见 docs/device-sdk-assessment-2026-11-07.md）。原实现会随机生成
+    心率/睡眠/血糖等数据冒充采集结果，现已整体移除；本端点如实返回
+    503"设备数据源未接入"，不写入任何数据、不更新 last_connected。
     """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验（沿用只读角色语义）
     device = await _get_device_or_404(device_id)
     await _ensure_device_access(device, current_user, db, list(DEVICE_READ_ROLES))
 
-    return await device_service.sync_device_data(device_id)
-
-
-@router.post("/{device_id}/repair", response_model=dict)
-async def repair_device(
-    device_id: str,
-    current_user: Any = Depends(get_current_active_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """
-    自动修复设备异常状态
-    """
-    # 存在性校验：畸形 ID 与不存在的设备语义一致（404）
-    device = await _get_device_or_404(device_id)
-
-    # AUTH01 对象级授权（变更守卫）：属主患者可维修自己名下设备（此前属主
-    # 患者被"只有医生或管理员"一刀切 403，即患者角色错配缺陷）；
-    # 健康管理师只读，不可执行维修等变更操作；非属主医生须与设备所属患者
-    # 存在归属关系（ensure_patient_access）。
-    await _ensure_device_access(
-        device, current_user, db, list(DEVICE_MUTATE_ROLES),
-        detail="无权修复此设备：仅设备属主、医生或管理员可执行维修操作")
-
-    # 调用设备修复服务
-    repair_result = await device_service.auto_repair_device(device_id)
-    return repair_result
+    result = await device_service.sync_device_data(device_id)
+    # 数据源未接入：如实 503，绝不返回随机数据伪装同步成功
+    if not result.get("success"):
+        raise HTTPException(status_code=503, detail=result.get("message", "设备数据源未接入"))
+    return result
 
 
 @router.get("/{device_id}/status", response_model=DeviceStatusResponse)
@@ -284,7 +268,11 @@ async def get_device_status(
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """获取设备状态"""
+    """获取设备状态
+
+    去模拟化：状态由设备文档 last_connected 真实推导；电量/信号强度
+    无真实上报路径，响应中如实为 null（不再随机生成）。
+    """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
     device = await _get_device_or_404(device_id)
     await _ensure_device_access(device, current_user, db, list(DEVICE_READ_ROLES))

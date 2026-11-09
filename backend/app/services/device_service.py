@@ -8,7 +8,6 @@ from bson import ObjectId
 
 from ..models.device import Device, DeviceData
 from ..models.device_data_standard import DeviceType, DeviceStatus, ConnectionType
-from ..models.device_repair_log import DeviceRepairLog
 from .device_adapters import get_device_adapter
 from .device_data_validator_service import device_data_validator_service
 from ..db.mongodb import get_db
@@ -120,58 +119,49 @@ class DeviceService:
         return [{**data, "_id": str(data["_id"])} for data in device_data]
     
     async def sync_device_data(self, device_id: str) -> Dict:
-        """同步设备数据"""
-        # 先获取设备信息
+        """同步设备数据
+
+        去模拟化（REM02）：原实现按设备类型选择适配器，随机生成心率/睡眠/
+        血糖/肺功能等"采集数据"写入 device_data 集合，并更新 last_connected
+        伪装连接成功。设备真实数据源（SDK/厂商云）尚未接入，此处如实拒绝，
+        不生成任何数据、不更新 last_connected（未发生真实连接）。
+        """
         device = await self.get_device(device_id)
         if not device:
             return {"success": False, "message": "设备不存在"}
-        
-        # 根据设备类型选择适配器
-        adapter = get_device_adapter(device["device_type"])
-        
-        # 使用适配器同步数据
-        try:
-            sync_result = await adapter.sync_data(device)
-            
-            # 更新设备最后连接时间
-            db = await get_db()
-            await db.devices.update_one(
-                {"_id": ObjectId(device_id)},
-                {"$set": {
-                    "last_connected": datetime.utcnow(),
-                    "updated_at": datetime.utcnow()
-                }}
-            )
-            
-            return sync_result
-        except Exception as e:
-            return {"success": False, "message": f"同步失败: {str(e)}"}
+
+        return {"success": False, "message": "设备数据源未接入，无法同步真实采集数据"}
     
     async def get_device_status(self, device_id: str) -> Dict:
-        """获取设备状态"""
+        """获取设备状态
+
+        去模拟化：状态仅由设备文档真实字段（last_connected）推导，
+        电量/信号强度全库无真实上报，如实透出 None（未上报），
+        不再随机生成电量与信号格数。
+        """
         device = await self.get_device(device_id)
         if not device:
             return {
-                "status": "error", 
+                "status": "error",
                 "message": "设备不存在",
-                "battery_level": 0,
-                "signal_strength": 0,
+                "battery_level": None,
+                "signal_strength": None,
                 "last_sync_time": None
             }
-        
+
         # 根据设备类型选择适配器
         adapter = get_device_adapter(device["device_type"])
-        
+
         # 使用适配器获取状态
         try:
             status = await adapter.get_status(device)
             return status
         except Exception as e:
             return {
-                "status": "error", 
+                "status": "error",
                 "message": f"获取状态失败: {str(e)}",
-                "battery_level": 0,
-                "signal_strength": 0,
+                "battery_level": None,
+                "signal_strength": None,
                 "last_sync_time": device.get("last_connected")
             }
     
@@ -197,138 +187,6 @@ class DeviceService:
             return {"success": True, "message": "设备配置已更新"}
         else:
             return {"success": False, "message": "设备配置更新失败"}
-    
-    async def auto_repair_device(self, device_id: str) -> Dict:
-        """
-        尝试自动修复设备状态异常
-        
-        参数:
-        - device_id: 设备ID
-        
-        返回:
-        - 修复结果，包含成功状态和消息
-        """
-        # 获取设备信息
-        device = await self.get_device(device_id)
-        if not device:
-            return {"success": False, "message": "设备不存在"}
-        
-        # 获取当前设备状态
-        current_status = await self.get_device_status(device_id)
-        
-        # 根据状态类型进行不同的修复操作
-        repair_actions = []
-        repair_results = []
-        
-        # 检查设备状态
-        if current_status.get("status") in ["error", "offline", "unknown"]:
-            repair_actions.append("重置设备连接")
-            
-            # 模拟重置设备连接
-            try:
-                # 获取设备适配器
-                adapter = get_device_adapter(device["device_type"])
-                # 执行重置操作（实际环境中调用设备SDK的重置方法）
-                repair_results.append({"action": "重置设备连接", "success": True})
-                
-                # 更新设备状态
-                db = await get_db()
-                await db.devices.update_one(
-                    {"_id": ObjectId(device_id)},
-                    {"$set": {
-                        "status": "active",
-                        "last_connected": datetime.utcnow(),
-                        "updated_at": datetime.utcnow()
-                    }}
-                )
-            except Exception as e:
-                repair_results.append({"action": "重置设备连接", "success": False, "reason": str(e)})
-        
-        # 检查是否需要固件更新
-        if device.get("firmware_update_available"):
-            repair_actions.append("固件更新")
-            
-            # 模拟固件更新（实际环境中调用设备SDK的固件更新方法）
-            try:
-                # 更新固件状态
-                db = await get_db()
-                await db.devices.update_one(
-                    {"_id": ObjectId(device_id)},
-                    {"$set": {
-                        "firmware_update_available": False,
-                        "firmware_version": f"{device.get('firmware_version', '1.0')}.1",  # 模拟版本增加
-                        "updated_at": datetime.utcnow()
-                    }}
-                )
-                repair_results.append({"action": "固件更新", "success": True})
-            except Exception as e:
-                repair_results.append({"action": "固件更新", "success": False, "reason": str(e)})
-        
-        # 检查电池状态（如果电池过低）
-        if current_status.get("battery_level", 0) < 20:
-            repair_actions.append("电池状态检查")
-            repair_results.append({
-                "action": "电池状态检查", 
-                "success": True, 
-                "message": "已提醒用户充电"
-            })
-            
-            # 在实际应用中，这里可以发送提醒消息给用户
-        
-        # 检查信号强度（如果信号弱）
-        if current_status.get("signal_strength", 0) < 2:
-            repair_actions.append("信号强度检查")
-            repair_results.append({
-                "action": "信号强度检查", 
-            "success": True,
-                "message": "已建议用户调整设备位置"
-            })
-        
-        # 如果没有执行任何修复操作
-        if not repair_actions:
-            return {"success": True, "message": "设备状态正常，无需修复"}
-        
-        # 生成修复报告
-        success_count = sum(1 for result in repair_results if result.get("success"))
-        
-        if success_count == len(repair_actions):
-            overall_success = True
-            message = "设备修复成功"
-        elif success_count > 0:
-            overall_success = True
-            message = "设备部分修复成功"
-        else:
-            overall_success = False
-            message = "设备修复失败"
-        
-        # 记录修复操作日志
-        repair_log = DeviceRepairLog(
-            device_id=device_id,
-            device_type=device["device_type"],
-            repair_time=datetime.utcnow(),
-            initial_status=current_status,
-            repair_actions=repair_actions,
-            repair_results=repair_results,
-            overall_success=overall_success
-        )
-        
-        # 存储修复日志
-        try:
-            db = await get_db()
-            await db.device_repair_logs.insert_one(repair_log.to_mongo())
-        except Exception as e:
-            print(f"保存修复日志失败: {e}")
-        
-        # 返回修复结果
-        return {
-            "success": overall_success,
-            "message": message,
-            "device_id": device_id,
-            "device_type": device["device_type"],
-            "repair_actions": repair_actions,
-            "repair_results": repair_results,
-            "new_status": await self.get_device_status(device_id)
-        }
     
     async def get_supported_data_types(self, device_type: Optional[str] = None) -> Dict:
         """

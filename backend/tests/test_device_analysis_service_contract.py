@@ -130,15 +130,15 @@ class DeviceAnalysisServiceContractTests(unittest.IsolatedAsyncioTestCase):
             "name": "合成设备",
             "status": "active",
         }])
-        # get_device_status 返回空 dict：电量 0(+50) + 信号 0(+30) + 从未同步(+40)
-        # → 得分封顶 100 > 20，进入结果
+        # get_device_status 返回空 dict：电量/信号未上报（None，去模拟化后
+        # 不再按 0 误判扣分，如实不计分）+ 从未同步(+40) → 得分 40 > 20，进入结果
         self.device_service_mock.get_device_status = AsyncMock(return_value={})
         with patch.object(damodule, "get_db", new=AsyncMock(return_value=db)):
             result = await device_analysis_service.monitor_device_status(
                 device_id=DEVICE_ID)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["device"]["_id"], DEVICE_ID)
-        self.assertEqual(result[0]["status_score"], 100)
+        self.assertEqual(result[0]["status_score"], 40)
 
 
 if __name__ == "__main__":

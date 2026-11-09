@@ -188,55 +188,47 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
             f"/api/devices/{DEVICE_ID}", headers=self.auth())
         self.assertEqual(response.status_code, 404, response.text)
 
-    async def test_owner_patient_can_repair_own_device(self):
-        # 回归锁定（缺陷 A）：患者请求维修自己名下设备此前被
-        # "只有医生或管理员" 一刀切 403（患者角色错配），属主应放行
-        self.device_service.auto_repair_device = AsyncMock(
-            return_value={"success": True, "message": "设备修复成功"})
+    async def test_sync_returns_503_for_owner_without_mock_data(self):
+        # 去模拟化（REM02）：设备真实数据源未接入，同步端点如实 503，
+        # 不再随机生成心率/睡眠等数据伪装同步成功
+        self.device_service.sync_device_data = AsyncMock(
+            return_value={"success": False,
+                          "message": "设备数据源未接入，无法同步真实采集数据"})
         response = await self.client.post(
-            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
-        self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
-        self.assertTrue(payload["success"])
-        self.device_service.auto_repair_device.assert_awaited_once_with(DEVICE_ID)
+            f"/api/devices/{DEVICE_ID}/sync", headers=self.auth())
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertIn("设备数据源未接入", response.json()["detail"])
+        self.device_service.sync_device_data.assert_awaited_once_with(DEVICE_ID)
 
-    async def test_repair_forbidden_for_other_patient(self):
-        # 非属主患者请求维修他人设备：403，service 不被触发
-        self.device_service.get_device = AsyncMock(return_value=make_device_doc(
-            patient_id="other-patient"))
-        self.device_service.auto_repair_device = AsyncMock()
-        response = await self.client.post(
-            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
-        self.assertEqual(response.status_code, 403, response.text)
-        self.device_service.auto_repair_device.assert_not_awaited()
-
-    async def test_assigned_doctor_can_repair_patient_device(self):
-        # AUTH01 后医生维修他人设备的条件收敛为：须为该患者的主管医护
-        # （practitioners 列表成员），变更操作的第二授权角色仍生效
+    async def test_assigned_doctor_can_configure_patient_device(self):
+        # AUTH01：医生对他人设备的变更操作须为该患者的主管医护
+        # （practitioners 列表成员），变更授权角色仍生效
+        # （原以此锁定 repair 端点；该端点因伪造修复结果已删除，改由
+        # configure 这一真实变更操作承载同等授权语义）
         self.operator = make_operator(role="doctor")
         self.get_user_mock.return_value = self.operator
         self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
             practitioners=[OPERATOR_ID]))
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
             patient_id=OTHER_PATIENT_ID))
-        self.device_service.auto_repair_device = AsyncMock(
-            return_value={"success": True, "message": "设备修复成功"})
-        response = await self.client.post(
-            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
+        self.device_service.configure_device = AsyncMock(
+            return_value={"success": True, "message": "设备配置已更新"})
+        response = await self.client.put(
+            f"/api/devices/{DEVICE_ID}/config",
+            json={"sync_frequency": "hourly"}, headers=self.auth())
         self.assertEqual(response.status_code, 200, response.text)
-        self.device_service.auto_repair_device.assert_awaited_once_with(DEVICE_ID)
+        self.device_service.configure_device.assert_awaited_once()
 
-    async def test_repair_forbidden_for_health_manager(self):
-        # 回归锁定（缺陷 B）：健康管理师只读，不可执行维修等变更操作
-        self.operator = make_operator(role="health_manager")
-        self.get_user_mock.return_value = self.operator
+    async def test_configure_forbidden_for_other_patient(self):
+        # 非属主患者配置他人设备：403，service 不被触发
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
             patient_id="other-patient"))
-        self.device_service.auto_repair_device = AsyncMock()
-        response = await self.client.post(
-            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
+        self.device_service.configure_device = AsyncMock()
+        response = await self.client.put(
+            f"/api/devices/{DEVICE_ID}/config",
+            json={"sync_frequency": "hourly"}, headers=self.auth())
         self.assertEqual(response.status_code, 403, response.text)
-        self.device_service.auto_repair_device.assert_not_awaited()
+        self.device_service.configure_device.assert_not_awaited()
 
     async def test_assigned_health_manager_can_read_device_detail(self):
         # 健康管理师可查看其负责患者的设备数据（只读路径放行，须有归属关系）
@@ -295,23 +287,23 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.device_service.get_device_status.assert_not_awaited()
 
     async def test_unassigned_doctor_mutate_forbidden_and_no_business_call(self):
-        # AUTH01：非归属医生的变更请求（维修/配置）同样 403，service 零调用
+        # AUTH01：非归属医生的变更请求（同步/配置）同样 403，service 零调用
         self.operator = make_operator(role="doctor")
         self.get_user_mock.return_value = self.operator
         self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
             practitioners=["another-doctor"]))
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
             patient_id=OTHER_PATIENT_ID))
-        self.device_service.auto_repair_device = AsyncMock()
+        self.device_service.sync_device_data = AsyncMock()
         self.device_service.configure_device = AsyncMock()
-        repair_resp = await self.client.post(
-            f"/api/devices/{DEVICE_ID}/repair", headers=self.auth())
+        sync_resp = await self.client.post(
+            f"/api/devices/{DEVICE_ID}/sync", headers=self.auth())
         config_resp = await self.client.put(
             f"/api/devices/{DEVICE_ID}/config",
             json={"sync_frequency": "hourly"}, headers=self.auth())
-        self.assertEqual(repair_resp.status_code, 403, repair_resp.text)
+        self.assertEqual(sync_resp.status_code, 403, sync_resp.text)
         self.assertEqual(config_resp.status_code, 403, config_resp.text)
-        self.device_service.auto_repair_device.assert_not_awaited()
+        self.device_service.sync_device_data.assert_not_awaited()
         self.device_service.configure_device.assert_not_awaited()
 
     async def test_admin_exempt_from_patient_assignment(self):
@@ -392,7 +384,6 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
             ("get", f"/api/devices/{MALFORMED_DEVICE_ID}/data", {}),
             ("get", f"/api/devices/{MALFORMED_DEVICE_ID}/status", {}),
             ("post", f"/api/devices/{MALFORMED_DEVICE_ID}/sync", {}),
-            ("post", f"/api/devices/{MALFORMED_DEVICE_ID}/repair", {}),
             ("put", f"/api/devices/{MALFORMED_DEVICE_ID}/config",
              {"json": {"sync_frequency": "hourly"}}),
         ):
@@ -448,6 +439,33 @@ class DeviceServiceMalformedIdContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["_id"], DEVICE_ID)
         self.db.devices.find_one.assert_awaited_once_with(
             {"_id": ObjectId(DEVICE_ID)})
+
+    async def test_sync_device_data_refuses_without_device_source(self):
+        # 去模拟化（REM02）：设备真实数据源未接入时如实拒绝，
+        # 不生成任何采集数据、不更新 last_connected
+        self.db.devices.find_one = AsyncMock(
+            return_value=make_device_doc(patient_id=OPERATOR_ID))
+        result = await device_service_module.device_service.sync_device_data(
+            DEVICE_ID)
+        self.assertFalse(result["success"])
+        self.assertIn("设备数据源未接入", result["message"])
+        self.db.device_data.insert_many.assert_not_called()
+        self.db.devices.update_one.assert_not_awaited()
+
+    async def test_get_device_status_reports_unreported_fields_as_none(self):
+        # 去模拟化：电量/信号全库无真实上报路径（bind_device 不采集），
+        # 状态仅由 last_connected 真实推导，不再随机生成 30-100 电量与
+        # 1-5 信号格；库中未存储电量时如实为 None
+        doc = make_device_doc(patient_id=OPERATOR_ID)
+        doc["last_connected"] = datetime.utcnow()
+        doc["battery_level"] = None
+        self.db.devices.find_one = AsyncMock(return_value=doc)
+        result = await device_service_module.device_service.get_device_status(
+            DEVICE_ID)
+        self.assertEqual(result["status"], "online")
+        self.assertIsNone(result["battery_level"])
+        self.assertIsNone(result["signal_strength"])
+        self.assertEqual(result["last_sync_time"], doc["last_connected"])
 
 
 if __name__ == "__main__":
