@@ -3,6 +3,7 @@ from fastapi import Request, Response
 from jose import JWTError, jwt
 from math import isfinite
 import logging
+import re
 from datetime import datetime
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
@@ -14,6 +15,31 @@ from app.core.permissions import AUDITED_PERMISSIONS
 from app.integrations.identity.access import unified_authentication
 
 logger = logging.getLogger(__name__)
+
+# AUTH02 审计脱敏：凭证明文/哈希类键按子串匹配（防止 secret_hash、api_key
+# 等变体绕过）；答卷/报告类大文本按精确键名匹配，避免误删状态类小字段。
+_SENSITIVE_CREDENTIAL_PATTERN = re.compile(
+    r"secret|password|passwd|token|credential|api[_-]?key|authorization", re.I)
+_SENSITIVE_CONTENT_KEYS = frozenset({
+    "answer", "answers", "response", "responses", "content", "body",
+    "payload", "raw_text", "full_text", "report_text", "questionnaire_data",
+})
+
+
+def redact_sensitive_details(details: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """审计脱敏：返回可安全写入审计日志的 details 副本。
+
+    审计记录不得包含凭证明文（或其哈希）与完整敏感答卷内容（AUTH02 验收标准
+    "日志不含凭证或完整敏感答卷"）。本函数整键移除敏感键，不做部分掩码——
+    掩码仍会泄露长度等元信息。宁可少记录，也不在审计中留存可复用凭证。
+    """
+    if not details:
+        return {}
+    return {
+        key: value for key, value in details.items()
+        if key not in _SENSITIVE_CONTENT_KEYS
+        and not _SENSITIVE_CREDENTIAL_PATTERN.search(str(key))
+    }
 
 
 def _extract_identity_from_token(token: str) -> Tuple[Optional[str], Optional[str]]:
@@ -175,7 +201,11 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
             # 令牌中携带角色时写入审计详情，便于归因分析
             if role:
                 details["role"] = role
-            
+
+            # 纵深防御：审计详情写入前统一脱敏，凭证明文/哈希与完整敏感
+            # 答卷内容不允许进入审计记录（本路径当前仅写入固定安全键）。
+            details = redact_sensitive_details(details)
+
             # 创建审计日志
             await audit_service.create_log(
                 log_data=AuditLogCreate(
@@ -237,10 +267,11 @@ class ResourcePermissionTracker:
                         resource_id=resource_id,
                         is_granted=is_granted,
                         ip_address=ip_address,
-                        details={
+                        # details 由调用方传入，写入前脱敏（AUTH02）。
+                        details=redact_sensitive_details({
                             "resource_type": resource_type,
                             **(details or {})
-                        }
+                        })
                     )
             except Exception as e:
                 logger.error(f"Failed to track permission check: {str(e)}")
@@ -277,7 +308,8 @@ class ResourcePermissionTracker:
                         resource_type=resource_type,
                         resource_id=resource_id,
                         status="success" if success else "failure",
-                        details=details or {}
+                        # details 由调用方传入，写入前脱敏（AUTH02）。
+                        details=redact_sensitive_details(details or {})
                     ),
                     ip_address=ip_address
                 )
