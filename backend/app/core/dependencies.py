@@ -9,6 +9,7 @@ from app.db.mongodb import get_database
 from app.services.user_service import UserService
 from app.services.agent_service import AgentService
 from app.services.rehabilitation_service import RehabilitationService
+from app.services.rehab_plan_structure_service import RehabPlanStructureService
 from app.schemas.user import UserResponse
 from app.core.permissions import PermissionChecker
 from app.core.patient_access import PatientAccessError, load_patient_doc, ensure_patient_access
@@ -51,6 +52,12 @@ async def get_rehabilitation_service(
 ):
     """获取康复服务"""
     return RehabilitationService(db=db)
+
+async def get_rehab_plan_structure_service(
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """获取康复方案结构化服务（REH01：方案版本/处方项/执行事件）"""
+    return RehabPlanStructureService(db=db)
 
 # 权限检查依赖
 def check_permission(permission: str):

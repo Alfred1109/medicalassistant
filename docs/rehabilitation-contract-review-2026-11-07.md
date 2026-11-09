@@ -23,6 +23,14 @@
 | 审核 | 页面发送 `{modifications: {...}}`，router 接收裸字典后原样交给 Agent；Agent 允许除 `_id` 外任意字段覆盖并把整个含 `_id` 文档放入 `$set` | 修改可能被嵌套为 `plan.modifications` 而未实际应用；缺少字段白名单、审核人、版本冲突和状态转换约束；含 `_id` 的更新行为须用真实 Mongo 验证 |
 | 临床调整 | 代码根据三个反馈与硬编码阈值建议加减组数/次数；评估缺失疼痛默认满分，加权总分使用固定权重 | 现有代码不是已确认的肾病康复规则，也不是 113.44 的权威量表评分；不得用于新功能的正式验收 |
 
+### 1.1 缺陷复核记录（2026-11-09，REH01）
+
+针对 :23"审核"行缺陷的复核与收尾修复：
+
+- 现状复核：approve 链路已不再是"router 接收裸字典后原样交给 Agent"。router 以 `GeneratedPlanApprovalRequest`/`GeneratedPlanEdits`（`extra="forbid"` 顶层白名单）接收修改，服务层在一个原子写中应用内容、审核证据与状态（`test_generated_plan_approval_contract.py` 覆盖，含真实副本集并发审批）。
+- 本次收尾：`GeneratedPlanEdits.exercises` 原先仍为嵌套裸字典，`_id` 等身份字段可经嵌套结构进入 `$set`。已改为处方项白名单模型 `PrescriptionItemEdit`（`extra="forbid"`），`_id`、`patient_id`、`status` 等字段在任意层级被 422 拒绝；真实 Mongo 验证审核落库文档的 exercises 项不含 `_id` 键（`tests/test_rehab_plan_structure_contract.py::StructureMongoContractTests`）。
+- 仍遗留：普通计划编辑 `RehabPlanUpdate` 的嵌套 `exercises`/`metadata` 仍为裸字典（收紧会影响既有普通计划编辑往返，未列入本次范围）；方案版本状态机、签署与发布口径由 REH02 承接；中心/项目维度授权规则待 D02。
+
 ## 2. 历史数据范围
 
 - 活动 `RehabilitationService`、Agent 审核及预测服务读写 `rehab_plans`。

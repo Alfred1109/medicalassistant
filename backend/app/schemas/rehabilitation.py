@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.schemas.base import PydanticConfig
+from app.schemas.rehab_plan_structure import PrescriptionItemEdit
 
 class ExerciseBase(BaseModel):
     name: str
@@ -77,13 +78,18 @@ class RehabPlanUpdate(BaseModel):
 
 
 class GeneratedPlanEdits(BaseModel):
-    """审核页可修改的内容；身份、状态和审核证据只能由服务写入。"""
+    """审核页可修改的内容；身份、状态和审核证据只能由服务写入。
+
+    exercises 使用处方项白名单模型（extra=forbid）：嵌套结构内的 `_id`、
+    patient_id、status 等字段一律 422 拒绝，不再作为裸字典透传进入 `$set`
+    （核查文档 :23 缺陷的收尾修复）。
+    """
     model_config = ConfigDict(extra="forbid")
     name: Optional[str] = None
     description: Optional[str] = None
     duration_weeks: Optional[int] = None
     frequency: Optional[str] = None
-    exercises: Optional[List[Dict[str, Any]]] = None
+    exercises: Optional[List[PrescriptionItemEdit]] = None
     notes: Optional[str] = None
 
 

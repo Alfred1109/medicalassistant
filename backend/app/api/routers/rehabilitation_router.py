@@ -16,9 +16,15 @@ from app.schemas.rehabilitation import (
     AssessmentUpdate,
     AssessmentResponse
 )
+from app.schemas.rehab_plan_structure import (
+    ExecutionEventCreate,
+    PlanVersionCreate,
+    PrescriptionItemCreate,
+)
 from app.services.rehabilitation_service import RehabilitationService
 from app.core.dependencies import (
     get_rehabilitation_service,
+    get_rehab_plan_structure_service,
     get_database,
     verify_patient_access,
 )
@@ -578,5 +584,135 @@ async def get_exercise_trends(
     
     if not trends:
         raise HTTPException(status_code=404, detail="Trend data not found")
-    
+
     return trends
+
+
+# ── REH01 方案结构化：方案版本 / 处方项 / 执行事件 ─────────────────────────
+# 授权契约与既有对象级端点一致：先加载方案文档取 patient_id
+# （文档不存在 → 404，不暴露存在性），再复用 patient_access 内核
+# ensure_patient_access（非归属医生 403 PATIENT_NOT_ASSIGNED，admin 豁免）。
+# 中心/项目维度授权的字段位随文档透传，跨中心规则待 D02 确认后在此追加。
+# 服务层抛出的 AppBaseException 由全局异常处理器统一转响应。
+
+@router.post("/plans/{plan_id}/versions", response_model=Dict[str, Any])
+async def create_plan_version(
+    plan_id: str = Path(..., description="康复计划ID"),
+    version_data: Optional[PlanVersionCreate] = Body(default=None),
+    current_user: Any = Depends(get_current_active_user),
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    structure_service: Any = Depends(get_rehab_plan_structure_service),
+):
+    """为方案创建新版本（对当前内容做一次白名单快照）"""
+    # 授权与其他对象级端点同一规则；服务层 _ensure_plan_access 二次校验兜底
+    await _check_plan_access(plan_id, current_user, rehab_service, db)
+    return await structure_service.create_plan_version(
+        plan_id, version_data or PlanVersionCreate(),
+        operator_id=str(current_user.id), operator_role=current_user.role)
+
+
+@router.get("/plans/{plan_id}/versions", response_model=List[Dict[str, Any]])
+async def list_plan_versions(
+    plan_id: str = Path(..., description="康复计划ID"),
+    skip: int = 0,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: Any = Depends(get_current_active_user),
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    structure_service: Any = Depends(get_rehab_plan_structure_service),
+):
+    """列出方案的全部版本"""
+    # 授权与详情端点同一规则：加载方案文档 → 患者归属校验
+    await _check_plan_access(plan_id, current_user, rehab_service, db)
+    return await structure_service.list_plan_versions(
+        plan_id, operator_id=str(current_user.id), operator_role=current_user.role,
+        skip=skip, limit=limit)
+
+
+@router.get("/plans/{plan_id}/versions/{version_id}", response_model=Dict[str, Any])
+async def get_plan_version(
+    plan_id: str = Path(..., description="康复计划ID"),
+    version_id: str = Path(..., description="方案版本ID"),
+    current_user: Any = Depends(get_current_active_user),
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    structure_service: Any = Depends(get_rehab_plan_structure_service),
+):
+    """读取单个方案版本"""
+    await _check_plan_access(plan_id, current_user, rehab_service, db)
+    return await structure_service.get_plan_version(
+        plan_id, version_id,
+        operator_id=str(current_user.id), operator_role=current_user.role)
+
+
+@router.post("/plans/{plan_id}/versions/{version_id}/items", response_model=Dict[str, Any])
+async def add_prescription_item(
+    item_data: PrescriptionItemCreate,
+    plan_id: str = Path(..., description="康复计划ID"),
+    version_id: str = Path(..., description="方案版本ID"),
+    current_user: Any = Depends(get_current_active_user),
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    structure_service: Any = Depends(get_rehab_plan_structure_service),
+):
+    """向方案版本添加处方项（服务端分配稳定 item_id）"""
+    await _check_plan_access(plan_id, current_user, rehab_service, db)
+    return await structure_service.add_prescription_item(
+        plan_id, version_id, item_data,
+        operator_id=str(current_user.id), operator_role=current_user.role)
+
+
+@router.get("/plans/{plan_id}/items", response_model=List[Dict[str, Any]])
+async def list_prescription_items(
+    plan_id: str = Path(..., description="康复计划ID"),
+    version_id: Optional[str] = Query(None, description="按方案版本过滤"),
+    skip: int = 0,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: Any = Depends(get_current_active_user),
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    structure_service: Any = Depends(get_rehab_plan_structure_service),
+):
+    """列出方案的处方项"""
+    await _check_plan_access(plan_id, current_user, rehab_service, db)
+    return await structure_service.list_prescription_items(
+        plan_id, version_id=version_id,
+        operator_id=str(current_user.id), operator_role=current_user.role,
+        skip=skip, limit=limit)
+
+
+@router.post("/plans/{plan_id}/items/{item_id}/events", response_model=Dict[str, Any])
+async def record_execution_event(
+    event_data: ExecutionEventCreate,
+    plan_id: str = Path(..., description="康复计划ID"),
+    item_id: str = Path(..., description="处方项ID（稳定 item_id）"),
+    current_user: Any = Depends(get_current_active_user),
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    structure_service: Any = Depends(get_rehab_plan_structure_service),
+):
+    """记录一次训练执行事件；(plan_id, event_id) 幂等，重复提交返回既有事件"""
+    await _check_plan_access(plan_id, current_user, rehab_service, db)
+    return await structure_service.record_execution_event(
+        plan_id, item_id, event_data,
+        operator_id=str(current_user.id), operator_role=current_user.role)
+
+
+@router.get("/plans/{plan_id}/items/{item_id}/events", response_model=List[Dict[str, Any]])
+async def list_execution_events(
+    plan_id: str = Path(..., description="康复计划ID"),
+    item_id: str = Path(..., description="处方项ID（稳定 item_id）"),
+    skip: int = 0,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: Any = Depends(get_current_active_user),
+    rehab_service: RehabilitationService = Depends(get_rehabilitation_service),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    structure_service: Any = Depends(get_rehab_plan_structure_service),
+):
+    """列出处方项的执行事件"""
+    await _check_plan_access(plan_id, current_user, rehab_service, db)
+    return await structure_service.list_execution_events(
+        plan_id, item_id=item_id,
+        operator_id=str(current_user.id), operator_role=current_user.role,
+        skip=skip, limit=limit)
