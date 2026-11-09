@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     # 文件存储配置
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))  # 10MB
+
+    # WS04 跨 worker WebSocket 分发模式（docs/wp5-ws04-multiworker-design-draft-2026-11-07.md
+    # 方案 A2 + C1 护栏）：
+    # - local（默认）：单 worker 进程内直连分发，行为与多 worker 化之前一致；
+    # - bus：写侧事件帧发布到 ws_events capped 集合，读侧 tailable cursor 跨 worker 分发。
+    EVENT_BUS_MODE: str = os.getenv("EVENT_BUS_MODE", "local")
     
     # 日志配置
     LOG_FILE: str = os.getenv("LOG_FILE", "logs/app.log")

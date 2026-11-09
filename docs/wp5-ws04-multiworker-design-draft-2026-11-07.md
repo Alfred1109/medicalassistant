@@ -262,3 +262,49 @@ REST 定时拉取替代推送。延迟秒级、服务器压力随客户端数线
 - `ws_events` 事件帧 schema 细节（与 WS01 已冻结的信封 `{type, data, message_id, server_seq, ts}` 的映射，见 wp5-ws01 盘点 D7/D11）——建议在 S1 实施前出契约补充。
 - WS02 的连接期撤权复核（WS04 完成标准中的"过期/撤权"项）与 presence 机制的耦合，留待 WS02 设计稿。
 - `frontend/vite.config.pilot.ts`（未跟踪文件）是否影响试点期 WS 路由，未纳入本稿。
+
+---
+
+## 实施记录（2026-11-09）
+
+按用户授权"技术决策默认采纳设计稿推荐方案"实施 A2（ws_events capped 集合事件总线）+ C1（单 worker 护栏先行），S1（读侧）与 S2（写侧切换）已落地，S3 的连接层部分（presence）已落地，S4 留证见下。
+
+### 改动文件
+
+- `backend/app/api/ws_event_bus.py`（新增）：事件帧发布/读侧 tailable await cursor 消费循环（死亡检测 + 按 last `_id` 重连重放）、ws_events/ws_presence 幂等初始化、presence 心跳与跨 worker 在线名单聚合。
+- `backend/app/api/websockets.py`：`send_personal_message` / `send_chat_message` / `send_notification` 改为双模式（local 直投 = 既有语义不变；bus 发布事件帧，读侧任务经新增 `deliver_*_local` 投递本进程连接）；新增 presence 缓存合并的 `get_active_users_in_chat`；`setup_websockets` 在 bus 模式挂载总线启停（由 main.py 启动序列调用 setup_websockets，挂载点与设计稿 S1 等价，main.py 本身未动）。
+- `backend/app/core/config.py`：新增 `EVENT_BUS_MODE`（默认 `local`）。
+- `scripts/runtime.py`：C1 护栏——启动命令固定单 worker（无 `--workers`），`enforce_single_worker_guard()` 在 preflight 拒绝显式多 worker 请求（`MEDICALASSISTANT_BACKEND_WORKERS` 非 1 即启动失败）。
+- `backend/tests/test_ws_event_bus_contract.py`（新增，28 例）：本文件内存桩契约测试 + 真实副本集测试（`REHAB_TEST_REPLICA_URI`，覆盖真实 tailable cursor 双 worker 消费与 4KB capped 集合回卷重放）。
+
+### 采纳的推荐默认值（§7 六项决策点）
+
+| 决策点 | 采纳值 | 出处 |
+|---|---|---|
+| 1 引入 Redis | 否（未引入，A2 零新依赖） | §7-1 建议值 |
+| 2 Mongo 转 replica set | 不转（A2 在 standalone 与 replica set 上均可运行；真实副本集测试跑在既有隔离副本集 37021 上） | §7-2 建议值 |
+| 3 presence TTL / 心跳 | TTL 90s、心跳 30s（TTL ≥ 心跳 × 3） | §7-3 推荐值 |
+| 4 瞬态事件跨 worker 一致 | 要求（typing/user_joined/user_left 经 `send_chat_message` 走总线，不落业务库） | §7-4 建议值 |
+| 5 C1 过渡期先行验收 | 允许：默认 `EVENT_BUS_MODE=local` 行为与主线前逐字一致，护栏 + 契约测试为验收口径 | §7-5 建议值 |
+| 6 ws_events 容量与保留 | capped 起步 1MB；保留策略仅 capped 窗口内按 `_id` 回放，无额外归档 | §7-6 推荐值 |
+
+事件帧 schema（补 §附 遗留项）：`{ev_v: 1, kind: chat|notification|personal, target: {conversation_id|user_id}, payload: <与 local 模式直投载荷逐字一致>, ts, worker_id}`；`ev_v` 为 A1（change streams）升级位预留。WS01 信封的 `server_seq` 仍未实现（不属本轮范围）。
+
+### 实现与设计稿的差异
+
+- bus 模式下发布方自己的读侧任务也会收到事件帧并投递本进程连接，因此写侧发布成功后**不再本地直投**（避免双轨重复）；发布失败（如 Mongo 抖动）退回本进程直投并告警——即"broker 故障退化为今天的单 worker 行为"。
+- presence 读侧过滤按 `expires_at > now` 判定（Mongo TTL 监控约 60s 一轮，TTL 索引仅兜底）；跨 worker 在线名单是缓存视图，刷新间隔 5s（设计稿无推荐值，**实现自定**，取心跳间隔的 1/6，误判"在线"窗口 ≤5s）。
+- I2（离线通知误建）从管理器侧缓解：`get_active_users_in_chat` 合并 presence 名单后，跨 worker 在线用户不再被判离线；communication_service 的调用点（:375）未改动（该文件在并行任务片的改动面内）。
+
+### 遗留待定项
+
+1. **连接期授权变化处理未做**（任务说明如实标记）：WS02 的撤权/过期断连属 AUTH04/WS02 范畴，本轮未实现；既有 5s 身份复检（`receive_authorized`）保留原样。
+2. **S3 完整闭合待并行任务片合入后评估**：presence 的消费方（communication_service 在线判定）未改动，I2 目前靠管理器侧合并名单缓解，presence 缓存存在 ≤5s 滞后窗口（方向为短暂"误判在线"）。
+3. **S4 全量可靠性验证未做**：broker 故障（停/重启 Mongo）与慢消费者（真实多 worker 部署下回卷）目前以单进程内双 manager 模拟 + 真实副本集小容量 capped 回卷测试覆盖；双 uvicorn worker 的端到端留待部署联调留证。
+4. **ws_events 容量 1MB 为推荐起步值**：无峰值事件速率数据，有量级预期后按"峰值 × 回放窗口"评估；capped 不可原地扩容，扩容需新建集合切名（迁移脚本未预备）。
+5. **§7-3/§7-6 数值与 §7-5 口径仍属"按推荐值落地、待评审追认"**，与 D4 幂等键同等待遇。
+
+### 测试证据（2026-11-09）
+
+- `tests/test_ws_event_bus_contract.py`：**28 passed**（含 `REHAB_TEST_REPLICA_URI=mongodb://127.0.0.1:37021/?replicaSet=rehab_rs&directConnection=true` 下的 2 例真实副本集测试；DEBUG=false）。
+- 回归：`tests/test_communication_contract.py` + `tests/test_websocket_runtime.py`：**48 passed**（既有消息落库/幂等/已读回执/单 worker 启动行为不受影响）。

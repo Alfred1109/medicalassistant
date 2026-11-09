@@ -213,11 +213,31 @@ def verify_websocket_runtime(python):
 
 def backend_command(python, host, port):
     # No automatic fallback to an HTTP-only Uvicorn installation.
+    # C1 护栏（WS04）：启动命令固定单 worker（无 --workers）。WS 分发层的
+    # 多 worker 能力由 docs/wp5-ws04-multiworker-design-draft-2026-11-07.md
+    # 方案 A2（EVENT_BUS_MODE=bus）门控，扩容前须先切换并重新验收。
     return [python, "-m", "uvicorn", "app.main:app", "--host", host,
             "--port", str(port), "--ws", "websockets"]
 
 
+def enforce_single_worker_guard():
+    """C1 过渡期护栏：显式拒绝多 worker 启动请求。
+
+    过渡期 WS 分发为单 worker 口径（ConnectionManager/presence 任务为进程内
+    单例）；多 worker 须以 EVENT_BUS_MODE=bus 验收通过后另行放开。默认未设置
+    或为 "1" 时放行，行为与既有单 worker 部署完全一致。
+    """
+    requested = os.environ.get("MEDICALASSISTANT_BACKEND_WORKERS")
+    if requested not in (None, "", "1"):
+        raise RuntimeFailure(
+            "MEDICALASSISTANT_BACKEND_WORKERS=%r is rejected: the WebSocket dispatch "
+            "layer is single-worker during the WS04 transition; scale out only after "
+            "EVENT_BUS_MODE=bus is enabled and re-validated" % requested)
+
+
 def preflight():
+    # C1 护栏（WS04）：过渡期固定单 worker，显式多 worker 请求启动即拒绝。
+    enforce_single_worker_guard()
     if os.environ.get("DEBUG", "false").lower() not in {
             "1", "0", "true", "false", "yes", "no", "on", "off", "y", "n", "t", "f"}:
         raise RuntimeFailure("DEBUG must be a boolean value for the backend. "
