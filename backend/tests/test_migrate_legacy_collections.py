@@ -20,8 +20,12 @@ import unittest
 from scripts.migrate_legacy_collections import (
     MIGRATIONS,
     REPORT_ONLY,
+    archive_collection,
+    archive_target_name,
+    print_archive_report,
     print_report,
     run,
+    run_archive,
     transform_followup_doc,
 )
 
@@ -318,3 +322,77 @@ class MigrateLegacyCollectionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original["status"], "cancelled")  # 入参未被改动
         self.assertEqual(transformed["status"], "canceled")
         self.assertIsNot(original, transformed)
+
+
+class ArchiveCollectionTests(unittest.IsolatedAsyncioTestCase):
+    """FU01 D-4 归档只读能力（2026-11-09 默认决策）：原样保真归档，不迁移不映射。
+
+    设计稿 §六 D-4：follow_ups 遗留造数数据归档只读，不复制进业务集合。
+    归档能力同样默认 dry-run、幂等、绝不删除或修改源集合。
+    """
+
+    BATCH = "20261109T000000Z-test"
+
+    def _seed(self, db):
+        db["follow_ups"].docs = {
+            "f1": _doc("f1", doctor_id="d1", title="旧随访", completed_date="2026-01-01"),
+            "f2": _doc("f2", doctor_id="d2", status="cancelled"),
+        }
+
+    async def test_archive_dry_run_does_not_write(self):
+        db = FakeDatabase()
+        self._seed(db)
+
+        report = await archive_collection(db, "follow_ups", apply=False, batch_id=self.BATCH)
+
+        self.assertEqual(report["legacy_count"], 2)
+        self.assertEqual(report["would_copy"], 2)
+        self.assertEqual(report["copied"], 0)
+        self.assertEqual(db[archive_target_name("follow_ups")].docs, {})
+
+    async def test_archive_copies_verbatim_with_tag_and_never_mutates_source(self):
+        db = FakeDatabase()
+        self._seed(db)
+        source_snapshot = {k: dict(v) for k, v in db["follow_ups"].docs.items()}
+
+        report = await archive_collection(db, "follow_ups", apply=True, batch_id=self.BATCH)
+
+        self.assertEqual(report["copied"], 2)
+        archived = db[archive_target_name("follow_ups")].docs
+        self.assertEqual(set(archived), {"f1", "f2"})
+        # 保真：除 legacy_source 打标外与源文档逐字段一致（不做 status/notes 映射）
+        for doc_id, source_doc in source_snapshot.items():
+            archived_doc = archived[doc_id]
+            self.assertEqual(archived_doc.get("status"), source_doc.get("status"))
+            # 打标：来源集合 + 批次 + kind=archive
+            self.assertEqual(archived_doc["legacy_source"], {
+                "collection": "follow_ups", "batch": self.BATCH, "kind": "archive"})
+        # cancelled 拼写不归一（归档不做字段级映射）
+        self.assertEqual(archived["f2"]["status"], "cancelled")
+        # 源集合原样保留（只读）
+        self.assertEqual(db["follow_ups"].docs, source_snapshot)
+
+    async def test_archive_is_idempotent(self):
+        db = FakeDatabase()
+        self._seed(db)
+
+        await archive_collection(db, "follow_ups", apply=True, batch_id=self.BATCH)
+        second = await archive_collection(db, "follow_ups", apply=True, batch_id=self.BATCH)
+
+        self.assertEqual(second["copied"], 0)
+        self.assertEqual(second["already_archived"], 2)
+        self.assertEqual(len(db[archive_target_name("follow_ups")].docs), 2)
+
+    async def test_archive_target_name_prefix(self):
+        self.assertEqual(archive_target_name("follow_ups"), "archive_follow_ups")
+
+    async def test_run_archive_reports_all_names(self):
+        db = FakeDatabase()
+        self._seed(db)
+
+        report = await run_archive(db, ["follow_ups"], apply=False, batch_id=self.BATCH)
+
+        self.assertEqual([item["legacy"] for item in report["archive"]], ["follow_ups"])
+        self.assertEqual(report["batch_id"], self.BATCH)
+        # print_archive_report 只打印不抛错（冒烟）
+        print_archive_report(report, apply=False)

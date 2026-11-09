@@ -81,7 +81,7 @@ class FakeCollection:
     def __init__(self):
         self.docs: Dict[Any, Dict[str, Any]] = {}
 
-    async def insert_one(self, doc):
+    async def insert_one(self, doc, *args, **kwargs):
         doc = dict(doc)
         _id = doc.get("_id") or ObjectId()
         doc["_id"] = _id
@@ -257,6 +257,8 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
             ("POST", f"/api/health-records/followups/{self.doc['_id']}/complete", {}),
             ("POST", f"/api/health-records/followups/{self.doc['_id']}/cancel", {"cancel_reason": "x"}),
             ("POST", f"/api/health-records/followups/{self.doc['_id']}/reschedule", {"new_date": datetime.utcnow().isoformat(), "reason": "x"}),
+            ("POST", f"/api/health-records/followups/{self.doc['_id']}/review", {"decision": "approved"}),
+            ("POST", f"/api/health-records/followups/{self.doc['_id']}/re-evaluate", {"scheduled_date": datetime.utcnow().isoformat()}),
         ]
         original = dict(self.doc)
         for method, path, body in paths:
@@ -276,6 +278,8 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
             ("POST", f"/api/health-records/followups/{node_id}/complete", {}),
             ("POST", f"/api/health-records/followups/{node_id}/cancel", {"cancel_reason": "x"}),
             ("POST", f"/api/health-records/followups/{node_id}/reschedule", {"new_date": datetime.utcnow().isoformat(), "reason": "x"}),
+            ("POST", f"/api/health-records/followups/{node_id}/review", {"decision": "approved"}),
+            ("POST", f"/api/health-records/followups/{node_id}/re-evaluate", {"scheduled_date": datetime.utcnow().isoformat()}),
         ]
         for method, path, body in calls:
             with self.subTest(path=path):
@@ -314,6 +318,87 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post(f"/api/health-records/followups/{node_id}/cancel", json={"cancel_reason": "x", "canceled_by": str(ObjectId())})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["cancellation_data"]["canceled_by"], DOCTOR_ID)
+
+    async def test_review_endpoint_reaches_completed_only_via_approval(self):
+        """FU01 S5 路由：手工录入转 in_review；completed 只能由审阅通过置达。"""
+        self.user = _make_user("doctor", DOCTOR_ID)
+        node_id = str(self.doc["_id"])
+        entry = await self.client.post(f"/api/health-records/followups/{node_id}/complete",
+                                       json={"notes": "电话随访结果"})
+        self.assertEqual(entry.status_code, 200, entry.text)
+        self.assertEqual(entry.json()["status"], "in_review")
+        doc = self.db["followup_records"].docs[self.doc["_id"]]
+        self.assertEqual(doc["completion_data"]["source"], "manual_entry")
+        # 手工录入审计已落库
+        self.assertEqual(len(self.db["audit_logs"].docs), 1)
+
+        approved = await self.client.post(f"/api/health-records/followups/{node_id}/review",
+                                          json={"decision": "approved", "comment": "核实通过"})
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(approved.json()["status"], "completed")
+        self.assertEqual(approved.json()["review"]["decision"], "approved")
+        self.assertEqual(len(self.db["audit_logs"].docs), 2)
+
+        # 已完成节点再录入/再审阅 → 状态机冲突 409
+        for path, body in [("complete", {"notes": "x"}),
+                           ("review", {"decision": "returned"})]:
+            with self.subTest(path=path):
+                conflict = await self.client.post(
+                    f"/api/health-records/followups/{node_id}/{path}", json=body)
+                self.assertEqual(conflict.status_code, 409, conflict.text)
+
+    async def test_review_endpoint_requires_provider_or_admin(self):
+        """已分配医护但非该节点责任人审阅 → 服务层 403（admin 豁免在服务层，
+        路由层患者归属策略仍要求 doctor/health_manager）。"""
+        other_doctor = str(ObjectId())
+        self.db.users.docs[ObjectId(PATIENT_ID)]["practitioners"].append(other_doctor)
+        node_id = str(self.doc["_id"])
+        self.db["followup_records"].docs[self.doc["_id"]]["status"] = "in_review"
+
+        self.user = _make_user("doctor", other_doctor)
+        denied = await self.client.post(f"/api/health-records/followups/{node_id}/review",
+                                        json={"decision": "approved"})
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(
+            self.db["followup_records"].docs[self.doc["_id"]]["status"], "in_review")
+
+        # 路由层写权限策略（需医疗人员）先于服务层 admin 豁免生效
+        self.user = _make_user("admin", str(ObjectId()))
+        admin = await self.client.post(f"/api/health-records/followups/{node_id}/review",
+                                       json={"decision": "approved"})
+        self.assertEqual(admin.status_code, 403, admin.text)
+        self.assertEqual(
+            self.db["followup_records"].docs[self.doc["_id"]]["status"], "in_review")
+
+        # 责任医护本人可审阅
+        self.user = _make_user("doctor", DOCTOR_ID)
+        allowed = await self.client.post(f"/api/health-records/followups/{node_id}/review",
+                                         json={"decision": "approved"})
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+        self.assertEqual(allowed.json()["status"], "completed")
+
+    async def test_re_evaluate_endpoint_creates_linked_node(self):
+        """FU01 S6 路由：复评新建节点并双向关联；重试幂等返回同一后继。"""
+        self.user = _make_user("doctor", DOCTOR_ID)
+        node_id = str(self.doc["_id"])
+        self.db["followup_records"].docs[self.doc["_id"]]["status"] = "completed"
+        next_date = (datetime.utcnow() + timedelta(days=14)).isoformat()
+
+        first = await self.client.post(f"/api/health-records/followups/{node_id}/re-evaluate",
+                                       json={"scheduled_date": next_date, "reason": "按计划复评"})
+        self.assertEqual(first.status_code, 200, first.text)
+        child_id = first.json()["id"]
+        self.assertNotEqual(child_id, node_id)
+        self.assertEqual(str(first.json()["previous_visit_id"]), node_id)
+        original = self.db["followup_records"].docs[self.doc["_id"]]
+        self.assertEqual(original["next_visit_id"], child_id)
+        self.assertEqual(len(self.db["followup_records"].docs), 2)
+
+        retry = await self.client.post(f"/api/health-records/followups/{node_id}/re-evaluate",
+                                       json={"scheduled_date": next_date, "reason": "按计划复评"})
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(retry.json()["id"], child_id)
+        self.assertEqual(len(self.db["followup_records"].docs), 2)
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,9 @@ from .followup import (  # noqa: F401  转发导出：随访唯一契约在 app/
     CompleteFollowUpRequest,
     CancelFollowUpRequest,
     RescheduleFollowUpRequest,
+    ReviewDecision,
+    ReviewFollowUpRequest,
+    ReEvaluateFollowUpRequest,
     FollowUpRecordDB,
     FollowUpRecordResponse,
 )

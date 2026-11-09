@@ -24,6 +24,7 @@ from app.schemas.health_record import (
     HealthRecordCreate, HealthRecordUpdate, HealthRecordResponse,
     FollowUpRecordCreate, FollowUpRecordUpdate, FollowUpRecordResponse,
     CompleteFollowUpRequest, CancelFollowUpRequest, RescheduleFollowUpRequest,
+    ReviewFollowUpRequest, ReEvaluateFollowUpRequest,
     HealthDataCreate, HealthDataResponse, HealthRecordStats, HealthTimelineItem,
     RecordType, FollowUpType, FollowUpStatus
 )
@@ -343,10 +344,12 @@ async def complete_followup(
     _: bool = Depends(is_medical_staff())
 ):
     """
-    完成随访
+    无表单随访的手工结果录入（FU01 S5，原「完成随访」端点降级语义）
 
-    - **只有医疗人员可以完成随访**
+    - **只有医疗人员可以录入随访结果**
     - 需要提供实际日期、备注、回答等信息
+    - D-2 默认决策（2026-11-09）：录入后节点转待审阅（in_review），带显式
+      source=manual_entry 标记并记审计；completed 只能由审阅接口置达
     - FU01 S2：经 FollowupService 唯一入口转调
     """
     followup = await followup_service.get_followup_record(followup_id)
@@ -354,11 +357,69 @@ async def complete_followup(
         raise HTTPException(status_code=404, detail="随访记录不存在")
     await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
 
-    # 完成随访
-    result = await followup_service.complete_followup(followup_id, data)
+    # 手工录入随访结果（节点转 in_review，进入待审阅流程）
+    result = await followup_service.complete_followup(followup_id, data, operator_id=current_user.id)
     if not result:
         raise HTTPException(status_code=404, detail="随访记录不存在")
-    
+
+    return result
+
+
+@router.post("/followups/{followup_id}/review", response_model=FollowUpRecordResponse)
+async def review_followup(
+    data: ReviewFollowUpRequest,
+    followup_id: str = Path(..., description="随访记录ID"),
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
+):
+    """
+    医护审阅随访（FU01 S5）
+
+    - **只有医疗人员可以审阅**；服务层校验审阅人必须是责任医护本人或管理员
+    - 仅待审阅（in_review）节点可审阅；approved 置 completed（completed 的
+      唯一产生路径），returned 回待填写（awaiting_fill）并要求新建填报任务
+    - 每次审阅追加 review.history[] 证据链并记审计
+    """
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+
+    result = await followup_service.review_followup(
+        followup_id, data, reviewer_id=current_user.id, reviewer_role=current_user.role)
+    if not result:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+
+    return result
+
+
+@router.post("/followups/{followup_id}/re-evaluate", response_model=FollowUpRecordResponse)
+async def re_evaluate_followup(
+    data: ReEvaluateFollowUpRequest,
+    followup_id: str = Path(..., description="随访记录ID"),
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
+):
+    """
+    发起复评（FU01 S6）
+
+    - **只有医疗人员可以发起复评**
+    - 复评 = 新建随访节点：复制表单绑定、问题与责任人、模板、提醒配置，
+      previous/next_visit_id 双向关联；原节点不覆盖不改写
+    - 已有后继节点的随访不能重复发起（幂等重试返回同一后继节点）
+    """
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+
+    result = await followup_service.re_evaluate_followup(
+        followup_id, data, operator_id=current_user.id)
+    if not result:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+
     return result
 
 @router.post("/followups/{followup_id}/cancel", response_model=FollowUpRecordResponse)

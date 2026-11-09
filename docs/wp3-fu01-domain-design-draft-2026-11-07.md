@@ -319,3 +319,51 @@ schema 命名：以第二代骨架（`FollowUpBase/FollowUpRecordDB/FollowUpReco
 | D-5（=【计划】D05） | 答卷字段映射、评分解释与手工覆盖口径（影响 `confirmation` 快照中哪些字段进入本地观察值） | WP2 DATA02 衔接，S4 快照字段预留 | 肾脏康复临床组（【计划】：100） |
 
 以上决策未确认前，各切片按「结构先行、语义待定」实施：字段与状态占位、接口可测，但不把待定语义当作已生效能力（对齐【计划】：12 的声明原则）。
+
+---
+
+## 七、实施记录（2026-11-09）
+
+本节记录 FU01 S5/S6 收尾切片的实施情况与默认决策采纳（用户授权「技术决策默认采纳设计稿推荐方案」）。以下内容为工作区改动，未经提交与业务验收。
+
+### 7.1 默认决策采纳
+
+| 决策点 | 采纳方案 | 落地位置 |
+|--------|----------|----------|
+| D-2（无表单随访手工录入语义） | 允许手工录入随访结果：`POST /followups/{id}/complete` 降级为手工录入，节点转 `in_review`（不再直达 `completed`）；`completion_data.source="manual_entry"` 显式标记（区别于外部表单填报）；同一事务写审计（`audit_logs`，action=`followup_manual_entry`）；进入与填报答卷相同的审阅流程。**不写 `effective_response` / `fill_task_ids`**——有效答卷只能来自任务 confirm 路径，手工录入不允许冒充表单答卷状态 | backend/app/services/followup_service.py（complete_followup 降级、review_followup）、health_record_router.py（complete 语义更新、新 review 端点） |
+| D-3（missed/overdue/lost 口径） | **状态机部分采纳，阈值口径待定**：服务层提供 `mark_overdue`（open 状态 → overdue，可补救）与 `mark_lost`（仅 overdue → lost，终态）两个状态转换及证据字段（`metadata.overdue` / `metadata.lost`），幂等；**不实现定时调度、窗口阈值与失访认定人规则**（属 FU03，设计稿 §五 FU03 前置说明）。复评不允许从 `lost` 发起（终态无出边） | backend/app/services/followup_service.py（mark_overdue / mark_lost） |
+| D-4（follow_ups 遗留造数迁移 vs 归档） | **归档只读**：不把 `follow_ups` 复制进业务集合 `followup_records`；迁移脚本新增归档能力 `archive_collection`（`--archive <集合名>`），把遗留集合**原样**复制到 `archive_<集合名>`（只加 `legacy_source{kind:"archive"}` 打标，不做字段映射），默认 dry-run、幂等、绝不删除或修改源集合。**未执行任何真实数据迁移/归档**；MIGRATIONS 中 S3 字段级映射能力保留，供业务未来明确追认「迁移」方案时使用，执行前须业务确认并隔离演练 | backend/scripts/migrate_legacy_collections.py（归档能力 + D-4 说明）、tests/test_migrate_legacy_collections.py |
+
+D-1（=D03）与 D-5（=D05）未涉及本切片，维持开放。
+
+### 7.2 S5 审阅与证据链实施
+
+- 新端点 `POST /api/health-records/followups/{id}/review`（body：`decision: approved|returned`、`comment`、`evidence`），路由层沿用 `is_medical_staff` + 患者归属校验；服务层校验审阅人必须是责任医护（`provider_id` / `created_by`）本人或 admin（`FOLLOWUP_REVIEW_FORBIDDEN` 403）。
+- 仅 `in_review` 节点可审阅；`approved` → `completed` + `actual_date=reviewed_at`（**completed 的唯一产生路径**）；`returned` → `awaiting_fill` 并清除 `effective_response`（旧任务保持 `confirmed` 终态，需新建填报任务重填）。
+- 证据链：每次审阅追加 `review.history[]`（`review_id / reviewer_id / reviewer_role / reviewed_at / decision / comment / evidence`）+ `review.decision/reviewed_at/reviewer_id` 摘要；幂等指纹 `review_operation` 与其他节点操作一致。
+- 审计与节点写入同一事务（`audit_logs` 集合，落库形状与 AuditLogService 一致），失败整体回滚。
+- 响应契约扩展（`FollowUpRecordResponse`）：`visit_code / review / effective_response / fill_task_ids / previous_visit_id / next_visit_id`（全部 Optional，兼容存量响应）。
+
+### 7.3 S6 复评链与有效答卷实施
+
+- 新端点 `POST /api/health-records/followups/{id}/re-evaluate`：复评 = 新建节点，复制 `form_binding / questions / follow_up_type` 与责任人、模板、提醒配置，写 `previous_visit_id`，原节点只回写 `next_visit_id / next_follow_up_id` 链接字段（A06 不覆盖不改写）；`visit_code` 不继承（同一患者各节点唯一）；`provider_id` 可显式覆盖（换人复评）。
+- 复评来源状态限定为已结束/可补救节点（`completed / canceled / missed / overdue`）；进行中节点走改期/取消；已有后继节点拒绝重复创建。事务 + 乐观版本保护 + 请求指纹幂等（并发重试单一后继，不产生分叉）。
+- 有效答卷选择规则 `select_effective_response`（纯函数）：任务 `confirmed`（已提交且经本地核实）、答卷未作废（`remote_status ∈ {submitted, restored, None}`）、属本节点（`resolve_effective_response` 按 `fill_task_ids` + `followup_visit_id` 过滤，跨访视任务排除）、取最新修订（`revision` 降序，同修订取最晚 `submitted_at`）；返回 `selection_basis`（规则名、候选数、候选任务列表）保证可解释。只读核验入口，不回写节点——`effective_response` 仍只能由任务 confirm 路径写入。
+
+### 7.4 测试与验证
+
+- 目标测试（2026-11-09，隔离本地副本集 `rehab_rs` @127.0.0.1:37021，`DEBUG=false`，合成数据；**未跑全量**）：
+  - `tests/test_followup_service_contract.py`：39 passed（原 22 + 新增 S5/S6/D-3 及 D-2 降级改写用例）；
+  - `tests/test_followup_route_convergence.py`：17 passed（新增 review / re-evaluate 路由用例，越权与身份用例补新端点）；
+  - `tests/test_followup_transactions_mongo.py`：13 passed / 1 skipped（standalone 拒绝用例待独立 standalone 实例；新增审阅×取消并发、审阅失败回滚（含审计）、退回原子清空、复评并发/冲突/继承校验、手工录入同事务审计）；
+  - `tests/test_migrate_legacy_collections.py`：22 passed（原 17 + 归档 dry-run/保真打标/幂等 5 例）；
+  - 汇总同轮：followup + forms 事务 91 passed / 4 skipped；波及面 `test_health_record_service_contract.py` + `tests/test_object_id_schema.py` 回归 7 passed。
+- §11「取消并改期多次写入原子性/幂等」遗留：**已随 98b77e7 事务化改造闭环**（`run_followup_transaction` + 指纹幂等 + 乐观版本 + 后继配置继承），既有副本集用例覆盖并发重试、冲突回滚与配置继承，本切片未再改动该流程。
+
+### 7.5 遗留项
+
+1. **D-1/D-3/D-5 仍开放**：`form_binding` 升级 `ExternalFormBinding`（WP2）、overdue/lost 阈值与失访认定人口径（FU03）、答卷字段映射与评分解释（WP2 DATA02）。D-3 状态机阈值口径在业务确认前不得接入定时调度。
+2. 复评表单版本与时间窗口依赖 D03：`re-evaluate` 复制既有 `form_binding` 直传值，不涉及 D03 清单校验。
+3. 归档执行本身待业务授权：脚本能力就绪（dry-run 默认），未对任何真实库执行；真实执行前需业务确认并在隔离实例演练。
+4. standalone 拒绝用例（`REHAB_TEST_STANDALONE_URI`）本轮无独立 standalone 实例，保持 skip；此前记录的验证结论见 deploy/mongodb/README.md。
+5. 审阅工作台前端（S5 切片的前端部分）不在本切片范围（与并行前端任务片隔离）。

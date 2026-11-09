@@ -35,8 +35,11 @@ from app.schemas.followup import (
     CancelFollowUpRequest,
     CompleteFollowUpRequest,
     RescheduleFollowUpRequest,
+    ReviewDecision,
+    ReviewFollowUpRequest,
+    ReEvaluateFollowUpRequest,
 )
-from app.services.followup_service import FollowupService
+from app.services.followup_service import FollowupService, select_effective_response
 from app.core.exceptions import AppBaseException
 
 PATIENT_ID = str(ObjectId())
@@ -144,8 +147,10 @@ class FakeCollection:
 
 
 def _make_service():
+    # audit_logs：FU01 S5 起手工录入/审阅在同一事务写审计，需要预置该集合
     collections = {name: FakeCollection() for name in (
-        FollowUpRecord.collection_name, "medical_timelines",
+        FollowUpRecord.collection_name, "medical_timelines", "audit_logs",
+        "integration_fill_tasks",
     )}
     service = FollowupService(FakeTransactionalDatabase(collections))
     return service, collections
@@ -257,6 +262,8 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
     # -------- complete / cancel / reschedule 随访 --------
 
     async def test_complete_followup_converts_answers_and_sets_completion(self):
+        """FU01 S5（D-2 默认决策）：complete 降级为手工录入——节点转 in_review
+        而非 completed，带显式 source=manual_entry 标记并写审计。"""
         followup_id = await self._seed_followup()
         actual_date = datetime.utcnow() - timedelta(hours=1)
         data = CompleteFollowUpRequest(
@@ -266,13 +273,14 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
             follow_up_result="completed",
         )
 
-        response = await self.service.complete_followup(followup_id, data)
+        response = await self.service.complete_followup(followup_id, data, operator_id=DOCTOR_ID)
 
         self.assertIsNotNone(response)
-        self.assertEqual(response.status, FollowUpStatus.COMPLETED)
+        # D-2：手工录入只转待审阅，completed 只能由审阅通过置达
+        self.assertEqual(response.status, FollowUpStatus.IN_REVIEW)
         doc = self.followup_records.docs[ObjectId(followup_id)]
         encode(doc)  # answers 已转 dict，文档可序列化
-        self.assertEqual(doc["status"], "completed")
+        self.assertEqual(doc["status"], "in_review")
         self.assertEqual(doc["actual_date"], actual_date)
         self.assertIsInstance(doc["answers"][0], dict)
         self.assertEqual(doc["answers"][0]["question_id"], "q1")
@@ -280,10 +288,22 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         # FU01 S1：完成数据落顶层正式字段，停止 metadata.completion_data / metadata.result
         self.assertEqual(doc["completion_data"]["result"], "completed")
         self.assertEqual(doc["completion_data"]["notes"], "随访完成，恢复良好")
+        # D-2：显式 source 标记，区别于外部表单填报
+        self.assertEqual(doc["completion_data"]["source"], "manual_entry")
         self.assertEqual(doc["follow_up_result"], "completed")
         self.assertNotIn("completion_data", doc.get("metadata", {}))
         self.assertNotIn("result", doc.get("metadata", {}))
         self.assertEqual(doc["notes"], "随访完成，恢复良好")
+        # D-2：手工录入不允许冒充表单答卷状态——不写 effective_response / fill_task_ids
+        self.assertNotIn("effective_response", doc)
+        self.assertNotIn("fill_task_ids", doc)
+        # D-2：同一事务写审计
+        audit_docs = list(self.collections["audit_logs"].docs.values())
+        self.assertEqual(len(audit_docs), 1)
+        self.assertEqual(audit_docs[0]["action"], "followup_manual_entry")
+        self.assertEqual(audit_docs[0]["resource_id"], followup_id)
+        self.assertEqual(audit_docs[0]["user_id"], DOCTOR_ID)
+        self.assertEqual(audit_docs[0]["details"]["source"], "manual_entry")
 
     async def test_complete_followup_creates_next_followup(self):
         followup_id = await self._seed_followup()
@@ -592,6 +612,387 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count, 1)
         other = await self.service.count_upcoming(str(ObjectId()), since=datetime.utcnow())
         self.assertEqual(other, 0)
+
+    # -------- FU01 S5：医护审阅与证据链（设计稿 §4.3，D-2 默认决策） --------
+
+    async def _seed_with_status(self, status, **extra):
+        """按指定状态直接落库一个节点（绕过状态机，模拟已发生的上游流转）。"""
+        doc = FollowUpRecord(
+            patient_id=PATIENT_ID, created_by=DOCTOR_ID,
+            follow_up_type="phone",
+            scheduled_date=datetime.utcnow() + timedelta(days=1),
+            notes="待审阅随访").to_mongo()
+        doc.update(status=status, provider_id=DOCTOR_ID)
+        doc.update(extra)
+        self.followup_records.docs[doc["_id"]] = doc
+        return str(doc["_id"])
+
+    def _audit_docs(self):
+        return list(self.collections["audit_logs"].docs.values())
+
+    async def test_completed_is_only_reachable_through_review_approval(self):
+        """S5 验收：completed 只能由审阅通过产生——手工录入后无法直达 completed。"""
+        followup_id = await self._seed_followup()
+        await self.service.complete_followup(followup_id, CompleteFollowUpRequest())
+        self.assertEqual(
+            self.followup_records.docs[ObjectId(followup_id)]["status"], "in_review")
+        # 换内容再录入（新指纹）→ 已是 in_review 仍允许录入，但不直达 completed
+        response = await self.service.complete_followup(
+            followup_id,
+            CompleteFollowUpRequest(notes="补充记录", follow_up_result="stable"))
+        self.assertEqual(response.status, FollowUpStatus.IN_REVIEW)
+
+    async def test_review_approval_completes_node_with_evidence_chain(self):
+        """approved：completed + actual_date=reviewed_at，review.history[] 全链可追溯。"""
+        followup_id = await self._seed_with_status("in_review")
+        evidence = {"task_id": str(ObjectId()), "response_id": "resp-1", "revision": 1}
+        data = ReviewFollowUpRequest(decision=ReviewDecision.APPROVED,
+                                     comment="恢复良好", evidence=evidence)
+
+        response = await self.service.review_followup(
+            followup_id, data, reviewer_id=DOCTOR_ID, reviewer_role="doctor")
+
+        self.assertEqual(response.status, FollowUpStatus.COMPLETED)
+        self.assertIsNotNone(response.actual_date)
+        doc = self.followup_records.docs[ObjectId(followup_id)]
+        encode(doc)
+        self.assertEqual(doc["status"], "completed")
+        review = doc["review"]
+        self.assertEqual(review["decision"], "approved")
+        self.assertEqual(review["reviewer_id"], DOCTOR_ID)
+        self.assertEqual(len(review["history"]), 1)
+        entry = review["history"][0]
+        self.assertEqual(entry["decision"], "approved")
+        self.assertEqual(entry["reviewer_id"], DOCTOR_ID)
+        self.assertEqual(entry["reviewer_role"], "doctor")
+        self.assertEqual(entry["evidence"], evidence)
+        self.assertIn("reviewed_at", entry)
+        # 表单路径的有效答卷在审阅通过后保留
+        self.assertEqual(len(self._audit_docs()), 1)
+        self.assertEqual(self._audit_docs()[0]["action"], "followup_review")
+
+    async def test_review_approval_keeps_effective_response_from_form_task(self):
+        """approved：表单答卷的 effective_response 保留（证据链不丢）。"""
+        effective = {"task_id": str(ObjectId()), "response_id": "resp-1"}
+        followup_id = await self._seed_with_status("in_review", effective_response=effective)
+        await self.service.review_followup(
+            followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+            reviewer_id=DOCTOR_ID)
+        doc = self.followup_records.docs[ObjectId(followup_id)]
+        self.assertEqual(doc["effective_response"], effective)
+
+    async def test_review_returned_sets_awaiting_fill_and_clears_effective_response(self):
+        """returned：节点回 awaiting_fill、清除 effective_response（旧任务保持终态），
+        历史留痕于 review.history[]。"""
+        effective = {"task_id": str(ObjectId()), "response_id": "resp-1"}
+        followup_id = await self._seed_with_status(
+            "in_review", effective_response=effective,
+            fill_task_ids=[ObjectId(effective["task_id"])])
+        data = ReviewFollowUpRequest(decision=ReviewDecision.RETURNED,
+                                     comment="答案不完整，需重新填报")
+
+        response = await self.service.review_followup(
+            followup_id, data, reviewer_id=DOCTOR_ID)
+
+        self.assertEqual(response.status, FollowUpStatus.AWAITING_FILL)
+        doc = self.followup_records.docs[ObjectId(followup_id)]
+        encode(doc)
+        self.assertEqual(doc["status"], "awaiting_fill")
+        self.assertIsNone(doc.get("effective_response"))
+        # 旧任务保持 confirmed 终态：节点仍保留任务反向索引，需新建任务重填
+        self.assertEqual([str(t) for t in doc["fill_task_ids"]], [effective["task_id"]])
+        self.assertEqual(doc["review"]["history"][0]["decision"], "returned")
+
+    async def test_review_requires_in_review_status(self):
+        """非 in_review 节点拒绝审阅（scheduled/completed 均冲突 409）。"""
+        for status in ("scheduled", "completed", "canceled"):
+            followup_id = await self._seed_with_status(status)
+            with self.subTest(status=status):
+                with self.assertRaises(AppBaseException) as error:
+                    await self.service.review_followup(
+                        followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+                        reviewer_id=DOCTOR_ID)
+                self.assertEqual(error.exception.status_code, 409)
+
+    async def test_review_reviewer_must_be_provider_or_admin(self):
+        """审阅人必须是责任医护本人或 admin；其他医护 403。"""
+        followup_id = await self._seed_with_status("in_review")
+        with self.assertRaises(AppBaseException) as error:
+            await self.service.review_followup(
+                followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+                reviewer_id=str(ObjectId()), reviewer_role="doctor")
+        self.assertEqual(error.exception.status_code, 403)
+        # admin 可审阅
+        response = await self.service.review_followup(
+            followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+            reviewer_id=str(ObjectId()), reviewer_role="admin")
+        self.assertEqual(response.status, FollowUpStatus.COMPLETED)
+
+    async def test_review_idempotent_retry_does_not_duplicate_history(self):
+        """相同审阅请求重试返回当前节点，不追加 history、不重复审计。"""
+        followup_id = await self._seed_with_status("in_review")
+        data = ReviewFollowUpRequest(decision=ReviewDecision.APPROVED, comment="ok")
+        first = await self.service.review_followup(followup_id, data, reviewer_id=DOCTOR_ID)
+        retry = await self.service.review_followup(followup_id, data, reviewer_id=DOCTOR_ID)
+        self.assertEqual(retry.status, first.status)
+        doc = self.followup_records.docs[ObjectId(followup_id)]
+        self.assertEqual(len(doc["review"]["history"]), 1)
+        self.assertEqual(len(self._audit_docs()), 1)
+
+    async def test_manual_entry_review_full_flow(self):
+        """端到端：手工录入 → in_review（带 manual_entry 标记）→ 审阅通过 → completed。"""
+        followup_id = await self._seed_followup()
+        await self.service.complete_followup(
+            followup_id, CompleteFollowUpRequest(notes="电话随访结果"), operator_id=DOCTOR_ID)
+        doc = self.followup_records.docs[ObjectId(followup_id)]
+        self.assertEqual(doc["status"], "in_review")
+        self.assertEqual(doc["completion_data"]["source"], "manual_entry")
+        response = await self.service.review_followup(
+            followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED,
+                                               comment="录入结果已核实"),
+            reviewer_id=DOCTOR_ID)
+        self.assertEqual(response.status, FollowUpStatus.COMPLETED)
+        # 录入来源标记保留，审阅证据链与手工录入审计并存
+        doc = self.followup_records.docs[ObjectId(followup_id)]
+        self.assertEqual(doc["completion_data"]["source"], "manual_entry")
+        self.assertEqual(doc["review"]["decision"], "approved")
+        actions = {a["action"] for a in self._audit_docs()}
+        self.assertEqual(actions, {"followup_manual_entry", "followup_review"})
+
+    # -------- FU01 S6：复评链与有效答卷（设计稿 §4.4） --------
+
+    async def test_re_evaluate_creates_linked_node_without_overwriting_original(self):
+        """复评新建节点：复制处方配置、previous/next 双向关联；原节点除链接
+        字段外不覆盖不改写（A06）。"""
+        doc = FollowUpRecord(
+            patient_id=PATIENT_ID, created_by=DOCTOR_ID,
+            follow_up_type="phone",
+            scheduled_date=datetime.utcnow() - timedelta(days=7),
+            notes="首评随访",
+            questions=[{"question_id": "q1", "question_text": "恢复如何",
+                        "question_type": "text", "order": 1}],
+            answers=[{"question_id": "q1", "answer_value": "良好"}],
+            reminder_settings={"enabled": True, "days_before": 1}).to_mongo()
+        doc.update(status="completed", provider_id=DOCTOR_ID, template_id="tpl-009",
+                   reminder_before=30, form_binding={"questionnaire_id": 7},
+                   visit_code="V-001", effective_response={"response_id": "resp-1"},
+                   review={"decision": "approved"}, actual_date=datetime.utcnow())
+        before = dict(doc)
+        followup_id = str(doc["_id"])
+        self.followup_records.docs[doc["_id"]] = doc
+        data = ReEvaluateFollowUpRequest(
+            scheduled_date=datetime.utcnow() + timedelta(days=14), reason="按计划复评")
+
+        response = await self.service.re_evaluate_followup(
+            followup_id, data, operator_id=DOCTOR_ID)
+
+        self.assertIsNotNone(response)
+        self.assertEqual(len(self.followup_records.docs), 2)
+        child = self.followup_records.docs[ObjectId(response.id)]
+        encode(child)
+        # 新节点：复评链与处方配置
+        self.assertEqual(str(child["previous_visit_id"]), followup_id)
+        self.assertEqual(child["status"], "scheduled")
+        self.assertEqual(child["scheduled_date"], data.scheduled_date)
+        self.assertEqual(child["provider_id"], DOCTOR_ID)
+        self.assertEqual(child["template_id"], "tpl-009")
+        self.assertEqual(child["reminder_before"], 30)
+        self.assertEqual(child["form_binding"], {"questionnaire_id": 7})
+        self.assertEqual(child["questions"], before["questions"])
+        self.assertEqual(child["follow_up_type"], "phone")
+        self.assertIn("复评", child["notes"])
+        # visit_code 不继承：同一患者各节点 visit_code 唯一
+        self.assertNotIn("visit_code", child)
+        # 空状态开始：答案、结果、审阅、任务引用不继承
+        self.assertEqual(child["answers"], [])
+        self.assertNotIn("effective_response", child)
+        self.assertNotIn("review", child)
+        # 原节点只写链接字段，其余不覆盖不改写
+        original = self.followup_records.docs[ObjectId(followup_id)]
+        self.assertEqual(original["next_visit_id"], response.id)
+        self.assertEqual(original["next_follow_up_id"], response.id)
+        for key in ("status", "provider_id", "template_id", "form_binding",
+                    "visit_code", "effective_response", "review", "answers",
+                    "scheduled_date", "notes", "reminder_before"):
+            self.assertEqual(original[key], before[key], key)
+        # 新节点时间线创建（原节点状态未变，时间线不重写）
+        self.assertEqual(len(self.timelines.docs), 1)
+
+    async def test_re_evaluate_retry_returns_same_child(self):
+        """相同复评请求重试返回同一后继节点（幂等，不产生分叉）。"""
+        followup_id = await self._seed_with_status("completed")
+        data = ReEvaluateFollowUpRequest(scheduled_date=datetime.utcnow() + timedelta(days=7))
+        first = await self.service.re_evaluate_followup(followup_id, data, operator_id=DOCTOR_ID)
+        retry = await self.service.re_evaluate_followup(followup_id, data, operator_id=DOCTOR_ID)
+        self.assertEqual(retry.id, first.id)
+        self.assertEqual(len(self.followup_records.docs), 2)
+
+    async def test_re_evaluate_conflicts_when_successor_exists(self):
+        """已有后继节点（无论何种来源）拒绝再次复评；不同请求并发只成功一个。"""
+        followup_id = await self._seed_with_status("completed")
+        first = await self.service.re_evaluate_followup(
+            followup_id, ReEvaluateFollowUpRequest(
+                scheduled_date=datetime.utcnow() + timedelta(days=7)), operator_id=DOCTOR_ID)
+        with self.assertRaises(AppBaseException) as error:
+            await self.service.re_evaluate_followup(
+                followup_id, ReEvaluateFollowUpRequest(
+                    scheduled_date=datetime.utcnow() + timedelta(days=10), reason="其他"),
+                operator_id=DOCTOR_ID)
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(len(self.followup_records.docs), 2)
+        original = self.followup_records.docs[ObjectId(followup_id)]
+        self.assertEqual(original["next_visit_id"], first.id)
+
+    async def test_re_evaluate_rejects_active_node(self):
+        """进行中的节点（scheduled/in_review/awaiting_fill/rescheduled）拒绝复评。"""
+        for status in ("scheduled", "in_review", "awaiting_fill", "rescheduled"):
+            followup_id = await self._seed_with_status(status)
+            with self.subTest(status=status):
+                with self.assertRaises(AppBaseException) as error:
+                    await self.service.re_evaluate_followup(
+                        followup_id, ReEvaluateFollowUpRequest(
+                            scheduled_date=datetime.utcnow() + timedelta(days=7)))
+                self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(len(self.followup_records.docs), 4)
+
+    async def test_re_evaluate_provider_override(self):
+        """复评显式指定新责任医护时，子节点 provider_id 覆盖、created_by 保留原值。"""
+        followup_id = await self._seed_with_status("completed")
+        new_provider = str(ObjectId())
+        response = await self.service.re_evaluate_followup(
+            followup_id,
+            ReEvaluateFollowUpRequest(
+                scheduled_date=datetime.utcnow() + timedelta(days=7),
+                provider_id=new_provider),
+            operator_id=DOCTOR_ID)
+        child = self.followup_records.docs[ObjectId(response.id)]
+        self.assertEqual(child["provider_id"], new_provider)
+        self.assertEqual(child["created_by"], DOCTOR_ID)
+
+    async def test_select_effective_response_follows_selection_rule(self):
+        """有效答卷规则：仅 confirmed 任务参与、voided 排除、取最新修订、可解释。"""
+        task_a = {"_id": ObjectId(), "status": "confirmed", "followup_visit_id": "v1",
+                  "fill_sessions": [{"confirmation": {
+                      "response_id": "resp-a", "revision": 1,
+                      "remote_status": "submitted", "submitted_at": "2026-11-01T08:00:00Z"}}]}
+        task_b = {"_id": ObjectId(), "status": "confirmed",
+                  "fill_sessions": [{"confirmation": {
+                      "response_id": "resp-b", "revision": 3,
+                      "remote_status": "submitted", "submitted_at": "2026-11-02T08:00:00Z"}}]}
+        task_voided = {"_id": ObjectId(), "status": "confirmed",
+                       "fill_sessions": [{"confirmation": {
+                           "response_id": "resp-v", "revision": 9,
+                           "remote_status": "voided", "submitted_at": "2026-11-03T08:00:00Z"}}]}
+        task_unconfirmed = {"_id": ObjectId(), "status": "submitted",
+                            "fill_sessions": [{"confirmation": {
+                                "response_id": "resp-u", "revision": 9,
+                                "remote_status": "submitted"}}]}
+        task_not_linked = {"_id": ObjectId(), "status": "confirmed",
+                           "followup_visit_id": "other-visit",
+                           "fill_sessions": [{"confirmation": {
+                               "response_id": "resp-x", "revision": 9,
+                               "remote_status": "submitted"}}]}
+
+        selected = select_effective_response(
+            [task_a, task_b, task_voided, task_unconfirmed])
+        # 取最新修订：revision 3 的 resp-b 胜出（voided rev9 排除，未确认任务排除）
+        self.assertEqual(selected["response_id"], "resp-b")
+        self.assertEqual(selected["task_id"], str(task_b["_id"]))
+        self.assertEqual(selected["revision"], 3)
+        self.assertEqual(selected["selection_basis"]["candidates_considered"], 2)
+        # 同修订取最晚提交
+        task_c = {"_id": ObjectId(), "status": "confirmed",
+                  "fill_sessions": [{"confirmation": {
+                      "response_id": "resp-c", "revision": 3,
+                      "remote_status": "submitted", "submitted_at": "2026-11-04T08:00:00Z"}}]}
+        selected_latest = select_effective_response([task_b, task_c])
+        self.assertEqual(selected_latest["response_id"], "resp-c")
+        # 全部无效返回 None
+        self.assertIsNone(select_effective_response([task_voided, task_unconfirmed]))
+        self.assertIsNone(select_effective_response([]))
+        # 跨访视任务由 resolve 层排除（此处验证纯函数不越权选定它，
+        # 排除逻辑在 resolve_effective_response 中按 followup_visit_id 过滤）
+        self.assertEqual(
+            select_effective_response([task_not_linked])["task_id"], str(task_not_linked["_id"]))
+
+    async def test_resolve_effective_response_excludes_cross_visit_tasks(self):
+        """resolve 只读重算：跨访视任务被排除，选定结果不回写节点。"""
+        followup_id = await self._seed_with_status("in_review")
+        own_task = {"_id": ObjectId(), "status": "confirmed",
+                    "followup_visit_id": followup_id,
+                    "fill_sessions": [{"confirmation": {
+                        "response_id": "resp-own", "revision": 2,
+                        "remote_status": "submitted", "submitted_at": "2026-11-05T08:00:00Z"}}]}
+        foreign_task = {"_id": ObjectId(), "status": "confirmed",
+                        "followup_visit_id": str(ObjectId()),
+                        "fill_sessions": [{"confirmation": {
+                            "response_id": "resp-foreign", "revision": 9,
+                            "remote_status": "submitted"}}]}
+        self.collections["integration_fill_tasks"].docs[own_task["_id"]] = own_task
+        self.collections["integration_fill_tasks"].docs[foreign_task["_id"]] = foreign_task
+        doc = self.followup_records.docs[ObjectId(followup_id)]
+        doc["fill_task_ids"] = [own_task["_id"], foreign_task["_id"]]
+
+        resolved = await self.service.resolve_effective_response(followup_id)
+
+        self.assertEqual(resolved["response_id"], "resp-own")
+        # 只读：节点未回写
+        self.assertNotIn("effective_response", doc)
+
+    async def test_resolve_effective_response_invalid_or_missing_node(self):
+        self.assertIsNone(await self.service.resolve_effective_response("not-an-object-id"))
+        self.assertIsNone(await self.service.resolve_effective_response(str(ObjectId())))
+
+    # -------- D-3：逾期/失访状态机（结构先行，口径待 FU03） --------
+
+    async def test_mark_overdue_transitions_open_nodes_and_is_idempotent(self):
+        """open 状态 → overdue；重复标记幂等；终态拒绝。"""
+        for status in ("scheduled", "awaiting_fill", "rescheduled"):
+            followup_id = await self._seed_with_status(status)
+            with self.subTest(status=status):
+                response = await self.service.mark_overdue(followup_id, operator_id=DOCTOR_ID)
+                self.assertEqual(response.status, FollowUpStatus.OVERDUE)
+                doc = self.followup_records.docs[ObjectId(followup_id)]
+                encode(doc)
+                self.assertEqual(doc["metadata"]["overdue"]["operator_id"], DOCTOR_ID)
+                # 幂等：重复标记返回当前节点，版本不再递增
+                version = doc["mutation_version"]
+                again = await self.service.mark_overdue(followup_id)
+                self.assertEqual(again.status, FollowUpStatus.OVERDUE)
+                self.assertEqual(
+                    self.followup_records.docs[ObjectId(followup_id)]["mutation_version"], version)
+
+    async def test_mark_overdue_rejects_terminal_and_review_states(self):
+        for status in ("completed", "canceled", "in_review"):
+            followup_id = await self._seed_with_status(status)
+            with self.subTest(status=status):
+                with self.assertRaises(AppBaseException) as error:
+                    await self.service.mark_overdue(followup_id)
+                self.assertEqual(error.exception.status_code, 409)
+
+    async def test_mark_lost_requires_overdue_and_is_terminal(self):
+        """失访认定仅允许 overdue 节点；认定后为终态，重复认定幂等。"""
+        scheduled_id = await self._seed_with_status("scheduled")
+        with self.assertRaises(AppBaseException) as error:
+            await self.service.mark_lost(scheduled_id)
+        self.assertEqual(error.exception.status_code, 409)
+
+        overdue_id = await self._seed_with_status("overdue")
+        response = await self.service.mark_lost(overdue_id, operator_id=DOCTOR_ID)
+        self.assertEqual(response.status, FollowUpStatus.LOST)
+        doc = self.followup_records.docs[ObjectId(overdue_id)]
+        encode(doc)
+        self.assertEqual(doc["metadata"]["lost"]["recognized_by"], DOCTOR_ID)
+        # 幂等
+        again = await self.service.mark_lost(overdue_id)
+        self.assertEqual(again.status, FollowUpStatus.LOST)
+        # lost 是终态：不能 overdue/审阅/复评
+        with self.assertRaises(AppBaseException):
+            await self.service.mark_overdue(overdue_id)
+        with self.assertRaises(AppBaseException):
+            await self.service.re_evaluate_followup(
+                overdue_id, ReEvaluateFollowUpRequest(
+                    scheduled_date=datetime.utcnow() + timedelta(days=1)))
 
 
 if __name__ == "__main__":

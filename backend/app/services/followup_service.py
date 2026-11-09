@@ -13,14 +13,29 @@ health_record_service 保留健康档案域，随访统计经本服务转调。
 取消/改期语义（设计稿 §2.2）：cancel(reschedule_date) = 关闭当前节点（status=canceled，
 拼写与 FollowUpStatus.CANCELED 归一）并新建节点（previous_visit_id 关联），
 不再在原节点上把状态改写为 rescheduled（原 models.cancel_followup 缺陷）。
+
+FU01 S5（审阅与证据链，设计稿 §4.3，D-2 默认决策见实施记录 2026-11-09）：
+- complete 端点降级为「无表单随访的手工结果录入」：写 answers/notes 后节点转
+  in_review（不再直达 completed），completion_data 带显式 source=manual_entry 标记
+  （区别于外部表单填报），写审计，进入与填报答卷相同的待审阅流程；
+- completed 只能由 review 审阅通过置达；手工录入不写 effective_response /
+  fill_task_ids（有效答卷只能来自任务 confirm 路径，不允许冒充表单答卷状态）。
+
+FU01 S6（复评链与有效答卷，设计稿 §4.4）：re_evaluate 新建节点复制处方配置并
+写 previous/next_visit_id 链，原节点不覆盖不改写（A06）；select_effective_response
+实现有效答卷选择规则（已确认、未作废、属本节点、取最新修订）。
+
+D-3 状态机（结构先行，口径待 FU03 确认）：mark_overdue（逾期可补救）与
+mark_lost（失访终态认定）只提供状态转换与证据字段，不实现定时调度与阈值口径。
 """
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from copy import deepcopy
 from hashlib import sha256
 from bson import encode
 from app.core.exceptions import AppBaseException
 from app.db.transactions import run_followup_transaction
+from app.schemas.audit_log import AuditLogCreate
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
@@ -28,6 +43,7 @@ from app.models.health_record import FollowUpRecord, MedicalTimeline
 from app.schemas.followup import (
     FollowUpRecordCreate, FollowUpRecordUpdate, FollowUpRecordResponse,
     CompleteFollowUpRequest, CancelFollowUpRequest, RescheduleFollowUpRequest,
+    ReviewDecision, ReviewFollowUpRequest, ReEvaluateFollowUpRequest,
 )
 
 
@@ -45,11 +61,26 @@ _FOLLOWUP_FORMAL_FIELDS = (
     "review", "previous_visit_id", "next_visit_id",
     "legacy_source", "deleted", "deleted_at", "deleted_by",
     "mutation_version", "cancellation_operation", "completion_operation", "reschedule_operation",
+    "review_operation", "re_evaluate_operation",
 )
+
+
+# 填报任务集合名（与 integrations/forms/models.COLLECTION_NAME 一致；
+# 不做模块级导入以避免 forms service -> followup_service 的既有依赖成环）
+_FILL_TASKS_COLLECTION = "integration_fill_tasks"
+
+# 有效答卷认可的远端状态（设计稿 §2.1 ③：已提交、未作废；restored=作废后恢复，
+# 视为有效；draft 不应出现在 confirmed 任务的确认证据中，防御性排除）
+_EFFECTIVE_REMOTE_STATUSES = {"submitted", "restored", None}
 
 
 def followup_conflict(message="随访已发生变更，请重新读取后操作"):
     return AppBaseException(message, status_code=409, error_code="FOLLOWUP_CONFLICT")
+
+
+def _as_optional_str(value):
+    """ObjectId / str 兼容转 Optional[str]（响应契约字段均为 str）。"""
+    return None if value is None else str(value)
 
 
 def followup_version_filter(doc):
@@ -61,6 +92,51 @@ def followup_version_filter(doc):
 def _request_fingerprint(kind, payload):
     # BSON 编码统一日期为UTC毫秒，与实际Mongo持久化精度保持一致。
     return sha256(encode({"kind": kind, "payload": payload})).hexdigest()
+
+
+def select_effective_response(fill_task_docs):
+    """有效答卷选择规则（FU01 S6，设计稿 §2.1 ③、§五 S6）。
+
+    规则：任务已确认（confirmed = 远端已提交且经本地核实）、答卷未作废
+    （remote_status 非 voided）、任务属于目标节点（调用方负责过滤），
+    取最新修订（revision 降序），修订相同取最晚 submitted_at。
+
+    返回选定结果及可解释的选择依据；无有效答卷返回 None。
+    纯函数：只读入参，不触库、不回写节点（effective_response 仍只能由
+    任务 confirm 路径写入，见 integrations/forms/service.py）。
+    """
+    candidates = []
+    for doc in fill_task_docs or []:
+        if doc.get("status") != "confirmed":
+            continue  # 已提交但未核实（submitted）不算数，设计稿 §2.2 耦合规则
+        sessions = doc.get("fill_sessions") or []
+        confirmations = [s.get("confirmation") for s in sessions if s.get("confirmation")]
+        if not confirmations:
+            continue
+        confirmation = confirmations[-1]  # 同任务多会话取最后一次确认
+        remote_status = confirmation.get("remote_status")
+        if remote_status not in _EFFECTIVE_REMOTE_STATUSES:
+            continue  # 已作废（voided）答卷不参与选定
+        candidates.append({
+            "task_id": str(doc.get("_id")),
+            "response_id": confirmation.get("response_id"),
+            "revision": confirmation.get("revision") or 0,
+            "submitted_at": confirmation.get("submitted_at"),
+            "remote_status": remote_status,
+            "visit_code": confirmation.get("visit_code"),
+        })
+    if not candidates:
+        return None
+    # 修订降序、提交时间降序（ISO 字符串字典序与时间序一致）
+    best = max(candidates, key=lambda c: (c["revision"], str(c["submitted_at"] or "")))
+    return {
+        **best,
+        "selection_basis": {
+            "rule": "confirmed+not_voided+latest_revision",
+            "candidates_considered": len(candidates),
+            "candidate_task_ids": [c["task_id"] for c in candidates],
+        },
+    }
 
 
 # -------- 读取/映射兼容层（FU01 S1 引入，S2 起随随访域迁入本模块） --------
@@ -134,7 +210,15 @@ def map_followup_record_to_response(followup_record: FollowUpRecord) -> FollowUp
         template_id=formal_or_meta("template_id", "template_id"),
         reminder_before=reminder_before,
         completion_data=formal_or_meta("completion_data", "completion_data"),
-        cancellation_data=formal_or_meta("cancellation_data", "cancellation_data")
+        cancellation_data=formal_or_meta("cancellation_data", "cancellation_data"),
+        # FU01 S5/S6 响应扩展：审阅证据链、有效答卷、复评链与节点关联键
+        # （ObjectId 兼容转 str；fill_task_ids 反向索引以字符串列表出参）
+        visit_code=formal_or_meta("visit_code", "visit_code"),
+        review=formal_or_meta("review", "review"),
+        effective_response=formal_or_meta("effective_response", "effective_response"),
+        fill_task_ids=[str(v) for v in (getattr(followup_record, "fill_task_ids", None) or [])],
+        previous_visit_id=_as_optional_str(formal_or_meta("previous_visit_id", "previous_visit_id")),
+        next_visit_id=_as_optional_str(formal_or_meta("next_visit_id", "next_visit_id")),
     )
 
 
@@ -448,8 +532,29 @@ class FollowupService:
                       "occurred_at": timeline.occurred_at,
                       "metadata.status": doc["status"]}}, session=session)
 
-    async def _create_successor(self, doc, date, notes, session):
-        """只继承新访视的处方配置；答案、结果、审阅和任务引用从空状态开始。"""
+    async def _write_audit(self, resource_id, user_id, action, details, session):
+        """在同一事务内写审计日志（audit_logs 集合，落库形状与 AuditLogService 一致）。
+
+        FU01 S5（D-2 默认决策）：手工录入与审阅动作必须记审计且与节点写入
+        原子提交——审计不得先于业务写提交（失败残留），也不得落后（丢失）。
+        集合惰性获取：HealthRecordService 组合本服务时传入的是无 audit_logs
+        预置键的假库，只有审计路径需要该集合。
+        """
+        log_dict = AuditLogCreate(
+            user_id=str(user_id) if user_id is not None else "unknown",
+            action=action, resource_type="followup_record",
+            resource_id=str(resource_id), status="success", details=details,
+        ).model_dump()
+        log_dict["created_at"] = datetime.now(timezone.utc)
+        await self.db["audit_logs"].insert_one(log_dict, session=session)
+
+    async def _create_successor(self, doc, date, notes, session, provider_id=None):
+        """只继承新访视的处方配置；答案、结果、审阅和任务引用从空状态开始。
+
+        visit_code 不继承：同一患者各节点 visit_code 唯一（设计稿 §4.4 验收口径），
+        复评/改期新节点由 S4 填报联动按其自身 visit_code 关联。
+        provider_id：缺省继承原节点责任医护，显式传入时覆盖（S6 复评可换人）。
+        """
         source = followup_from_mongo(doc)
         record = FollowUpRecord(
             patient_id=source.patient_id, created_by=source.created_by,
@@ -463,6 +568,8 @@ class FollowupService:
                 value = legacy.get(field)
             if value is not None:
                 setattr(record, field, deepcopy(value))
+        if provider_id is not None:
+            record.provider_id = provider_id
         record.previous_visit_id = str(doc["_id"])
         record.mutation_version = 0
         child = record.to_mongo()
@@ -487,7 +594,18 @@ class FollowupService:
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
-    async def complete_followup(self, followup_id, data):
+    async def complete_followup(self, followup_id, data, *, operator_id=None):
+        """无表单随访的手工结果录入（FU01 S5，原 complete 端点降级语义）。
+
+        D-2 默认决策（2026-11-09，见设计稿实施记录）：允许手工录入随访结果，
+        但——
+        - 节点只转 in_review（待医护审阅），completed 只能由 review 审阅通过
+          置达（设计稿 §4.2「旧 complete 端点不得再直达 completed」）；
+        - completion_data 带显式 source=manual_entry，区别于外部表单填报；
+        - 不写 effective_response / fill_task_ids（有效答卷只能来自任务
+          confirm 路径，手工录入不允许冒充表单答卷状态）；
+        - 同一事务写审计（action=followup_manual_entry）。
+        """
         # 未显式提交的actual_date由服务端生成；不参与重试指纹。
         fingerprint = _request_fingerprint("complete", data.model_dump(exclude_unset=True))
         async def operation(doc, session):
@@ -496,10 +614,11 @@ class FollowupService:
             self._require_open(doc, allow_review=True)
             now = datetime.utcnow()
             values = {
-                "status": "completed", "actual_date": data.actual_date,
+                "status": "in_review", "actual_date": data.actual_date,
                 "answers": [a.model_dump() for a in data.answers],
                 "notes": data.notes or doc.get("notes", ""), "updated_at": now,
-                "completion_data": {"completed_at": now, "result": data.follow_up_result, "notes": data.notes},
+                "completion_data": {"completed_at": now, "result": data.follow_up_result,
+                                    "notes": data.notes, "source": "manual_entry"},
                 "follow_up_result": data.follow_up_result, "completion_operation": fingerprint,
             }
             # 更新父节点获得写冲突保护后，才建立后继及时间线；全部同一事务。
@@ -510,6 +629,66 @@ class FollowupService:
                 await self.followup_records.update_one(
                     {"_id": doc["_id"]}, {"$set": {"next_follow_up_id": child_id, "next_visit_id": child_id}}, session=session)
                 updated.update(next_follow_up_id=child_id, next_visit_id=child_id)
+            await self._write_audit(
+                followup_id,
+                operator_id or doc.get("provider_id") or doc.get("created_by"),
+                "followup_manual_entry",
+                {"decision": "manual_entry", "source": "manual_entry",
+                 "result": data.follow_up_result},
+                session)
+            await self._write_timeline(updated, session)
+            return map_followup_record_to_response(followup_from_mongo(updated))
+        return await self._mutate(followup_id, operation)
+
+    async def review_followup(self, followup_id, data, *, reviewer_id, reviewer_role="doctor"):
+        """医护审阅（FU01 S5，设计稿 §4.3）。
+
+        - 仅 in_review 节点可审阅；completed 只能由 approved 决定置达；
+        - 审阅人必须是责任医护（provider_id / created_by）本人或 admin，
+          患者归属校验已在路由层执行；
+        - 每次审阅追加 review.history[] 证据链（reviewer/decision/comment/evidence）；
+        - returned：节点回 awaiting_fill，清除 effective_response（旧任务保持
+          confirmed 终态，需新建填报任务重填，设计稿 §2.2 耦合规则）；
+        - 幂等：相同请求指纹重复提交返回当前节点，不追加 history。
+        """
+        fingerprint = _request_fingerprint("review", {
+            "decision": data.decision.value, "comment": data.comment,
+            "evidence": data.evidence, "reviewer_id": reviewer_id})
+        async def operation(doc, session):
+            if doc.get("review_operation") == fingerprint:
+                return map_followup_record_to_response(followup_from_mongo(doc))
+            if doc["status"] != "in_review":
+                raise followup_conflict("只有待审阅(in_review)状态的随访可以审阅")
+            if (reviewer_role != "admin"
+                    and reviewer_id not in {doc.get("provider_id"), doc.get("created_by")}):
+                raise AppBaseException("只有责任医护本人或管理员可以审阅该随访",
+                                       status_code=403, error_code="FOLLOWUP_REVIEW_FORBIDDEN")
+            now = datetime.utcnow()
+            history = list((doc.get("review") or {}).get("history") or [])
+            entry = {
+                "review_id": str(ObjectId()), "reviewer_id": reviewer_id,
+                "reviewer_role": reviewer_role, "reviewed_at": now,
+                "decision": data.decision.value, "comment": data.comment,
+                "evidence": data.evidence,
+            }
+            history.append(entry)
+            review = {"history": history, "decision": data.decision.value,
+                      "reviewed_at": now, "reviewer_id": reviewer_id}
+            values = {"review": review, "review_operation": fingerprint, "updated_at": now}
+            if data.decision is ReviewDecision.APPROVED:
+                # 审阅通过：completed + actual_date=reviewed_at（设计稿 §4.3）
+                values["status"] = "completed"
+                values["actual_date"] = now
+            else:
+                # 审阅退回：待重新填报；有效答卷清空，历史保留在各任务确认证据中
+                values["status"] = "awaiting_fill"
+                values["effective_response"] = None
+            updated = await self._write_node(doc, values, session)
+            await self._write_audit(
+                followup_id, reviewer_id, "followup_review",
+                {"decision": data.decision.value, "comment": data.comment,
+                 "review_id": entry["review_id"],
+                 "evidence": data.evidence}, session)
             await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
@@ -560,3 +739,116 @@ class FollowupService:
             await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
+
+    # -------- FU01 S6：复评链（设计稿 §4.4）与 D-3 逾期/失访状态机（结构先行） --------
+
+    # 复评允许的来源状态：已结束或可补救的节点；lost 是终态（设计稿 §2.2
+    # 状态机无出边），不能从失访认定节点发起复评
+    _REEVALUABLE_STATUSES = {"completed", "canceled", "missed", "overdue"}
+
+    async def re_evaluate_followup(self, followup_id, data, *, operator_id=None):
+        """复评 = 新建节点（FU01 S6，设计稿 §4.4）。
+
+        - 复制 form_binding / questions / follow_up_type 与责任人、模板、
+          提醒配置（_create_successor），写 previous_visit_id；原节点只回写
+          next_visit_id / next_follow_up_id 链接字段，不覆盖不改写其余内容（A06）；
+        - 原节点须处于已结束状态（completed/canceled/missed/overdue/lost）；
+          进行中的节点应走改期或取消流程；
+        - 已有后继节点时拒绝重复创建（并发下由乐观版本保护串行化）；
+        - 幂等：相同请求指纹重试返回同一后继节点，不产生分叉。
+        """
+        fingerprint = _request_fingerprint("re_evaluate", {
+            "scheduled_date": data.scheduled_date, "reason": data.reason,
+            "provider_id": data.provider_id, "operator_id": operator_id})
+        notes = f"复评随访(基于原随访 {followup_id})" + (f": {data.reason}" if data.reason else "")
+        async def operation(doc, session):
+            if doc.get("re_evaluate_operation") == fingerprint:
+                child = await self.followup_records.find_one(
+                    {"previous_visit_id": str(doc["_id"])}, session=session)
+                if child:
+                    return map_followup_record_to_response(followup_from_mongo(child))
+            if doc.get("next_visit_id") or doc.get("next_follow_up_id"):
+                raise followup_conflict("该随访已有后继节点，不能重复创建")
+            if doc["status"] not in self._REEVALUABLE_STATUSES:
+                raise followup_conflict("只有已结束的随访节点可以发起复评")
+            now = datetime.utcnow()
+            # 版本预留写：并发冲突在原节点乐观写处暴露，失败事务连子节点一起回滚
+            await self._write_node(doc, {"updated_at": now,
+                                         "re_evaluate_operation": fingerprint}, session)
+            child_id = await self._create_successor(
+                doc, data.scheduled_date, notes, session, provider_id=data.provider_id)
+            await self.followup_records.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"next_follow_up_id": child_id, "next_visit_id": child_id}}, session=session)
+            await self._write_audit(
+                followup_id, operator_id or doc.get("provider_id") or doc.get("created_by"),
+                "followup_re_evaluate",
+                {"child_visit_id": child_id, "reason": data.reason}, session)
+            child = await self.followup_records.find_one(
+                {"_id": ObjectId(child_id)}, session=session)
+            return map_followup_record_to_response(followup_from_mongo(child))
+        return await self._mutate(followup_id, operation)
+
+    async def mark_overdue(self, followup_id, *, operator_id=None):
+        """逾期状态转换（D-3 结构先行，阈值口径待 FU03）：open 状态 → overdue。
+
+        overdue = 超窗口未填、可补救（可经补填/催办回到 awaiting_fill，
+        失访认定走 mark_lost）。定时检查与提醒重试属 FU03，本方法只提供
+        状态机转换与证据字段；幂等：已是 overdue 直接返回当前节点。
+        """
+        async def operation(doc, session):
+            if doc["status"] == "overdue":
+                return map_followup_record_to_response(followup_from_mongo(doc))
+            self._require_open(doc)
+            now = datetime.utcnow()
+            metadata = deepcopy(doc.get("metadata") or {})
+            metadata["overdue"] = {"marked_at": now, "operator_id": operator_id}
+            updated = await self._write_node(
+                doc, {"status": "overdue", "metadata": metadata, "updated_at": now}, session)
+            await self._write_timeline(updated, session)
+            return map_followup_record_to_response(followup_from_mongo(updated))
+        return await self._mutate(followup_id, operation)
+
+    async def mark_lost(self, followup_id, *, operator_id=None):
+        """失访认定（D-3 结构先行，认定人口径待 FU03）：仅 overdue → lost（终态）。
+
+        幂等：已是 lost 直接返回当前节点；非 overdue 节点拒绝认定。
+        """
+        async def operation(doc, session):
+            if doc["status"] == "lost":
+                return map_followup_record_to_response(followup_from_mongo(doc))
+            if doc["status"] != "overdue":
+                raise followup_conflict("只有逾期(overdue)节点可以认定失访(lost)")
+            now = datetime.utcnow()
+            metadata = deepcopy(doc.get("metadata") or {})
+            metadata["lost"] = {"recognized_at": now, "recognized_by": operator_id}
+            updated = await self._write_node(
+                doc, {"status": "lost", "metadata": metadata, "updated_at": now}, session)
+            await self._write_timeline(updated, session)
+            return map_followup_record_to_response(followup_from_mongo(updated))
+        return await self._mutate(followup_id, operation)
+
+    async def resolve_effective_response(self, followup_id):
+        """按有效答卷规则重算节点选定答卷（FU01 S6 验收：选取可解释）。
+
+        只读核验入口：遍历节点 fill_task_ids 反向索引，跨访视任务（
+        followup_visit_id 不属本节点）一律排除；选定结果不回写节点——
+        effective_response 仍只能由任务 confirm 路径写入。无节点返回 None。
+        """
+        if not ObjectId.is_valid(followup_id):
+            return None
+        doc = await self.followup_records.find_one(
+            {"_id": ObjectId(followup_id), "deleted": {"$ne": True}})
+        if not doc:
+            return None
+        tasks = []
+        for task_id in doc.get("fill_task_ids") or []:
+            query_id = (ObjectId(str(task_id))
+                        if ObjectId.is_valid(str(task_id)) else task_id)
+            task = await self.db[_FILL_TASKS_COLLECTION].find_one({"_id": query_id})
+            if task is None:
+                continue
+            if str(task.get("followup_visit_id") or "") != str(doc["_id"]):
+                continue  # 跨访视答卷不可互相污染（设计稿 §4.4）
+            tasks.append(task)
+        return select_effective_response(tasks)
