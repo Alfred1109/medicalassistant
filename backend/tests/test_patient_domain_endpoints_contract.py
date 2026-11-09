@@ -181,6 +181,12 @@ class PatientDomainEndpointTests(unittest.IsolatedAsyncioTestCase):
             return user
 
         self.db = FakeDatabase()
+        # ConversationPolicy(D3)「有效账号」层查询 db.users；真实系统中认证用户必然存在，
+        # 这里同步播种认证用户文档（is_active 与认证主体一致）。
+        self.db.users.insert({
+            "_id": ObjectId(user.id), "name": user.name, "role": user.role,
+            "email": user.email, "is_active": user.is_active,
+        })
         app.dependency_overrides[get_database] = lambda: self.db
         app.dependency_overrides[get_current_user] = fake_current_user
         self.get_user_mock = AsyncMock(return_value=user)

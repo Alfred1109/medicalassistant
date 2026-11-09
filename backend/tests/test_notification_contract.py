@@ -467,6 +467,9 @@ class NotificationTriggerTests(unittest.IsolatedAsyncioTestCase):
         conversation_id = seed_conversation(db, alice, bob)
 
         # bob "在线"（挂在聊天室里，无需真实 socket）
+        # ConversationPolicy(D3)「有效账号」层查询 db.users，与 create_conversation 测试同样播种。
+        db.users.docs.extend([dict(alice), dict(bob)])
+
         manager = get_connection_manager()
         manager.chat_rooms.setdefault(conversation_id, {})[str(bob["_id"])] = {
             "stub": None
@@ -515,6 +518,8 @@ class NotificationTriggerTests(unittest.IsolatedAsyncioTestCase):
         bob = make_user("Bob", "patient")
         conversation_id = seed_conversation(db, alice, bob)
         message_id = seed_message(db, conversation_id, alice, bob)
+        # ConversationPolicy(D3)「有效账号」层查询 db.users，与 create_conversation 测试同样播种。
+        db.users.docs.extend([dict(alice), dict(bob)])
 
         self.assertTrue(
             await CommunicationService.delete_message(
@@ -530,14 +535,29 @@ class NotificationTriggerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(doc["title"], "消息已撤回")
         self.assertEqual(doc["related_entity_id"], conversation_id)
 
-        # 非发送者删除 → 拒绝且不产生通知
+        # D6 冻结语义（2026-11-09）：会话任一参与者均可软删除——接收者 bob 删除，
+        # 另一方 alice 收到通知。
         message_id2 = seed_message(db, conversation_id, alice, bob)
-        self.assertFalse(
+        self.assertTrue(
             await CommunicationService.delete_message(
                 db, message_id2, str(bob["_id"])
             )
         )
-        self.assertEqual(len(db.notifications.docs), 1)
+        await _drain_tasks()
+        self.assertEqual(len(db.notifications.docs), 2)
+        self.assertEqual(db.notifications.docs[1]["recipient_id"], str(alice["_id"]))
+        self.assertEqual(db.notifications.docs[1]["sender_id"], str(bob["_id"]))
+        self.assertEqual(db.notifications.docs[1]["title"], "消息已撤回")
+
+        # 非会话参与者删除 → 拒绝且不产生通知
+        charlie = make_user("Charlie", "doctor")
+        message_id3 = seed_message(db, conversation_id, alice, bob)
+        self.assertFalse(
+            await CommunicationService.delete_message(
+                db, message_id3, str(charlie["_id"])
+            )
+        )
+        self.assertEqual(len(db.notifications.docs), 2)
 
 
 # ---------------------------------------------------------------------------
