@@ -3,12 +3,20 @@ WS01 通信契约测试
 
 覆盖：
 - REST 发消息落库形状（结构 B：participant1_id/participant2_id、read/deleted、recipient_id）
-- client_message_id 幂等键（HTTP 与 WS 入站同键，重复投递返回既有消息不重复落库）
+- client_message_id 幂等键（D4 追认冻结：HTTP 与 WS 入站同键，重复投递返回既有消息不重复落库）
 - WS：非成员入房被拒（close 4403 / NOT_CONVERSATION_PARTICIPANT）、
   成员发消息落库且广播载荷带真实服务端 id、重复 client_message_id 幂等
 - WS03 已读回执：read_receipt 帧真实落库 + 广播形状（conversation_id/reader_id/
   message_ids/read_at）、非成员拒绝、落库失败错误帧不广播、
   read_at 谓词怪癖修正（广播不依赖墙钟秒边界）
+- D3 ConversationPolicy（默认采纳待评审追认 2026-11-09）：有效账号 + 会话参与者
+  同一规则覆盖入站/出站；D1 目标形态 participants 数组兼容读
+- D6 删除语义（默认采纳待评审追认 2026-11-09）：软删除、双方会话内不可见、
+  保留审计与原文引用完整性、不硬删
+- D7 事件信封：message / read_receipt / delete_message 帧携带 server_seq
+  （_id 大端单调整数，插入型事件重放稳定）
+- 启动集合边界：普通启动不隐式建集合，索引声明跳过空库，
+  首个消息落库惰性补建索引（test_demo_auth_boundary 回归的契约面）
 - 死代码删除后 import app.main 正常（本模块顶部 import 即隐式覆盖）
 """
 import asyncio
@@ -180,6 +188,14 @@ class FakeDB:
     def __getitem__(self, name):
         return self.__getattr__(name)
 
+    async def list_collection_names(self):
+        # 只返回真实存在的集合（模拟 Mongo 语义：未写入/未显式创建的集合不存在）。
+        return [name for name, value in self.__dict__.items()
+                if isinstance(value, FakeCollection)]
+
+    async def create_collection(self, name):
+        return self.__getattr__(name)
+
 
 def make_user(name, role):
     return {"_id": ObjectId(), "name": name, "role": role, "is_active": True}
@@ -302,6 +318,37 @@ class RestCommunicationContractTests(unittest.IsolatedAsyncioTestCase):
         # 会话摘要已更新
         self.assertEqual(db.conversations.docs[0]["last_message_preview"], "hello")
 
+    async def test_duplicate_client_message_id_over_http_is_idempotent(self):
+        """D4 追认冻结（默认采纳待评审追认 2026-11-09）：HTTP 重试同键投递
+        返回既有消息，不重复落库、不重复产生副作用。"""
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
+        conversation_id = seed_conversation(db, alice, bob)
+        app.dependency_overrides[get_database] = lambda: db
+        app.dependency_overrides[get_current_active_user] = lambda: authenticated_user(alice)
+
+        async with httpx.AsyncClient(app=app, base_url="http://test") as client:
+            payload = {"content": "retry me", "client_message_id": "http-idem-1"}
+            first = await client.post(
+                f"/api/communications/conversations/{conversation_id}/messages",
+                json=payload,
+            )
+            replay = await client.post(
+                f"/api/communications/conversations/{conversation_id}/messages",
+                json=payload,
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(first.json()["id"], replay.json()["id"])
+        self.assertEqual(first.json()["client_message_id"], "http-idem-1")
+        self.assertEqual(len(db.messages.docs), 1)
+        # 幂等重放不产生新副作用（仅首次落库创建 1 条离线通知，D10 桥；摘要不变）
+        self.assertEqual(len(db.notifications.docs), 1)
+        self.assertEqual(db.conversations.docs[0]["last_message_preview"], "retry me")
+
     async def test_conversation_membership_is_enforced_for_http_send(self):
         db = FakeDB()
         alice = make_user("Alice", "doctor")
@@ -334,6 +381,8 @@ class ClientMessageIdIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         db = FakeDB()
         alice = make_user("Alice", "doctor")
         bob = make_user("Bob", "patient")
+        # D3 策略要求发送者为有效账号
+        db.users.docs.extend([dict(alice), dict(bob)])
         conversation_id = seed_conversation(db, alice, bob)
 
         first = await CommunicationService.send_message(
@@ -349,13 +398,15 @@ class ClientMessageIdIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["timestamp"], second["timestamp"])
         self.assertEqual(len(db.messages.docs), 1)
         self.assertEqual(db.messages.docs[0]["client_message_id"], "idem-1")
-        self.assertEqual(len(db.notifications.docs), 0)  # 幂等重放不产生新副作用
+        # 幂等重放不产生新副作用：仅首次落库创建 1 条离线通知（D10 桥）
+        self.assertEqual(len(db.notifications.docs), 1)
 
     async def test_same_key_from_other_sender_or_conversation_is_not_deduplicated(self):
         db = FakeDB()
         alice = make_user("Alice", "doctor")
         bob = make_user("Bob", "patient")
         carol = make_user("Carol", "doctor")
+        db.users.docs.extend([dict(alice), dict(bob), dict(carol)])
         conversation_ab = seed_conversation(db, alice, bob)
         conversation_ac = seed_conversation(db, alice, carol)
 
@@ -442,6 +493,7 @@ class UniqueIndexRaceTests(unittest.IsolatedAsyncioTestCase):
         db.messages = UniqueRaceCollection()
         alice = make_user("Alice", "doctor")
         bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
         conversation_id = seed_conversation(db, alice, bob)
 
         # 并发窗口：另一请求已落库同键消息，本请求的先查后插被绕过
@@ -470,6 +522,7 @@ class ObjectIdPaginationTests(unittest.IsolatedAsyncioTestCase):
         db = FakeDB()
         alice = make_user("Alice", "doctor")
         bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
         conversation_id = seed_conversation(db, alice, bob)
 
         # 时间戳故意与 _id 顺序相反：模拟历史本地时区文档与 UTC 文档交界处的漂移。
@@ -505,6 +558,7 @@ class ObjectIdPaginationTests(unittest.IsolatedAsyncioTestCase):
         db = FakeDB()
         alice = make_user("Alice", "doctor")
         bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
         conversation_id = seed_conversation(db, alice, bob)
 
         cutoff = datetime(2026, 1, 1, 12, 0, 0)
@@ -567,6 +621,8 @@ class MarkConversationAsReadTests(unittest.IsolatedAsyncioTestCase):
         self.alice = make_user("Alice", "doctor")
         self.bob = make_user("Bob", "patient")
         self.conversation_id = seed_conversation(self.db, self.alice, self.bob)
+        # D3 策略：已读路径要求操作者为有效账号
+        self.db.users.docs.extend([dict(self.alice), dict(self.bob)])
         self.manager = _StubManager()
         self.manager_patch = patch(
             "app.api.websockets.get_connection_manager",
@@ -933,6 +989,278 @@ class WebSocketChatContractTests(unittest.TestCase):
 
         # 未落库
         self.assertEqual(self.db.messages.docs[0]["read"], False)
+
+
+# ---------------------------------------------------------------------------
+# 启动集合边界（修复 test_demo_auth_boundary 回归：普通启动不隐式建集合）
+# ---------------------------------------------------------------------------
+
+class StartupCollectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    """ensure_communication_indexes 不得在空库上隐式创建 messages 集合
+    （create_index 会隐式 createCollection，曾导致普通启动产生未声明集合写入），
+    索引由首个消息落库路径惰性补建。"""
+
+    async def asyncSetUp(self):
+        from app.services import communication_service as communication_module
+        self.communication_module = communication_module
+        communication_module._index_state["ensured"] = False
+
+    async def asyncTearDown(self):
+        self.communication_module._index_state["ensured"] = False
+
+    async def test_index_declaration_skips_missing_collection(self):
+        db = FakeDB()
+
+        async def empty_names():
+            return []
+
+        db.list_collection_names = empty_names  # 空库：没有任何集合
+        await ensure_communication_indexes(db)
+        # 未触碰 messages → 不隐式建集合、不声明索引
+        self.assertEqual(db.messages.indexes, [])
+
+    async def test_index_declaration_runs_for_existing_collection(self):
+        db = FakeDB()  # messages 已在 __dict__ 中（等价于集合已存在）
+        await ensure_communication_indexes(db)
+        self.assertEqual(len(db.messages.indexes), 1)
+
+    async def test_first_message_persist_bootstraps_index_lazily_exactly_once(self):
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
+        conversation_id = seed_conversation(db, alice, bob)
+
+        await CommunicationService.send_message(
+            db, conversation_id, str(alice["_id"]), "m1", client_message_id="lazy-1")
+        # 首个消息落库（隐式建集合）后，索引恰好补建一次
+        self.assertEqual(len(db.messages.indexes), 1)
+        self.assertEqual(
+            db.messages.indexes[0][1]["name"],
+            "uniq_conversation_sender_client_message_id",
+        )
+        await CommunicationService.send_message(
+            db, conversation_id, str(alice["_id"]), "m2", client_message_id="lazy-2")
+        # 每进程最多尝试一次，不随每条消息重复建索引
+        self.assertEqual(len(db.messages.indexes), 1)
+
+
+# ---------------------------------------------------------------------------
+# D3 ConversationPolicy（默认采纳待评审追认 2026-11-09）
+# ---------------------------------------------------------------------------
+
+class ConversationPolicyDecisionTests(unittest.IsolatedAsyncioTestCase):
+    """有效账号 + 会话参与者同一规则覆盖入站写与出站读。"""
+
+    async def test_disabled_account_member_is_denied_on_send_and_read(self):
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        bob["is_active"] = False  # 连接期内被停用
+        db.users.docs.extend([dict(alice), dict(bob)])
+        conversation_id = seed_conversation(db, alice, bob)
+
+        # 入站写：账号停用即拒绝，不落库
+        with self.assertRaises(ValueError):
+            await CommunicationService.send_message(
+                db, conversation_id, str(bob["_id"]), "hi")
+        self.assertEqual(len(db.messages.docs), 0)
+        # 出站读：同一规则
+        self.assertEqual(
+            await CommunicationService.get_messages(db, conversation_id, str(bob["_id"])), [])
+        self.assertIsNone(
+            await CommunicationService.get_conversation(db, conversation_id, str(bob["_id"])))
+
+    async def test_participants_array_shape_is_accepted_for_membership(self):
+        """D1 目标形态兼容读：participants 数组会话在成员层与收发路径可用
+        （写入侧仍为结构 B 双人形态，迁移属 WS01-c）。"""
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
+        conversation_id = str(ObjectId())
+        db.conversations.docs.append({
+            "_id": ObjectId(conversation_id),
+            "participants": [
+                {"user_id": str(alice["_id"]), "role": "doctor", "joined_at": datetime.utcnow()},
+                {"user_id": str(bob["_id"]), "role": "patient", "joined_at": datetime.utcnow()},
+            ],
+            "type": "chat",
+            "status": "active",
+            "created_at": datetime.utcnow(),
+            "last_message_time": datetime.utcnow(),
+            "metadata": {},
+        })
+
+        self.assertTrue(await CommunicationService.is_conversation_participant(
+            db, conversation_id, str(alice["_id"])))
+        sent = await CommunicationService.send_message(
+            db, conversation_id, str(alice["_id"]), "array-shape")
+        self.assertEqual(sent["recipient_id"], str(bob["_id"]))
+
+    async def test_missing_user_record_is_denied(self):
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        conversation_id = seed_conversation(db, alice, bob)
+        # 用户记录缺失（成员校验通过但账号层无记录）→ 拒绝
+        with self.assertRaises(ValueError):
+            await CommunicationService.send_message(
+                db, conversation_id, str(alice["_id"]), "ghost")
+        self.assertEqual(len(db.messages.docs), 0)
+
+
+# ---------------------------------------------------------------------------
+# D6 删除语义（默认采纳待评审追认 2026-11-09）
+# ---------------------------------------------------------------------------
+
+class DeletionSemanticsTests(unittest.IsolatedAsyncioTestCase):
+    """软删除、双方会话内不可见、保留审计与原文引用完整性、不硬删。"""
+
+    def setUp(self):
+        self.db = FakeDB()
+        self.alice = make_user("Alice", "doctor")
+        self.bob = make_user("Bob", "patient")
+        self.db.users.docs.extend([dict(self.alice), dict(self.bob)])
+        self.conversation_id = seed_conversation(self.db, self.alice, self.bob)
+        self.manager = _StubManager()
+        self.manager_patch = patch(
+            "app.api.websockets.get_connection_manager",
+            return_value=self.manager,
+        )
+        self.manager_patch.start()
+
+    def tearDown(self):
+        self.manager_patch.stop()
+
+    async def _send(self, content):
+        return await CommunicationService.send_message(
+            self.db, self.conversation_id, str(self.alice["_id"]), content)
+
+    async def test_sender_delete_hides_from_both_and_preserves_original(self):
+        message = await self._send("retract me")
+        self.assertTrue(await CommunicationService.delete_message(
+            self.db, message["id"], str(self.alice["_id"])))
+
+        # 双方会话内均不可见
+        self.assertEqual(await CommunicationService.get_messages(
+            self.db, self.conversation_id, str(self.alice["_id"])), [])
+        self.assertEqual(await CommunicationService.get_messages(
+            self.db, self.conversation_id, str(self.bob["_id"])), [])
+
+        # 不硬删：原文与原始字段保留，附审计字段（引用完整性不破坏）
+        doc = self.db.messages.docs[0]
+        self.assertEqual(doc["content"], "retract me")
+        self.assertEqual(doc["sender_id"], str(self.alice["_id"]))
+        self.assertTrue(doc["deleted"])
+        self.assertIsInstance(doc["deleted_at"], datetime)
+        self.assertEqual(doc["deleted_by"], str(self.alice["_id"]))
+
+        # 删除事件广播带 server_seq
+        delete_frame = self.manager.sent[-1][0]
+        self.assertEqual(delete_frame["type"], "delete_message")
+        self.assertEqual(delete_frame["message_id"], message["id"])
+        self.assertIsInstance(delete_frame["server_seq"], int)
+
+    async def test_recipient_can_delete_received_message(self):
+        message = await self._send("for bob")
+        self.assertTrue(await CommunicationService.delete_message(
+            self.db, message["id"], str(self.bob["_id"])))
+        doc = self.db.messages.docs[0]
+        self.assertEqual(doc["deleted_by"], str(self.bob["_id"]))
+        self.assertEqual(await CommunicationService.get_messages(
+            self.db, self.conversation_id, str(self.bob["_id"])), [])
+
+    async def test_non_participant_cannot_delete(self):
+        mallory = make_user("Mallory", "doctor")
+        self.db.users.docs.append(dict(mallory))
+        message = await self._send("secret")
+        self.assertFalse(await CommunicationService.delete_message(
+            self.db, message["id"], str(mallory["_id"])))
+        self.assertFalse(self.db.messages.docs[0]["deleted"])
+
+    async def test_delete_is_idempotent_second_call_returns_false(self):
+        message = await self._send("once")
+        self.assertTrue(await CommunicationService.delete_message(
+            self.db, message["id"], str(self.alice["_id"])))
+        self.assertFalse(await CommunicationService.delete_message(
+            self.db, message["id"], str(self.alice["_id"])))
+        self.assertEqual(len(self.db.messages.docs), 1)  # 不硬删、不重复写
+
+    async def test_deleted_message_excluded_from_offline_sync_and_unread(self):
+        message = await self._send("gone")
+        await CommunicationService.delete_message(
+            self.db, message["id"], str(self.alice["_id"]))
+
+        synced = await CommunicationService.sync_offline_messages(
+            self.db, str(self.bob["_id"]), datetime.utcnow() - timedelta(hours=1))
+        self.assertEqual(synced, [])
+        self.assertEqual(await CommunicationService.get_unread_messages_count(
+            self.db, self.conversation_id, str(self.bob["_id"])), 0)
+
+
+# ---------------------------------------------------------------------------
+# D7 事件信封 server_seq（_id 单调整数）
+# ---------------------------------------------------------------------------
+
+class ServerSeqEnvelopeTests(unittest.IsolatedAsyncioTestCase):
+    """message / read_receipt / delete_message 帧携带 server_seq：
+    插入型事件取落库 _id（重放稳定、与插入顺序单调），非插入型事件取发射时刻
+    新生 ObjectId 的同进程单调整数。"""
+
+    def setUp(self):
+        self.db = FakeDB()
+        self.alice = make_user("Alice", "doctor")
+        self.bob = make_user("Bob", "patient")
+        self.db.users.docs.extend([dict(self.alice), dict(self.bob)])
+        self.conversation_id = seed_conversation(self.db, self.alice, self.bob)
+        self.manager = _StubManager()
+        self.manager_patch = patch(
+            "app.api.websockets.get_connection_manager",
+            return_value=self.manager,
+        )
+        self.manager_patch.start()
+
+    def tearDown(self):
+        self.manager_patch.stop()
+
+    async def test_message_frames_carry_monotonic_server_seq_derived_from_id(self):
+        first = await CommunicationService.send_message(
+            self.db, self.conversation_id, str(self.alice["_id"]), "m1",
+            client_message_id="seq-1")
+        second = await CommunicationService.send_message(
+            self.db, self.conversation_id, str(self.alice["_id"]), "m2",
+            client_message_id="seq-2")
+
+        frames = [payload for payload, _ in self.manager.sent
+                  if payload["type"] == "message"]
+        self.assertEqual(len(frames), 2)
+        seqs = [frame["server_seq"] for frame in frames]
+        self.assertTrue(all(isinstance(seq, int) and seq > 0 for seq in seqs))
+        self.assertLess(seqs[0], seqs[1])  # 与落库顺序单调一致
+        # 与消息 id 同源：server_seq = _id 的 12 字节大端整数
+        self.assertEqual(seqs[0], int.from_bytes(ObjectId(first["id"]).binary, "big"))
+
+    async def test_replayed_message_does_not_emit_second_frame(self):
+        payload = {"client_message_id": "dup"}
+        await CommunicationService.send_message(
+            self.db, self.conversation_id, str(self.alice["_id"]), "m", **payload)
+        await CommunicationService.send_message(
+            self.db, self.conversation_id, str(self.alice["_id"]), "m", **payload)
+        frames = [p for p, _ in self.manager.sent if p["type"] == "message"]
+        self.assertEqual(len(frames), 1)  # 幂等重放不产生新事件帧
+
+    async def test_read_receipt_carries_server_seq(self):
+        unread = make_message_doc(
+            self.conversation_id, str(self.alice["_id"]), str(self.bob["_id"]), "u")
+        self.db.messages.docs.append(unread)
+        await CommunicationService.mark_conversation_as_read(
+            self.db, self.conversation_id, str(self.bob["_id"]))
+
+        receipt = self.manager.sent[0][0]
+        self.assertEqual(receipt["type"], "read_receipt")
+        self.assertIsInstance(receipt["server_seq"], int)
+        self.assertGreater(receipt["server_seq"], 0)
 
 
 # ---------------------------------------------------------------------------

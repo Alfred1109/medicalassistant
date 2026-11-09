@@ -202,3 +202,41 @@
 - 群聊是否为本期业务范围（结构 A 有模型、无任何业务调用）。
 - 附件存储介质选型与合规要求（当前后端无任何上传端点，`UploadFile/multipart` 仅出现在邮件代码 report_scheduler_service.py:11）。
 - `frontend/vite.config.pilot.ts`（未跟踪文件）是否引入了试点专用通信配置，未纳入本次盘点范围。
+
+---
+
+## 冻结记录（2026-11-09）
+
+用户授权「技术决策默认采纳盘点推荐方案」。以下标注**「默认采纳，待评审追认（2026-11-09）」**的条目均按本盘点 §4.2 推荐项落地并冻结，未经评审会议正式追认前不视为业务确认；无推荐依据的条目如实保持开放，未造默认值。
+
+### 决策点冻结状态
+
+| # | 决策点 | 状态 | 说明与落地位置 |
+|---|---|---|---|
+| D1 | 会话成员模型 | 部分冻结（默认采纳，待评审追认 2026-11-09） | 目标形态采纳建议：`participants: [{user_id, role, joined_at}]` + `is_group`（+ `group_meta`，群聊写入未启用）。**写入侧仍为结构 B `participant1_id/participant2_id` 双人形态**（避免本期 schema 迁移，迁移属盘点 §5.2 WS01-c）；读取侧已兼容两种形态（`participant_ids`，见 `backend/app/services/conversation_policy.py`）。群聊是否本期落地仍未决策 |
+| D2 | 中心与诊疗授权字段 | **保持开放** | 盘点原文即「待业务确认」，无推荐默认值，不造字段；会话文档未加 `center_id` / `encounter_ref`。MC02 多中心隔离接入前必须决策 |
+| D3 | ConversationPolicy | 冻结（默认采纳，待评审追认 2026-11-09） | 按推荐落地「入房/入站/出站三层校验同一规则」：第 1 层有效账号（存在且 `is_active`）+ 第 2 层会话参与者已实现，HTTP 入站（send/delete）、出站（read/get）与 WS 入房（`is_conversation_participant`）复用同一判定（`backend/app/services/conversation_policy.py`）。**待评审**：第 3 层授权版本匹配（会话文档无授权版本字段、无数值依据，当前恒通过）；连接期定时复核与撤权断连时限属 WS02 |
+| D4 | 幂等键 | **冻结（追认已实现项）** | `client_message_id` + `(conversation_id, sender_id, client_message_id)` partial unique 索引，HTTP 与 WS 入站同键，重复投递返回既有消息、不重复落库/广播/通知；并发窗口由 `DuplicateKeyError` 兜底（`backend/app/db/indexes.py`、`communication_service.send_message`）。ID 生成端随实现一并追认为客户端生成——**待评审确认**。契约测试覆盖 REST/WS 重放、跨发送者/跨会话不去重、并发兜底 |
+| D5 | 已读语义 | **冻结（追认已实现项）** | 维持已实现语义：读取即标读 + 显式标读接口 + 服务端落库回执广播（`read_receipt` 帧：conversation_id/reader_id/message_ids/read_at）。与盘点原建议的偏差：**「废弃读取即已读副作用」未采纳**——读取即标读是工作区既有已交付行为（开发计划 §11 2026-11-08 已声明保留），该偏差**待评审**。per-message `read_by[]`（群聊）未采纳（群聊未启用） |
+| D6 | 删除语义 | 冻结（默认采纳，待评审追认 2026-11-09） | 软删除：会话任一参与者可删（发送者撤回 / 接收者删除）；删除后**双方会话内不可见**（`get_messages` / `sync_offline_messages` 过滤 `deleted` 文档，`$ne True` 兼容历史文档）；**不硬删**——原文与全部原始字段保留，附 `deleted` / `deleted_at` / `deleted_by` 审计字段，按 id 引用原文仍可解析（引用完整性不破坏）。盘点原推荐的两层语义（发送者撤回对所有人隐藏 + 接收者本地 per-user 隐藏）收敛为单层软删（双方不可见），**待评审追认**（`communication_service.delete_message`） |
+| D7 | WS 事件信封 | 部分冻结（默认采纳，待评审追认 2026-11-09） | `server_seq` 已补：12 字节 ObjectId 大端整数，复用 `_id` 单调游标基建。message 帧取落库文档 `_id`（重放稳定、与插入顺序单调一致）；`read_receipt` / `delete_message` 取发射时刻新生 ObjectId（同进程内单调）。**待评审**：完整 `{type, data, message_id, server_seq, ts}` 信封归一涉及 `websockets.py` 全部帧（user_joined/typing/error）重构，未在本期执行；跨 worker 全序属 D11/WS04 |
+| D8 | 附件 | **保持开放** | 存储介质选型与病历附件合规要求未决（关联 MC01）；现契约仅透传 `attachments` 元数据 |
+| D9 | 连接凭据 | **保持开放** | token 不入 URL 现状维持；短期一次性 ticket vs cookie 待部署拓扑联调确认 |
+| D10 | 通知边界 | 维持（部分落地） | 离线→通知桥保留（135a5d9 / b335c69），通知域与聊天消息域不合并 |
+| D11 | 多 worker 分发 | 不在本期冻结 | 由 WS04 设计稿（054cdb5）接手，以本记录 D7 的 server_seq 为信封前提 |
+
+### 配套修复：启动集合边界（2026-11-09）
+
+- 问题：`ensure_communication_indexes` 在启动期对 `messages` 调用 `create_index`，空库上会**隐式创建集合**（createCollection），导致「普通启动不落任何账号/演示数据」边界测试 `test_demo_auth_boundary.py::test_normal_startup_does_not_seed_any_accounts` 失败（干净 HEAD 复现，确认与后续改动无关）。
+- 收敛：启动期仅当 `messages` 集合已存在才声明索引，空库跳过（`backend/app/db/indexes.py`）；首个消息落库隐式建集合后，落库路径惰性补建索引（每进程一次，`communication_service.send_message`）。消息落库与幂等去重能力不变（应用层先查后插 + `DuplicateKeyError` 兜底不受影响），普通启动不再产生任何未声明的集合写入。
+
+### 契约测试（2026-11-09）
+
+`backend/tests/test_communication_contract.py` 新增/更新（跟随既有风格，FakeDB 内存桩）：
+- 启动集合边界：空库跳过索引声明、既有集合正常声明、首个消息落库惰性补建且每进程仅一次。
+- D4：REST 层重复 `client_message_id` 幂等（同 id 返回、单文档、无重复副作用）。
+- D3：账号停用成员入站写/出站读均拒绝；用户记录缺失拒绝；`participants` 数组形态（D1 目标形态）成员判定与收发可用。
+- D6：发送者删除双方不可见且原文/审计字段保留；接收者可删；非参与者拒绝；重复删除幂等返回 False；离线同步与未读数排除已删消息。
+- D7：message 帧携带 `server_seq`（等于 `_id` 大端整数、随落库顺序单调）、幂等重放不产生新帧、`read_receipt` 帧携带 `server_seq`。
+
+验证（隔离副本集 `127.0.0.1:37021`，`DEBUG=false`）：`test_demo_auth_boundary.py` 7 passed；`test_communication_contract.py` 46 passed。共享工作区验证期间 WS 用例曾受并行在途改动影响（`ws_event_bus.py` 读取 `settings.EVENT_BUS_MODE`，`config.py` 未同步声明），该声明补齐后全部通过；此失败与 WS01 本轮改动无关。

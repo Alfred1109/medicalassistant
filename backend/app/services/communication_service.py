@@ -11,9 +11,31 @@ import asyncio
 import logging
 
 from app.services.notification_service import NotificationService
+from app.services.conversation_policy import (
+    ConversationPolicy,
+    REASON_ACCOUNT_INVALID,
+    participant_ids,
+)
 
 # 配置日志
 logger = logging.getLogger(__name__)
+
+# 通信索引惰性初始化状态（进程级）：普通启动不隐式建集合（启动边界契约），
+# 首个消息落库隐式创建 messages 集合后，补建幂等唯一索引（见 send_message）。
+_index_state = {"ensured": False}
+
+
+async def _ensure_indexes_after_first_persist(db) -> None:
+    """首个消息落库（隐式建集合）后惰性补建通信索引，每进程最多尝试一次。"""
+    if _index_state["ensured"]:
+        return
+    _index_state["ensured"] = True
+    try:
+        from app.db.indexes import ensure_communication_indexes
+        await ensure_communication_indexes(db)
+    except Exception as e:
+        # 索引补建失败不阻断消息落库：幂等去重退化为应用层先查后插。
+        logger.warning("通信索引惰性初始化失败，幂等去重退化为应用层查重: %s", e)
 
 
 class CommunicationService:
@@ -24,6 +46,17 @@ class CommunicationService:
     # 消息读取/分页/离线同步一律改按 _id（ObjectId 单调，真实插入时刻有序），
     # 彻底免疫历史时区漂移，见 get_messages / sync_offline_messages。
     @staticmethod
+    def _server_seq(oid: ObjectId) -> int:
+        """D7 事件信封 server_seq：ObjectId 12 字节大端整数。
+
+        复用 _id 单调游标基建（ObjectId 按生成时刻单调递增）：插入型事件
+        （message）取落库文档 _id（重放稳定）；非插入型事件（read_receipt /
+        delete_message）取发射时刻新生 ObjectId（同进程内单调）。跨 worker
+        全序属 D11/WS04 范畴。
+        """
+        return int.from_bytes(oid.binary, "big")
+
+    @staticmethod
     async def is_conversation_participant(
         db: AsyncIOMotorClient,
         conversation_id: str,
@@ -33,13 +66,14 @@ class CommunicationService:
 
         无效的 conversation_id / user_id 一律视为非成员，不抛异常，
         供 WebSocket 层在握手阶段安全调用。
+        成员判定统一走 ConversationPolicy 的成员层（D1 兼容读两种成员形态）。
         """
         if not ObjectId.is_valid(conversation_id) or not ObjectId.is_valid(user_id):
             return False
         conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
         if not conversation:
             return False
-        return user_id in (conversation.get("participant1_id"), conversation.get("participant2_id"))
+        return user_id in participant_ids(conversation)
 
     @staticmethod
     def _format_message(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -119,15 +153,14 @@ class CommunicationService:
         user_id: str,
     ) -> Optional[Dict[str, Any]]:
         """获取特定对话详情"""
-        conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
-        
-        if not conversation:
+        # ConversationPolicy（D3，默认采纳待评审追认 2026-11-09）：
+        # 出站读与入房/入站同一规则——有效账号 + 会话参与者。
+        decision = await ConversationPolicy.authorize(
+            db, conversation_id, user_id, layer="outbound")
+        if not decision.allowed or decision.conversation is None:
             return None
-        
-        # 验证用户是否为对话参与者
-        if user_id != conversation["participant1_id"] and user_id != conversation["participant2_id"]:
-            return None
-        
+        conversation = decision.conversation
+
         conversation["id"] = str(conversation["_id"])
         del conversation["_id"]
         
@@ -232,13 +265,16 @@ class CommunicationService:
         before_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """获取对话中的消息"""
-        # 验证用户是否为对话参与者
-        conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
-        if not conversation or (user_id != conversation["participant1_id"] and user_id != conversation["participant2_id"]):
+        # ConversationPolicy（D3）：出站读与入房/入站同一规则
+        decision = await ConversationPolicy.authorize(
+            db, conversation_id, user_id, layer="outbound")
+        if not decision.allowed:
             return []
-        
+
         # 构建查询
-        query = {"conversation_id": conversation_id}
+        # D6 删除语义（默认采纳待评审追认 2026-11-09）：软删除消息对双方
+        # 会话内不可见（$ne True 兼容无 deleted 字段的历史文档）。
+        query = {"conversation_id": conversation_id, "deleted": {"$ne": True}}
         if before_id and ObjectId.is_valid(before_id):
             # 获取指定消息之前的消息（向上加载历史消息）。
             # 分页游标用消息 _id（ObjectId 单调递增，与插入时间有序一致）做 $lt
@@ -291,10 +327,17 @@ class CommunicationService:
         partial unique 索引（见 app/db/indexes.py）以 DuplicateKeyError 拦截，
         捕获后重查返回既有消息，语义与快路径一致（不重复产生副作用）。
         """
-        # 验证用户是否为对话参与者（HTTP/WS 共用的成员校验语义）
-        conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
-        if not conversation or (sender_id != conversation["participant1_id"] and sender_id != conversation["participant2_id"]):
+        # ConversationPolicy（D3，默认采纳待评审追认 2026-11-09）：
+        # HTTP/WS 入站共用同一校验语义——有效账号 + 会话参与者。
+        # 账号停用（连接期内撤权）与非成员均拒绝；WS 层把 ValueError
+        # 统一映射为 NOT_CONVERSATION_PARTICIPANT + 4403 断连。
+        decision = await ConversationPolicy.authorize(
+            db, conversation_id, sender_id, layer="inbound")
+        if not decision.allowed or decision.conversation is None:
+            if decision.reason == REASON_ACCOUNT_INVALID:
+                raise ValueError("发送者账号不可用")
             raise ValueError("用户不是对话参与者")
+        conversation = decision.conversation
 
         # 幂等去重：重复投递返回既有消息
         if client_message_id:
@@ -306,8 +349,10 @@ class CommunicationService:
             if existing:
                 return CommunicationService._format_message(existing)
 
-        # 确定接收者ID
-        recipient_id = conversation["participant1_id"] if sender_id == conversation["participant2_id"] else conversation["participant2_id"]
+        # 确定接收者ID（D1 兼容读：participants 数组形态取另一成员；
+        # 现行写入仍为双人单聊形态，群聊写入未启用，迁移属 WS01-c）
+        other_members = [member for member in participant_ids(conversation) if member != sender_id]
+        recipient_id = other_members[0] if other_members else None
 
         # 创建消息（时间统一 UTC）
         now = datetime.utcnow()
@@ -333,6 +378,9 @@ class CommunicationService:
         # 不发通知，避免重复副作用）。
         try:
             await db.messages.insert_one(message)
+            # 首个消息落库隐式创建 messages 集合 → 惰性补建幂等唯一索引
+            # （普通启动不隐式建集合，见 app/db/indexes.py）。
+            await _ensure_indexes_after_first_persist(db)
         except DuplicateKeyError:
             existing = await db.messages.find_one({
                 "conversation_id": conversation_id,
@@ -362,11 +410,13 @@ class CommunicationService:
             from app.api.websockets import get_connection_manager
             manager = get_connection_manager()
             
-            # 向聊天室发送消息
+            # 向聊天室发送消息（D7：事件信封携带 server_seq，
+            # 取落库文档 _id 的大端整数——重放稳定且与插入顺序单调）
             await manager.send_chat_message(
                 {
                     "type": "message",
-                    "message": message_response
+                    "message": message_response,
+                    "server_seq": CommunicationService._server_seq(message["_id"]),
                 },
                 conversation_id
             )
@@ -433,7 +483,10 @@ class CommunicationService:
         message_ids: Optional[List[str]] = None,
     ) -> int:
         """所有已读入口的统一授权、持久化与事件路径。"""
-        if not await CommunicationService.is_conversation_participant(db, conversation_id, user_id):
+        # ConversationPolicy（D3）：出站写与入房/入站同一规则
+        decision = await ConversationPolicy.authorize(
+            db, conversation_id, user_id, layer="outbound")
+        if not decision.allowed:
             raise ValueError("用户不是该会话参与者")
         unread_filter = {
             "conversation_id": conversation_id,
@@ -465,6 +518,8 @@ class CommunicationService:
                     "reader_id": user_id,
                     "message_ids": persisted_ids,
                     "read_at": now.isoformat(),
+                    # D7：非插入型事件用发射时刻新生 ObjectId 的单调整数
+                    "server_seq": CommunicationService._server_seq(ObjectId()),
                 }, conversation_id)
             except Exception as e:
                 logger.warning(f"推送已读状态失败: {str(e)}")
@@ -493,32 +548,51 @@ class CommunicationService:
         message_id: str,
         user_id: str
     ) -> bool:
-        """删除消息（软删除）"""
+        """删除消息（D6 冻结语义：软删除，默认采纳待评审追认 2026-11-09）。
+
+        会话任一参与者均可软删除（发送者撤回 / 接收者删除）：
+        - 双方会话内不可见：get_messages / sync_offline_messages 过滤已删文档；
+        - 不硬删：文档原样保留 content 等原始字段，附 deleted / deleted_at /
+          deleted_by 审计字段，原文按 id 引用仍可解析（引用完整性不破坏）。
+        """
+        if not ObjectId.is_valid(message_id):
+            return False
         message = await db.messages.find_one({
             "_id": ObjectId(message_id),
-            "sender_id": user_id  # 只允许发送者删除
+            "deleted": {"$ne": True},  # 已删除消息不可重复删除
         })
-        
+
         if not message:
             return False
-        
+
+        # ConversationPolicy（D3）：删除是入站写，须为有效账号 + 会话参与者
+        decision = await ConversationPolicy.authorize(
+            db, message["conversation_id"], user_id, layer="inbound")
+        if not decision.allowed:
+            return False
+
         result = await db.messages.update_one(
-            {"_id": ObjectId(message_id)},
-            {"$set": {"deleted": True, "deleted_at": datetime.utcnow()}}
+            {"_id": ObjectId(message_id), "deleted": {"$ne": True}},
+            {"$set": {
+                "deleted": True,
+                "deleted_at": datetime.utcnow(),
+                "deleted_by": user_id,
+            }}
         )
-        
-        # 通过WebSocket推送消息删除通知
+
+        # 通过WebSocket推送消息删除通知（D7：信封携带 server_seq）
         if result.modified_count > 0:
             try:
                 from app.api.websockets import get_connection_manager
                 manager = get_connection_manager()
-                
+
                 # 发送消息删除通知
                 await manager.send_chat_message(
                     {
                         "type": "delete_message",
                         "message_id": message_id,
-                        "user_id": user_id
+                        "user_id": user_id,
+                        "server_seq": CommunicationService._server_seq(ObjectId()),
                     },
                     message["conversation_id"]
                 )
@@ -578,10 +652,12 @@ class CommunicationService:
         # 单调，from_datetime 把 last_sync_time 视为 UTC 生成游标），历史文档
         # timestamp 为本地时区时代写入，按 timestamp 比较会在切换交界处漂移。
         cursor_id = ObjectId.from_datetime(last_sync_time)
+        # D6：软删除消息对双方不可见，离线同步同样过滤（$ne True 兼容历史文档）
         query = {
             "conversation_id": {"$in": conversation_ids},
             "recipient_id": user_id,
-            "_id": {"$gt": cursor_id}
+            "_id": {"$gt": cursor_id},
+            "deleted": {"$ne": True}
         }
 
         cursor = db.messages.find(query).sort("_id", 1)
