@@ -25,151 +25,142 @@ import { zhCN } from 'date-fns/locale';
 // 导入组件
 import HealthDataVisualization from '../../components/HealthManager/HealthDataVisualization';
 import HealthDataForm from '../../components/HealthManager/HealthDataForm';
+import type { HealthDataRecord as HealthDataFormRecord } from '../../components/HealthManager/HealthDataForm';
+import api from '../../services/httpClient';
 
-// 模拟数据
-const mockPatients = [
-  { id: '1', name: '张三', age: 45, gender: '男' },
-  { id: '2', name: '李四', age: 32, gender: '女' },
-  { id: '3', name: '王五', age: 58, gender: '男' },
-  { id: '4', name: '赵六', age: 27, gender: '女' },
-  { id: '5', name: '孙七', age: 62, gender: '男' }
-];
+// 后端患者行形状（GET /api/doctors/patients / GET /api/health-managers/patients，
+// 字段见 backend/app/db/crud_services.py 的 _get_patient_data）
+interface BackendPatientRow {
+  id: string;
+  name: string;
+  age: number;
+  gender: string;
+  diagnosis?: string | null;
+  status?: string | null;
+}
 
-// 模拟健康数据
-const generateMockHealthData = (patientId: string) => {
-  const today = new Date();
-  const data = [];
-  
-  // 生成过去30天的模拟数据
-  for (let i = 0; i < 30; i++) {
-    const date = new Date();
-    date.setDate(today.getDate() - i);
-    
-    // 模拟血压数据
-    if (i % 2 === 0) {
-      data.push({
-        id: `bp-${i}`,
-        patient_id: patientId,
-        data_type: 'vital_signs',
-        vital_sign_type: 'blood_pressure',
-        value: { systolic: Math.floor(110 + Math.random() * 30), diastolic: Math.floor(70 + Math.random() * 20) },
-        unit: 'mmHg',
-        measured_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_by: 'user1',
-        notes: i % 10 === 0 ? '服用降压药后测量' : ''
-      });
-    }
-    
-    // 模拟血糖数据
-    if (i % 3 === 0) {
-      data.push({
-        id: `bs-${i}`,
-        patient_id: patientId,
-        data_type: 'vital_signs',
-        vital_sign_type: 'blood_sugar',
-        value: Math.floor(4 + Math.random() * 3 * 10) / 10,
-        unit: 'mmol/L',
-        measured_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_by: 'user1',
-        notes: i % 9 === 0 ? '餐后两小时测量' : ''
-      });
-    }
-    
-    // 模拟体温数据
-    if (i % 5 === 0) {
-      data.push({
-        id: `temp-${i}`,
-        patient_id: patientId,
-        data_type: 'vital_signs',
-        vital_sign_type: 'temperature',
-        value: 36.2 + Math.random() * 1.5,
-        unit: '°C',
-        measured_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_by: 'user1',
-        notes: ''
-      });
-    }
-    
-    // 模拟心率数据
-    if (i % 2 === 1) {
-      data.push({
-        id: `hr-${i}`,
-        patient_id: patientId,
-        data_type: 'vital_signs',
-        vital_sign_type: 'heart_rate',
-        value: Math.floor(60 + Math.random() * 30),
-        unit: 'bpm',
-        measured_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_by: 'user1',
-        notes: ''
-      });
-    }
-    
-    // 模拟呼吸频率数据
-    if (i % 7 === 0) {
-      data.push({
-        id: `rr-${i}`,
-        patient_id: patientId,
-        data_type: 'vital_signs',
-        vital_sign_type: 'respiratory_rate',
-        value: Math.floor(12 + Math.random() * 8),
-        unit: 'breaths/min',
-        measured_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_by: 'user1',
-        notes: ''
-      });
-    }
-    
-    // 模拟体重数据
-    if (i % 10 === 0) {
-      data.push({
-        id: `weight-${i}`,
-        patient_id: patientId,
-        data_type: 'vital_signs',
-        vital_sign_type: 'weight',
-        value: Math.floor(50 + Math.random() * 40 * 10) / 10,
-        unit: 'kg',
-        measured_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_by: 'user1',
-        notes: ''
-      });
-    }
-    
-    // 模拟实验室检查结果
-    if (i % 15 === 0) {
-      data.push({
-        id: `lab-${i}`,
-        patient_id: patientId,
-        data_type: 'lab_result',
-        test_name: '血常规',
-        result: {
-          'WBC': `${(4 + Math.random() * 6).toFixed(2)} x10^9/L`,
-          'RBC': `${(3.5 + Math.random() * 2).toFixed(2)} x10^12/L`,
-          'HGB': `${(120 + Math.random() * 40).toFixed(1)} g/L`,
-          'PLT': `${(150 + Math.random() * 250).toFixed(0)} x10^9/L`
-        },
-        reference_range: {
-          'WBC': '4.0-10.0 x10^9/L',
-          'RBC': '3.5-5.5 x10^12/L',
-          'HGB': '120-160 g/L',
-          'PLT': '100-300 x10^9/L'
-        },
-        measured_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_at: format(date, "yyyy-MM-dd'T'HH:mm:ss'Z'"),
-        created_by: 'lab_tech_1',
-        notes: ''
-      });
-    }
-  }
-  
-  return data;
+// 后端健康数据行形状（GET /api/health-records/health-data，
+// 见 backend/app/api/routers/health_record_router.py 的 list_health_data）
+interface BackendHealthDataRow {
+  id: string;
+  patient_id: string;
+  data_type: string; // vital_sign / lab_result / ...
+  data: {
+    type?: string; // vital_sign：生命体征类型（blood_pressure、heart_rate、body_temperature...）
+    value?: number | string | Record<string, number>;
+    unit?: string | null;
+    notes?: string | null;
+    [key: string]: unknown;
+  };
+  recorded_by?: string | null;
+  recorded_at: string;
+}
+
+// 页面内部使用的健康数据记录（由后端行归一化而来）
+interface HealthDataRecord {
+  id: string;
+  patient_id: string;
+  data_type: string; // vital_sign / lab_result
+  vital_type?: string;
+  value?: number | string | Record<string, number>;
+  unit?: string;
+  measured_at: string;
+  created_by?: string;
+  notes?: string;
+  // 与 HealthDataVisualization 的 HealthDataPoint 形状保持兼容
+  data: unknown;
+  recorded_at: string;
+  // lab_result 专用字段
+  test_name?: string;
+  result_value?: string | Record<string, unknown>;
+  reference_range?: string;
+  interpretation?: string;
+}
+
+// 患者选择器数据（由后端患者行归一化而来）
+interface PatientOption {
+  id: string;
+  name: string;
+  age: number;
+  gender: string;
+}
+
+// 生命体征类型 → 展示名
+const vitalTypeNames: Record<string, string> = {
+  blood_pressure: '血压',
+  heart_rate: '心率',
+  blood_glucose: '血糖',
+  blood_sugar: '血糖',
+  body_temperature: '体温',
+  temperature: '体温',
+  respiratory_rate: '呼吸频率',
+  blood_oxygen: '血氧',
+  weight: '体重'
 };
+
+// 后端生命体征类型 → 展示名（未覆盖的类型原样展示类型键，不隐藏）
+const formatVitalDisplayName = (vitalType: string): string =>
+  vitalTypeNames[vitalType] ?? vitalType;
+
+// 生命体征值展示：血压为 {systolic, diastolic} 对象，其余为标量
+const formatVitalValue = (record: HealthDataRecord): string => {
+  const { value, unit } = record;
+  if (value !== null && typeof value === 'object') {
+    if ('systolic' in value && 'diastolic' in value) {
+      return `${value.systolic}/${value.diastolic}${unit ? ` ${unit}` : ''}`;
+    }
+    return Object.entries(value)
+      .map(([key, val]) => `${key}: ${String(val)}`)
+      .join('，');
+  }
+  return `${value ?? '--'}${unit ? ` ${unit}` : ''}`;
+};
+
+// 将后端健康数据行归一化为页面内部记录
+const mapBackendHealthDataRow = (row: BackendHealthDataRow): HealthDataRecord => {
+  const base: HealthDataRecord = {
+    id: row.id,
+    patient_id: row.patient_id,
+    data_type: row.data_type,
+    measured_at: row.recorded_at,
+    // 兼容 HealthDataVisualization 的 HealthDataPoint 形状
+    data: row.data,
+    recorded_at: row.recorded_at,
+    created_by: row.recorded_by ?? undefined,
+    notes: row.data?.notes ?? undefined
+  };
+
+  if (row.data_type === 'vital_sign') {
+    return {
+      ...base,
+      vital_type: String(row.data?.type ?? ''),
+      value: row.data?.value,
+      unit: row.data?.unit ?? undefined
+    };
+  }
+
+  if (row.data_type === 'lab_result') {
+    return {
+      ...base,
+      test_name: row.data?.test_name !== undefined ? String(row.data.test_name) : undefined,
+      result_value: row.data?.result_value as string | Record<string, unknown> | undefined,
+      reference_range:
+        row.data?.reference_range !== undefined ? String(row.data.reference_range) : undefined,
+      interpretation:
+        row.data?.interpretation !== undefined ? String(row.data.interpretation) : undefined
+    };
+  }
+
+  return base;
+};
+
+// 将后端患者行归一化为患者选择器数据
+const mapBackendPatientRow = (row: BackendPatientRow): PatientOption => ({
+  id: String(row?.id ?? ''),
+  name: String(row?.name ?? '未知患者'),
+  age: Number(row?.age ?? 0),
+  gender: String(row?.gender ?? '未知')
+});
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -195,35 +186,79 @@ function TabPanel(props: TabPanelProps) {
 
 const DataMonitoring: React.FC = () => {
   const [selectedPatient, setSelectedPatient] = useState<string>('');
-  const [healthData, setHealthData] = useState<any[]>([]);
+  const [patients, setPatients] = useState<PatientOption[]>([]);
+  const [patientsLoading, setPatientsLoading] = useState<boolean>(false);
+  const [healthData, setHealthData] = useState<HealthDataRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [tabValue, setTabValue] = useState<number>(0);
   const [showForm, setShowForm] = useState<boolean>(false);
-  
+
+  // 加载患者列表（真实端点，按当前登录角色选择）
+  useEffect(() => {
+    const loadPatients = async () => {
+      try {
+        setPatientsLoading(true);
+
+        // 后端患者列表按角色分端点：医生 GET /api/doctors/patients、
+        // 健康管理师 GET /api/health-managers/patients（均校验角色，见对应 router）
+        const userResponse = await api.get('users/me');
+        const role = String(userResponse.data?.role ?? '');
+        const listUrl =
+          role === 'doctor'
+            ? 'doctors/patients'
+            : role === 'health_manager'
+              ? 'health-managers/patients'
+              : null;
+
+        if (!listUrl) {
+          setError('当前角色没有可用的患者列表数据源');
+          return;
+        }
+
+        const response = await api.get<BackendPatientRow[]>(listUrl);
+        // 后端直接返回数组；兼容可能的 {status, data} 包装
+        const payload = response.data as BackendPatientRow[] | { data?: BackendPatientRow[] };
+        const rows: BackendPatientRow[] = Array.isArray(payload) ? payload : (payload.data ?? []);
+
+        setPatients(rows.map(mapBackendPatientRow));
+        setError(null);
+      } catch (err) {
+        setError('加载患者列表失败');
+        console.error(err);
+      } finally {
+        setPatientsLoading(false);
+      }
+    };
+
+    loadPatients();
+  }, []);
+
   // 加载患者健康数据
   useEffect(() => {
     if (selectedPatient) {
       loadHealthData(selectedPatient);
     }
   }, [selectedPatient]);
-  
+
   // 处理选择患者
   const handlePatientChange = (event: SelectChangeEvent<string>) => {
     setSelectedPatient(event.target.value as string);
   };
-  
-  // 加载健康数据（模拟API调用）
+
+  // 加载健康数据（真实端点：GET /api/health-records/health-data，patient_id 必填）
   const loadHealthData = async (patientId: string) => {
     try {
       setLoading(true);
-      
-      // 模拟API延迟
-      await new Promise(resolve => setTimeout(resolve, 800));
-      
-      // 获取模拟数据
-      const data = generateMockHealthData(patientId);
-      setHealthData(data);
+
+      const response = await api.get<BackendHealthDataRow[]>('health-records/health-data', {
+        params: { patient_id: patientId }
+      });
+      // 后端直接返回数组；兼容可能的 {status, data} 包装
+      const payload = response.data as BackendHealthDataRow[] | { data?: BackendHealthDataRow[] };
+      const rows: BackendHealthDataRow[] = Array.isArray(payload) ? payload : (payload.data ?? []);
+
+      setHealthData(rows.map(mapBackendHealthDataRow));
       setError(null);
     } catch (err) {
       setError('加载健康数据失败');
@@ -243,26 +278,42 @@ const DataMonitoring: React.FC = () => {
     setShowForm(true);
   };
   
-  // 处理健康数据提交
-  const handleHealthDataSubmit = async (data: any) => {
+  // 处理健康数据提交（真实端点：POST /api/health-records/health-data，
+  // 请求体为 HealthDataCreate：{ patient_id, data_type, data_content, ... }）
+  const handleHealthDataSubmit = async (data: HealthDataFormRecord) => {
     try {
       setLoading(true);
-      
-      // 模拟API延迟
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      // 添加模拟ID和时间戳
-      const newData = {
-        id: `new-${Date.now()}`,
+
+      // 表单 data_type 即后端生命体征 vital_type（blood_pressure/heart_rate/...）；
+      // 血压的收缩/舒张压存于 additional_info，作为对象值提交；
+      // mood/pain/custom 等非生命体征类型后端暂无专用语义，暂以通用健康数据存储
+      const isBloodPressure = data.data_type === 'blood_pressure';
+      const value = isBloodPressure
+        ? {
+            systolic: Number(data.additional_info?.systolic ?? 0),
+            diastolic: Number(data.additional_info?.diastolic ?? 0)
+          }
+        : data.value;
+
+      await api.post('health-records/health-data', {
         patient_id: selectedPatient,
-        created_at: new Date().toISOString(),
-        created_by: 'current_user',
-        ...data
-      };
-      
-      // 更新本地数据
-      setHealthData(prevData => [newData, ...prevData]);
+        data_type: 'vital_sign',
+        data_content: {
+          type: data.data_type,
+          value,
+          unit: data.unit || null,
+          notes: data.notes || null
+        },
+        source: 'manual',
+        recorded_at:
+          typeof data.measured_at === 'string'
+            ? data.measured_at
+            : format(data.measured_at, "yyyy-MM-dd'T'HH:mm:ss")
+      });
+
       setShowForm(false);
+      // 提交后从后端重新拉取，保证展示与真实数据源一致（不做本地乐观插入）
+      await loadHealthData(selectedPatient);
     } catch (err) {
       setError('保存健康数据失败');
       console.error(err);
@@ -272,17 +323,17 @@ const DataMonitoring: React.FC = () => {
   };
   
   // 获取选中患者信息
-  const selectedPatientInfo = selectedPatient ? 
-    mockPatients.find(p => p.id === selectedPatient) : null;
-  
+  const selectedPatientInfo = selectedPatient ?
+    patients.find(p => p.id === selectedPatient) ?? null : null;
+
   // 过滤出不同类型的健康数据
-  const vitalSigns = healthData.filter(data => data.data_type === 'vital_signs');
+  const vitalSigns = healthData.filter(data => data.data_type === 'vital_sign');
   const labResults = healthData.filter(data => data.data_type === 'lab_result');
-  
-  // 最新的生命体征数据
-  const latestVitalSigns: Record<string, any> = {};
+
+  // 最新的生命体征数据（按 vital_type 分组取最新一条）
+  const latestVitalSigns: Record<string, HealthDataRecord> = {};
   vitalSigns.forEach(data => {
-    const type = data.vital_sign_type;
+    const type = data.vital_type ?? '';
     if (!latestVitalSigns[type] || new Date(data.measured_at) > new Date(latestVitalSigns[type].measured_at)) {
       latestVitalSigns[type] = data;
     }
@@ -310,7 +361,7 @@ const DataMonitoring: React.FC = () => {
                 onChange={handlePatientChange}
                 label="选择患者"
               >
-                {mockPatients.map(patient => (
+                {patients.map(patient => (
                   <MenuItem key={patient.id} value={patient.id}>
                     {patient.name} ({patient.gender}, {patient.age}岁)
                   </MenuItem>
@@ -320,8 +371,14 @@ const DataMonitoring: React.FC = () => {
           </Grid>
         </Grid>
       </Paper>
-      
-      {!selectedPatient && (
+
+      {!patientsLoading && !error && patients.length === 0 && (
+        <Alert severity="info" sx={{ mt: 2 }}>
+          暂无患者数据：当前角色名下没有关联患者（后端患者列表为空）
+        </Alert>
+      )}
+
+      {!selectedPatient && patients.length > 0 && (
         <Alert severity="info" sx={{ mt: 2 }}>请选择一名患者查看健康数据</Alert>
       )}
       
@@ -379,40 +436,10 @@ const DataMonitoring: React.FC = () => {
                 最新生命体征
               </Typography>
               <Grid container spacing={2}>
-                {Object.entries(latestVitalSigns).map(([type, data]: [string, any]) => {
-                  let displayValue = '';
-                  let displayName = '';
-                  
-                  switch (type) {
-                    case 'blood_pressure':
-                      displayName = '血压';
-                      displayValue = `${data.value.systolic}/${data.value.diastolic} ${data.unit}`;
-                      break;
-                    case 'blood_sugar':
-                      displayName = '血糖';
-                      displayValue = `${data.value} ${data.unit}`;
-                      break;
-                    case 'temperature':
-                      displayName = '体温';
-                      displayValue = `${data.value.toFixed(1)} ${data.unit}`;
-                      break;
-                    case 'heart_rate':
-                      displayName = '心率';
-                      displayValue = `${data.value} ${data.unit}`;
-                      break;
-                    case 'respiratory_rate':
-                      displayName = '呼吸频率';
-                      displayValue = `${data.value} ${data.unit}`;
-                      break;
-                    case 'weight':
-                      displayName = '体重';
-                      displayValue = `${data.value} ${data.unit}`;
-                      break;
-                    default:
-                      displayName = type;
-                      displayValue = `${data.value} ${data.unit}`;
-                  }
-                  
+                {Object.entries(latestVitalSigns).map(([type, data]) => {
+                  const displayName = formatVitalDisplayName(type);
+                  const displayValue = formatVitalValue(data);
+
                   return (
                     <Grid item xs={6} sm={4} md={3} key={type}>
                       <Card variant="outlined">
@@ -468,39 +495,9 @@ const DataMonitoring: React.FC = () => {
               ) : (
                 <Box sx={{ maxHeight: '400px', overflow: 'auto' }}>
                   {vitalSigns.map((data, index) => {
-                    let displayValue = '';
-                    let displayName = '';
-                    
-                    switch (data.vital_sign_type) {
-                      case 'blood_pressure':
-                        displayName = '血压';
-                        displayValue = `${data.value.systolic}/${data.value.diastolic} ${data.unit}`;
-                        break;
-                      case 'blood_sugar':
-                        displayName = '血糖';
-                        displayValue = `${data.value} ${data.unit}`;
-                        break;
-                      case 'temperature':
-                        displayName = '体温';
-                        displayValue = `${data.value.toFixed(1)} ${data.unit}`;
-                        break;
-                      case 'heart_rate':
-                        displayName = '心率';
-                        displayValue = `${data.value} ${data.unit}`;
-                        break;
-                      case 'respiratory_rate':
-                        displayName = '呼吸频率';
-                        displayValue = `${data.value} ${data.unit}`;
-                        break;
-                      case 'weight':
-                        displayName = '体重';
-                        displayValue = `${data.value} ${data.unit}`;
-                        break;
-                      default:
-                        displayName = data.vital_sign_type;
-                        displayValue = `${data.value} ${data.unit}`;
-                    }
-                    
+                    const displayName = formatVitalDisplayName(data.vital_type ?? '');
+                    const displayValue = formatVitalValue(data);
+
                     return (
                       <React.Fragment key={data.id}>
                         <Box sx={{ p: 2 }}>
@@ -546,33 +543,55 @@ const DataMonitoring: React.FC = () => {
                     <React.Fragment key={data.id}>
                       <Box sx={{ p: 2 }}>
                         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
-                          <Chip 
-                            label={data.test_name} 
-                            color="secondary" 
-                            size="small" 
-                            variant="outlined" 
+                          <Chip
+                            label={data.test_name ?? '未命名检验'}
+                            color="secondary"
+                            size="small"
+                            variant="outlined"
                           />
                           <Typography variant="caption" color="text.secondary">
                             {format(new Date(data.measured_at), 'yyyy-MM-dd HH:mm', { locale: zhCN })}
                           </Typography>
                         </Stack>
-                        
-                        <Grid container spacing={2} sx={{ mt: 1 }}>
-                          {Object.entries(data.result).map(([key, value]) => (
-                            <Grid item xs={12} sm={6} md={4} key={key}>
-                              <Typography variant="body2" color="text.secondary">
-                                {key}
-                              </Typography>
-                              <Typography variant="body1">
-                                {value as string}
-                              </Typography>
+
+                        {/* 后端 lab_result 为单一 result_value（字符串或字典）+ 字符串参考范围 */}
+                        {data.result_value !== null && typeof data.result_value === 'object' ? (
+                          <Grid container spacing={2} sx={{ mt: 1 }}>
+                            {Object.entries(data.result_value).map(([key, value]) => (
+                              <Grid item xs={12} sm={6} md={4} key={key}>
+                                <Typography variant="body2" color="text.secondary">
+                                  {key}
+                                </Typography>
+                                <Typography variant="body1">
+                                  {String(value)}
+                                </Typography>
+                                {data.reference_range && (
+                                  <Typography variant="caption" color="text.secondary">
+                                    参考范围: {data.reference_range}
+                                  </Typography>
+                                )}
+                              </Grid>
+                            ))}
+                          </Grid>
+                        ) : (
+                          <>
+                            <Typography variant="h6">
+                              {data.result_value ?? '--'}
+                            </Typography>
+                            {data.reference_range && (
                               <Typography variant="caption" color="text.secondary">
-                                参考范围: {data.reference_range[key] as string}
+                                参考范围: {data.reference_range}
                               </Typography>
-                            </Grid>
-                          ))}
-                        </Grid>
-                        
+                            )}
+                          </>
+                        )}
+
+                        {data.interpretation && (
+                          <Typography variant="body2" sx={{ mt: 1 }}>
+                            结果解释: {data.interpretation}
+                          </Typography>
+                        )}
+
                         {data.notes && (
                           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                             备注: {data.notes}

@@ -153,30 +153,11 @@ const SystemSettings: React.FC = () => {
     }));
   };
 
-  // 保存设置
-  const handleSaveSettings = async (category: string) => {
-    setLoading(true);
-    try {
-      // 模拟API调用
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      setNotification({
-        open: true,
-        message: `${category}设置已保存`,
-        severity: 'success'
-      });
-    } catch (error) {
-      setNotification({
-        open: true,
-        message: `保存${category}设置失败`,
-        severity: 'error'
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
+  // 后端尚未提供设置保存/备份接口：不提供假成功提示，仅如实告知未实现
+  const SETTINGS_NOT_IMPLEMENTED =
+    '该功能后端未实现：系统尚未提供设置保存/备份接口，本页修改仅在内存中生效，不会持久化到服务器。';
 
-  // 重置设置到默认值
+  // 重置设置到默认值（仅重置本页内存状态）
   const handleResetSettings = (category: string) => {
     switch (category) {
       case 'ui':
@@ -210,7 +191,7 @@ const SystemSettings: React.FC = () => {
     
     setNotification({
       open: true,
-      message: `${category}设置已重置为默认值`,
+      message: `${category}设置已在本页重置为默认值（后端未接入，不会保存到服务器）`,
       severity: 'info'
     });
   };
@@ -228,9 +209,7 @@ const SystemSettings: React.FC = () => {
           localStorage.removeItem(key);
         }
       });
-      
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
+
       setNotification({
         open: true,
         message: '缓存数据已清理',
@@ -356,14 +335,16 @@ const SystemSettings: React.FC = () => {
               />
             </FormGroup>
 
-            <Box sx={{ mt: 3, display: 'flex', gap: 2 }}>
+            <Alert severity="info" sx={{ mt: 3, mb: 2 }}>
+              {SETTINGS_NOT_IMPLEMENTED}
+            </Alert>
+            <Box sx={{ display: 'flex', gap: 2 }}>
               <Button
                 variant="contained"
                 startIcon={<SaveIcon />}
-                onClick={() => handleSaveSettings('界面')}
-                disabled={loading}
+                disabled
               >
-                保存设置
+                保存设置（后端未实现）
               </Button>
               <Button
                 variant="outlined"
@@ -441,14 +422,16 @@ const SystemSettings: React.FC = () => {
               </Select>
             </FormControl>
 
-            <Box sx={{ mt: 3, display: 'flex', gap: 2 }}>
+            <Alert severity="info" sx={{ mt: 3, mb: 2 }}>
+              {SETTINGS_NOT_IMPLEMENTED}
+            </Alert>
+            <Box sx={{ display: 'flex', gap: 2 }}>
               <Button
                 variant="contained"
                 startIcon={<SaveIcon />}
-                onClick={() => handleSaveSettings('安全')}
-                disabled={loading}
+                disabled
               >
-                保存设置
+                保存设置（后端未实现）
               </Button>
               <Button
                 variant="outlined"
@@ -491,22 +474,22 @@ const SystemSettings: React.FC = () => {
               <ListItem>
                 <ListItemText
                   primary="数据同步"
-                  secondary="上次同步时间：2024年1月15日 14:30"
+                  secondary="数据同步功能后端未实现，暂未接入同步数据源，无真实同步记录可展示"
                 />
                 <ListItemSecondaryAction>
-                  <Chip label="已同步" color="success" size="small" />
+                  <Chip label="未接入" size="small" />
                 </ListItemSecondaryAction>
               </ListItem>
-              
+
               <Divider />
-              
+
               <ListItem>
                 <ListItemText
                   primary="离线数据"
-                  secondary="允许在离线状态下访问部分功能和数据"
+                  secondary="该功能后端未实现，暂不可配置"
                 />
                 <ListItemSecondaryAction>
-                  <Switch defaultChecked />
+                  <Switch disabled />
                 </ListItemSecondaryAction>
               </ListItem>
             </List>
@@ -593,14 +576,16 @@ const SystemSettings: React.FC = () => {
                 </Grid>
               </Grid>
 
-              <Box sx={{ mt: 3, display: 'flex', gap: 2 }}>
+              <Alert severity="info" sx={{ mt: 3, mb: 2 }}>
+                {SETTINGS_NOT_IMPLEMENTED}
+              </Alert>
+              <Box sx={{ display: 'flex', gap: 2 }}>
                 <Button
                   variant="contained"
                   startIcon={<SaveIcon />}
-                  onClick={() => handleSaveSettings('系统')}
-                  disabled={loading}
+                  disabled
                 >
-                  保存设置
+                  保存设置（后端未实现）
                 </Button>
                 <Button
                   variant="outlined"
@@ -613,10 +598,9 @@ const SystemSettings: React.FC = () => {
                   variant="outlined"
                   startIcon={<BackupIcon />}
                   color="info"
-                  onClick={() => handleSaveSettings('备份')}
-                  disabled={loading}
+                  disabled
                 >
-                  立即备份
+                  立即备份（后端未实现）
                 </Button>
               </Box>
             </Box>

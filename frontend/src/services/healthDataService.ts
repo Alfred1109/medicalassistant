@@ -1,4 +1,5 @@
 import { HealthDataType, WidgetSize, TimeRange, WidgetType } from '../types/health';
+import api from './httpClient';
 
 // 健康数据类型
 export interface HealthData {
@@ -86,84 +87,6 @@ export const getLatestValue = (data: HealthData[], dataType: HealthDataType): He
   )[0];
 };
 
-// 生成模拟健康数据
-const generateMockHealthData = (): HealthData[] => {
-  const now = new Date();
-  const data: HealthData[] = [];
-  
-  // 心率数据
-  for (let i = 0; i < 24; i++) {
-    const timestamp = new Date(now);
-    timestamp.setHours(now.getHours() - 24 + i);
-    
-    data.push({
-      id: `hr-${i}`,
-      type: 'heart_rate',
-      value: Math.floor(60 + Math.random() * 40), // 60-100 bpm
-      unit: 'bpm',
-      timestamp: timestamp.toISOString()
-    });
-  }
-  
-  // 血压数据
-  for (let i = 0; i < 6; i++) {
-    const timestamp = new Date(now);
-    timestamp.setHours(now.getHours() - 24 + i * 4);
-    
-    const systolic = Math.floor(110 + Math.random() * 30); // 收缩压 110-140
-    const diastolic = Math.floor(60 + Math.random() * 30); // 舒张压 60-90
-    
-    data.push({
-      id: `bp-${i}`,
-      type: 'blood_pressure',
-      value: `${systolic}/${diastolic}`,
-      unit: 'mmHg',
-      timestamp: timestamp.toISOString()
-    });
-  }
-  
-  // 体重数据
-  data.push({
-    id: 'weight-1',
-    type: 'weight',
-    value: 72.5,
-    unit: 'kg',
-    timestamp: new Date().toISOString()
-  });
-  
-  // 血糖数据
-  data.push({
-    id: 'glucose-1',
-    type: 'blood_glucose',
-    value: 95,
-    unit: 'mg/dL',
-    timestamp: new Date().toISOString()
-  });
-  
-  // 步数数据
-  data.push({
-    id: 'steps-1',
-    type: 'steps',
-    value: 8500,
-    unit: '步',
-    timestamp: new Date().toISOString()
-  });
-  
-  // 睡眠数据
-  data.push({
-    id: 'sleep-1',
-    type: 'sleep',
-    value: 7.5,
-    unit: '小时',
-    timestamp: new Date().toISOString()
-  });
-  
-  return data;
-};
-
-// 模拟数据
-const mockHealthData: HealthData[] = generateMockHealthData();
-
 // 默认小部件配置
 const defaultWidgets: WidgetConfig[] = [
   {
@@ -237,54 +160,118 @@ const defaultWidgets: WidgetConfig[] = [
 
 /**
  * 健康数据服务
+ *
+ * 数据来源（真实后端端点，见 backend/app/api/routers/health_record_router.py）：
+ * - GET /api/health-records/health-data  按患者列出健康数据（patient_id 必填）
+ *
+ * 注意：
+ * - 本服务不在请求失败时回退到前端模拟数据（原 generateMockHealthData 已删除），
+ *   请求失败会向上抛出，由调用方渲染错误态。
+ * - 后端要求具体患者 ID，不支持 'me' 之类的占位符；调用方需先解析出真实患者 ID。
+ * - 后端生命体征 vital_type 尚无 sleep / steps 等类型的写入路径（前端类型已定义），
+ *   这些数据自然缺席，由调用方展示诚实空态，不做前端补数。
  */
+
+// 后端健康数据行形状（HealthDataResponse，见 backend/app/schemas/health_record.py）
+interface BackendHealthDataRow {
+  id: string;
+  patient_id: string;
+  data_type: string; // vital_sign / lab_result / ...
+  data: {
+    type?: string; // vital_sign：生命体征类型（heart_rate、blood_pressure、body_temperature...）
+    value?: number | string | Record<string, number>;
+    unit?: string | null;
+    notes?: string | null;
+    [key: string]: unknown;
+  };
+  device_id?: string | null;
+  recorded_at: string;
+}
+
+// 后端生命体征类型 → 前端 HealthDataType 映射；
+// 后端存在但前端类型未覆盖的类型（blood_oxygen、respiratory_rate 等）跳过
+const vitalTypeToHealthDataType: Record<string, HealthDataType> = {
+  heart_rate: 'heart_rate',
+  blood_pressure: 'blood_pressure',
+  weight: 'weight',
+  blood_glucose: 'blood_glucose',
+  blood_sugar: 'blood_glucose',
+  body_temperature: 'temperature',
+  temperature: 'temperature'
+};
+
 const healthDataService = {
   /**
    * 获取用户健康数据
-   * @param userId 用户ID
-   * @param timeRange 时间范围
+   * @param userId 患者 ID（后端 patient_id 必填，不支持 'me' 占位）
+   * @param timeRange 时间范围（映射为 start_date 查询参数）
    * @returns 健康数据数组
    */
   getUserHealthData: async (userId: string, timeRange?: string): Promise<HealthData[]> => {
-    try {
-      // 这里应该从API获取数据，现在使用模拟数据
-      return mockHealthData;
-    } catch (error) {
-      console.error('获取健康数据失败:', error);
-      return [];
+    const params: Record<string, string> = { patient_id: userId };
+
+    if (timeRange) {
+      const days = ({ day: 1, week: 7, month: 30, year: 365 } as Record<string, number>)[timeRange];
+      if (days) {
+        params.start_date = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      }
     }
+
+    const response = await api.get('health-records/health-data', { params });
+
+    // 后端该端点直接返回数组；兼容可能的 {status, data} 包装
+    const rows: BackendHealthDataRow[] = Array.isArray(response.data)
+      ? response.data
+      : (response.data?.data ?? []);
+
+    return rows.flatMap((row): HealthData[] => {
+      // 仅映射生命体征类数据；其余 data_type（lab_result 等）不属于本服务前端类型
+      if (row.data_type !== 'vital_sign') return [];
+
+      const mappedType = vitalTypeToHealthDataType[String(row.data?.type ?? '')];
+      if (!mappedType) return [];
+
+      return [
+        {
+          id: row.id,
+          type: mappedType,
+          value: (row.data?.value ?? '') as number | string,
+          unit: row.data?.unit ?? '',
+          timestamp: row.recorded_at,
+          deviceId: row.device_id ?? undefined,
+          userId: row.patient_id,
+          notes: row.data?.notes ?? undefined
+        }
+      ];
+    });
   },
-  
+
   /**
    * 获取用户仪表盘配置
+   *
+   * 后端暂无仪表盘配置端点（全库无 dashboard/widget 配置路由），
+   * 返回前端默认布局；defaultWidgets 是界面默认配置，不是模拟业务数据。
+   * 后端补齐配置端点后应改为真实读取。
+   *
    * @param userId 用户ID
    * @returns 仪表盘配置
    */
-  getUserDashboardConfig: async (userId: string): Promise<WidgetConfig[]> => {
-    try {
-      // 这里应该从API获取数据，现在使用默认配置
-      return defaultWidgets;
-    } catch (error) {
-      console.error('获取仪表盘配置失败:', error);
-      return defaultWidgets;
-    }
+  getUserDashboardConfig: async (_userId: string): Promise<WidgetConfig[]> => {
+    return defaultWidgets;
   },
-  
+
   /**
    * 保存用户健康仪表盘配置
+   *
+   * 后端暂无仪表盘配置端点，无法持久化：如实返回 false（不再假造保存成功）。
+   * 后端补齐端点后应改为真实提交。
+   *
    * @param userId 用户ID
    * @param widgets 控件配置数组
    * @returns 是否成功
    */
-  saveUserDashboardConfig: async (userId: string, widgets: WidgetConfig[]): Promise<boolean> => {
-    try {
-      // 这里应该调用API保存配置
-      console.log('保存仪表盘配置:', userId, widgets);
-      return true;
-    } catch (error) {
-      console.error('保存仪表盘配置失败:', error);
-      return false;
-    }
+  saveUserDashboardConfig: async (_userId: string, _widgets: WidgetConfig[]): Promise<boolean> => {
+    return false;
   }
 };
 
