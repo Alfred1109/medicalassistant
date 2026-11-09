@@ -124,7 +124,6 @@ Medical Rehabilitation Assistant是一个医疗康复辅助系统，旨在帮助
 
 项目根目录提供 `./start.sh` 与 `./stop.sh`；`./start.sh --check` 检查依赖、MongoDB和端口，`./start.sh --status` 查看项目进程。脚本使用 `backend/.venv` 或 `backend/venv`，可用 `MEDICALASSISTANT_PYTHON` 指定项目Python；MongoDB独立配置和管理，启动器不会安装依赖或启停数据库。若环境中的 `DEBUG` 不是布尔值，可在启动命令前显式设置 `DEBUG=false`，无需修改全局环境。当前前端构建与统一身份仍待修复验收，启动成功不代表业务可用。
 
-旧名称 `start-project.sh`、`stop-project.sh` 仅保留为 `start.sh`、`stop.sh` 的兼容转调，参数和退出码原样传递，不再维护独立启停逻辑；日常使用仍以 `start.sh`、`stop.sh` 为入口。
 
 ## 下一步工作
 
