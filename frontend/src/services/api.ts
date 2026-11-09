@@ -4,6 +4,7 @@ import api from './httpClient';
 import type { LoginCredentials, TokenResponse, User } from '../types/api.types';
 import type { Patient, PatientHealthRecord } from '../types/patient.types';
 import type { Doctor } from '../types/doctor.types';
+import type { FollowUpRecord, FollowUpWorkbenchQuery, FollowUpWorkbenchPage, ReviewFollowUpRequest, ReEvaluateFollowUpRequest } from '../types/followup';
 
 // API服务方法
 export const apiService = {
@@ -69,6 +70,10 @@ export const apiService = {
       }),
   },
   
+  healthManager: {
+    getPatients: (): Promise<AxiosResponse<Patient[]>> => api.get('/health-managers/patients'),
+  },
+
   // 康复计划接口
   rehabilitation: {
     getPlans: (patientId?: string): Promise<AxiosResponse<any[]>> => 
@@ -122,8 +127,20 @@ export const apiService = {
     api.delete(`/health-records/${recordId}`),
 
   // 随访记录
-  getFollowUps: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<any[]>> =>
+  getFollowUps: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<FollowUpRecord[]>> =>
     api.get('/health-records/followups', { params: { patient_id: patientId, ...(params || {}) } }),
+
+  getFollowUpWorkbench: (params: FollowUpWorkbenchQuery, signal?: AbortSignal): Promise<AxiosResponse<FollowUpWorkbenchPage>> =>
+    api.get('/health-records/followup-workbench', { params, signal }),
+
+  getFollowUp: (followUpId: string): Promise<AxiosResponse<FollowUpRecord>> =>
+    api.get(`/health-records/followups/${followUpId}`),
+
+  reviewFollowUp: (followUpId: string, data: ReviewFollowUpRequest): Promise<AxiosResponse<FollowUpRecord>> =>
+    api.post(`/health-records/followups/${followUpId}/review`, data),
+
+  reEvaluateFollowUp: (followUpId: string, data: ReEvaluateFollowUpRequest): Promise<AxiosResponse<FollowUpRecord>> =>
+    api.post(`/health-records/followups/${followUpId}/re-evaluate`, data),
 
   createFollowUp: (followUpData: any): Promise<AxiosResponse<any>> =>
     api.post('/health-records/followups', followUpData),
@@ -131,7 +148,7 @@ export const apiService = {
   updateFollowUp: (followUpId: string, followUpData: any): Promise<AxiosResponse<any>> =>
     api.put(`/health-records/followups/${followUpId}`, followUpData),
 
-  completeFollowUp: (followUpId: string, data?: { actual_date?: string; notes?: string }): Promise<AxiosResponse<any>> =>
+  completeFollowUp: (followUpId: string, data: { expected_version: number; actual_date: string; follow_up_result: string; notes?: string }): Promise<AxiosResponse<any>> =>
     api.post(`/health-records/followups/${followUpId}/complete`, data ?? {}),
 
   cancelFollowUp: (followUpId: string, data: { cancel_reason: string }): Promise<AxiosResponse<any>> =>
@@ -196,4 +213,4 @@ export const apiService = {
   },
 };
 
-export default api; 
+export default api;

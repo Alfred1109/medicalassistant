@@ -12,7 +12,8 @@ from pymongo.errors import OperationFailure
 
 from app.core.exceptions import AppBaseException
 from app.models.health_record import FollowUpRecord
-from app.schemas.followup import CancelFollowUpRequest
+from app.schemas.followup import (
+    CancelFollowUpRequest, CompleteFollowUpRequest, ReviewFollowUpRequest)
 from app.services.followup_service import FollowupService
 from app.integrations.forms import service, models
 from test_integration_forms_contract import FakeRemote, make_remote_client, make_operator, OPERATOR_ID, PATIENT_ID
@@ -21,6 +22,9 @@ from test_integration_forms_contract import FakeRemote, make_remote_client, make
 @unittest.skipUnless(os.environ.get("REHAB_TEST_MONGO_URI"), "isolated replica-set URI not supplied")
 class FormsMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        fill_feature = patch.dict(os.environ, {"FORM_PLATFORM_FILL_ENABLED": "true"})
+        fill_feature.start()
+        self.addCleanup(fill_feature.stop)
         uri = os.environ["REHAB_TEST_MONGO_URI"]
         if not uri.startswith("mongodb://127.0.0.1:"):
             raise RuntimeError("only an explicit loopback test instance is allowed")
@@ -71,6 +75,8 @@ class FormsMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
         task = await self.db[models.COLLECTION_NAME].find_one({"_id": ObjectId(self.task_id)})
         self.assertEqual(visit["status"], "awaiting_fill")
         self.assertNotIn("effective_response", visit)
+        self.assertNotIn("current_evidence", visit)
+        self.assertNotIn("submission_history", visit)
         self.assertNotEqual(task["status"], "confirmed")
 
 
@@ -107,9 +113,70 @@ class FormsMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("effective_response", visit)
         self.assertNotEqual(task["status"], "confirmed")
 
+    async def test_manual_return_external_confirmation_has_only_external_current_evidence(self):
+        followups = FollowupService(self.db)
+        node = await followups.get_followup_record(self.visit_id)
+        submitted = await followups.complete_followup(self.visit_id,
+            CompleteFollowUpRequest(expected_version=node.mutation_version,
+                notes="manual result", follow_up_result="old manual result"), operator_id=OPERATOR_ID)
+        returned = await followups.review_followup(self.visit_id,
+            ReviewFollowUpRequest(expected_version=submitted.mutation_version, decision="returned"),
+            reviewer_id=OPERATOR_ID)
+        await service.confirm_fill_task(self.db, self.remote_client, self.task_id, self.operator)
+        current = await followups.get_followup_record(self.visit_id)
+        self.assertEqual(current.current_evidence["source"], "external_form")
+        self.assertIsNone(current.completion_data)
+        self.assertIsNone(current.follow_up_result)
+        self.assertEqual(current.answers, [])
+        self.assertEqual(current.effective_response["response_id"], 42)
+        self.assertEqual([entry["source"] for entry in current.submission_history],
+                         ["manual_entry", "external_form"])
+        self.assertEqual(current.submission_history[0]["snapshot"]["notes"], "manual result")
+        self.assertEqual(current.submission_history[-1]["confirmation"]["response_id"], 42)
+        self.assertEqual(current.submission_history[-1]["submitted_by"], OPERATOR_ID)
+        self.assertEqual(returned.review["history"][0]["current_evidence"]["source"], "manual_entry")
+        approved = await followups.review_followup(self.visit_id,
+            ReviewFollowUpRequest(expected_version=current.mutation_version, decision="approved"),
+            reviewer_id=OPERATOR_ID)
+        self.assertEqual(approved.review["history"][-1]["verified_confirmation"]["response_id"], 42)
+
+    async def test_external_return_manual_submission_has_only_manual_current_evidence(self):
+        followups = FollowupService(self.db)
+        await service.confirm_fill_task(self.db, self.remote_client, self.task_id, self.operator)
+        current = await followups.get_followup_record(self.visit_id)
+        returned = await followups.review_followup(self.visit_id,
+            ReviewFollowUpRequest(expected_version=current.mutation_version, decision="returned"),
+            reviewer_id=OPERATOR_ID)
+        manual = await followups.complete_followup(self.visit_id,
+            CompleteFollowUpRequest(expected_version=returned.mutation_version, notes="new manual"),
+            operator_id=OPERATOR_ID)
+        self.assertEqual(manual.current_evidence["source"], "manual_entry")
+        self.assertIsNone(manual.effective_response)
+        self.assertEqual([entry["source"] for entry in manual.submission_history],
+                         ["external_form", "manual_entry"])
+        self.assertEqual(manual.submission_history[0]["confirmation"]["response_id"], 42)
+        task = await self.db[models.COLLECTION_NAME].find_one({"_id": ObjectId(self.task_id)})
+        self.assertEqual(task["status"], "confirmed")  # confirmed historical task remains intact
+
+    async def test_manual_source_replacement_rolls_back_with_audit_failure(self):
+        followups = FollowupService(self.db)
+        await service.confirm_fill_task(self.db, self.remote_client, self.task_id, self.operator)
+        before = await self.db.followup_records.find_one({"_id": ObjectId(self.visit_id)})
+        with patch.object(followups, "_write_audit", side_effect=RuntimeError("synthetic audit failure")):
+            with self.assertRaises(RuntimeError):
+                await followups.complete_followup(self.visit_id,
+                    CompleteFollowUpRequest(expected_version=before["mutation_version"], notes="replacement"),
+                    operator_id=OPERATOR_ID)
+        self.assertEqual(await self.db.followup_records.find_one({"_id": ObjectId(self.visit_id)}), before)
+
 
 @unittest.skipUnless(os.environ.get("REHAB_TEST_STANDALONE_URI"), "isolated standalone URI not supplied")
 class FormsStandaloneRejectionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        fill_feature = patch.dict(os.environ, {"FORM_PLATFORM_FILL_ENABLED": "true"})
+        fill_feature.start()
+        self.addCleanup(fill_feature.stop)
+
     async def test_unlinked_creation_is_rejected_before_remote_side_effect(self):
         uri = os.environ["REHAB_TEST_STANDALONE_URI"]
         if not uri.startswith("mongodb://127.0.0.1:"):

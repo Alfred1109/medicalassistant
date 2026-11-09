@@ -1,8 +1,7 @@
 """随访入口的患者范围授权；复用共享医患归属规则。"""
-from bson import ObjectId
 from fastapi import HTTPException
 
-from app.core.patient_access import ensure_patient_access
+from app.core.patient_access import assigned_patient_query, ensure_patient_access
 
 
 async def ensure_followup_patient_access(db, patient_id, actor, *, write=False):
@@ -25,8 +24,5 @@ async def followup_patient_scope(db, actor):
         return [str(actor.id)]
     if actor.role not in {"doctor", "health_manager"}:
         raise HTTPException(status_code=403, detail="无权访问随访记录")
-    identifiers = [str(actor.id)]
-    if ObjectId.is_valid(str(actor.id)):
-        identifiers.append(ObjectId(str(actor.id)))
-    cursor = db.users.find({"role": "patient", "practitioners": {"$in": identifiers}}, {"_id": 1})
+    cursor = db.users.find(assigned_patient_query(str(actor.id), actor.role), {"_id": 1})
     return [str(doc["_id"]) async for doc in cursor]

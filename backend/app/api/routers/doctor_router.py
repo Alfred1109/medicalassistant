@@ -5,8 +5,9 @@ from app.schemas.user import UserResponse
 from app.schemas.followup import FollowUpRecordCreate, FollowUpRecordResponse
 from app.core.dependencies import get_current_user, get_database, format_mongo_doc, get_health_record_for_patient, get_followup_service
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.db.crud_services import PatientCRUD, DoctorCRUD
-from app.models.user import Doctor, Patient
+from app.db.crud_services import PatientCRUD
+from app.models.user import Patient
+from app.core.patient_access import assigned_patient_query, ensure_patient_access, PatientAccessError
 from app.services.followup_service import FollowupService
 from app.core.followup_access import ensure_followup_patient_access, followup_patient_scope
 from bson.objectid import ObjectId
@@ -26,7 +27,6 @@ async def get_doctor_patients(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     
     # 从数据库获取患者数据
-    doctor_crud = DoctorCRUD(db, Doctor)
     patient_crud = PatientCRUD(db, Patient)
 
     try:
@@ -56,41 +56,13 @@ async def get_patient_health_record(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     
     try:
-        # 检查该患者是否属于当前医生
-        doctor_crud = DoctorCRUD(db, Doctor)
-        doctor_id = current_user.id
-        patient_ids = await doctor_crud.get_patients(doctor_id)
-        
-        # 兼容处理医生记录中没有patients字段或为空的情况
-        if not patient_ids:
-            # 直接从数据库检查医生记录
-            doctor_collection = db["users"]
-            doctor = await doctor_collection.find_one({"_id": ObjectId(doctor_id), "role": "doctor"})
-            if doctor and "patients" in doctor:
-                patient_ids = doctor["patients"]
-        
-        # 检查患者是否属于当前医生
-        if patient_id not in patient_ids:
-            # 尝试直接查询患者信息确认是否存在
-            patient_collection = db["users"]
-            patient = await patient_collection.find_one({"_id": ObjectId(patient_id), "role": "patient"})
-            if not patient:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到患者信息")
-            
-            # 如果患者存在但不属于当前医生，提示权限不足
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="您无权查看该患者的健康档案")
+        patient = await ensure_patient_access(
+            db, patient_id, str(current_user.id), current_user.role)
         
         # 使用通用函数获取健康档案
         record = await get_health_record_for_patient(patient_id, db)
         
         if not record:
-            # 获取患者基本信息，创建空的健康档案结构
-            patient_collection = db["users"]
-            patient = await patient_collection.find_one({"_id": ObjectId(patient_id), "role": "patient"})
-            
-            if not patient:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到患者信息")
-                
             # 构建基本的健康档案结构
             return {
                 "id": patient_id,
@@ -126,7 +98,7 @@ async def get_patient_health_record(
         }
         
         return formatted_record
-    except HTTPException:
+    except (HTTPException, PatientAccessError):
         raise
     except Exception as e:
         print(f"获取患者健康档案时出错: {str(e)}")
@@ -199,18 +171,7 @@ async def get_patient_monitoring_data(
     if not ObjectId.is_valid(patient_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到患者信息")
     try:
-        doctor_id = current_user.id
-        # 校验患者存在且属于当前医生（与健康档案端点一致的授权语义）
-        doctor = await db["users"].find_one({"_id": ObjectId(doctor_id), "role": "doctor"})
-        patient_ids = (doctor or {}).get("patients") or []
-        if patient_id not in [str(p) for p in patient_ids]:
-            patient = await db["users"].find_one(
-                {"_id": ObjectId(patient_id), "role": "patient"})
-            if not patient:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                    detail="未找到患者信息")
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                                detail="您无权查看该患者的监测数据")
+        await ensure_patient_access(db, patient_id, str(current_user.id), current_user.role)
 
         plans_collection = db["rehab_plans"]
         total_plans = await plans_collection.count_documents({"patient_id": patient_id})
@@ -237,7 +198,7 @@ async def get_patient_monitoring_data(
             },
             "completedSessionsLast30Days": completed_sessions,
         }
-    except HTTPException:
+    except (HTTPException, PatientAccessError):
         raise
     except Exception as e:
         print(f"获取患者监测数据时出错: {str(e)}")
@@ -279,7 +240,7 @@ async def get_doctor_statistics(
     """获取医生工作统计数据（真实聚合，2026-11-08 替换存根空对象）
 
     字段语义（均来自真实集合，无数据时如实为 0）：
-    - patientCount: 该医生关联的患者数（users.doctors.patients 列表长度）
+    - patientCount: 患者 practitioners 中关联该医生的真实患者数
     - rehabPlans:   该医生作为 practitioner_id 的康复计划总数/进行中/已完成
                     （rehab_plans 集合，status: active/completed）
     - completedSessionsThisMonth: 该医生患者本月完成的训练进度记录数
@@ -295,7 +256,8 @@ async def get_doctor_statistics(
         if not doctor:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到医生信息")
 
-        patient_ids = doctor.get("patients") or []
+        patient_ids = [str(patient["_id"]) async for patient in
+                       db["users"].find(assigned_patient_query(str(doctor_id)), {"_id": 1})]
         plans_collection = db["rehab_plans"]
         total_plans = await plans_collection.count_documents({"practitioner_id": doctor_id})
         active_plans = await plans_collection.count_documents(
@@ -323,7 +285,7 @@ async def get_doctor_statistics(
             },
             "completedSessionsThisMonth": completed_sessions,
         }
-    except HTTPException:
+    except (HTTPException, PatientAccessError):
         raise
     except Exception as e:
         print(f"获取医生统计数据时出错: {str(e)}")
@@ -353,4 +315,4 @@ async def create_informed_consent(
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     # 这里调用相应的服务层功能
-    return {"id": "new_consent_id"} 
+    return {"id": "new_consent_id"}

@@ -24,59 +24,22 @@ import type { SelectChangeEvent } from '@mui/material';
 import { LocalizationProvider, DateTimePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { zhCN } from 'date-fns/locale';
+import { format } from 'date-fns';
 import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
 import type { Patient } from '../../types/patient.types';
 
 // 导入组件
 import FollowUpList from '../../components/HealthManager/FollowUpList';
+import FollowUpReviewDialog from '../../components/HealthManager/FollowUpReviewDialog';
+import FollowUpManualEntryDialog from '../../components/HealthManager/FollowUpManualEntryDialog';
+import FollowUpReEvaluateDialog from '../../components/HealthManager/FollowUpReEvaluateDialog';
+import FollowUpDetailsDialog from '../../components/HealthManager/FollowUpDetailsDialog';
 
-// 随访类型选项（对齐 backend FollowUpType，schemas/health_record.py:28-35）
-const followUpTypes = [
-  { value: 'phone', label: '电话随访' },
-  { value: 'online', label: '线上随访' },
-  { value: 'onsite', label: '门诊随访' },
-  { value: 'home_visit', label: '家庭访视' },
-  { value: 'remote_monitoring', label: '远程监测' },
-  { value: 'group', label: '小组随访' },
-  { value: 'other', label: '其他' },
-];
-
-// 随访状态选项（对齐 backend FollowUpStatus，schemas/health_record.py:39-44）
-const followUpStatuses = [
-  { value: 'scheduled', label: '已计划' },
-  { value: 'completed', label: '已完成' },
-  { value: 'canceled', label: '已取消' },
-  { value: 'missed', label: '已错过' },
-  { value: 'rescheduled', label: '已重新安排' },
-];
-
-// 随访记录类型（对齐 backend 第二代 FollowUpRecordResponse，schemas/health_record.py:539-555）
-interface FollowUpRecord {
-  id: string;
-  patient_id: string;
-  created_by: string;
-  provider_id: string;
-  follow_up_type: string;
-  scheduled_date: string;
-  actual_date?: string | null;
-  status: string;
-  notes?: string | null;
-  description: string;
-  created_at: string;
-  updated_at: string;
-  // 客户端根据患者列表拼接的展示字段，后端不返回
-  patient_name?: string;
-}
-
-// 随访筛选条件（与 FollowUpList 的 FollowUpFilters 保持结构一致）
-interface FollowUpFilters {
-  follow_up_type?: string;
-  status?: string;
-  start_date?: string | null;
-  end_date?: string | null;
-  patient_name?: string;
-}
+import type { FollowUpFilters, FollowUpRecord } from '../../types/followup';
+import { followUpTypes, getFollowUpStatusInfo, manualEntryText } from '../../constants/followup';
+import { canReEvaluateFollowUp, canReviewFollowUp } from '../../utils/followupReview';
+import { useFollowUpWorkbench } from '../../hooks/useFollowUpWorkbench';
 
 // 从 axios 错误中提取可读信息
 const getApiErrorMessage = (err: unknown, fallback: string): string => {
@@ -88,11 +51,15 @@ const getApiErrorMessage = (err: unknown, fallback: string): string => {
 };
 
 const ALL_PATIENTS = 'all';
-// 后端 GET /health-records/followups 单次最多返回 limit 条，且不返回总数，取上限后前端分页
-const FETCH_LIMIT = 100;
 
 const FollowUpManagement: React.FC = () => {
   const currentUser = useSelector((state: RootState) => state.auth.user);
+  // A different account receives a fresh workspace, including all dialogs and
+  // patient choices; no prior identity's content is rendered during effects.
+  return <FollowUpWorkspace key={currentUser ? `${currentUser.id}:${currentUser.role}` : 'anonymous'} currentUser={currentUser} />;
+};
+
+const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = ({ currentUser }) => {
 
   // 患者列表状态
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -101,15 +68,23 @@ const FollowUpManagement: React.FC = () => {
   const [selectedPatientId, setSelectedPatientId] = useState<string>(ALL_PATIENTS);
 
   // 随访列表状态
-  const [followUps, setFollowUps] = useState<FollowUpRecord[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [filters, setFilters] = useState<FollowUpFilters>({});
+  const today = format(new Date(), 'yyyy-MM-dd');
+  const hasFilters = Object.values(filters).some(value => Boolean(value));
+  const identity = currentUser ? `${currentUser.id}:${currentUser.role}` : '';
+  const { records: followUps, total, loading, error, reload: loadFollowUps } = useFollowUpWorkbench(
+    identity, selectedPatientId, filters, page, pageSize, setPage);
+  const applyFilters = (next: FollowUpFilters) => { setPage(0); setFilters(next); };
+  const changePageSize = (size: number) => { setPage(0); setPageSize(size); };
 
   // 对话框状态
   const [createOpen, setCreateOpen] = useState(false);
+  const [reviewId, setReviewId] = useState<string | null>(null);
+  const [detailsId, setDetailsId] = useState<string | null>(null);
+  const [reEvaluateId, setReEvaluateId] = useState<string | null>(null);
+  const [manualEntryId, setManualEntryId] = useState<string | null>(null);
   const [editTarget, setEditTarget] = useState<FollowUpRecord | null>(null);
   const [cancelTarget, setCancelTarget] = useState<FollowUpRecord | null>(null);
   const [rescheduleTarget, setRescheduleTarget] = useState<FollowUpRecord | null>(null);
@@ -133,12 +108,10 @@ const FollowUpManagement: React.FC = () => {
   const [editForm, setEditForm] = useState<{
     follow_up_type: string;
     scheduled_date: Date;
-    status: string;
     description: string;
   }>({
     follow_up_type: 'phone',
     scheduled_date: new Date(),
-    status: 'scheduled',
     description: ''
   });
 
@@ -162,10 +135,18 @@ const FollowUpManagement: React.FC = () => {
   // 加载医生的患者列表（真实接口 GET /doctors/patients）
   useEffect(() => {
     let cancelled = false;
+    setPatients([]);
+    setPatientsError(null);
+    setSelectedPatientId(ALL_PATIENTS);
+    setPage(0);
+    setFilters({});
+    setCreateOpen(false); setReviewId(null); setDetailsId(null); setReEvaluateId(null);
+    setManualEntryId(null); setEditTarget(null); setCancelTarget(null); setRescheduleTarget(null);
     const loadPatients = async () => {
       try {
         setPatientsLoading(true);
-        const response = await apiService.doctor.getPatients();
+        if (!identity) return;
+        const response = await (currentUser?.role === 'health_manager' ? apiService.healthManager.getPatients() : apiService.doctor.getPatients());
         if (cancelled) return;
         const list = Array.isArray(response.data) ? response.data : [];
         setPatients(list);
@@ -183,80 +164,7 @@ const FollowUpManagement: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  // 组装 GET /health-records/followups 查询参数（后端要求 patient_id 必填）
-  const buildQueryParams = (f: FollowUpFilters) => ({
-    status: f.status || undefined,
-    follow_up_type: f.follow_up_type || undefined,
-    start_date: f.start_date || undefined,
-    end_date: f.end_date || undefined,
-    skip: 0,
-    limit: FETCH_LIMIT
-  });
-
-  // 加载随访记录（真实接口 GET /health-records/followups，按患者逐个查询后合并）
-  const loadFollowUps = async () => {
-    if (patientsLoading || patients.length === 0) {
-      return;
-    }
-    const targets = selectedPatientId === ALL_PATIENTS
-      ? patients
-      : patients.filter(p => p.id === selectedPatientId);
-    if (targets.length === 0) {
-      setFollowUps([]);
-      return;
-    }
-
-    try {
-      setLoading(true);
-      const responses = await Promise.all(
-        targets.map(patient => apiService.getFollowUps(patient.id, buildQueryParams(filters)))
-      );
-      const nameById = new Map(patients.map(p => [p.id, p.name]));
-      const merged: FollowUpRecord[] = [];
-      responses.forEach(response => {
-        const items = Array.isArray(response.data) ? response.data : [];
-        items.forEach(item => {
-          merged.push({
-            ...item,
-            patient_name: nameById.get(item.patient_id)
-          });
-        });
-      });
-
-      // 患者姓名过滤由前端完成（后端无 patient_name 查询参数）
-      let result = merged;
-      if (filters.patient_name) {
-        const keyword = filters.patient_name.toLowerCase();
-        result = merged.filter(record =>
-          (record.patient_name || record.patient_id).toLowerCase().includes(keyword)
-        );
-      }
-
-      // 按计划时间倒序，便于查看最近的随访安排
-      result = [...result].sort((a, b) =>
-        a.scheduled_date < b.scheduled_date ? 1 : -1
-      );
-
-      setFollowUps(result);
-      setError(null);
-    } catch (err) {
-      setError(getApiErrorMessage(err, '加载随访记录失败'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadFollowUps();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, filters, selectedPatientId, patients]);
-
-  // 切换患者或筛选条件时回到第一页
-  useEffect(() => {
-    setPage(0);
-  }, [filters, selectedPatientId]);
+  }, [identity]);
 
   // -------- 新建随访 --------
   const handleAddFollowUp = () => {
@@ -308,7 +216,6 @@ const FollowUpManagement: React.FC = () => {
     setEditForm({
       follow_up_type: record.follow_up_type,
       scheduled_date: record.scheduled_date ? new Date(record.scheduled_date) : new Date(),
-      status: record.status,
       description: record.description || ''
     });
     setEditTarget(record);
@@ -321,7 +228,6 @@ const FollowUpManagement: React.FC = () => {
       await apiService.updateFollowUp(editTarget.id, {
         follow_up_type: editForm.follow_up_type,
         scheduled_date: editForm.scheduled_date.toISOString(),
-        status: editForm.status,
         description: editForm.description.trim()
       });
       setEditTarget(null);
@@ -334,20 +240,8 @@ const FollowUpManagement: React.FC = () => {
     }
   };
 
-  // -------- 完成随访（POST /health-records/followups/{id}/complete） --------
-  const handleCompleteFollowUp = async (id: string) => {
-    const record = followUps.find(item => item.id === id);
-    try {
-      await apiService.completeFollowUp(id, {
-        actual_date: new Date().toISOString(),
-        notes: record?.notes || undefined
-      });
-      showSnackbar('随访已标记为完成', 'success');
-      await loadFollowUps();
-    } catch (err) {
-      showSnackbar(getApiErrorMessage(err, '操作失败'), 'error');
-    }
-  };
+  // -------- 提交手工录入（POST /health-records/followups/{id}/complete） --------
+  const handleCompleteFollowUp = (id: string) => setManualEntryId(id);
 
   // -------- 取消随访（POST /health-records/followups/{id}/cancel） --------
   const handleCancelFollowUp = (id: string) => {
@@ -416,10 +310,8 @@ const FollowUpManagement: React.FC = () => {
     setSnackbar(prev => ({ ...prev, open: false }));
   };
 
-  // 前端分页（后端列表接口不返回总数）
-  const paginatedFollowUps = followUps.slice(page * pageSize, (page + 1) * pageSize);
-
   const handlePatientChange = (event: SelectChangeEvent<string>) => {
+    setPage(0);
     setSelectedPatientId(event.target.value);
   };
 
@@ -439,18 +331,18 @@ const FollowUpManagement: React.FC = () => {
         随访管理
       </Typography>
       <Typography variant="body2" color="text.secondary" paragraph>
-        查看并管理患者的随访计划。列表与新建、完成、取消、重新安排操作均已接入健康档案随访接口；
+        查看并管理患者的随访计划。手工录入后进入待审阅，责任医护审阅通过后完成随访；
         删除功能待随访领域收敛后开放。
       </Typography>
       <Divider sx={{ mb: 2 }} />
 
-      {/* 患者筛选：后端随访列表接口按 patient_id 查询，需先选择患者范围 */}
+      {/* 患者选项只用于筛选和创建；列表由工作台接口统一授权并分页。 */}
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
         <FormControl size="small" sx={{ minWidth: 280 }}>
           <InputLabel id="doctor-followup-patient-label">患者范围</InputLabel>
           <Select
             labelId="doctor-followup-patient-label"
-            value={patients.length === 0 ? '' : selectedPatientId}
+            value={selectedPatientId}
             label="患者范围"
             onChange={handlePatientChange}
             disabled={patientsLoading || patients.length === 0}
@@ -472,24 +364,62 @@ const FollowUpManagement: React.FC = () => {
         </Alert>
       )}
 
+      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
+        <Button variant={!hasFilters ? 'contained' : 'outlined'} onClick={() => applyFilters({})}>全部随访</Button>
+        <Button variant={filters.status === 'in_review' ? 'contained' : 'outlined'} onClick={() => applyFilters({ status: 'in_review' })}>待医护审阅</Button>
+        <Button variant={!filters.status && filters.start_date === today && filters.end_date === today ? 'contained' : 'outlined'} onClick={() => { const day = format(new Date(), 'yyyy-MM-dd'); applyFilters({ start_date: day, end_date: day }); }}>今日安排</Button>
+      </Stack>
+
       <FollowUpList
-        records={paginatedFollowUps}
+        records={followUps}
         loading={loading}
         error={error || undefined}
-        totalCount={followUps.length}
+        totalCount={total}
         page={page}
         pageSize={pageSize}
         onPageChange={setPage}
-        onPageSizeChange={setPageSize}
+        onPageSizeChange={changePageSize}
         onAdd={handleAddFollowUp}
         onEdit={handleEditFollowUp}
+        onView={setDetailsId}
+        onReEvaluate={setReEvaluateId}
+        canReEvaluate={record => canReEvaluateFollowUp(record, currentUser)}
         onComplete={handleCompleteFollowUp}
+        onReview={setReviewId}
+        canReview={record => canReviewFollowUp(record, currentUser)}
         onCancel={handleCancelFollowUp}
         onReschedule={handleRescheduleFollowUp}
         onDelete={handleDeleteFollowUp}
-        onFilterChange={setFilters}
+        onFilterChange={applyFilters}
         onRefresh={loadFollowUps}
         currentFilters={filters}
+      />
+
+      <FollowUpDetailsDialog
+        followUpId={detailsId}
+        actor={currentUser ? { id: currentUser.id, role: currentUser.role } : null}
+        onClose={() => setDetailsId(null)}
+        onOpen={setDetailsId}
+        onReEvaluate={id => { setDetailsId(null); setReEvaluateId(id); }}
+      />
+      <FollowUpReEvaluateDialog
+        followUpId={reEvaluateId}
+        actor={currentUser ? { id: currentUser.id, role: currentUser.role } : null}
+        onClose={() => setReEvaluateId(null)}
+        onCreated={async record => { setReEvaluateId(null); setDetailsId(record.id); showSnackbar('复评节点已创建', 'success'); await loadFollowUps(); }}
+      />
+
+      <FollowUpManualEntryDialog
+        followUpId={manualEntryId}
+        onClose={() => setManualEntryId(null)}
+        onSaved={async () => { setManualEntryId(null); showSnackbar(manualEntryText.success, 'success'); await loadFollowUps(); }}
+      />
+
+      <FollowUpReviewDialog
+        followUpId={reviewId}
+        actor={currentUser ? { id: currentUser.id, role: currentUser.role } : null}
+        onClose={() => setReviewId(null)}
+        onReviewed={async () => { setReviewId(null); showSnackbar('审阅结果已保存', 'success'); await loadFollowUps(); }}
       />
 
       {/* 新建随访对话框：对齐后端 FollowUpRecordCreate（第二代）必填字段 */}
@@ -604,20 +534,12 @@ const FollowUpManagement: React.FC = () => {
               </Select>
             </FormControl>
 
-            <FormControl fullWidth required>
-              <InputLabel id="edit-followup-status-label">状态</InputLabel>
-              <Select
-                labelId="edit-followup-status-label"
-                value={editForm.status}
-                label="状态"
-                onChange={(e) => setEditForm(prev => ({ ...prev, status: e.target.value }))}
-                disabled={submitting}
-              >
-                {followUpStatuses.map(status => (
-                  <MenuItem key={status.value} value={status.value}>{status.label}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <TextField
+              label="状态"
+              value={getFollowUpStatusInfo(editTarget?.status ?? '').label}
+              InputProps={{ readOnly: true }}
+              helperText="状态由对应的随访业务操作更新"
+            />
 
             <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={zhCN}>
               <DateTimePicker

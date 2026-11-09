@@ -3,7 +3,7 @@
 包括健康档案、健康数据等；随访相关 schema 已拆分至 .followup（FU01 S1），
 本文件保留转发导入以兼容既有引用（路由层 S2 收敛后移除）。
 """
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from enum import Enum
@@ -131,121 +131,6 @@ class RecordVersion(BaseModel):
     created_by: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
     change_description: Optional[str] = None
-
-
-# ------------ 请求响应模型 ------------
-
-# 健康档案创建请求模型
-class HealthRecordCreate(BaseModel):
-    patient_id: str
-    record_type: RecordType
-    title: Optional[str] = None
-    content: Dict[str, Any]
-    created_by: str
-    organization_id: Optional[str] = None
-    attachments: Optional[List[Attachment]] = None
-    tags: Optional[List[str]] = None
-    visibility: RecordVisibility = RecordVisibility.ALL
-    metadata: Optional[Dict[str, Any]] = None
-
-    @validator('title', always=True)
-    def set_default_title(cls, v, values):
-        if not v and 'record_type' in values:
-            return f"{values['record_type'].capitalize()} Record"
-        return v
-
-
-# 健康档案更新请求模型
-class HealthRecordUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[Dict[str, Any]] = None
-    attachments: Optional[List[Attachment]] = None
-    tags: Optional[List[str]] = None
-    visibility: Optional[RecordVisibility] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-
-# 健康档案响应模型
-class HealthRecordResponse(BaseModel):
-    id: str
-    patient_id: str
-    record_type: str
-    title: str
-    content: Dict[str, Any]
-    created_by: str
-    organization_id: Optional[str] = None
-    attachments: List[Attachment] = []
-    tags: List[str] = []
-    visibility: str
-    created_at: datetime
-    updated_at: datetime
-    versions: Optional[List[RecordVersion]] = None
-    metadata: Dict[str, Any] = {}
-
-    class Config(PydanticConfig):
-        pass
-
-
-# 健康数据创建请求模型
-class HealthDataCreate(BaseModel):
-    patient_id: str
-    data_type: str  # vital_sign, lab_result, etc.
-    data: Dict[str, Any]
-    source: Optional[str] = None  # device, manual, imported
-    device_id: Optional[str] = None
-    recorded_by: Optional[str] = None
-    recorded_at: Optional[datetime] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-
-# 健康数据响应模型
-class HealthDataResponse(BaseModel):
-    id: str
-    patient_id: str
-    data_type: str
-    data: Dict[str, Any]
-    source: Optional[str] = None
-    device_id: Optional[str] = None
-    recorded_by: Optional[str] = None
-    recorded_at: datetime
-    created_at: datetime
-    updated_at: datetime
-    metadata: Dict[str, Any] = {}
-
-    class Config(PydanticConfig):
-        pass
-
-
-# 健康档案统计响应模型
-class HealthRecordStats(BaseModel):
-    total_records: int
-    record_types: Dict[str, int]
-    recent_updates: List[datetime]
-    upcoming_followups: Optional[List[Dict[str, Any]]] = None
-    pending_actions: Optional[List[Dict[str, Any]]] = None
-
-    class Config:
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
-
-
-# 健康时间线项目模型
-class HealthTimelineItem(BaseModel):
-    id: str
-    patient_id: str
-    item_type: str  # health_record, follow_up, medication, vital_sign, etc.
-    title: str
-    description: Optional[str] = None
-    occurred_at: datetime
-    created_by: Optional[str] = None
-    related_ids: Optional[List[str]] = None
-    metadata: Dict[str, Any] = {}
-
-    class Config:
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat()
-        }
 
 
 # 健康档案相关模型定义
@@ -436,4 +321,4 @@ class HealthTimelineItem(BaseModel):
     class Config:
         json_encoders = {
             datetime: lambda dt: dt.isoformat()
-        } 
+        }

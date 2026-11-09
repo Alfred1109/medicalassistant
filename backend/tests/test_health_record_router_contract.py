@@ -308,6 +308,28 @@ class HealthRecordRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(other.status_code, 403, other.text)
         self.followup_service.list_followup_records.assert_awaited_once()  # 仅自己的那次
 
+    async def test_notification_followup_detail_rechecks_current_role_and_patient_scope(self):
+        patient_doc = {"_id": ObjectId(PATIENT_ID), "role": "patient",
+                       "practitioners": [CREATOR_ID], "health_managers": [CREATOR_ID]}
+        self.followup_service.db.users.find_one.return_value = patient_doc
+        path = f"/api/health-records/followups/{FOLLOWUP_ID}"
+        for role in ("patient", "doctor", "health_manager", "admin"):
+            response = await self.client.get(path, headers=self.login_as(role))
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["id"], FOLLOWUP_ID)
+        for role in ("doctor", "health_manager"):
+            field = "practitioners" if role == "doctor" else "health_managers"
+            patient_doc[field] = []
+            response = await self.client.get(path, headers=self.login_as(role))
+            self.assertEqual(response.status_code, 403, response.text)
+        response = await self.client.get(path, headers=self.login_as("patient", OTHER_PATIENT_ID))
+        self.assertEqual(response.status_code, 403)
+        response = await self.client.get(path, headers=self.login_as("unrecognized_role"))
+        self.assertEqual(response.status_code, 403)
+        self.followup_service.get_followup_record.return_value = None
+        response = await self.client.get(path, headers=self.login_as("patient"))
+        self.assertEqual(response.status_code, 404)
+
     async def test_patient_upcoming_forced_to_self_scope(self):
         self.followup_service.get_upcoming_followups = AsyncMock(return_value=[])
         response = await self.client.get(

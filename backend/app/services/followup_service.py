@@ -18,8 +18,8 @@ FU01 S5（审阅与证据链，设计稿 §4.3，D-2 默认决策见实施记录
 - complete 端点降级为「无表单随访的手工结果录入」：写 answers/notes 后节点转
   in_review（不再直达 completed），completion_data 带显式 source=manual_entry 标记
   （区别于外部表单填报），写审计，进入与填报答卷相同的待审阅流程；
-- completed 只能由 review 审阅通过置达；手工录入不写 effective_response /
-  fill_task_ids（有效答卷只能来自任务 confirm 路径，不允许冒充表单答卷状态）。
+- completed 只能由 review 审阅通过置达；手工录入清除旧 effective_response
+  当前引用，保留历史任务（有效答卷只能来自任务 confirm 路径）。
 
 FU01 S6（复评链与有效答卷，设计稿 §4.4）：re_evaluate 新建节点复制处方配置并
 写 previous/next_visit_id 链，原节点不覆盖不改写（A06）；select_effective_response
@@ -32,6 +32,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 from copy import deepcopy
 from hashlib import sha256
+import re
 from bson import encode
 from app.core.exceptions import AppBaseException
 from app.db.transactions import run_followup_transaction
@@ -44,6 +45,7 @@ from app.schemas.followup import (
     FollowUpRecordCreate, FollowUpRecordUpdate, FollowUpRecordResponse,
     CompleteFollowUpRequest, CancelFollowUpRequest, RescheduleFollowUpRequest,
     ReviewDecision, ReviewFollowUpRequest, ReEvaluateFollowUpRequest,
+    FollowUpWorkbenchItem, FollowUpWorkbenchPage,
 )
 
 
@@ -62,6 +64,9 @@ _FOLLOWUP_FORMAL_FIELDS = (
     "legacy_source", "deleted", "deleted_at", "deleted_by",
     "mutation_version", "cancellation_operation", "completion_operation", "reschedule_operation",
     "review_operation", "re_evaluate_operation",
+    "current_evidence", "submission_history",
+    "_reminder_fence",  # Internal concurrency fence, never a clinical revision.
+    "_access_fence",  # Internal source/authorization fence, not patient content.
 )
 
 
@@ -92,6 +97,58 @@ def followup_version_filter(doc):
 def _request_fingerprint(kind, payload):
     # BSON 编码统一日期为UTC毫秒，与实际Mongo持久化精度保持一致。
     return sha256(encode({"kind": kind, "payload": payload})).hexdigest()
+
+
+def _evidence_value(doc, key):
+    if key in doc:
+        return doc[key]
+    return (doc.get("metadata") or {}).get("result" if key == "follow_up_result" else key)
+
+
+def current_followup_evidence(doc):
+    """Resolve only unambiguous current evidence; never choose between mixed legacy sources."""
+    manual = (_evidence_value(doc, "completion_data") or {}).get("source") == "manual_entry"
+    external = _evidence_value(doc, "effective_response") or {}
+    external_valid = bool(external.get("task_id") and external.get("response_id") is not None)
+    marker = doc.get("current_evidence") or {}
+    if manual and external:
+        return {"source": "ambiguous"}
+    source = "manual_entry" if manual else "external_form" if external_valid else "unknown"
+    if marker.get("source") and marker["source"] != source:
+        return {"source": "ambiguous"}
+    if source == "unknown":
+        return {"source": source}
+    return {**marker, "source": source, **({"legacy": True} if not marker else {})}
+
+
+def _submission_snapshot(doc):
+    return {key: deepcopy(_evidence_value(doc, key)) for key in (
+        "completion_data", "effective_response", "answers", "notes", "actual_date", "follow_up_result")}
+
+
+def submission_history_with_legacy(doc):
+    """Archive pre-marker evidence before replacing or returning it, without rewriting history."""
+    history = deepcopy(doc.get("submission_history") or [])
+    if (not (doc.get("current_evidence") or {}).get("submission_id")
+            and (_evidence_value(doc, "completion_data") or _evidence_value(doc, "effective_response"))):
+        history.append({"submission_id": str(ObjectId()), "source": "legacy_snapshot",
+                        "observed_version": doc.get("mutation_version", 0) or 0,
+                        "evidence_state": current_followup_evidence(doc),
+                        "snapshot": _submission_snapshot(doc)})
+    return history
+
+
+def followup_submission_fields(doc, values, *, source, submitted_by, submitted_at, confirmation=None):
+    """One current source plus append-only evidence snapshots, shared by manual and form writers."""
+    marker = {"submission_id": str(ObjectId()), "source": source,
+              "submitted_version": (doc.get("mutation_version", 0) or 0) + 1}
+    snapshot = _submission_snapshot({**doc, **values})
+    entry = {**marker, "submitted_by": submitted_by, "submitted_at": submitted_at,
+             "snapshot": snapshot}
+    if confirmation is not None:
+        entry["confirmation"] = deepcopy(confirmation)
+    return {"current_evidence": marker,
+            "submission_history": [*submission_history_with_legacy(doc), entry]}
 
 
 def select_effective_response(fill_task_docs):
@@ -154,9 +211,8 @@ def followup_from_mongo(mongo_doc) -> Optional[FollowUpRecord]:
     doc = dict(mongo_doc)
     formal = {}
     for field in _FOLLOWUP_FORMAL_FIELDS:
-        value = doc.pop(field, None)
-        if value is not None:
-            formal[field] = value
+        if field in doc:
+            formal[field] = doc.pop(field)
     record = FollowUpRecord.from_mongo(doc)
     for field, value in formal.items():
         setattr(record, field, value)
@@ -178,9 +234,8 @@ def map_followup_record_to_response(followup_record: FollowUpRecord) -> FollowUp
     metadata = followup_record.metadata or {}
 
     def formal_or_meta(field: str, meta_key: str):
-        value = getattr(followup_record, field, None)
-        if value is not None:
-            return value
+        if hasattr(followup_record, field):
+            return getattr(followup_record, field)
         return metadata.get(meta_key)
 
     reminder_before = formal_or_meta("reminder_before", "reminder_before")
@@ -202,6 +257,7 @@ def map_followup_record_to_response(followup_record: FollowUpRecord) -> FollowUp
         created_at=followup_record.created_at,
         updated_at=followup_record.updated_at,
         status=followup_record.status,
+        mutation_version=getattr(followup_record, "mutation_version", 0) or 0,
         actual_date=followup_record.actual_date,
         answers=followup_record.answers,
         notes=followup_record.notes,
@@ -219,6 +275,12 @@ def map_followup_record_to_response(followup_record: FollowUpRecord) -> FollowUp
         fill_task_ids=[str(v) for v in (getattr(followup_record, "fill_task_ids", None) or [])],
         previous_visit_id=_as_optional_str(formal_or_meta("previous_visit_id", "previous_visit_id")),
         next_visit_id=_as_optional_str(formal_or_meta("next_visit_id", "next_visit_id")),
+        current_evidence=current_followup_evidence({
+            "completion_data": formal_or_meta("completion_data", "completion_data"),
+            "effective_response": formal_or_meta("effective_response", "effective_response"),
+            "current_evidence": getattr(followup_record, "current_evidence", None),
+        }) if followup_record.status in {"in_review", "completed"} else None,
+        submission_history=getattr(followup_record, "submission_history", None) or [],
     )
 
 
@@ -238,6 +300,125 @@ class FollowupService:
         self.medical_timelines = db[MedicalTimeline.collection_name]
 
     # -------- 创建 / 查询 --------
+
+    async def quality_source(self, followup_id, session=None):
+        """Internal source reference for authorized quality workflows."""
+        if not ObjectId.is_valid(followup_id):
+            return None
+        return await self.followup_records.find_one({"_id": ObjectId(followup_id),
+            "deleted": {"$ne": True}}, session=session)
+
+    async def fence_quality_source(self, document, session):
+        value = document.get("_access_fence", 0)
+        if type(value) is not int or value < 0:
+            raise AppBaseException("随访并发状态异常", status_code=503,
+                                   error_code="QUALITY_SOURCE_FENCE_INVALID")
+        result = await self.followup_records.update_one({"_id": document["_id"],
+            "deleted": {"$ne": True}}, {"$inc": {"_access_fence": 1}}, session=session)
+        if result.matched_count != 1:
+            raise AppBaseException("随访来源已变化，请重新读取", status_code=409,
+                                   error_code="QUALITY_SOURCE_CHANGED")
+
+    async def quality_process_snapshot(self, patient_ids, **options):
+        from app.services.quality_process_queries import monitoring_pipeline
+        rows = await self.followup_records.aggregate(
+            monitoring_pipeline("followup", patient_ids, **options)).to_list(length=1)
+        return rows[0] if rows else {}
+
+    async def ensure_reminder_scan_index(self):
+        await self.followup_records.create_index([("status", 1), ("scheduled_date", 1)], name="reminder_due_scan")
+
+    async def get_reminder_source(self, followup_id, *, session=None):
+        """Internal source read; external callers still apply object authorization."""
+        return await self.followup_records.find_one({"_id": ObjectId(followup_id)}, session=session)
+
+    def reminder_candidate_cursor(self, now):
+        return self.followup_records.find({"deleted": {"$ne": True},
+            "status": {"$in": ["scheduled", "awaiting_fill"]},
+            "scheduled_date": {"$gt": now, "$lte": now + timedelta(hours=24)}}).sort(
+                [("scheduled_date", 1), ("_id", 1)])
+
+    async def fence_reminder_source(self, document, session):
+        value = document.get("_reminder_fence", 0)
+        if type(value) is not int or value < 0:
+            raise AppBaseException("提醒并发字段无效", status_code=503,
+                                   error_code="REMINDER_INVALID_FENCE")
+        await self.followup_records.update_one({"_id": document["_id"]},
+            {"$inc": {"_reminder_fence": 1}}, session=session)
+
+    async def list_workbench(
+        self, *, patient_ids: Optional[List[str]], patient_id: Optional[str] = None,
+        status: Optional[List[str]] = None, follow_up_type: Optional[str] = None,
+        start_date: Optional[datetime] = None, end_date: Optional[datetime] = None,
+        patient_name: Optional[str] = None, skip: int = 0, limit: int = 20,
+        sort_order: str = "desc",
+    ) -> FollowUpWorkbenchPage:
+        """Query the authorized workbench once, with an exact filtered total.
+
+        Date bounds are [start_date, end_date). The caller derives patient_ids
+        from the authenticated actor; None is reserved for an authorized admin.
+        Patient names are projected separately and never grant clinical access.
+        """
+        if skip < 0 or not 1 <= limit <= 100 or sort_order not in {"asc", "desc"}:
+            raise ValueError("invalid workbench pagination")
+        if patient_id and patient_ids is not None and patient_id not in patient_ids:
+            raise AppBaseException("无权访问该患者的随访记录", status_code=403,
+                                   error_code="PATIENT_NOT_ASSIGNED")
+        scope = [patient_id] if patient_id else patient_ids
+        query = {"deleted": {"$ne": True}}
+        if scope is not None:
+            query["patient_id"] = {"$in": scope}
+        if status:
+            query["status"] = {"$in": status}
+        if follow_up_type:
+            query["follow_up_type"] = follow_up_type
+        dates = {}
+        if start_date is not None:
+            dates["$gte"] = start_date
+        if end_date is not None:
+            dates["$lt"] = end_date
+        if dates:
+            query["scheduled_date"] = dates
+
+        if patient_name:
+            # Escape input so names containing regex syntax remain literal.
+            patient_query = {"role": "patient", "name": {
+                "$regex": re.escape(patient_name), "$options": "i"}}
+            if scope is not None:
+                identifiers = [value for item in scope for value in
+                               ([item, ObjectId(item)] if ObjectId.is_valid(item) else [item])]
+                patient_query["_id"] = {"$in": identifiers}
+            matches = await self.db.users.find(patient_query, {"_id": 1}).to_list(length=None)
+            matched_ids = {str(row["_id"]) for row in matches}
+            if scope is not None:
+                matched_ids.intersection_update(scope)
+            query["patient_id"] = {"$in": sorted(matched_ids)}
+
+        direction = 1 if sort_order == "asc" else -1
+        # Count and page consume the same filtered aggregation stream.
+        result = await self.followup_records.aggregate([
+            {"$match": query},
+            {"$sort": {"scheduled_date": direction, "_id": direction}},
+            {"$facet": {"items": [{"$skip": skip}, {"$limit": limit}],
+                        "count": [{"$count": "total"}]}}
+        ]).to_list(length=1)
+        batch = result[0] if result else {"items": [], "count": []}
+        documents = batch["items"]
+        ids = {str(row["patient_id"]) for row in documents}
+        identifiers = [value for item in ids for value in
+                       ([item, ObjectId(item)] if ObjectId.is_valid(item) else [item])]
+        names = {}
+        if identifiers:
+            patients = await self.db.users.find(
+                {"role": "patient", "_id": {"$in": identifiers}}, {"name": 1}
+            ).to_list(length=None)
+            names = {str(row["_id"]): row.get("name") for row in patients}
+        items = [FollowUpWorkbenchItem(
+            **map_followup_record_to_response(followup_from_mongo(row)).model_dump(),
+            patient_name=names.get(str(row["patient_id"]))) for row in documents]
+        return FollowUpWorkbenchPage(items=items,
+            total=batch["count"][0]["total"] if batch["count"] else 0,
+            skip=skip, limit=limit)
 
     async def _list_records(
         self, query: Dict[str, Any], *, skip: int = 0, limit: int = 100,
@@ -602,15 +783,22 @@ class FollowupService:
         - 节点只转 in_review（待医护审阅），completed 只能由 review 审阅通过
           置达（设计稿 §4.2「旧 complete 端点不得再直达 completed」）；
         - completion_data 带显式 source=manual_entry，区别于外部表单填报；
-        - 不写 effective_response / fill_task_ids（有效答卷只能来自任务
-          confirm 路径，手工录入不允许冒充表单答卷状态）；
+        - 清除旧 effective_response 当前引用并归档旧证据，保留 fill_task_ids；
+          有效答卷只能来自任务 confirm 路径，手工录入不冒充表单答卷；
         - 同一事务写审计（action=followup_manual_entry）。
+        - expected_version 绑定读取时的内容；同轮请求重试只返回直接产生的
+          版本，退回后必须重新读取。相同内容的新轮录入使用新的版本号。
         """
         # 未显式提交的actual_date由服务端生成；不参与重试指纹。
-        fingerprint = _request_fingerprint("complete", data.model_dump(exclude_unset=True))
+        fingerprint = _request_fingerprint("complete", {
+            "request": data.model_dump(exclude_unset=True), "operator_id": operator_id})
         async def operation(doc, session):
-            if doc.get("completion_operation") == fingerprint:
+            version = doc.get("mutation_version", 0) or 0
+            if (doc.get("completion_operation") == fingerprint
+                    and version == data.expected_version + 1):
                 return map_followup_record_to_response(followup_from_mongo(doc))
+            if version != data.expected_version:
+                raise followup_conflict("随访内容已更新，请重新读取后提交录入")
             self._require_open(doc, allow_review=True)
             now = datetime.utcnow()
             values = {
@@ -620,7 +808,10 @@ class FollowupService:
                 "completion_data": {"completed_at": now, "result": data.follow_up_result,
                                     "notes": data.notes, "source": "manual_entry"},
                 "follow_up_result": data.follow_up_result, "completion_operation": fingerprint,
+                "effective_response": None,
             }
+            values.update(followup_submission_fields(doc, values, source="manual_entry",
+                submitted_by=operator_id, submitted_at=now))
             # 更新父节点获得写冲突保护后，才建立后继及时间线；全部同一事务。
             updated = await self._write_node(doc, values, session)
             if data.next_follow_up_date:
@@ -640,6 +831,28 @@ class FollowupService:
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
+    async def _verified_external_review_evidence(self, doc, session):
+        """Approval uses persisted confirmation bound to this patient/visit, never client evidence."""
+        reference = _evidence_value(doc, "effective_response") or {}
+        task_id = str(reference.get("task_id") or "")
+        if not ObjectId.is_valid(task_id):
+            raise followup_conflict("当前答卷缺少有效的本地确认任务，请退回重新提交")
+        task = await self.db[_FILL_TASKS_COLLECTION].find_one(
+            {"_id": ObjectId(task_id)}, session=session)
+        confirmation = (task or {}).get("confirmation") or {}
+        if (not task or task.get("status") != "confirmed"
+                or str(task.get("patient_id")) != str(doc.get("patient_id"))
+                or str(task.get("followup_visit_id")) != str(doc["_id"])
+                or confirmation.get("response_id") != reference.get("response_id")
+                or confirmation.get("remote_status") not in {"submitted", "restored"}):
+            raise followup_conflict("当前答卷与本地确认证据不一致，请退回重新提交")
+        visit_code = doc.get("visit_code")
+        if visit_code and any(value != visit_code for value in (
+                task.get("visit_code"), reference.get("visit_code"),
+                confirmation.get("visit_code")) if value is not None):
+            raise followup_conflict("当前答卷的访视引用不一致，请退回重新提交")
+        return deepcopy(confirmation)
+
     async def review_followup(self, followup_id, data, *, reviewer_id, reviewer_role="doctor"):
         """医护审阅（FU01 S5，设计稿 §4.3）。
 
@@ -649,32 +862,51 @@ class FollowupService:
         - 每次审阅追加 review.history[] 证据链（reviewer/decision/comment/evidence）；
         - returned：节点回 awaiting_fill，清除 effective_response（旧任务保持
           confirmed 终态，需新建填报任务重填，设计稿 §2.2 耦合规则）；
-        - 幂等：相同请求指纹重复提交返回当前节点，不追加 history。
+        - expected_version 绑定实际读到的内容，避免读取旧内容却批准新内容；
+        - 幂等仅限直接结果版本；节点再变更后旧请求返回409，不能跨轮重放。
         """
         fingerprint = _request_fingerprint("review", {
+            "expected_version": data.expected_version,
             "decision": data.decision.value, "comment": data.comment,
             "evidence": data.evidence, "reviewer_id": reviewer_id})
         async def operation(doc, session):
-            if doc.get("review_operation") == fingerprint:
+            version = doc.get("mutation_version", 0) or 0
+            if (doc.get("review_operation") == fingerprint
+                    and version == data.expected_version + 1):
                 return map_followup_record_to_response(followup_from_mongo(doc))
+            if version != data.expected_version:
+                raise followup_conflict("随访内容已更新，请重新读取后审阅")
             if doc["status"] != "in_review":
                 raise followup_conflict("只有待审阅(in_review)状态的随访可以审阅")
             if (reviewer_role != "admin"
                     and reviewer_id not in {doc.get("provider_id"), doc.get("created_by")}):
                 raise AppBaseException("只有责任医护本人或管理员可以审阅该随访",
                                        status_code=403, error_code="FOLLOWUP_REVIEW_FORBIDDEN")
+            evidence_state = current_followup_evidence(doc)
+            if (data.decision is ReviewDecision.APPROVED
+                    and evidence_state["source"] not in {"manual_entry", "external_form"}):
+                raise followup_conflict("当前随访证据来源缺失或冲突，请退回并重新提交后审阅")
+            verified_confirmation = None
+            if (data.decision is ReviewDecision.APPROVED
+                    and evidence_state["source"] == "external_form"):
+                verified_confirmation = await self._verified_external_review_evidence(doc, session)
             now = datetime.utcnow()
             history = list((doc.get("review") or {}).get("history") or [])
             entry = {
                 "review_id": str(ObjectId()), "reviewer_id": reviewer_id,
                 "reviewer_role": reviewer_role, "reviewed_at": now,
+                "reviewed_version": data.expected_version,
+                "current_evidence": evidence_state,
                 "decision": data.decision.value, "comment": data.comment,
                 "evidence": data.evidence,
             }
             history.append(entry)
+            if verified_confirmation is not None:
+                entry["verified_confirmation"] = verified_confirmation
             review = {"history": history, "decision": data.decision.value,
                       "reviewed_at": now, "reviewer_id": reviewer_id}
-            values = {"review": review, "review_operation": fingerprint, "updated_at": now}
+            values = {"review": review, "review_operation": fingerprint, "updated_at": now,
+                      "submission_history": submission_history_with_legacy(doc)}
             if data.decision is ReviewDecision.APPROVED:
                 # 审阅通过：completed + actual_date=reviewed_at（设计稿 §4.3）
                 values["status"] = "completed"
@@ -683,6 +915,8 @@ class FollowupService:
                 # 审阅退回：待重新填报；有效答卷清空，历史保留在各任务确认证据中
                 values["status"] = "awaiting_fill"
                 values["effective_response"] = None
+                values.update(current_evidence=None, completion_data=None, answers=[],
+                              follow_up_result=None, actual_date=None)
             updated = await self._write_node(doc, values, session)
             await self._write_audit(
                 followup_id, reviewer_id, "followup_review",
@@ -752,7 +986,8 @@ class FollowupService:
         - 复制 form_binding / questions / follow_up_type 与责任人、模板、
           提醒配置（_create_successor），写 previous_visit_id；原节点只回写
           next_visit_id / next_follow_up_id 链接字段，不覆盖不改写其余内容（A06）；
-        - 原节点须处于已结束状态（completed/canceled/missed/overdue/lost）；
+        - 原节点须处于可复评状态（completed/canceled/missed/overdue）；
+          lost 无出边，不能发起复评；
           进行中的节点应走改期或取消流程；
         - 已有后继节点时拒绝重复创建（并发下由乐观版本保护串行化）；
         - 幂等：相同请求指纹重试返回同一后继节点，不产生分叉。

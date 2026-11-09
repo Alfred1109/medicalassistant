@@ -7,6 +7,7 @@
 """
 
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -46,6 +47,22 @@ class FormPlatformClient:
         # verify_tls=False 仅限隔离联调的自签名证书场景
         self._verify_tls = verify_tls
 
+    @property
+    def source_origin(self) -> str:
+        """Controlled source namespace for reference bindings, never caller input."""
+        parsed = urlsplit(self._base_url)
+        try:
+            parsed.port
+        except ValueError:
+            raise FormPlatformError("表单平台来源地址配置无效") from None
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or "?" in self._base_url or "#" in self._base_url
+                or parsed.path not in {"", "/"} or any(ord(c) <= 32 for c in self._base_url)
+                or (settings.ENVIRONMENT.lower() == "production" and parsed.scheme != "https")):
+            raise FormPlatformError("表单平台来源地址配置无效")
+        return f"{parsed.scheme}://{parsed.netloc.lower()}"
+
     @classmethod
     def from_settings(cls) -> "FormPlatformClient":
         secret = settings.FORM_PLATFORM_CLIENT_SECRET
@@ -65,14 +82,15 @@ class FormPlatformClient:
         return {"Authorization": f"Bearer {self._client_id}.{self._client_secret}"}
 
     async def _request(self, method: str, path: str,
-                       json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       json_body: Optional[Dict[str, Any]] = None,
+                       params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=self._timeout,
                                          transport=self._transport,
                                          verify=self._verify_tls) as client:
                 response = await client.request(
                     method, f"{self._base_url}{path}",
-                    json=json_body, headers=self._auth_headers(),
+                    json=json_body, params=params, headers=self._auth_headers(),
                 )
         except httpx.HTTPError as exc:
             # httpx.HTTPError 覆盖 TransportError 与无效请求构造；均属"无法完成调用"
@@ -127,3 +145,38 @@ class FormPlatformClient:
 
     async def get_response(self, response_id: int) -> Dict[str, Any]:
         return await self._request("GET", f"/integration/v1/responses/{response_id}")
+
+    async def list_projects(self, *, limit: int = 50, cursor: Optional[str] = None) -> Dict[str, Any]:
+        return await self._request("GET", "/integration/v1/projects",
+                                   params=self._catalog_params(limit, cursor))
+
+    async def list_centers(self, project_id: int, *, limit: int = 50,
+                           cursor: Optional[str] = None) -> Dict[str, Any]:
+        return await self._request("GET", f"/integration/v1/projects/{project_id}/centers",
+                                   params=self._catalog_params(limit, cursor))
+
+    async def list_subjects(self, project_id: int, *, center_id: Optional[int] = None,
+                            status: str = "all", limit: int = 50,
+                            cursor: Optional[str] = None) -> Dict[str, Any]:
+        params = dict(self._catalog_params(limit, cursor), status=status)
+        if center_id is not None:
+            params["center_id"] = center_id
+        return await self._request("GET", f"/integration/v1/projects/{project_id}/subjects", params=params)
+
+    async def list_forms(self, project_id: int, *, status: str = "active", limit: int = 50,
+                         cursor: Optional[str] = None) -> Dict[str, Any]:
+        return await self._request("GET", f"/integration/v1/projects/{project_id}/forms",
+                                   params=dict(self._catalog_params(limit, cursor), status=status))
+
+    async def get_patient_reference(self, project_id: int, center_id: int,
+                                    subject_id: int) -> Dict[str, Any]:
+        return await self._request("GET", f"/integration/v1/projects/{project_id}/centers/{center_id}"
+                                   f"/subjects/{subject_id}/patient-reference")
+
+    async def get_form_definition(self, form_id: int, *, version: Optional[int] = None) -> Dict[str, Any]:
+        return await self._request("GET", f"/integration/v1/forms/{form_id}/definition",
+                                   params={"version": version} if version is not None else None)
+
+    @staticmethod
+    def _catalog_params(limit: int, cursor: Optional[str]) -> Dict[str, Any]:
+        return {"limit": limit, **({"cursor": cursor} if cursor is not None else {})}

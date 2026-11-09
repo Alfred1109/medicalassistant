@@ -2,7 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from typing import List, Optional
 from app.schemas.user import UserResponse
 from app.schemas.followup import FollowUpRecordCreate, FollowUpRecordResponse
-from app.core.dependencies import get_current_user, get_followup_service
+from app.core.dependencies import get_current_user, get_followup_service, get_database
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from app.db.crud_services import PatientCRUD
+from app.models.user import Patient
 from app.services.followup_service import FollowupService
 from app.core.followup_access import ensure_followup_patient_access, followup_patient_scope
 
@@ -12,12 +15,18 @@ router = APIRouter()
 
 # 患者管理
 @router.get("/patients", response_model=List[dict])
-async def get_manager_patients(current_user: UserResponse = Depends(get_current_user)):
+async def get_manager_patients(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     """获取健康管理师管理的患者列表"""
     if current_user.role != "health_manager":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return []
+    try:
+        return await PatientCRUD(db, Patient).find_assigned_patients(
+            str(current_user.id), current_user.role)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="获取患者列表失败，请稍后重试") from exc
 
 # 健康档案
 @router.get("/health-records/{patient_id}", response_model=dict)
@@ -112,4 +121,4 @@ async def get_manager_statistics(
     if current_user.role != "health_manager":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     # 这里调用相应的服务层功能
-    return {} 
+    return {}

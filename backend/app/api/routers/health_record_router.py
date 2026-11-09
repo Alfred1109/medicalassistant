@@ -2,9 +2,9 @@
 健康档案API路由
 提供健康档案、随访记录和健康数据的CRUD操作接口
 """
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path
-from datetime import datetime
+from typing import List, Literal, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path, Response
+from datetime import datetime, timezone
 
 from app.core.dependencies import (
     get_current_user,
@@ -30,6 +30,7 @@ from app.schemas.health_record import (
 )
 from app.core.permissions import Permission
 from app.core.health_record_access import ensure_health_record_patient_access
+from app.schemas.followup import FollowUpWorkbenchPage
 
 router = APIRouter(prefix="/health-records", tags=["健康档案"])
 
@@ -219,6 +220,48 @@ async def create_followup_record(
         raise HTTPException(status_code=500, detail="创建随访记录失败")
     
     return result
+
+@router.get("/followup-workbench", response_model=FollowUpWorkbenchPage)
+async def get_followup_workbench(
+    response: Response,
+    patient_id: Optional[str] = Query(None, min_length=1, max_length=128),
+    status: Optional[List[FollowUpStatus]] = Query(None),
+    follow_up_type: Optional[FollowUpType] = Query(None),
+    start_date: Optional[datetime] = Query(None, description="包含此时刻；必须带时区"),
+    end_date: Optional[datetime] = Query(None, description="不包含此时刻；必须带时区"),
+    patient_name: Optional[str] = Query(None, min_length=1, max_length=100),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    sort_order: Literal["asc", "desc"] = Query("desc"),
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+):
+    """医护随访工作台；按当前患者授权范围过滤后计数和分页。
+
+    日期使用半开区间 [start_date, end_date)，不会改变节点状态。
+    """
+    if current_user.role not in {"doctor", "health_manager", "admin"}:
+        raise HTTPException(status_code=403, detail="需要医护或管理员权限")
+    for value in (start_date, end_date):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise HTTPException(status_code=422, detail="工作台日期必须包含时区")
+    if start_date is not None and end_date is not None and end_date <= start_date:
+        raise HTTPException(status_code=422, detail="结束时间必须晚于开始时间")
+    if patient_id:
+        await ensure_followup_patient_access(followup_service.db, patient_id, current_user)
+    scope = await followup_patient_scope(followup_service.db, current_user)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return await followup_service.list_workbench(
+        patient_ids=scope, patient_id=patient_id,
+        status=[value.value for value in status] if status else None,
+        follow_up_type=follow_up_type.value if follow_up_type else None,
+        start_date=start_date.astimezone(timezone.utc).replace(tzinfo=None) if start_date else None,
+        end_date=end_date.astimezone(timezone.utc).replace(tzinfo=None) if end_date else None,
+        patient_name=patient_name.strip() if patient_name else None,
+        skip=skip, limit=limit, sort_order=sort_order,
+    )
+
 
 @router.get("/followups", response_model=List[FollowUpRecordResponse])
 async def list_followup_records(
@@ -721,4 +764,4 @@ async def get_health_record(
 
     await ensure_health_record_patient_access(health_record_service.db, result.patient_id, current_user)
 
-    return result 
+    return result

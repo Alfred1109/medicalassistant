@@ -5,8 +5,11 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson.objectid import ObjectId
 from pymongo import ReturnDocument
 from pymongo.errors import PyMongoError
+from pymongo.read_concern import ReadConcern
+from pymongo.write_concern import WriteConcern
 from copy import deepcopy
 from app.core.exceptions import AppBaseException
+from app.core.patient_access import assigned_patient_query, PatientAccessError
 import numpy as np
 
 from app.schemas.rehabilitation import (
@@ -69,6 +72,13 @@ class RehabilitationService:
                 return None
             update_data = plan_data.model_dump(exclude_unset=True)
             update_data["updated_at"] = datetime.utcnow()
+            publication_guard = {key: plan.get(key) for key in (
+                "published_version_id", "has_publication_history", "publication_revision", "_publication_fence")}
+            if ("status" in update_data and update_data["status"] != plan.get("status")
+                    and (plan.get("has_publication_history") or plan.get("published_version_id")
+                         or plan.get("publication_revision"))):
+                raise AppBaseException("有发布历史的方案须通过撤回、取消或归档操作变更状态", status_code=409,
+                                       error_code="REHAB_PLAN_PUBLICATION_ACTION_REQUIRED")
             if self._is_generated_plan(plan):
                 if "status" in update_data and update_data["status"] != plan.get("status"):
                     raise AppBaseException("生成计划的状态须经对应审核操作变更", status_code=409,
@@ -98,6 +108,7 @@ class RehabilitationService:
                          "generation_source": plan.get("generation_source"),
                          "content_revision": plan.get("content_revision"),
                          "updated_at": plan.get("updated_at")}
+                query.update(publication_guard)
                 updated = await self.plans_collection.find_one_and_update(
                     query, {"$set": update_data, "$inc": {"content_revision": 1}},
                     return_document=ReturnDocument.AFTER)
@@ -107,7 +118,12 @@ class RehabilitationService:
                 updated["_id"] = str(updated["_id"])
                 return updated
             result = await self.plans_collection.update_one(
-                {"_id": ObjectId(plan_id)}, {"$inc": {"content_revision": 1}, "$set": update_data})
+                {"_id": ObjectId(plan_id), "patient_id": plan.get("patient_id"),
+                 "status": plan.get("status"), "content_revision": plan.get("content_revision"),
+                 **publication_guard}, {"$inc": {"content_revision": 1}, "$set": update_data})
+            if result.matched_count != 1:
+                raise AppBaseException("计划已被其他请求修改，请重新读取", status_code=409,
+                                       error_code="REHAB_PLAN_CONFLICT")
             if result.modified_count:
                 return await self.get_rehab_plan(plan_id)
         except PyMongoError as exc:
@@ -116,19 +132,46 @@ class RehabilitationService:
         return None
 
     async def delete_rehab_plan(self, plan_id: str) -> bool:
-        """Delete a rehabilitation plan"""
-        try:
-            result = await self.plans_collection.delete_one({"_id": ObjectId(plan_id)})
-            return result.deleted_count > 0
-        except Exception:
+        """Delete only a plan that has never acquired publication history."""
+        if not ObjectId.is_valid(plan_id):
             return False
+        try:
+            result = await self.plans_collection.delete_one({
+                "_id": ObjectId(plan_id),
+                "has_publication_history": {"$ne": True},
+                "published_version_id": None,
+                "publication_revision": {"$in": [None, 0]},
+            })
+            if result.deleted_count:
+                return True
+            if await self.plans_collection.find_one({"_id": ObjectId(plan_id)}, {"_id": 1}):
+                raise AppBaseException("已有发布记录的方案不能删除，请撤回并保留历史", status_code=409,
+                                       error_code="REHAB_PLAN_PUBLICATION_HISTORY")
+            return False
+        except PyMongoError as exc:
+            raise AppBaseException("康复计划删除失败，请稍后重试", status_code=503,
+                                   error_code="REHAB_PLAN_DELETE_FAILED") from exc
             
     async def list_rehab_plans(
-        self, patient_id: Optional[str] = None, skip: int = 0, limit: int = 100
+        self, patient_id: Optional[str] = None, skip: int = 0, limit: int = 100,
+        *, actor_id: str, actor_role: str,
     ) -> List[Dict[str, Any]]:
-        """List rehabilitation plans with optional patient filtering"""
+        """Apply patient authorization in the query before pagination."""
         filter_dict = {}
-        if patient_id:
+        if actor_role == "admin":
+            if patient_id:
+                filter_dict["patient_id"] = patient_id
+        elif actor_role in {"doctor", "health_manager"}:
+            patients = self.db.users.find(
+                assigned_patient_query(str(actor_id), actor_role), {"_id": 1})
+            patient_ids = [str(patient["_id"]) async for patient in patients]
+            if patient_id and str(patient_id) not in patient_ids:
+                raise PatientAccessError("无权访问该患者的康复方案")
+            # An empty authorized scope must stay empty, never become find({}).
+            filter_dict["patient_id"] = {"$in": patient_ids}
+        else:
+            raise PatientAccessError("无权访问康复方案", error_code="REHAB_ROLE_FORBIDDEN")
+        if patient_id and actor_role != "admin":
             filter_dict["patient_id"] = patient_id
             
         cursor = self.plans_collection.find(filter_dict).skip(skip).limit(limit)
@@ -419,27 +462,61 @@ class RehabilitationService:
 
     # 新增 - 康复评估相关功能
     async def create_assessment(self, assessment_data: AssessmentCreate) -> Dict[str, Any]:
-        """创建新的康复评估记录"""
-        assessment = assessment_data.dict()
+        """Create an assessment and its same-patient plan relation atomically."""
+        assessment = assessment_data.model_dump()
+        assessment["_id"] = ObjectId()
         assessment["created_at"] = datetime.utcnow()
         assessment["updated_at"] = assessment["created_at"]
-        
+        assessment["content_revision"] = 0
         # 生成评估分数
         assessment["scores"] = self._calculate_assessment_scores(assessment)
         
-        result = await self.assessments_collection.insert_one(assessment)
-        assessment["_id"] = str(result.inserted_id)
-        
-        # 关联到康复计划（如果指定了计划ID）
-        if "plan_id" in assessment and assessment["plan_id"]:
-            await self.plans_collection.update_one(
-                {"_id": ObjectId(assessment["plan_id"])},
-                {"$inc": {"content_revision": 1},
-                    "$push": {"assessments": str(result.inserted_id)},
-                    "$set": {"updated_at": datetime.utcnow()}
-                }
-            )
-        
+        plan_id = assessment.get("plan_id")
+        if plan_id:
+            async def create_with_plan(session):
+                await self._get_same_patient_plan(plan_id, assessment["patient_id"], session=session)
+                # A real conditional write fences concurrent deletion or a
+                # change to the plan owner; the assessment cannot outlive a
+                # failed association within this transaction.
+                result = await self.plans_collection.update_one(
+                    {"_id": ObjectId(plan_id), "patient_id": assessment["patient_id"]},
+                    {"$inc": {"content_revision": 1},
+                     "$push": {"assessments": str(assessment["_id"])},
+                     "$set": {"updated_at": assessment["created_at"]}}, session=session)
+                if result.matched_count != 1:
+                    raise AppBaseException("康复计划归属已改变，请重新读取", status_code=409,
+                                           error_code="ASSESSMENT_PLAN_CONFLICT")
+                await self.assessments_collection.insert_one(deepcopy(assessment), session=session)
+            try:
+                async with await self.db.client.start_session() as session:
+                    await session.with_transaction(create_with_plan,
+                        read_concern=ReadConcern("snapshot"), write_concern=WriteConcern("majority"))
+            except PyMongoError as exc:
+                raise AppBaseException("评估与方案关联需要副本集事务，未能确认保存", status_code=503,
+                                       error_code="ASSESSMENT_TRANSACTION_UNAVAILABLE") from exc
+        else:
+            await self.assessments_collection.insert_one(deepcopy(assessment))
+        assessment["_id"] = str(assessment["_id"])
+        return assessment
+
+    async def _get_same_patient_plan(self, plan_id: str, patient_id: str, *, session=None):
+        if not ObjectId.is_valid(plan_id):
+            raise AppBaseException("康复计划不存在", status_code=404,
+                                   error_code="ASSESSMENT_PLAN_NOT_FOUND")
+        plan = await self.plans_collection.find_one(
+            {"_id": ObjectId(plan_id), "patient_id": patient_id}, session=session)
+        if not plan:
+            raise AppBaseException("康复计划不存在", status_code=404,
+                                   error_code="ASSESSMENT_PLAN_NOT_FOUND")
+        return plan
+
+    async def _get_same_patient_assessment(self, assessment_id: str, patient_id: str):
+        if not ObjectId.is_valid(assessment_id):
+            return None
+        assessment = await self.assessments_collection.find_one(
+            {"_id": ObjectId(assessment_id), "patient_id": patient_id})
+        if assessment:
+            assessment["_id"] = str(assessment["_id"])
         return assessment
     
     async def get_assessment(self, assessment_id: str) -> Optional[Dict[str, Any]]:
@@ -453,15 +530,18 @@ class RehabilitationService:
             return None
         return None
     
-    async def update_assessment(self, assessment_id: str, assessment_data: AssessmentUpdate) -> Optional[Dict[str, Any]]:
+    async def update_assessment(self, assessment_id: str, assessment_data: AssessmentUpdate,
+                                *, patient_id: str) -> Optional[Dict[str, Any]]:
         """更新康复评估记录"""
         try:
-            update_data = assessment_data.dict(exclude_unset=True)
+            assessment = await self._get_same_patient_assessment(assessment_id, patient_id)
+            if not assessment:
+                return None
+            update_data = assessment_data.model_dump(exclude_unset=True)
             update_data["updated_at"] = datetime.utcnow()
             
             # 如果更新了评估指标，重新计算评分
             if any(k in update_data for k in ["range_of_motion", "muscle_strength", "pain_level", "functional_status"]):
-                assessment = await self.get_assessment(assessment_id)
                 if assessment:
                     # 更新评估数据
                     for k, v in update_data.items():
@@ -470,14 +550,17 @@ class RehabilitationService:
                     update_data["scores"] = self._calculate_assessment_scores(assessment)
             
             result = await self.assessments_collection.update_one(
-                {"_id": ObjectId(assessment_id)},
-                {"$set": update_data}
+                {"_id": ObjectId(assessment_id), "patient_id": patient_id,
+                 "content_revision": assessment.get("content_revision")},
+                {"$set": update_data, "$inc": {"content_revision": 1}}
             )
-            
-            if result.modified_count:
-                return await self.get_assessment(assessment_id)
-        except Exception:
-            return None
+            if result.matched_count != 1:
+                raise AppBaseException("康复评估已改变，请重新读取", status_code=409,
+                                       error_code="ASSESSMENT_CONFLICT")
+            return await self._get_same_patient_assessment(assessment_id, patient_id)
+        except PyMongoError as exc:
+            raise AppBaseException("康复评估保存失败", status_code=503,
+                                   error_code="ASSESSMENT_WRITE_FAILED") from exc
         return None
     
     async def list_patient_assessments(
@@ -510,7 +593,7 @@ class RehabilitationService:
     
     async def get_assessment_comparison(self, patient_id: str, assessment_id: str) -> Dict[str, Any]:
         """比较当前评估与前一次评估的差异"""
-        current = await self.get_assessment(assessment_id)
+        current = await self._get_same_patient_assessment(assessment_id, patient_id)
         if not current:
             return {"error": "Assessment not found"}
             
@@ -653,6 +736,8 @@ class RehabilitationService:
             
             if "error" in comparison:
                 return comparison
+            if plan_id:
+                await self._get_same_patient_plan(plan_id, patient_id)
                 
             # 准备提示词数据
             prompt_data = {
@@ -668,18 +753,25 @@ class RehabilitationService:
             
             if assessment_analysis:
                 # 更新当前评估，添加AI分析结果
-                await self.assessments_collection.update_one(
-                    {"_id": ObjectId(previous_assessment_id)},
+                original = comparison["current"]
+                result = await self.assessments_collection.update_one(
+                    {"_id": ObjectId(previous_assessment_id), "patient_id": patient_id,
+                     "content_revision": original.get("content_revision"),
+                     "updated_at": original.get("updated_at")},
                     {
                         "$set": {
                             "ai_analysis": assessment_analysis,
                             "updated_at": datetime.utcnow()
-                        }
+                        },
+                        "$inc": {"content_revision": 1}
                     }
                 )
+                if result.matched_count != 1:
+                    raise AppBaseException("评估在分析期间已改变，请重新分析", status_code=409,
+                                           error_code="ASSESSMENT_ANALYSIS_CONFLICT")
                 
                 # 获取更新后的评估
-                updated_assessment = await self.get_assessment(previous_assessment_id)
+                updated_assessment = await self._get_same_patient_assessment(previous_assessment_id, patient_id)
                 return updated_assessment or {"error": "Failed to update assessment with AI analysis"}
             else:
                 return {"error": "Failed to generate assessment analysis"}
@@ -1146,3 +1238,21 @@ class RehabilitationService:
             "data_source": self.STATISTICS_DATA_SOURCE,
             "data_notes": ["计划内暂无进度记录，series 为空"] if not entries else [],
         }
+
+    async def quality_source(self, plan_id, session=None):
+        """Internal quality-reference read; caller supplies patient authorization."""
+        if not ObjectId.is_valid(str(plan_id)):
+            return None
+        return await self.plans_collection.find_one({"_id": ObjectId(plan_id)}, session=session)
+
+    async def fence_quality_source(self, document, session):
+        """Serialize a quality reference with deletion or patient reassignment."""
+        value = document.get("_publication_fence", 0)
+        if type(value) is not int or value < 0:
+            raise AppBaseException("方案并发状态异常", status_code=503,
+                                   error_code="QUALITY_SOURCE_FENCE_INVALID")
+        result = await self.plans_collection.update_one({"_id": document["_id"]},
+            {"$inc": {"_publication_fence": 1}}, session=session)
+        if result.matched_count != 1:
+            raise AppBaseException("关联方案已变化，请重新核实", status_code=409,
+                                   error_code="QUALITY_SOURCE_CHANGED")

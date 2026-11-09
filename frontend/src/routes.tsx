@@ -23,6 +23,8 @@ import Dashboard from './pages/Dashboard';
 import RehabPlans from './pages/RehabPlan/RehabPlans';
 import RehabPlanDetail from './pages/RehabPlan/RehabPlanDetail';
 import RehabPlanForm from './pages/RehabPlan/RehabPlanForm';
+import { PatientPlanList, PatientPlanDetail } from './pages/RehabPlan/PatientPlans';
+import ClinicianPlanWorkbench from './pages/RehabPlan/ClinicianPlanWorkbench';
 import Agents from './pages/Agent/Agents';
 import AgentDetail from './pages/Agent/AgentDetail';
 import AgentForm from './pages/Agent/AgentForm';
@@ -31,6 +33,19 @@ import NotFound from './pages/NotFound';
 
 // 通知中心组件
 import NotificationsPage from './pages/NotificationsPage';
+import FollowUpDetailPage from './pages/FollowUpDetailPage';
+import QualityControlWorkbench from './pages/Quality/QualityControlWorkbench';
+
+function RehabPlansEntry() {
+  const role = useSelector((state: RootState) => state.auth.user?.role);
+  return role === 'patient' ? <PatientPlanList /> :
+    role === 'doctor' || role === 'health_manager' ? <ClinicianPlanWorkbench /> : <RehabPlans />;
+}
+
+function RehabPlanDetailEntry() {
+  const role = useSelector((state: RootState) => state.auth.user?.role);
+  return role === 'patient' ? <PatientPlanDetail /> : <RehabPlanDetail />;
+}
 
 // 康复练习库页面
 import Exercises from './pages/Exercise/Exercises';
@@ -71,6 +86,7 @@ import ConsentTemplateList from './pages/Patient/ConsentTemplateList';
 import AdminDashboard from './pages/Admin/AdminDashboard';
 import DoctorManagement from './pages/Admin/DoctorManagement';
 import AdminPatientManagement from './pages/Admin/PatientManagement';
+import PatientLinks from './pages/Admin/PatientLinks';
 import HealthManagerManagement from './pages/Admin/HealthManagerManagement';
 import OrganizationManagement from './pages/Admin/OrganizationManagement';
 import TagManagement from './pages/Admin/TagManagement';
@@ -256,12 +272,14 @@ const AppRoutes: React.FC = () => (
       
       {/* 通知中心路由 */}
       <Route path="notifications" element={<NotificationsPage />} />
+      <Route path="follow-ups/:followUpId" element={<FollowUpDetailPage />} />
+      <Route path="quality-control" element={<QualityControlWorkbench />} />
       
       {/* Rehabilitation Plans routes - 注意路由顺序，特定路由需要在参数路由前定义 */}
       <Route path="rehab-plans/new" element={<RehabPlanForm />} />
       <Route path="rehab-plans/edit/:id" element={<RehabPlanForm />} />
-      <Route path="rehab-plans/:id" element={<RehabPlanDetail />} />
-      <Route path="rehab-plans" element={<RehabPlans />} />
+      <Route path="rehab-plans/:id" element={<RehabPlanDetailEntry />} />
+      <Route path="rehab-plans" element={<RehabPlansEntry />} />
       
       {/* Exercises routes - 注意路由顺序 */}
       <Route path="exercises/new" element={<ExerciseForm />} />
@@ -363,6 +381,7 @@ const AppRoutes: React.FC = () => (
         <Route index element={<Navigate to="/app/admin/doctors" replace />} />
         <Route path="doctors" element={<DoctorManagement />} />
         <Route path="patients" element={<AdminPatientManagement />} />
+        <Route path="patient-links" element={<PatientLinks />} />
         <Route path="health-managers" element={<HealthManagerManagement />} />
         <Route path="organizations" element={<OrganizationManagement />} />
         <Route path="tags" element={<TagManagement />} />

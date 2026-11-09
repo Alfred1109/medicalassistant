@@ -179,7 +179,7 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         operations = (
             self.service.get_followup_record(invalid_id),
             self.service.update_followup_record(invalid_id, FollowUpRecordUpdate()),
-            self.service.complete_followup(invalid_id, CompleteFollowUpRequest()),
+            self.service.complete_followup(invalid_id, CompleteFollowUpRequest(expected_version=0)),
             self.service.cancel_followup(invalid_id, CancelFollowUpRequest(cancel_reason="test")),
             self.service.reschedule_followup(
                 invalid_id, RescheduleFollowUpRequest(new_date=datetime.utcnow(), reason="test")),
@@ -266,7 +266,7 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         而非 completed，带显式 source=manual_entry 标记并写审计。"""
         followup_id = await self._seed_followup()
         actual_date = datetime.utcnow() - timedelta(hours=1)
-        data = CompleteFollowUpRequest(
+        data = CompleteFollowUpRequest(expected_version=0,
             actual_date=actual_date,
             answers=[FollowUpAnswer(question_id="q1", answer_value=8, answer_text="恢复较好")],
             notes="随访完成，恢复良好",
@@ -295,7 +295,7 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("result", doc.get("metadata", {}))
         self.assertEqual(doc["notes"], "随访完成，恢复良好")
         # D-2：手工录入不允许冒充表单答卷状态——不写 effective_response / fill_task_ids
-        self.assertNotIn("effective_response", doc)
+        self.assertIsNone(doc.get("effective_response"))
         self.assertNotIn("fill_task_ids", doc)
         # D-2：同一事务写审计
         audit_docs = list(self.collections["audit_logs"].docs.values())
@@ -307,7 +307,7 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_complete_followup_creates_next_followup(self):
         followup_id = await self._seed_followup()
-        data = CompleteFollowUpRequest(
+        data = CompleteFollowUpRequest(expected_version=0,
             next_follow_up_date=datetime.utcnow() + timedelta(days=7),
         )
 
@@ -623,6 +623,8 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
             scheduled_date=datetime.utcnow() + timedelta(days=1),
             notes="待审阅随访").to_mongo()
         doc.update(status=status, provider_id=DOCTOR_ID)
+        if status == "in_review" and "effective_response" not in extra:
+            doc["completion_data"] = {"source": "manual_entry", "result": "synthetic legacy result"}
         doc.update(extra)
         self.followup_records.docs[doc["_id"]] = doc
         return str(doc["_id"])
@@ -633,20 +635,20 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_is_only_reachable_through_review_approval(self):
         """S5 验收：completed 只能由审阅通过产生——手工录入后无法直达 completed。"""
         followup_id = await self._seed_followup()
-        await self.service.complete_followup(followup_id, CompleteFollowUpRequest())
+        await self.service.complete_followup(followup_id, CompleteFollowUpRequest(expected_version=0))
         self.assertEqual(
             self.followup_records.docs[ObjectId(followup_id)]["status"], "in_review")
         # 换内容再录入（新指纹）→ 已是 in_review 仍允许录入，但不直达 completed
         response = await self.service.complete_followup(
             followup_id,
-            CompleteFollowUpRequest(notes="补充记录", follow_up_result="stable"))
+            CompleteFollowUpRequest(expected_version=1, notes="补充记录", follow_up_result="stable"))
         self.assertEqual(response.status, FollowUpStatus.IN_REVIEW)
 
     async def test_review_approval_completes_node_with_evidence_chain(self):
         """approved：completed + actual_date=reviewed_at，review.history[] 全链可追溯。"""
         followup_id = await self._seed_with_status("in_review")
         evidence = {"task_id": str(ObjectId()), "response_id": "resp-1", "revision": 1}
-        data = ReviewFollowUpRequest(decision=ReviewDecision.APPROVED,
+        data = ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED,
                                      comment="恢复良好", evidence=evidence)
 
         response = await self.service.review_followup(
@@ -675,8 +677,12 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         """approved：表单答卷的 effective_response 保留（证据链不丢）。"""
         effective = {"task_id": str(ObjectId()), "response_id": "resp-1"}
         followup_id = await self._seed_with_status("in_review", effective_response=effective)
+        await self.collections["integration_fill_tasks"].insert_one({
+            "_id": ObjectId(effective["task_id"]), "status": "confirmed", "patient_id": PATIENT_ID,
+            "followup_visit_id": followup_id,
+            "confirmation": {"response_id": "resp-1", "remote_status": "submitted", "answers": []}})
         await self.service.review_followup(
-            followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+            followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
             reviewer_id=DOCTOR_ID)
         doc = self.followup_records.docs[ObjectId(followup_id)]
         self.assertEqual(doc["effective_response"], effective)
@@ -688,7 +694,7 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         followup_id = await self._seed_with_status(
             "in_review", effective_response=effective,
             fill_task_ids=[ObjectId(effective["task_id"])])
-        data = ReviewFollowUpRequest(decision=ReviewDecision.RETURNED,
+        data = ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.RETURNED,
                                      comment="答案不完整，需重新填报")
 
         response = await self.service.review_followup(
@@ -710,7 +716,7 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status):
                 with self.assertRaises(AppBaseException) as error:
                     await self.service.review_followup(
-                        followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+                        followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
                         reviewer_id=DOCTOR_ID)
                 self.assertEqual(error.exception.status_code, 409)
 
@@ -719,19 +725,19 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         followup_id = await self._seed_with_status("in_review")
         with self.assertRaises(AppBaseException) as error:
             await self.service.review_followup(
-                followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+                followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
                 reviewer_id=str(ObjectId()), reviewer_role="doctor")
         self.assertEqual(error.exception.status_code, 403)
         # admin 可审阅
         response = await self.service.review_followup(
-            followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+            followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
             reviewer_id=str(ObjectId()), reviewer_role="admin")
         self.assertEqual(response.status, FollowUpStatus.COMPLETED)
 
     async def test_review_idempotent_retry_does_not_duplicate_history(self):
         """相同审阅请求重试返回当前节点，不追加 history、不重复审计。"""
         followup_id = await self._seed_with_status("in_review")
-        data = ReviewFollowUpRequest(decision=ReviewDecision.APPROVED, comment="ok")
+        data = ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED, comment="ok")
         first = await self.service.review_followup(followup_id, data, reviewer_id=DOCTOR_ID)
         retry = await self.service.review_followup(followup_id, data, reviewer_id=DOCTOR_ID)
         self.assertEqual(retry.status, first.status)
@@ -743,12 +749,12 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         """端到端：手工录入 → in_review（带 manual_entry 标记）→ 审阅通过 → completed。"""
         followup_id = await self._seed_followup()
         await self.service.complete_followup(
-            followup_id, CompleteFollowUpRequest(notes="电话随访结果"), operator_id=DOCTOR_ID)
+            followup_id, CompleteFollowUpRequest(expected_version=0, notes="电话随访结果"), operator_id=DOCTOR_ID)
         doc = self.followup_records.docs[ObjectId(followup_id)]
         self.assertEqual(doc["status"], "in_review")
         self.assertEqual(doc["completion_data"]["source"], "manual_entry")
         response = await self.service.review_followup(
-            followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED,
+            followup_id, ReviewFollowUpRequest(expected_version=1, decision=ReviewDecision.APPROVED,
                                                comment="录入结果已核实"),
             reviewer_id=DOCTOR_ID)
         self.assertEqual(response.status, FollowUpStatus.COMPLETED)
@@ -758,6 +764,112 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(doc["review"]["decision"], "approved")
         actions = {a["action"] for a in self._audit_docs()}
         self.assertEqual(actions, {"followup_manual_entry", "followup_review"})
+
+    async def test_return_resubmit_same_content_uses_new_version_and_preserves_history(self):
+        followup_id = await self._seed_followup()
+        initial = await self.service.get_followup_record(followup_id)
+        self.assertEqual(initial.mutation_version, 0)  # historical nodes have no version
+        for version in (0, 2):
+            entry = CompleteFollowUpRequest(expected_version=version, notes="相同录入")
+            submitted = await self.service.complete_followup(followup_id, entry)
+            retry = await self.service.complete_followup(followup_id, entry)
+            self.assertEqual(submitted.mutation_version, version + 1)
+            self.assertEqual(retry.mutation_version, submitted.mutation_version)
+            decision = ReviewFollowUpRequest(expected_version=version + 1,
+                decision=ReviewDecision.RETURNED, comment="请核实")
+            returned = await self.service.review_followup(followup_id, decision, reviewer_id=DOCTOR_ID)
+            retried = await self.service.review_followup(followup_id, decision, reviewer_id=DOCTOR_ID)
+            self.assertEqual(returned.status, FollowUpStatus.AWAITING_FILL)
+            self.assertEqual(retried.mutation_version, version + 2)
+            with self.assertRaises(AppBaseException) as stale:
+                await self.service.complete_followup(followup_id, entry)
+            self.assertEqual(stale.exception.status_code, 409)
+        submitted = await self.service.complete_followup(followup_id,
+            CompleteFollowUpRequest(expected_version=4, notes="相同录入"))
+        approved = await self.service.review_followup(followup_id,
+            ReviewFollowUpRequest(expected_version=submitted.mutation_version,
+                decision=ReviewDecision.APPROVED), reviewer_id=DOCTOR_ID)
+        self.assertEqual(approved.status, FollowUpStatus.COMPLETED)
+        history = approved.review["history"]
+        self.assertEqual([item["reviewed_version"] for item in history], [1, 3, 5])
+        self.assertEqual(len(self._audit_docs()), 6)
+
+    async def test_stale_review_cannot_approve_updated_content_or_replay_across_rounds(self):
+        followup_id = await self._seed_with_status("in_review")
+        decision = ReviewFollowUpRequest(expected_version=0,
+            decision=ReviewDecision.RETURNED, comment="重新录入")
+        await self.service.review_followup(followup_id, decision, reviewer_id=DOCTOR_ID)
+        await self.service.complete_followup(followup_id,
+            CompleteFollowUpRequest(expected_version=1, notes="新内容"))
+        with self.assertRaises(AppBaseException) as stale:
+            await self.service.review_followup(followup_id, decision, reviewer_id=DOCTOR_ID)
+        self.assertEqual(stale.exception.status_code, 409)
+        current = await self.service.get_followup_record(followup_id)
+        self.assertEqual(current.status, FollowUpStatus.IN_REVIEW)
+        await self.service.update_followup_record(followup_id,
+            FollowUpRecordUpdate(description="再次变更"))
+        with self.assertRaises(AppBaseException) as stale:
+            await self.service.review_followup(followup_id,
+                ReviewFollowUpRequest(expected_version=current.mutation_version,
+                    decision=ReviewDecision.APPROVED), reviewer_id=DOCTOR_ID)
+        self.assertEqual(stale.exception.status_code, 409)
+        self.assertEqual(len(self._audit_docs()), 2)
+
+    async def test_ambiguous_or_missing_legacy_evidence_cannot_be_approved(self):
+        for extra in (
+            {"completion_data": None},
+            {"completion_data": {"source": "manual_entry", "result": "old"},
+             "effective_response": {"task_id": "old-task", "response_id": 1}},
+        ):
+            followup_id = await self._seed_with_status("in_review", **extra)
+            response = await self.service.get_followup_record(followup_id)
+            self.assertIn(response.current_evidence["source"], {"unknown", "ambiguous"})
+            with self.assertRaises(AppBaseException) as error:
+                await self.service.review_followup(followup_id,
+                    ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
+                    reviewer_id=DOCTOR_ID)
+            self.assertEqual(error.exception.status_code, 409)
+            returned = await self.service.review_followup(followup_id,
+                ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.RETURNED),
+                reviewer_id=DOCTOR_ID)
+            self.assertIsNone(returned.current_evidence)
+            if extra.get("effective_response"):
+                self.assertEqual(returned.submission_history[0]["snapshot"]["effective_response"],
+                                 extra["effective_response"])
+
+    async def test_manual_submission_clears_old_form_evidence_and_shadows_metadata(self):
+        followup_id = await self._seed_with_status("awaiting_fill",
+            metadata={"effective_response": {"task_id": "legacy", "response_id": 42}})
+        response = await self.service.complete_followup(followup_id,
+            CompleteFollowUpRequest(expected_version=0, notes="current"))
+        self.assertIsNone(response.effective_response)
+        self.assertEqual(response.current_evidence["source"], "manual_entry")
+        self.assertEqual(response.submission_history[0]["snapshot"]["effective_response"]["response_id"], 42)
+        self.assertEqual(response.submission_history[-1]["snapshot"]["notes"], "current")
+
+    async def test_external_approval_requires_matching_persisted_confirmation(self):
+        for override in (
+            {"status": "failed"}, {"patient_id": "other"}, {"followup_visit_id": "other"},
+            {"confirmation": {"response_id": 43, "remote_status": "submitted"}},
+            {"confirmation": {"response_id": 42, "remote_status": "voided"}},
+            {"visit_code": "other"}, {},
+        ):
+            task_id = ObjectId()
+            followup_id = await self._seed_with_status("in_review", visit_code="V1",
+                effective_response={"task_id": str(task_id), "response_id": 42, "visit_code": "V1"})
+            task = {"_id": task_id, "status": "confirmed", "patient_id": PATIENT_ID,
+                    "followup_visit_id": followup_id, "visit_code": "V1",
+                    "confirmation": {"response_id": 42, "remote_status": "submitted", "visit_code": "V1"}}
+            if override:
+                task.update(override)
+                await self.collections["integration_fill_tasks"].insert_one(task)
+            with self.assertRaises(AppBaseException) as error:
+                await self.service.review_followup(followup_id,
+                    ReviewFollowUpRequest(expected_version=0, decision="approved",
+                        evidence={"response_id": 42, "status": "confirmed"}), reviewer_id=DOCTOR_ID)
+            self.assertEqual(error.exception.status_code, 409)
+            await self.service.review_followup(followup_id,
+                ReviewFollowUpRequest(expected_version=0, decision="returned"), reviewer_id=DOCTOR_ID)
 
     # -------- FU01 S6：复评链与有效答卷（设计稿 §4.4） --------
 
@@ -776,7 +888,10 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         doc.update(status="completed", provider_id=DOCTOR_ID, template_id="tpl-009",
                    reminder_before=30, form_binding={"questionnaire_id": 7},
                    visit_code="V-001", effective_response={"response_id": "resp-1"},
-                   review={"decision": "approved"}, actual_date=datetime.utcnow())
+                   review={"decision": "approved"}, actual_date=datetime.utcnow(),
+                   current_evidence={"source": "external_form", "submission_id": "original"},
+                   submission_history=[{"submission_id": "original", "source": "external_form",
+                                        "snapshot": {"effective_response": {"response_id": "resp-1"}}}])
         before = dict(doc)
         followup_id = str(doc["_id"])
         self.followup_records.docs[doc["_id"]] = doc
@@ -807,13 +922,17 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(child["answers"], [])
         self.assertNotIn("effective_response", child)
         self.assertNotIn("review", child)
+        self.assertNotIn("current_evidence", child)
+        self.assertNotIn("submission_history", child)
+        self.assertIsNone(response.current_evidence)
+        self.assertEqual(response.submission_history, [])
         # 原节点只写链接字段，其余不覆盖不改写
         original = self.followup_records.docs[ObjectId(followup_id)]
         self.assertEqual(original["next_visit_id"], response.id)
         self.assertEqual(original["next_follow_up_id"], response.id)
         for key in ("status", "provider_id", "template_id", "form_binding",
                     "visit_code", "effective_response", "review", "answers",
-                    "scheduled_date", "notes", "reminder_before"):
+                    "scheduled_date", "notes", "reminder_before", "current_evidence", "submission_history"):
             self.assertEqual(original[key], before[key], key)
         # 新节点时间线创建（原节点状态未变，时间线不重写）
         self.assertEqual(len(self.timelines.docs), 1)

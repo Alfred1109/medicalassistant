@@ -130,11 +130,14 @@ class FakeCollection:
 
     async def update_one(self, query, update):
         modified = 0
+        matched = 0
         for doc in self.docs:
             if _matches(doc, query):
+                matched += 1
+                if any(doc.get(key) != value for key, value in update.get("$set", {}).items()):
+                    modified += 1
                 doc.update(update.get("$set", {}))
-                modified += 1
-        return SimpleNamespace(modified_count=modified)
+        return SimpleNamespace(modified_count=modified, matched_count=matched)
 
     async def update_many(self, query, update):
         modified = 0
@@ -378,6 +381,53 @@ class NotificationRouterContractTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         app.dependency_overrides.clear()
 
+    async def test_read_delete_and_clear_only_affect_current_recipient_for_each_role(self):
+        for role in ("patient", "doctor", "health_manager", "admin"):
+            db = FakeDB()
+            recipient = str(ObjectId())
+            own_id, other_id = ObjectId(), ObjectId()
+            db.notifications.docs = [
+                {"_id": own_id, "recipient_id": recipient, "read": False},
+                {"_id": other_id, "recipient_id": str(ObjectId()), "read": False},
+            ]
+            app.dependency_overrides[get_database] = lambda: db
+            actor = UserResponse(id=recipient, name="synthetic", email="actor@example.com",
+                                 role=role, is_active=True, createdAt=datetime.utcnow(), updatedAt=datetime.utcnow())
+            app.dependency_overrides[get_current_user] = lambda: actor
+            async with httpx.AsyncClient(app=app, base_url="http://test") as client:
+                for _ in range(2):
+                    response = await client.put(f"/api/notifications/{own_id}/read")
+                    self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual((await client.put(f"/api/notifications/{other_id}/read")).status_code, 404)
+                self.assertEqual((await client.delete(f"/api/notifications/{other_id}")).status_code, 404)
+                self.assertEqual((await client.put("/api/notifications/invalid/read")).status_code, 404)
+                self.assertEqual((await client.delete("/api/notifications/invalid")).status_code, 404)
+                cleared = await client.delete("/api/notifications/clear-all")
+                self.assertEqual(cleared.status_code, 200, cleared.text)
+                self.assertEqual([row["_id"] for row in db.notifications.docs], [other_id])
+                self.assertFalse(db.notifications.docs[0]["read"])
+                self.assertEqual((await client.delete("/api/notifications/clear-all")).status_code, 200)
+
+    async def test_new_reminder_times_are_explicit_utc_without_reinterpreting_legacy(self):
+        db = FakeDB()
+        recipient = str(ObjectId())
+        for kind, sender in (("followup", "system:followup-reminders"), ("message", "doctor"),
+                             ("followup", "unknown-producer")):
+            db.notifications.docs.append({"_id": ObjectId(), "recipient_id": recipient, "read": False,
+                "time": datetime(2026, 11, 9, 0, 30), "notification_type": kind, "sender_id": sender,
+                "sender_name": "synthetic", "sender_role": "system", "title": "test", "content": "test"})
+        app.dependency_overrides[get_database] = lambda: db
+        actor = UserResponse(id=recipient, name="synthetic", email="actor@example.com", role="patient",
+                             is_active=True, createdAt=datetime.utcnow(), updatedAt=datetime.utcnow())
+        app.dependency_overrides[get_current_user] = lambda: actor
+        async with httpx.AsyncClient(app=app, base_url="http://test") as client:
+            response = await client.get("/api/notifications/")
+            self.assertEqual(response.status_code, 200)
+            rows = response.json()
+            self.assertTrue(rows[0]["time"].endswith(("Z", "+00:00")))
+            self.assertEqual(rows[1]["time"], "2026-11-09T00:30:00")
+            self.assertEqual(rows[2]["time"], "2026-11-09T00:30:00")
+
     async def test_list_unread_count_and_mark_read_endpoints(self):
         db = FakeDB()
         bob = make_user("Bob", "patient")
@@ -413,6 +463,8 @@ class NotificationRouterContractTests(unittest.IsolatedAsyncioTestCase):
             first_id = body[0]["id"]
             marked = await client.put(f"/api/notifications/{first_id}/read")
             self.assertEqual(marked.status_code, 200)
+            repeated = await client.put(f"/api/notifications/{first_id}/read")
+            self.assertEqual(repeated.status_code, 200)
             self.assertEqual(
                 (await client.get("/api/notifications/unread/count")).json(), 1
             )

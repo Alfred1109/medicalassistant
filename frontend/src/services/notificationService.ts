@@ -41,9 +41,9 @@ export const notificationApi = {
     skip?: number;
     type?: string;
     read?: boolean;
-  }) {
+  }, signal?: AbortSignal) {
     try {
-      const response = await api.get(API_COLLECTION_PATHS.NOTIFICATIONS, { params });
+      const response = await api.get(API_COLLECTION_PATHS.NOTIFICATIONS, { params, signal });
       return response.data;
     } catch (error) {
       console.error('获取通知失败:', error);

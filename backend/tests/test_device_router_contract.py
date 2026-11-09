@@ -46,10 +46,10 @@ def make_operator(role="patient", user_id=OPERATOR_ID):
                         role=role, is_active=True, createdAt=now, updatedAt=now)
 
 
-def make_patient_doc(patient_id=OTHER_PATIENT_ID, practitioners=()):
-    """users 集合中的患者档案（AUTH01 归属校验读取 practitioners 列表）"""
+def make_patient_doc(patient_id=OTHER_PATIENT_ID, practitioners=(), health_managers=()):
+    """users 集合中的患者档案，医生和健管师关系分别存储。"""
     return {"_id": patient_id, "role": "patient", "name": "合成患者",
-            "practitioners": list(practitioners)}
+            "practitioners": list(practitioners), "health_managers": list(health_managers)}
 
 
 def make_device_doc(patient_id=OPERATOR_ID, device_id=DEVICE_ID):
@@ -235,7 +235,7 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.operator = make_operator(role="health_manager")
         self.get_user_mock.return_value = self.operator
         self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
-            practitioners=[OPERATOR_ID]))
+            health_managers=[OPERATOR_ID]))
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
             patient_id=OTHER_PATIENT_ID))
         response = await self.client.get(
@@ -247,7 +247,7 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.operator = make_operator(role="health_manager")
         self.get_user_mock.return_value = self.operator
         self.db.users.find_one = AsyncMock(return_value=make_patient_doc(
-            practitioners=[OPERATOR_ID]))
+            health_managers=[OPERATOR_ID]))
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
             patient_id=OTHER_PATIENT_ID))
         self.device_service.get_device_data = AsyncMock(return_value=[])

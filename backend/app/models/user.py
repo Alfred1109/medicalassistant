@@ -25,7 +25,9 @@ class User:
         created_at: datetime = None,
         updated_at: datetime = None,
         _id: str = None,
-        metadata: Dict[str, Any] = None
+        metadata: Dict[str, Any] = None,
+        _reminder_fence: Optional[int] = None,
+        _access_fence: Optional[int] = None
     ):
         self.email = email
         self.name = name
@@ -258,4 +260,4 @@ class SystemAdmin(User):
         user_data = mongo_doc.copy()
         user_data["_id"] = str(user_data["_id"])
         
-        return cls(**user_data) 
+        return cls(**user_data)

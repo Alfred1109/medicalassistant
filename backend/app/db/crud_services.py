@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from bson import ObjectId
 
 from app.db.crud import CRUDBase
+from app.core.patient_access import assigned_patient_query
 from app.models.user import User, Doctor, Patient, HealthManager, SystemAdmin
 from app.models.organization import Organization
 from app.models.health_record import HealthRecord, FollowUpRecord
@@ -118,28 +119,14 @@ class PatientCRUD(CRUDBase[Patient]):
 
         数据库/查询异常如实上抛（由路由层转 500），不再吞掉后返回 []，
         避免"空列表"与"查询失败"混淆导致上层误判为空库。
-        单个患者 ID 无效仅跳过该条，不影响其余患者。
+        归属以患者 practitioners 为准，医生 patients 仅为历史兼容字段。
         """
-        # 获取医生对象
-        doctor_collection = self.db["users"]
-        doctor = await doctor_collection.find_one({"_id": ObjectId(doctor_id), "role": "doctor"})
+        return await self.find_assigned_patients(doctor_id, "doctor")
 
-        if not doctor or "patients" not in doctor or not doctor["patients"]:
-            return []
-
-        # 获取患者列表
-        patient_ids = doctor["patients"]
-        results = []
-
-        for patient_id in patient_ids:
-            try:
-                patient_doc = await self.collection.find_one({"_id": ObjectId(patient_id), "role": "patient"})
-                if patient_doc:
-                    results.append(await self._get_patient_data(patient_doc))
-            except Exception as e:
-                print(f"获取患者数据错误 (ID: {patient_id}): {str(e)}")
-
-        return results
+    async def find_assigned_patients(self, operator_id: str, operator_role: str) -> List[dict]:
+        """与对象授权同源，返回医护当前管理的患者展示数据。"""
+        cursor = self.collection.find(assigned_patient_query(operator_id, operator_role))
+        return [await self._get_patient_data(doc) async for doc in cursor]
     
     async def update_medical_info(self, patient_id: str, medical_info: Dict[str, Any]) -> bool:
         """更新患者医疗信息"""
@@ -375,4 +362,4 @@ def get_crud_services(db: AsyncIOMotorDatabase):
         "device": DeviceCRUD(db, Device),
         "device_data": DeviceDataCRUD(db, DeviceData),
         "agent": AgentCRUD(db, Agent),
-    } 
+    }

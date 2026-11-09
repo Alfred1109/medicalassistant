@@ -6,9 +6,9 @@ const { buildSync } = require('esbuild');
 const { configureStore } = require('@reduxjs/toolkit');
 const axios = require('axios');
 const compiled = buildSync({
-  stdin: { contents: `export * from './services/authSession'; export * from './store/slices/authSlice'; export {default as reducer} from './store/slices/authSlice'; export {default as http} from './services/httpClient'; export {api as queryApi} from './store/api';`, resolveDir: path.resolve(__dirname, '../src'), loader: 'ts' },
+  stdin: { contents: `export * from './services/authSession'; export * from './store/slices/authSlice'; export {default as reducer} from './store/slices/authSlice'; export {default as http} from './services/httpClient';`, resolveDir: path.resolve(__dirname, '../src'), loader: 'ts' },
   bundle: true, platform: 'node', format: 'cjs', write: false,
-  external: ['axios', '@reduxjs/toolkit', '@reduxjs/toolkit/query/react'], define: { 'import.meta.env.VITE_API_URL': 'undefined', 'import.meta.env.VITE_API_PREFIX': '"/medical"' }, logLevel: 'silent',
+  external: ['axios', '@reduxjs/toolkit'], define: { 'import.meta.env.VITE_API_URL': 'undefined', 'import.meta.env.VITE_API_PREFIX': '"/medical"' }, logLevel: 'silent',
 }).outputFiles[0].text;
 const user = { id: 'actor-1', role: 'doctor', name: 'Doctor', email: 'doctor@example.invalid', createdAt: '', updatedAt: '' };
 function fixture({ mode = 'oidc', session = { authenticated: true, identity_state: 'bound', clinical_access: true, user }, configError = null, postError = null } = {}) {
@@ -43,7 +43,7 @@ function fixture({ mode = 'oidc', session = { authenticated: true, identity_stat
   const inherited = loaded.require.bind(loaded); loaded.require = n => n === 'axios' ? proxy : inherited(n);
   loaded._compile(compiled, filename);
   const api = loaded.exports;
-  const store = configureStore({ reducer: { auth: api.reducer, [api.queryApi.reducerPath]: api.queryApi.reducer }, middleware: getDefault => getDefault().concat(api.queryApi.middleware) });
+  const store = configureStore({ reducer: { auth: api.reducer } });
   const httpCalls = [];
   api.http.defaults.adapter = async config => { httpCalls.push(config); return { data: {}, status: 200, statusText: 'OK', headers: {}, config }; };
   return { ...api, store, entries, calls, httpCalls };
@@ -160,27 +160,6 @@ test('OIDC profile writes use current transport mode instead of a stale stored b
   assert.equal(call.options.headers['X-CSRF-Token'], 'csrf-proof');
   assert.equal(call.options.headers.Authorization, undefined);
 });
-
-test('RTK mutations enforce Cookie and CSRF consistently with the Axios adapters', async t => {
-  const originalRequest = global.Request;
-  const originalFetch = global.fetch;
-  t.after(() => { global.Request = originalRequest; global.fetch = originalFetch; });
-  global.Request = class extends originalRequest {
-    constructor(input, init) { super(typeof input === 'string' && input.startsWith('/') ? 'https://rehab.example.invalid' + input : input, init); }
-  };
-  const requests = [];
-  global.fetch = async request => { requests.push(request); return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }); };
-  const f = fixture();
-  const result = await f.store.dispatch(f.queryApi.endpoints.createPatient.initiate({ name: 'patient' })).unwrap();
-  assert.deepEqual(result, {});
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, 'https://rehab.example.invalid/medical/api/patients');
-  assert.equal(requests[0].credentials, 'include');
-  assert.equal(requests[0].headers.get('X-CSRF-Token'), 'csrf-proof');
-  assert.equal(requests[0].headers.get('Authorization'), null);
-  f.store.dispatch(f.queryApi.util.resetApiState());
-});
-
 
 test('late profile response after logout cannot resurrect a cookie-authenticated user', async () => {
   const f = fixture();

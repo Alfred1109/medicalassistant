@@ -37,7 +37,6 @@ router = APIRouter()
 # （操作者须在患者档案 practitioners 列表中，admin 豁免，否则 403 PATIENT_NOT_ASSIGNED）
 _verify_patient_query = verify_patient_access("query")
 _verify_patient_path = verify_patient_access("path")
-_verify_patient_query_optional = verify_patient_access("query", required=False)
 
 
 # ── AUTH01 对象级授权第二层：仅持 plan_id/assessment_id 的端点 ─────────────
@@ -194,17 +193,32 @@ async def delete_rehab_plan(
     if not success:
         raise HTTPException(status_code=404, detail="Rehabilitation plan not found")
 
-# AUTH01：携带 patient_id 过滤时校验归属；无过滤条件的全量枚举待 AUTH01 服务层按主治医生收敛
+async def _authorize_plan_list(
+    patient_id: Optional[str] = None,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Authorize an explicit filter; the service scopes every list before paging."""
+    if current_user.role == "patient":
+        raise HTTPException(status_code=403, detail="请通过本人已发布康复方案入口查看")
+    if current_user.role not in {"admin", "doctor", "health_manager"}:
+        raise HTTPException(status_code=403, detail="无权访问康复方案")
+    if patient_id:
+        await ensure_patient_access(db, patient_id, str(current_user.id), current_user.role)
+    return current_user
+
+
 @router.get("/plans", response_model=List[Dict[str, Any]])
 async def list_rehab_plans(
     patient_id: Optional[str] = None,
-    skip: int = 0,
-    limit: int = 100,
-    current_user: Any = Depends(_verify_patient_query_optional),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1),
+    current_user: Any = Depends(_authorize_plan_list),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
-    """List all rehabilitation plans with optional filtering by patient"""
-    return await rehab_service.list_rehab_plans(patient_id, skip, limit)
+    """List rehabilitation plans within the authenticated actor's patient scope."""
+    return await rehab_service.list_rehab_plans(
+        patient_id, skip, limit, actor_id=str(current_user.id), actor_role=current_user.role)
 
 @router.post("/plans/{plan_id}/exercises", response_model=Dict[str, Any])
 async def add_exercises_to_plan(
@@ -227,10 +241,16 @@ async def add_exercises_to_plan(
     return updated_plan
 
 # 运动相关路由
+async def _authorize_exercise_catalog_write(current_user: Any = Depends(get_current_active_user)):
+    if current_user.role not in {"doctor", "health_manager", "admin"}:
+        raise HTTPException(status_code=403, detail="需要医疗人员或管理员维护运动目录")
+    return current_user
+
+
 @router.post("/exercises", response_model=Dict[str, Any])
 async def create_exercise(
     exercise_data: ExerciseCreate,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(_authorize_exercise_catalog_write),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """Create a new rehabilitation exercise"""
@@ -295,7 +315,7 @@ async def get_exercise(
 async def update_exercise(
     exercise_id: str,
     exercise_data: ExerciseUpdate,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(_authorize_exercise_catalog_write),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """Update a rehabilitation exercise"""
@@ -310,7 +330,7 @@ async def update_exercise(
 @router.delete("/exercises/{exercise_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_exercise(
     exercise_id: str,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(_authorize_exercise_catalog_write),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
     """Delete a rehabilitation exercise"""
@@ -355,9 +375,10 @@ async def update_assessment(
 ):
     """更新康复评估记录"""
     # AUTH01：对象级归属校验（变更端点与只读端点同一归属规则）
-    await _check_assessment_access(assessment_id, current_user, rehab_service, db)
+    assessment = await _check_assessment_access(assessment_id, current_user, rehab_service, db)
 
-    updated_assessment = await rehab_service.update_assessment(assessment_id, assessment_data)
+    updated_assessment = await rehab_service.update_assessment(
+        assessment_id, assessment_data, patient_id=str(assessment["patient_id"]))
     if not updated_assessment:
         raise HTTPException(status_code=404, detail="康复评估记录不存在")
     return updated_assessment

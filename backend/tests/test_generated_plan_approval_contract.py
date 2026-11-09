@@ -40,9 +40,15 @@ class Plans:
             self.doc[key] = self.doc.get(key, 0) + amount
         return deepcopy(self.doc)
     async def update_one(self, query, update):
+        if self.before_update:
+            self.before_update(self.doc)
+        if any(self.doc.get(key) != value for key, value in query.items()):
+            return SimpleNamespace(matched_count=0, modified_count=0)
         self.writes += 1
         self.doc.update(deepcopy(update['$set']))
-        return SimpleNamespace(modified_count=1)
+        for key, amount in update.get('$inc', {}).items():
+            self.doc[key] = self.doc.get(key, 0) + amount
+        return SimpleNamespace(matched_count=1, modified_count=1)
 
 def make_service(doc=None):
     plans = Plans(doc)
@@ -101,6 +107,28 @@ class GeneratedPlanApprovalTests(unittest.IsolatedAsyncioTestCase):
                     RehabPlanUpdate(status='completed', metadata={'custom': 'updated'}))
         self.assertEqual(updated['status'], 'completed')
         self.assertEqual(updated['metadata'], {'custom': 'updated'})
+
+    async def test_published_and_withdrawn_plans_cannot_change_status_through_legacy_update(self):
+        for status in ('cancelled', 'archived', 'active'):
+            doc = draft()
+            doc.update(status='draft', metadata={}, has_publication_history=True,
+                       published_version_id=None, publication_revision=2)
+            service, plans = make_service(doc)
+            with self.assertRaises(AppBaseException) as error:
+                await service.update_rehab_plan(str(doc['_id']), RehabPlanUpdate(status=status))
+            self.assertEqual(error.exception.status_code, 409)
+            self.assertEqual(plans.writes, 0)
+
+    async def test_publication_racing_legacy_status_update_cannot_be_overwritten(self):
+        doc = draft()
+        doc['metadata'] = {}
+        service, plans = make_service(doc)
+        plans.before_update = lambda current: current.update(has_publication_history=True,
+            published_version_id=str(ObjectId()), publication_revision=1, _publication_fence=1)
+        with self.assertRaises(AppBaseException) as error:
+            await service.update_rehab_plan(str(doc['_id']), RehabPlanUpdate(status='cancelled'))
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(plans.writes, 0)
 
     async def test_database_read_and_approval_write_failure_are_explicit(self):
         doc = draft()

@@ -12,6 +12,12 @@ from app.core.logging import app_logger as logger
 from app.core.config import settings
 # 导入自定义异常类
 from app.core.exceptions import AppBaseException
+from app.services.followup_reminder_service import reminder_runtime
+from app.api.routers.followup_reminder_router import router as followup_reminder_router
+from app.api.routers.rehab_publication_router import router as rehab_publication_router
+from app.api.routers.rehab_feedback_router import router as rehab_feedback_router
+from app.api.routers.quality_monitoring_router import router as quality_monitoring_router
+from app.api.routers.quality_issue_router import router as quality_issue_router
 
 # Import routers
 from app.api.routers import agent_router, rehabilitation_router, user_router
@@ -137,6 +143,8 @@ async def startup_db_client():
         await ensure_communication_indexes(mongodb_state.db)
         if oidc_settings.enabled:
             await ensure_identity_indexes(mongodb_state.db)
+        await reminder_runtime.start(mongodb_state.db, enabled=settings.FOLLOWUP_REMINDERS_ENABLED,
+                                     interval=settings.FOLLOWUP_REMINDERS_POLL_SECONDS)
     except DatabaseConnectionError as e:
         logger.critical(f"Failed to connect to database: {str(e)}")
         # 不启动无法访问数据库的服务。
@@ -146,6 +154,7 @@ async def startup_db_client():
 async def shutdown_db_client():
     """应用关闭时断开数据库连接"""
     logger.info("Application shutting down...")
+    await reminder_runtime.stop()
     await close_mongodb_connection()
 
 # 自定义异常处理
@@ -221,6 +230,11 @@ app.include_router(health_manager_router, prefix="/api/health-managers", tags=["
 app.include_router(patient_router, prefix="/api/patients", tags=["patients"])
 app.include_router(system_admin_router, prefix="/api/admin", tags=["admin"])
 # 健康档案 / 随访记录 / 健康数据(路由自带 /health-records 前缀)
+app.include_router(followup_reminder_router, prefix="/api")
+app.include_router(rehab_publication_router, prefix="/api")
+app.include_router(rehab_feedback_router, prefix="/api")
+app.include_router(quality_monitoring_router, prefix="/api")
+app.include_router(quality_issue_router, prefix="/api")
 app.include_router(health_record_router, prefix="/api")
 # 健康预警路由
 app.include_router(health_alert_router, tags=["health-alerts"])
@@ -251,6 +265,12 @@ app.include_router(analytics_router, prefix="/api", tags=["analytics"])
 # 表单平台（113.44）集成填报路由
 from app.integrations.forms.router import router as integration_forms_router
 app.include_router(integration_forms_router, prefix="/api", tags=["form-integration"])
+from app.integrations.forms.catalog_router import router as form_catalog_router
+from app.integrations.forms.patient_links import router as form_patient_links_router
+from app.integrations.forms.form_bindings import router as form_bindings_router
+app.include_router(form_catalog_router, prefix="/api")
+app.include_router(form_patient_links_router, prefix="/api")
+app.include_router(form_bindings_router, prefix="/api")
 app.include_router(identity_router, prefix="/api")
 
 @app.get("/api")

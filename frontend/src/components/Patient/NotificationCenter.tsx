@@ -105,18 +105,15 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
   const [filterMenuAnchorEl, setFilterMenuAnchorEl] = useState<null | HTMLElement>(null);
   
   // 处理通知点击
-  const handleNotificationClick = (notification: Notification) => {
-    if (!notification.read && onMarkAsRead) {
-      onMarkAsRead(notification.id).catch(err => 
-        console.error('Failed to mark notification as read:', err)
-      );
+  const handleNotificationClick = async (notification: Notification) => {
+    try {
+      if (!notification.read && onMarkAsRead) await onMarkAsRead(notification.id);
+      onNotificationClick?.(notification);
+    } catch (error) {
+      // The owning page shows the failure. Keep the notification visible so
+      // its read state and navigation can be retried together.
+      console.error('Failed to open notification:', error);
     }
-    
-    if (onNotificationClick) {
-      onNotificationClick(notification);
-    }
-    // 后端仅返回 related_entity_id/related_entity_type（无可跳转链接），
-    // 跳转目标待后端补充实体→路由映射后再接入
   };
   
   // 处理标记为已读
@@ -693,6 +690,8 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
           </Avatar>
         </ListItemAvatar>
         <ListItemText
+          primaryTypographyProps={{ component: 'div' }}
+          secondaryTypographyProps={{ component: 'div' }}
           primary={
             <Box display="flex" justifyContent="space-between" alignItems="center">
               <Typography
@@ -775,4 +774,4 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
   );
 };
 
-export default NotificationCenter; 
+export default NotificationCenter;

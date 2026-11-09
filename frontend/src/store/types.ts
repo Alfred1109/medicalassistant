@@ -4,7 +4,6 @@ import type { AuthState } from './slices/authSlice';
 import type { UIState } from './slices/uiSlice';
 import type { RehabState } from '../types/rehab';
 import type { AgentState } from './slices/agentSlice';
-import type { api } from './api';
 
 /**
  * store 的完整 state 类型。
@@ -19,7 +18,6 @@ export type RootState = {
   ui: UIState;
   rehab: RehabState;
   agents: AgentState;
-  [api.reducerPath]: ReturnType<typeof api.reducer>;
 };
 
 /**

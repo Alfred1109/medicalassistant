@@ -3,7 +3,7 @@
 处理系统通知的创建、获取和管理
 """
 from typing import Dict, List, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import asyncio
@@ -44,6 +44,14 @@ class NotificationService:
         for notification in notifications:
             notification["id"] = str(notification["_id"])
             del notification["_id"]
+            # Only this new producer has an established UTC storage contract.
+            # Historical datetime.now() notifications have unknown timezone
+            # provenance and must not be silently reinterpreted as UTC.
+            created_at = notification.get("time")
+            if (notification.get("notification_type") == "followup"
+                    and notification.get("sender_id") == "system:followup-reminders"
+                    and isinstance(created_at, datetime) and created_at.tzinfo is None):
+                notification["time"] = created_at.replace(tzinfo=timezone.utc)
         
         return notifications
     
@@ -59,22 +67,15 @@ class NotificationService:
     @staticmethod
     async def mark_as_read(db: AsyncIOMotorClient, notification_id: str, user_id: str) -> bool:
         """将特定通知标记为已读"""
-        # 确保通知存在且属于当前用户
-        notification = await db.notifications.find_one({
-            "_id": ObjectId(notification_id),
-            "recipient_id": user_id
-        })
-        
-        if not notification:
+        if not ObjectId.is_valid(notification_id):
             return False
-        
-        # 更新为已读
+        # Recipient ownership and mutation share one query. Opening a read
+        # notification again is a successful idempotent operation.
         result = await db.notifications.update_one(
-            {"_id": ObjectId(notification_id)},
+            {"_id": ObjectId(notification_id), "recipient_id": user_id},
             {"$set": {"read": True}}
         )
-        
-        return result.modified_count > 0
+        return result.matched_count > 0
     
     @staticmethod
     async def mark_all_as_read(db: AsyncIOMotorClient, user_id: str) -> int:
@@ -89,17 +90,9 @@ class NotificationService:
     @staticmethod
     async def delete_notification(db: AsyncIOMotorClient, notification_id: str, user_id: str) -> bool:
         """删除特定通知"""
-        # 确保通知存在且属于当前用户
-        notification = await db.notifications.find_one({
-            "_id": ObjectId(notification_id),
-            "recipient_id": user_id
-        })
-        
-        if not notification:
+        if not ObjectId.is_valid(notification_id):
             return False
-        
-        # 删除通知
-        result = await db.notifications.delete_one({"_id": ObjectId(notification_id)})
+        result = await db.notifications.delete_one({"_id": ObjectId(notification_id), "recipient_id": user_id})
         
         return result.deleted_count > 0
     
@@ -267,4 +260,4 @@ class NotificationService:
             except Exception as e:
                 logger.warning(f"批量通知实时推送失败: {str(e)}")
         
-        return notification_ids 
+        return notification_ids

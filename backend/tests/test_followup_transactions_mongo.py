@@ -92,7 +92,7 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
     async def test_complete_cancel_race_cannot_reopen_terminal_node(self):
         results = await asyncio.gather(
             self.service.cancel_followup(self.followup_id, self.request),
-            self.service.complete_followup(self.followup_id, CompleteFollowUpRequest()), return_exceptions=True)
+            self.service.complete_followup(self.followup_id, CompleteFollowUpRequest(expected_version=0)), return_exceptions=True)
         self.assertEqual(sum(isinstance(value, AppBaseException) and value.status_code == 409 for value in results), 1)
         terminal = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
         # FU01 S5：手工录入只到 in_review（completed 只能由审阅通过置达）
@@ -105,8 +105,8 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
                 await operation
 
     async def test_default_completion_time_does_not_break_request_retry(self):
-        first = await self.service.complete_followup(self.followup_id, CompleteFollowUpRequest())
-        second = await self.service.complete_followup(self.followup_id, CompleteFollowUpRequest())
+        first = await self.service.complete_followup(self.followup_id, CompleteFollowUpRequest(expected_version=0))
+        second = await self.service.complete_followup(self.followup_id, CompleteFollowUpRequest(expected_version=0))
         self.assertEqual(first.actual_date.replace(microsecond=first.actual_date.microsecond // 1000 * 1000), second.actual_date)
         self.assertEqual(await self.db.followup_records.count_documents({}), 1)
 
@@ -136,10 +136,15 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
 
     async def _seed_in_review(self):
         """把节点置为 in_review（模拟填报 confirm 后的待审阅状态）。"""
+        task_id = ObjectId()
+        await self.db.integration_fill_tasks.insert_one({
+            "_id": task_id, "status": "confirmed", "patient_id": self.doc["patient_id"],
+            "followup_visit_id": self.followup_id,
+            "confirmation": {"response_id": "resp-1", "remote_status": "submitted", "answers": []}})
         await self.db.followup_records.update_one(
             {"_id": self.doc["_id"]},
             {"$set": {"status": "in_review",
-                      "effective_response": {"task_id": str(ObjectId()), "response_id": "resp-1"}}})
+                      "effective_response": {"task_id": str(task_id), "response_id": "resp-1"}}})
         self.doc = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
 
     async def test_review_approval_and_cancel_race_one_conflicts(self):
@@ -147,7 +152,7 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
         await self._seed_in_review()
         results = await asyncio.gather(
             self.service.review_followup(
-                self.followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+                self.followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
                 reviewer_id=self.doc["provider_id"], reviewer_role="doctor"),
             self.service.cancel_followup(self.followup_id, CancelFollowUpRequest(cancel_reason="x")),
             return_exceptions=True)
@@ -168,14 +173,14 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.service, "_write_node", side_effect=fail_after_write):
             with self.assertRaises(RuntimeError):
                 await self.service.review_followup(
-                    self.followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+                    self.followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
                     reviewer_id=self.doc["provider_id"], reviewer_role="doctor")
         self.assertEqual(
             await self.db.followup_records.find_one({"_id": self.doc["_id"]}), before)
         self.assertEqual(await self.db.audit_logs.count_documents({}), 0)
         # 失败后重试成功
         response = await self.service.review_followup(
-            self.followup_id, ReviewFollowUpRequest(decision=ReviewDecision.APPROVED),
+            self.followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
             reviewer_id=self.doc["provider_id"], reviewer_role="doctor")
         self.assertEqual(response.status.value, "completed")
         self.assertEqual(await self.db.audit_logs.count_documents({}), 1)
@@ -183,7 +188,7 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
     async def test_review_returned_clears_effective_response_atomically(self):
         await self._seed_in_review()
         response = await self.service.review_followup(
-            self.followup_id, ReviewFollowUpRequest(decision=ReviewDecision.RETURNED),
+            self.followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.RETURNED),
             reviewer_id=self.doc["provider_id"], reviewer_role="doctor")
         self.assertEqual(response.status.value, "awaiting_fill")
         node = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
@@ -194,7 +199,10 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
     async def test_re_evaluate_concurrent_and_retry_has_one_successor(self):
         """复评并发与重试：同一后继节点、原节点链接唯一、审计不重复。"""
         await self.db.followup_records.update_one(
-            {"_id": self.doc["_id"]}, {"$set": {"status": "completed"}})
+            {"_id": self.doc["_id"]}, {"$set": {"status": "completed",
+                "current_evidence": {"source": "manual_entry", "submission_id": "original"},
+                "submission_history": [{"source": "manual_entry", "submission_id": "original",
+                                        "snapshot": {"notes": "original evidence"}}]}})
         self.doc = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
         request = ReEvaluateFollowUpRequest(
             scheduled_date=datetime.utcnow() + timedelta(days=14), reason="按计划复评")
@@ -213,9 +221,35 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("effective_response", child)
         self.assertNotIn("review", child)
         self.assertNotIn("fill_task_ids", child)
+        self.assertNotIn("current_evidence", child)
+        self.assertNotIn("submission_history", child)
         parent = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
         self.assertEqual(parent["next_visit_id"], str(child["_id"]))
+        mutable_fields = {"updated_at", "mutation_version", "re_evaluate_operation",
+                          "next_visit_id", "next_follow_up_id"}
+        self.assertEqual({key: value for key, value in parent.items() if key not in mutable_fields},
+                         {key: value for key, value in self.doc.items() if key not in mutable_fields})
         self.assertEqual(await self.db.audit_logs.count_documents({}), 1)
+
+    async def test_re_evaluate_audit_failure_rolls_back_parent_child_and_evidence(self):
+        await self.db.followup_records.update_one(
+            {"_id": self.doc["_id"]}, {"$set": {"status": "completed",
+                "current_evidence": {"source": "manual_entry", "submission_id": "original"},
+                "submission_history": [{"snapshot": {"notes": "original evidence"}}]}})
+        before = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
+        timeline_count = await self.db.medical_timelines.count_documents({})
+        request = ReEvaluateFollowUpRequest(scheduled_date=datetime.utcnow() + timedelta(days=14))
+        with patch.object(self.service, "_write_audit", side_effect=RuntimeError("synthetic audit failure")):
+            with self.assertRaises(RuntimeError):
+                await self.service.re_evaluate_followup(self.followup_id, request, operator_id="op")
+        self.assertEqual(await self.db.followup_records.find_one({"_id": self.doc["_id"]}), before)
+        self.assertEqual(await self.db.followup_records.count_documents({}), 1)
+        self.assertEqual(await self.db.medical_timelines.count_documents({}), timeline_count)
+        self.assertEqual(await self.db.audit_logs.count_documents({}), 0)
+        child = await self.service.re_evaluate_followup(self.followup_id, request, operator_id="op")
+        self.assertEqual(child.previous_visit_id, self.followup_id)
+        self.assertIsNone(child.current_evidence)
+        self.assertEqual(child.submission_history, [])
 
     async def test_re_evaluate_conflicting_requests_one_wins(self):
         """不同复评请求并发：一个 409，库里只有一个后继节点。"""
@@ -238,15 +272,71 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_entry_writes_audit_in_same_transaction(self):
         """手工录入（D-2）：节点转 in_review 与审计同事务落库。"""
         response = await self.service.complete_followup(
-            self.followup_id, CompleteFollowUpRequest(notes="电话录入"), operator_id="op")
+            self.followup_id, CompleteFollowUpRequest(expected_version=0, notes="电话录入"), operator_id="op")
         self.assertEqual(response.status.value, "in_review")
         node = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
         self.assertEqual(node["completion_data"]["source"], "manual_entry")
-        # 手工录入不创建/不改写表单答卷状态：种子节点既有的 effective_response 原样保留
-        self.assertEqual(node["effective_response"], {"response_id": "old"})
+        # 旧表单来源归档，当前证据只能是新手工录入。
+        self.assertIsNone(node["effective_response"])
+        self.assertEqual(node["current_evidence"]["source"], "manual_entry")
+        self.assertEqual(node["submission_history"][0]["snapshot"]["effective_response"], {"response_id": "old"})
         audit = await self.db.audit_logs.find_one({})
         self.assertEqual(audit["action"], "followup_manual_entry")
         self.assertEqual(audit["resource_id"], self.followup_id)
+
+    async def test_same_content_concurrent_retries_are_scoped_to_each_review_round(self):
+        for version in (0, 2):
+            entry = CompleteFollowUpRequest(expected_version=version, notes="same")
+            submitted = await asyncio.gather(*[
+                self.service.complete_followup(self.followup_id, entry, operator_id="op")
+                for _ in range(6)])
+            self.assertEqual({response.mutation_version for response in submitted}, {version + 1})
+            review = ReviewFollowUpRequest(expected_version=version + 1,
+                decision=ReviewDecision.RETURNED, comment="same")
+            returned = await asyncio.gather(*[
+                self.service.review_followup(self.followup_id, review,
+                    reviewer_id=self.doc["provider_id"])
+                for _ in range(6)])
+            self.assertEqual({response.mutation_version for response in returned}, {version + 2})
+            self.assertEqual({response.status.value for response in returned}, {"awaiting_fill"})
+            with self.assertRaises(AppBaseException) as stale:
+                await self.service.complete_followup(self.followup_id, entry)
+            self.assertEqual(stale.exception.status_code, 409)
+        node = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
+        self.assertEqual(len(node["review"]["history"]), 2)
+        self.assertEqual(await self.db.audit_logs.count_documents({}), 4)
+
+    async def test_concurrent_different_review_decisions_require_the_read_version(self):
+        await self._seed_in_review()
+        results = await asyncio.gather(*[
+            self.service.review_followup(self.followup_id,
+                ReviewFollowUpRequest(expected_version=0, decision=decision),
+                reviewer_id=self.doc["provider_id"])
+            for decision in (ReviewDecision.APPROVED, ReviewDecision.RETURNED)
+        ], return_exceptions=True)
+        self.assertEqual(sum(isinstance(item, AppBaseException) and item.status_code == 409
+                             for item in results), 1)
+        node = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
+        self.assertEqual(node["mutation_version"], 1)
+        self.assertEqual(len(node["review"]["history"]), 1)
+        self.assertEqual(await self.db.audit_logs.count_documents({}), 1)
+
+    async def test_edit_and_review_race_never_approves_unseen_content(self):
+        await self._seed_in_review()
+        results = await asyncio.gather(
+            self.service.update_followup_record(self.followup_id,
+                FollowUpRecordUpdate(description="new contents")),
+            self.service.review_followup(self.followup_id,
+                ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
+                reviewer_id=self.doc["provider_id"]), return_exceptions=True)
+        node = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
+        if node["status"] == "completed":
+            self.assertNotEqual(node.get("notes"), "new contents")
+            self.assertIsInstance(results[0], AppBaseException)
+        else:
+            self.assertEqual(node["notes"], "new contents")
+            self.assertIsInstance(results[1], AppBaseException)
+        self.assertEqual(node["mutation_version"], 1)
 
 
 @unittest.skipUnless(STANDALONE_URI, "set REHAB_TEST_STANDALONE_URI to an isolated local standalone")

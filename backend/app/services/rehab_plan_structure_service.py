@@ -179,6 +179,9 @@ class RehabPlanStructureService:
         """
         plan, version = await self._get_version_checked(
             plan_id, version_id, operator_id, operator_role)
+        if version.get("workflow") == "patient_publication" or version.get("status") != "draft":
+            raise AppBaseException("该版本不能通过旧处方接口修改，请使用康复草稿工作台", status_code=409,
+                                   error_code="REHAB_VERSION_IMMUTABLE")
         now = datetime.utcnow()
         doc = item_data.model_dump(exclude_unset=True)
         doc.update({
@@ -230,7 +233,7 @@ class RehabPlanStructureService:
     # ── 执行事件（幂等）───────────────────────────────────────────────────
 
     async def _ensure_event_indexes(self) -> None:
-        """惰性建立执行事件幂等唯一索引；失败不阻断记录（服务层仍先查后插）。"""
+        """建立执行事件幂等唯一索引；失败必须拒绝写入。"""
         if self._indexes_ready:
             return
         try:
@@ -238,9 +241,9 @@ class RehabPlanStructureService:
                 [("plan_id", 1), ("event_id", 1)], unique=True,
                 name="uniq_plan_event_id")
             self._indexes_ready = True
-        except (PyMongoError, AttributeError):
-            # 内存打桩 / 只读环境没有 create_index 或索引建立失败时降级
-            self._indexes_ready = True
+        except (PyMongoError, AttributeError) as exc:
+            raise AppBaseException("执行记录唯一索引不可用，请核查后重试", status_code=503,
+                                   error_code="REHAB_EXECUTION_INDEX_UNAVAILABLE") from exc
 
     async def record_execution_event(
         self, plan_id: str, item_id: str, event_data: ExecutionEventCreate, *,
@@ -253,8 +256,16 @@ class RehabPlanStructureService:
         所在版本；完成/撤回/补做的语义与并发更正历史待定 REH03，本方法
         只做幂等落库。
         """
+        if event_data.event_id.startswith("patient-report:"):
+            raise AppBaseException("该事件标识仅用于患者执行反馈", status_code=422,
+                                   error_code="REHAB_RESERVED_EVENT_ID")
         plan, item = await self._get_item_checked(
             plan_id, item_id, operator_id, operator_role)
+        item_version = await self.versions_collection.find_one(
+            {"_id": ObjectId(item["version_id"]), "plan_id": plan_id}) if ObjectId.is_valid(str(item.get("version_id", ""))) else None
+        if item_version and item_version.get("workflow") == "patient_publication":
+            raise AppBaseException("已发布处方的患者执行反馈须使用专用入口", status_code=409,
+                                   error_code="REHAB_PUBLICATION_EVENT_REQUIRED")
         await self._ensure_event_indexes()
         existing = await self.events_collection.find_one(
             {"plan_id": plan_id, "event_id": event_data.event_id})

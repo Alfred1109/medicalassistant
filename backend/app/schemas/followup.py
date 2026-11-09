@@ -108,6 +108,7 @@ class FollowUpRecordUpdate(BaseModel):
 
 class CompleteFollowUpRequest(BaseModel):
     """完成随访请求"""
+    expected_version: int = Field(..., ge=0, description="读取到的节点 mutation_version；旧节点为0")
     actual_date: datetime = Field(default_factory=datetime.now)
     answers: List[FollowUpAnswer] = []
     notes: Optional[str] = None
@@ -143,6 +144,7 @@ class ReviewFollowUpRequest(BaseModel):
     definition_hash / submitted_at / verified_at）；无表单随访的手工录入
     审阅可省略 evidence（录入证据在 completion_data.source=manual_entry）。
     """
+    expected_version: int = Field(..., ge=0, description="审阅内容对应的 mutation_version；旧节点为0")
     decision: ReviewDecision
     comment: Optional[str] = None
     evidence: Optional[Dict[str, Any]] = None
@@ -204,11 +206,14 @@ class FollowUpRecordDB(FollowUpBase, TimestampModel):
     reschedule_operation: Optional[str] = None
     review_operation: Optional[str] = None        # S5 审阅请求幂等指纹
     re_evaluate_operation: Optional[str] = None   # S6 复评请求幂等指纹
+    current_evidence: Optional[Dict[str, Any]] = None
+    submission_history: List[Dict[str, Any]] = []
 
 
 class FollowUpRecordResponse(FollowUpBase, TimestampModel):
     """随访记录响应模型"""
     id: str
+    mutation_version: int = 0
     created_by: str
     status: FollowUpStatus
     actual_date: Optional[datetime] = None
@@ -228,8 +233,22 @@ class FollowUpRecordResponse(FollowUpBase, TimestampModel):
     fill_task_ids: List[str] = []                         # 关联填报任务反向索引
     previous_visit_id: Optional[str] = None               # 复评链前驱
     next_visit_id: Optional[str] = None                   # 复评链后继
+    current_evidence: Optional[Dict[str, Any]] = None
+    submission_history: List[Dict[str, Any]] = []
 
     model_config = ConfigDict(
         from_attributes=True,
         populate_by_name=True,
     )
+
+
+class FollowUpWorkbenchItem(FollowUpRecordResponse):
+    """医护工作台显示信息；姓名不参与授权或身份匹配。"""
+    patient_name: Optional[str] = None
+
+
+class FollowUpWorkbenchPage(BaseModel):
+    items: List[FollowUpWorkbenchItem]
+    total: int = Field(ge=0)
+    skip: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)

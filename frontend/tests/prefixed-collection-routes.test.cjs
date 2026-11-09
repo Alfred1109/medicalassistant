@@ -31,28 +31,23 @@ test('all slash-collection consumers stay under the configured prefix without re
   global.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
   global.window = { location: { origin, protocol: 'http:', pathname: '/medical/app/dashboard' } };
   axios.defaults.proxy = false;
-  const source = `export {apiService} from './services/api'; export {notificationApi} from './services/notificationService'; export {default as dashboardService} from './services/dashboardService'; export {fetchAgents,createAgent} from './store/slices/agentSlice'; export {api as queryApi} from './store/api';`;
-  const code = buildSync({ stdin: { contents: source, resolveDir: path.resolve(__dirname, '../src'), loader: 'ts' }, bundle: true, write: false, format: 'cjs', platform: 'node', external: ['axios', '@reduxjs/toolkit', '@reduxjs/toolkit/query/react'],
+  const source = `export {apiService} from './services/api'; export {notificationApi} from './services/notificationService'; export {default as dashboardService} from './services/dashboardService'; export {fetchAgents,createAgent} from './store/slices/agentSlice';`;
+  const code = buildSync({ stdin: { contents: source, resolveDir: path.resolve(__dirname, '../src'), loader: 'ts' }, bundle: true, write: false, format: 'cjs', platform: 'node', external: ['axios', '@reduxjs/toolkit'],
     define: { 'import.meta.env.VITE_API_URL': JSON.stringify(origin + '/medical/api'), 'import.meta.env.VITE_API_PREFIX': '"/medical"' }, logLevel: 'silent' }).outputFiles[0].text;
   const filename = path.resolve(__dirname, '.prefixed-collections.cjs');
   const loaded = new Module(filename, module); loaded.filename = filename; loaded.paths = Module._nodeModulePaths(__dirname); loaded._compile(code, filename);
   const api = loaded.exports;
-  const store = configureStore({ reducer: { auth: () => ({ token: null }), [api.queryApi.reducerPath]: api.queryApi.reducer }, middleware: getDefault => getDefault().concat(api.queryApi.middleware) });
-  t.after(() => store.dispatch(api.queryApi.util.resetApiState()));
+  const store = configureStore({ reducer: { auth: () => ({ token: null }) } });
   await api.apiService.agent.getAgents();
   await api.apiService.agent.createAgent({ name: 'fixture' });
   await store.dispatch(api.fetchAgents()).unwrap();
   await store.dispatch(api.createAgent({ name: 'fixture' })).unwrap();
-  const query = store.dispatch(api.queryApi.endpoints.getAgents.initiate());
-  await query.unwrap();
-  query.unsubscribe();
-  await store.dispatch(api.queryApi.endpoints.createAgent.initiate({ name: 'fixture' })).unwrap();
   await api.notificationApi.getNotifications({ limit: 5 });
   await api.dashboardService.getNotifications(5);
   await api.apiService.getUserDevices();
-  assert.equal(received.length, 10, 'one config + nine requests, no extra redirect request');
+  assert.equal(received.length, 8, 'one config + seven requests, no extra redirect request');
   assert.equal(received.filter(r => r.path === '/medical/api/auth/config').length, 1);
-  assert.equal(received.filter(r => r.path.startsWith('/medical/api/agents/')).length, 6);
+  assert.equal(received.filter(r => r.path.startsWith('/medical/api/agents/')).length, 4);
   assert.equal(received.filter(r => r.path.startsWith('/medical/api/notifications/')).length, 2);
   assert.equal(received.filter(r => r.path === '/medical/api/devices/').length, 1);
   assert.ok(received.every(r => r.path.startsWith('/medical/api/')));

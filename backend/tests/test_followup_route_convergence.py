@@ -150,7 +150,7 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.db = FakeDatabase()
         self.doc = _seed_followup_doc(self.db)
-        self.db.users.docs[ObjectId(PATIENT_ID)] = {"_id": ObjectId(PATIENT_ID), "role": "patient", "practitioners": [DOCTOR_ID, MANAGER_ID]}
+        self.db.users.docs[ObjectId(PATIENT_ID)] = {"_id": ObjectId(PATIENT_ID), "role": "patient", "practitioners": [DOCTOR_ID], "health_managers": [MANAGER_ID]}
 
         async def fake_current_user():
             return self.user
@@ -243,6 +243,50 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(created.json()["id"], r"^[0-9a-f]{24}$")
         self.assertEqual(len(self.db["followup_records"].docs), 2)
 
+    async def test_manager_patient_list_uses_manager_assignment_and_revocation(self):
+        self.user = _make_user("health_manager", MANAGER_ID)
+        patient = self.db.users.docs[ObjectId(PATIENT_ID)]
+        patient["health_managers"] = [ObjectId(MANAGER_ID)]
+        patient["name"] = "管理患者"
+        other_id = ObjectId()
+        self.db.users.docs[other_id] = {
+            "_id": other_id, "role": "patient", "name": "错误角色关系",
+            "practitioners": [MANAGER_ID], "health_managers": [],
+        }
+        got = await self.client.get("/api/health-managers/patients")
+        self.assertEqual(got.status_code, 200, got.text)
+        self.assertEqual([item["id"] for item in got.json()], [PATIENT_ID])
+        self.assertEqual(got.json()[0]["name"], "管理患者")
+        detail = await self.client.get(f"/api/health-records/followups/{self.doc['_id']}")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        patient["health_managers"] = []
+        revoked = await self.client.get("/api/health-managers/patients")
+        self.assertEqual(revoked.json(), [])
+        detail = await self.client.get(f"/api/health-records/followups/{self.doc['_id']}")
+        self.assertEqual(detail.status_code, 403, detail.text)
+
+    async def test_manager_patient_list_does_not_grant_other_roles(self):
+        for role in ("doctor", "patient", "admin"):
+            with self.subTest(role=role):
+                self.user = _make_user(role, MANAGER_ID)
+                response = await self.client.get("/api/health-managers/patients")
+                self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_assigned_manager_can_submit_and_review_own_followup(self):
+        self.user = _make_user("health_manager", MANAGER_ID)
+        self.doc["provider_id"] = MANAGER_ID
+        self.doc["created_by"] = MANAGER_ID
+        node_id = str(self.doc["_id"])
+        submitted = await self.client.post(
+            f"/api/health-records/followups/{node_id}/complete",
+            json={"expected_version": 0, "notes": "电话核实"})
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        reviewed = await self.client.post(
+            f"/api/health-records/followups/{node_id}/review",
+            json={"expected_version": submitted.json()["mutation_version"], "decision": "approved"})
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        self.assertEqual(reviewed.json()["status"], "completed")
+
     async def test_doctor_followups_rejects_non_doctor(self):
         self.user = _make_user("patient", PATIENT_ID)
         response = await self.client.get("/api/doctors/follow-ups")
@@ -254,10 +298,10 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
         paths = [
             ("POST", "/api/health-records/followups", {"patient_id": PATIENT_ID, "provider_id": DOCTOR_ID, "follow_up_type": "phone", "scheduled_date": datetime.utcnow().isoformat(), "description": "x"}),
             ("PUT", f"/api/health-records/followups/{self.doc['_id']}", {"description": "changed"}),
-            ("POST", f"/api/health-records/followups/{self.doc['_id']}/complete", {}),
+            ("POST", f"/api/health-records/followups/{self.doc['_id']}/complete", {"expected_version": 0}),
             ("POST", f"/api/health-records/followups/{self.doc['_id']}/cancel", {"cancel_reason": "x"}),
             ("POST", f"/api/health-records/followups/{self.doc['_id']}/reschedule", {"new_date": datetime.utcnow().isoformat(), "reason": "x"}),
-            ("POST", f"/api/health-records/followups/{self.doc['_id']}/review", {"decision": "approved"}),
+            ("POST", f"/api/health-records/followups/{self.doc['_id']}/review", {"expected_version": 0, "decision": "approved"}),
             ("POST", f"/api/health-records/followups/{self.doc['_id']}/re-evaluate", {"scheduled_date": datetime.utcnow().isoformat()}),
         ]
         original = dict(self.doc)
@@ -275,10 +319,10 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
             ("GET", f"/api/health-records/followups?patient_id={PATIENT_ID}", None),
             ("GET", f"/api/health-records/followups/upcoming?patient_id={PATIENT_ID}", None),
             ("PUT", f"/api/health-records/followups/{node_id}", {"description": "changed"}),
-            ("POST", f"/api/health-records/followups/{node_id}/complete", {}),
+            ("POST", f"/api/health-records/followups/{node_id}/complete", {"expected_version": 0}),
             ("POST", f"/api/health-records/followups/{node_id}/cancel", {"cancel_reason": "x"}),
             ("POST", f"/api/health-records/followups/{node_id}/reschedule", {"new_date": datetime.utcnow().isoformat(), "reason": "x"}),
-            ("POST", f"/api/health-records/followups/{node_id}/review", {"decision": "approved"}),
+            ("POST", f"/api/health-records/followups/{node_id}/review", {"expected_version": 0, "decision": "approved"}),
             ("POST", f"/api/health-records/followups/{node_id}/re-evaluate", {"scheduled_date": datetime.utcnow().isoformat()}),
         ]
         for method, path, body in calls:
@@ -323,29 +367,42 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
         """FU01 S5 路由：手工录入转 in_review；completed 只能由审阅通过置达。"""
         self.user = _make_user("doctor", DOCTOR_ID)
         node_id = str(self.doc["_id"])
+        current = await self.client.get(f"/api/health-records/followups/{node_id}")
+        self.assertEqual(current.json()["mutation_version"], 0)
         entry = await self.client.post(f"/api/health-records/followups/{node_id}/complete",
-                                       json={"notes": "电话随访结果"})
+                                       json={"expected_version": 0, "notes": "电话随访结果"})
         self.assertEqual(entry.status_code, 200, entry.text)
         self.assertEqual(entry.json()["status"], "in_review")
+        self.assertEqual(entry.json()["mutation_version"], 1)
         doc = self.db["followup_records"].docs[self.doc["_id"]]
         self.assertEqual(doc["completion_data"]["source"], "manual_entry")
         # 手工录入审计已落库
         self.assertEqual(len(self.db["audit_logs"].docs), 1)
 
         approved = await self.client.post(f"/api/health-records/followups/{node_id}/review",
-                                          json={"decision": "approved", "comment": "核实通过"})
+                                          json={"expected_version": entry.json()["mutation_version"], "decision": "approved", "comment": "核实通过"})
         self.assertEqual(approved.status_code, 200, approved.text)
         self.assertEqual(approved.json()["status"], "completed")
+        self.assertEqual(approved.json()["mutation_version"], 2)
         self.assertEqual(approved.json()["review"]["decision"], "approved")
         self.assertEqual(len(self.db["audit_logs"].docs), 2)
 
         # 已完成节点再录入/再审阅 → 状态机冲突 409
-        for path, body in [("complete", {"notes": "x"}),
-                           ("review", {"decision": "returned"})]:
+        for path, body in [("complete", {"expected_version": approved.json()["mutation_version"], "notes": "x"}),
+                           ("review", {"expected_version": approved.json()["mutation_version"], "decision": "returned"})]:
             with self.subTest(path=path):
                 conflict = await self.client.post(
                     f"/api/health-records/followups/{node_id}/{path}", json=body)
                 self.assertEqual(conflict.status_code, 409, conflict.text)
+
+    async def test_manual_entry_and_review_require_observed_version(self):
+        self.user = _make_user("doctor", DOCTOR_ID)
+        node_id = str(self.doc["_id"])
+        for path, body in (("complete", {}), ("review", {"decision": "approved"})):
+            with self.subTest(path=path):
+                response = await self.client.post(
+                    f"/api/health-records/followups/{node_id}/{path}", json=body)
+                self.assertEqual(response.status_code, 422, response.text)
 
     async def test_review_endpoint_requires_provider_or_admin(self):
         """已分配医护但非该节点责任人审阅 → 服务层 403（admin 豁免在服务层，
@@ -354,10 +411,15 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
         self.db.users.docs[ObjectId(PATIENT_ID)]["practitioners"].append(other_doctor)
         node_id = str(self.doc["_id"])
         self.db["followup_records"].docs[self.doc["_id"]]["status"] = "in_review"
+        self.db["followup_records"].docs[self.doc["_id"]]["completion_data"] = {
+            "source": "manual_entry", "result": "电话核实结果"}
+        self.db["followup_records"].docs[self.doc["_id"]]["completion_data"] = {
+            "source": "manual_entry", "result": "已记录的随访结果"
+        }
 
         self.user = _make_user("doctor", other_doctor)
         denied = await self.client.post(f"/api/health-records/followups/{node_id}/review",
-                                        json={"decision": "approved"})
+                                        json={"expected_version": 0, "decision": "approved"})
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertEqual(
             self.db["followup_records"].docs[self.doc["_id"]]["status"], "in_review")
@@ -365,7 +427,7 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
         # 路由层写权限策略（需医疗人员）先于服务层 admin 豁免生效
         self.user = _make_user("admin", str(ObjectId()))
         admin = await self.client.post(f"/api/health-records/followups/{node_id}/review",
-                                       json={"decision": "approved"})
+                                       json={"expected_version": 0, "decision": "approved"})
         self.assertEqual(admin.status_code, 403, admin.text)
         self.assertEqual(
             self.db["followup_records"].docs[self.doc["_id"]]["status"], "in_review")
@@ -373,7 +435,7 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
         # 责任医护本人可审阅
         self.user = _make_user("doctor", DOCTOR_ID)
         allowed = await self.client.post(f"/api/health-records/followups/{node_id}/review",
-                                         json={"decision": "approved"})
+                                         json={"expected_version": 0, "decision": "approved"})
         self.assertEqual(allowed.status_code, 200, allowed.text)
         self.assertEqual(allowed.json()["status"], "completed")
 

@@ -1,13 +1,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import axios from 'axios';
-import type { BaseQueryApi } from '@reduxjs/toolkit/query';
 import { normalizeApiBaseUrl, resolveApiBaseUrl } from './apiBase.ts';
-
-const require = createRequire(import.meta.url);
-const { fetchBaseQuery } = require('@reduxjs/toolkit/query') as typeof import('@reduxjs/toolkit/query');
 
 const cases: Array<[string | undefined, string]> = [
   [undefined, '/api'],
@@ -56,7 +51,7 @@ for (const input of [
   });
 }
 
-test('Axios and RTK Query use one /api prefix for origin and API-root configurations', async () => {
+test('HTTP consumers use one /api prefix for origin and API-root configurations', async () => {
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
     if (!['/api/agents', '/medical/api/agents'].includes(request.url || '')) {
@@ -68,16 +63,6 @@ test('Axios and RTK Query use one /api prefix for origin and API-root configurat
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
   const origin = `http://127.0.0.1:${address.port}`;
-  const controller = new AbortController();
-  const queryApi: BaseQueryApi = {
-    signal: controller.signal,
-    abort: (reason) => controller.abort(reason),
-    dispatch: () => { throw new Error('No dispatch expected for URL contract test'); },
-    getState: () => ({}),
-    extra: undefined,
-    endpoint: 'agents',
-    type: 'query',
-  };
   try {
     for (const [configured, expectedPath] of [
       [origin, '/api/agents'],
@@ -89,10 +74,6 @@ test('Axios and RTK Query use one /api prefix for origin and API-root configurat
       const client = axios.create({ baseURL, proxy: false });
       const axiosResult = await client.get('/agents');
       assert.deepEqual(axiosResult.data, { path: expectedPath });
-      const query = fetchBaseQuery({ baseUrl: baseURL });
-      const queryResult = await query('agents', queryApi, {});
-      assert.equal(queryResult.error, undefined);
-      assert.deepEqual(queryResult.data, { path: expectedPath });
     }
     // Root-relative configuration resolves at the browser's current origin.
     const relativeUrl = new URL(`${normalizeApiBaseUrl()}/agents`, origin);
@@ -100,7 +81,6 @@ test('Axios and RTK Query use one /api prefix for origin and API-root configurat
     assert.equal(relativeResult.status, 200);
     assert.deepEqual(await relativeResult.json(), { path: '/api/agents' });
   } finally {
-    controller.abort();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });

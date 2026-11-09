@@ -35,10 +35,18 @@ def _form_error_response(exc: FormIntegrationError) -> HTTPException:
     })
 
 
+def require_fill_entry_enabled() -> None:
+    try:
+        service.require_fill_enabled()
+    except FormIntegrationError as exc:
+        raise _form_error_response(exc) from exc
+
+
 @router.post("/fill-tasks")
 async def create_fill_task(
     payload: Dict[str, Any],
     current_user: Any = Depends(get_current_active_user),
+    _fill_enabled: None = Depends(require_fill_entry_enabled),
     db: AsyncIOMotorDatabase = Depends(get_database),
     client: FormPlatformClient = Depends(get_form_platform_client),
 ):
@@ -78,6 +86,7 @@ async def get_fill_task(
 async def get_embed_url(
     task_id: str,
     current_user: Any = Depends(get_current_active_user),
+    _fill_enabled: None = Depends(require_fill_entry_enabled),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """返回嵌入 URL（明文 embed_token 不可再取；令牌过期需重新创建任务）。"""

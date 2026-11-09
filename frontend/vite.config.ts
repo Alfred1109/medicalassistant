@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { backendProxy, deploymentPrefix } from './config/devProxy';
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
@@ -11,10 +12,11 @@ export default defineConfig(({ mode }) => {
   if (!['http:', 'https:'].includes(backendUrl.protocol)) {
     throw new Error('VITE_BACKEND_TARGET must use http or https');
   }
+  const prefix = deploymentPrefix(env.VITE_API_PREFIX);
   
   return {
     // 部署在 nginx 的路径前缀下,与 VITE_API_PREFIX 保持一致
-    base: env.VITE_API_PREFIX ? `${env.VITE_API_PREFIX}/` : '/',
+    base: `${prefix}/`,
     plugins: [react()],
     resolve: {
       alias: {
@@ -25,25 +27,7 @@ export default defineConfig(({ mode }) => {
       port: 5501, // 前端端口
       open: false,
       host: '127.0.0.1', // 只监听回环,对外统一由 nginx :80 转发
-      proxy: {
-        '/api': {
-          target: backendTarget,
-          changeOrigin: true,
-          secure: false,
-          ws: true, // 支持WebSocket
-          configure: (proxy, _options) => {
-            proxy.on('error', (err, _req, _res) => {
-              console.log('代理请求错误:', err);
-            });
-            proxy.on('proxyReq', (proxyReq, req, _res) => {
-              console.log('代理请求:', req.method, req.url);
-            });
-            proxy.on('proxyRes', (proxyRes, req, _res) => {
-              console.log('代理响应:', req.method, req.url, proxyRes.statusCode);
-            });
-          },
-        },
-      },
+      proxy: backendProxy(prefix, backendTarget),
     },
     build: {
       sourcemap: true,

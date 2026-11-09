@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Box,
   Typography,
@@ -28,8 +28,7 @@ import {
   CircularProgress,
   Alert
 } from '@mui/material';
-import type { ChipProps } from '@mui/material';
-import { format, isAfter, isValid, parseISO } from 'date-fns';
+import { format, isValid, parseISO } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
@@ -46,48 +45,10 @@ import FilterListIcon from '@mui/icons-material/FilterList';
 import SearchIcon from '@mui/icons-material/Search';
 import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 
-// 随访类型选项
-const followUpTypes = [
-  { value: 'phone', label: '电话随访' },
-  { value: 'online', label: '线上随访' },
-  { value: 'onsite', label: '门诊随访' },
-  { value: 'home_visit', label: '家庭访视' },
-  { value: 'remote_monitoring', label: '远程监测' },
-  { value: 'group', label: '小组随访' },
-  { value: 'other', label: '其他' },
-];
-
-// 随访状态选项
-const followUpStatuses = [
-  { value: 'scheduled', label: '已计划', color: 'primary' },
-  { value: 'completed', label: '已完成', color: 'success' },
-  { value: 'canceled', label: '已取消', color: 'error' },
-  { value: 'missed', label: '已错过', color: 'warning' },
-  { value: 'rescheduled', label: '已重新安排', color: 'info' },
-] as const;
-
-interface FollowUpFilters {
-  follow_up_type?: string;
-  status?: string;
-  start_date?: string | null;
-  end_date?: string | null;
-  patient_name?: string;
-}
-
-// 随访记录类型
-interface FollowUpRecord {
-  id: string;
-  patient_id: string;
-  patient_name?: string;
-  follow_up_type: string;
-  scheduled_date: string;
-  actual_date?: string | null;
-  status: string;
-  notes?: string | null;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
+import type { FollowUpFilters, FollowUpRecord } from '../../types/followup';
+import {
+  followUpTypes, followUpStatuses, getFollowUpStatusInfo, getFollowUpTypeLabel, manualEntryText,
+} from '../../constants/followup';
 
 // 组件属性
 interface FollowUpListProps {
@@ -101,7 +62,12 @@ interface FollowUpListProps {
   onPageSizeChange?: (pageSize: number) => void;
   onAdd?: () => void;
   onEdit?: (id: string) => void;
+  onView?: (id: string) => void;
+  onReEvaluate?: (id: string) => void;
+  canReEvaluate?: (record: FollowUpRecord) => boolean;
   onComplete?: (id: string) => void;
+  onReview?: (id: string) => void;
+  canReview?: (record: FollowUpRecord) => boolean;
   onCancel?: (id: string) => void;
   onReschedule?: (id: string) => void;
   onDelete?: (id: string) => void;
@@ -109,6 +75,8 @@ interface FollowUpListProps {
   onRefresh?: () => void;
   currentFilters?: FollowUpFilters;
 }
+
+const EMPTY_FILTERS: FollowUpFilters = {};
 
 const FollowUpList: React.FC<FollowUpListProps> = ({
   records,
@@ -121,17 +89,23 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   onPageSizeChange,
   onAdd,
   onEdit,
+  onView,
+  onReEvaluate,
+  canReEvaluate,
   onComplete,
+  onReview,
+  canReview,
   onCancel,
   onReschedule,
   onDelete,
   onFilterChange,
   onRefresh,
-  currentFilters = {}
+  currentFilters = EMPTY_FILTERS
 }) => {
   // 状态
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState(currentFilters);
+  useEffect(() => { setFilters(currentFilters); }, [currentFilters]);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [actionDialogOpen, setActionDialogOpen] = useState(false);
@@ -226,63 +200,21 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
     }
   };
   
-  // 获取随访类型标签
-  const getFollowUpTypeLabel = (type: string) => {
-    const foundType = followUpTypes.find(t => t.value === type);
-    return foundType ? foundType.label : type;
-  };
-  
-  // 获取状态标签和颜色
-  const getStatusInfo = (status: string): { label: string; color: ChipProps['color'] } => {
-    const foundStatus = followUpStatuses.find(s => s.value === status);
-    return {
-      label: foundStatus ? foundStatus.label : status,
-      color: foundStatus ? foundStatus.color : 'default'
-    };
-  };
-  
-  // 检查随访是否过期（已错过）
-  const isFollowUpMissed = (record: FollowUpRecord) => {
-    return record.status === 'scheduled' && 
-           isAfter(new Date(), parseISO(record.scheduled_date)) &&
-           !record.actual_date;
-  };
-  
   // 渲染操作按钮
   const renderActions = (record: FollowUpRecord) => {
-    if (isFollowUpMissed(record)) {
-      // 错过的随访只能标记为"已完成"或"已取消"
-      return (
-        <Stack direction="row" spacing={1}>
-          <IconButton 
-            size="small" 
-            color="success" 
-            onClick={() => handleActionClick(record.id, 'complete')}
-            title="标记为已完成"
-          >
-            <DoneIcon fontSize="small" />
-          </IconButton>
-          <IconButton 
-            size="small" 
-            color="error" 
-            onClick={() => handleActionClick(record.id, 'cancel')}
-            title="标记为已取消"
-          >
-            <CancelIcon fontSize="small" />
-          </IconButton>
-        </Stack>
-      );
-    }
-    
     switch (record.status) {
+      case 'in_review':
+        return onReview ? <Button size="small" disabled={canReview ? !canReview(record) : false} onClick={() => onReview(record.id)}>审阅随访</Button> : null;
       case 'scheduled':
+      case 'awaiting_fill':
+      case 'rescheduled':
         return (
           <Stack direction="row" spacing={1}>
             <IconButton 
               size="small" 
               color="success" 
               onClick={() => handleActionClick(record.id, 'complete')}
-              title="标记为已完成"
+              title={manualEntryText.action}
             >
               <DoneIcon fontSize="small" />
             </IconButton>
@@ -306,19 +238,10 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
         );
       case 'completed':
       case 'canceled':
-        return (
-          <Stack direction="row" spacing={1}>
-            <IconButton 
-              size="small" 
-              color="primary" 
-              onClick={() => onEdit && onEdit(record.id)}
-              title="查看详情"
-            >
-              <MoreHorizIcon fontSize="small" />
-            </IconButton>
-          </Stack>
-        );
-      case 'rescheduled':
+      case 'missed':
+      case 'overdue':
+      case 'lost':
+        if (onView) return null;
         return (
           <Stack direction="row" spacing={1}>
             <IconButton 
@@ -357,10 +280,10 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   
   return (
     <Paper elevation={2}>
-      <Box p={3}>
-        <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+      <Box sx={{ p: { xs: 2, sm: 3 }, minWidth: 0 }}>
+        <Box display="flex" justifyContent="space-between" mb={2} sx={{ flexDirection: { xs: 'column', sm: 'row' }, alignItems: { xs: 'flex-start', sm: 'center' }, gap: 1 }}>
           <Typography variant="h6">随访管理</Typography>
-          <Box>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
             <Button 
               startIcon={<RefreshIcon />} 
               onClick={onRefresh} 
@@ -503,13 +426,13 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
         ) : records.length === 0 ? (
           <Box display="flex" justifyContent="center" alignItems="center" height={200}>
             <Typography color="text.secondary">
-              暂无随访记录
+              {error ? '随访记录未能加载，请点击刷新重试。' : '暂无随访记录'}
             </Typography>
           </Box>
         ) : (
           <>
             <TableContainer>
-              <Table aria-label="随访记录表格">
+              <Table aria-label="随访记录表格" sx={{ minWidth: 880 }}>
                 <TableHead>
                   <TableRow>
                     <TableCell>患者</TableCell>
@@ -523,28 +446,14 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
                 </TableHead>
                 <TableBody>
                   {records.map((record) => {
-                    const statusInfo = getStatusInfo(record.status);
-                    const isMissed = isFollowUpMissed(record);
+                    const statusInfo = getFollowUpStatusInfo(record.status);
                     
                     return (
-                      <TableRow 
-                        key={record.id}
-                        sx={{ 
-                          backgroundColor: isMissed ? 'rgba(255, 152, 0, 0.08)' : 'inherit'
-                        }}
-                      >
+                      <TableRow key={record.id}>
                         <TableCell>{record.patient_name || record.patient_id}</TableCell>
                         <TableCell>{getFollowUpTypeLabel(record.follow_up_type)}</TableCell>
                         <TableCell>
                           {formatDate(record.scheduled_date)}
-                          {isMissed && (
-                            <Chip 
-                              label="已错过" 
-                              size="small" 
-                              color="warning" 
-                              sx={{ ml: 1 }} 
-                            />
-                          )}
                         </TableCell>
                         <TableCell>
                           {record.actual_date ? formatDate(record.actual_date) : '-'}
@@ -570,7 +479,12 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
                           </Typography>
                         </TableCell>
                         <TableCell>
-                          {renderActions(record)}
+                          <Stack spacing={0.5}>
+                            {onView && <Button size="small" onClick={() => onView(record.id)}>查看详情</Button>}
+                            {renderActions(record)}
+                            {onReEvaluate && canReEvaluate?.(record) && <Button size="small" onClick={() => onReEvaluate(record.id)}>发起复评</Button>}
+                            {(record.next_visit_id || record.next_follow_up_id) && <Typography variant="caption" color="text.secondary">已有后继节点</Typography>}
+                          </Stack>
                         </TableCell>
                       </TableRow>
                     );
@@ -619,13 +533,13 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
         onClose={() => setActionDialogOpen(false)}
       >
         <DialogTitle>
-          {actionType === 'complete' ? '完成随访' :
+          {actionType === 'complete' ? manualEntryText.action :
            actionType === 'cancel' ? '取消随访' :
            actionType === 'reschedule' ? '重新安排随访' : ''}
         </DialogTitle>
         <DialogContent>
           <Typography>
-            {actionType === 'complete' ? '您确定要将此随访标记为已完成吗？' :
+            {actionType === 'complete' ? manualEntryText.confirmation :
              actionType === 'cancel' ? '您确定要取消此随访吗？' :
              actionType === 'reschedule' ? '您确定要重新安排此随访吗？' : ''}
           </Typography>

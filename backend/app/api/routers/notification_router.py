@@ -63,6 +63,16 @@ async def mark_all_as_read(
     
     return {"message": f"共{modified_count}条通知已标记为已读"}
 
+@router.delete("/clear-all")
+async def clear_all_notifications(
+    db: AsyncIOMotorClient = Depends(get_database),
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """清空当前用户的通知；固定路径必须先于单条通知的动态路径。"""
+    deleted_count = await NotificationService.clear_all_notifications(db, current_user.id)
+    return {"message": f"共{deleted_count}条通知已清空"}
+
+
 @router.delete("/{notification_id}")
 async def delete_notification(
     notification_id: str,
@@ -80,14 +90,3 @@ async def delete_notification(
         )
     
     return {"message": "通知已删除"}
-
-@router.delete("/clear-all")
-async def clear_all_notifications(
-    db: AsyncIOMotorClient = Depends(get_database),
-    current_user: UserResponse = Depends(get_current_user)
-):
-    """清空所有通知"""
-    user_id = current_user.id
-    deleted_count = await NotificationService.clear_all_notifications(db, user_id)
-    
-    return {"message": f"共{deleted_count}条通知已清空"} 

@@ -10,6 +10,7 @@
 
 from typing import Any, Dict, Optional
 from copy import deepcopy
+import os
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
@@ -37,6 +38,23 @@ class FormIntegrationError(AppBaseException):
                  details: Optional[Dict[str, Any]] = None):
         super().__init__(message=message, status_code=status_code,
                          error_code=error_code, details=details)
+
+
+def require_fill_enabled() -> None:
+    """Keep filling separate from read-only directory credentials.
+
+    Explicit opt-in is required while the bilateral launch/recovery contract is
+    being completed. Existing task inspection, confirmation and cancellation
+    remain available so prior tasks can be reconciled or revoked.
+    """
+    value = os.environ.get("FORM_PLATFORM_FILL_ENABLED", "false").strip().lower()
+    if value not in {"true", "false"}:
+        raise FormIntegrationError(
+            "表单填报开关配置无效", error_code="FORM_FILL_CONFIGURATION_INVALID",
+            status_code=503)
+    if value != "true":
+        raise FormIntegrationError(
+            "表单填报尚未启用", error_code="FORM_FILL_DISABLED", status_code=503)
 
 
 def _map_remote_error(exc: FormPlatformError, prefix: str) -> FormIntegrationError:
@@ -209,6 +227,7 @@ def _extract_remote_refs(payload: Dict[str, Any]) -> Dict[str, Any]:
 async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
                            operator: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     """创建填报任务：校验患者归属 → 远端建会话 → 落库任务（含一次性 embed_url 透传）。"""
+    require_fill_enabled()
     operator_id = str(operator.id)
     operator_role = operator.role
     if operator_role not in OPERATOR_ROLES:
@@ -470,7 +489,8 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
         confirmed.mark_confirmed(evidence)
         if followup_visit_id:
             from app.models.health_record import FollowUpRecord
-            from app.services.followup_service import followup_version_filter, followup_conflict
+            from app.services.followup_service import (
+                followup_version_filter, followup_conflict, followup_submission_fields)
             visit = await db[FollowUpRecord.collection_name].find_one(
                 {"_id": ObjectId(followup_visit_id)}, **options)
             if not visit or str(visit.get("patient_id")) != str(current.get("patient_id")):
@@ -478,14 +498,20 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
             _visit_is_writable(visit)
             if visit.get("visit_code") != node_visit_code:
                 raise followup_conflict("随访访视标识已改变，请重新核实")
-            result = await db[FollowUpRecord.collection_name].update_one(
-                followup_version_filter(visit),
-                {"$set": {"status": "in_review", "effective_response": {
+            values = {"status": "in_review", "effective_response": {
                     "task_id": str(doc["_id"]), "response_id": evidence.get("response_id"),
                     "visit_code": node_visit_code or evidence.get("visit_code"),
                     "submitted_at": evidence.get("submitted_at"),
                     "confirmed_at": confirmed.doc["confirmed_at"].isoformat() + "Z"},
-                    "updated_at": confirmed.doc["updated_at"]},
+                    "updated_at": confirmed.doc["updated_at"],
+                    "completion_data": None, "answers": [], "follow_up_result": None,
+                    "actual_date": None}
+            values.update(followup_submission_fields(visit, values, source="external_form",
+                submitted_by=(current.get("operator") or {}).get("user_id"),
+                submitted_at=confirmed.doc["confirmed_at"], confirmation=evidence))
+            result = await db[FollowUpRecord.collection_name].update_one(
+                followup_version_filter(visit),
+                {"$set": values,
                  "$addToSet": {"fill_task_ids": doc["_id"]}, "$inc": {"mutation_version": 1}},
                 **options)
             if result.matched_count != 1:

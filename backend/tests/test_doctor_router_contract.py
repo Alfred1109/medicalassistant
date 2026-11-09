@@ -13,7 +13,7 @@
 
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from bson import ObjectId
@@ -54,12 +54,26 @@ def _match(doc, filter_):
                 except TypeError:
                     # 类型括号语义：类型不匹配（字符串 vs datetime）不命中
                     return False
-                if op == "$in" and value not in operand and str(value) not in [str(o) for o in operand]:
-                    return False
+                if op == "$in":
+                    values = value if isinstance(value, list) else [value]
+                    if not any(str(item) in [str(o) for o in operand] for item in values):
+                        return False
             continue
         if value != cond and str(value) != str(cond):
             return False
     return True
+
+
+class FakeCursor:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        for doc in self.docs:
+            yield dict(doc)
 
 
 class FakeCollection:
@@ -74,6 +88,11 @@ class FakeCollection:
             if _match(doc, filter_):
                 return dict(doc)
         return None
+
+    def find(self, filter_, projection=None):
+        if self.find_one_error is not None:
+            raise self.find_one_error
+        return FakeCursor([doc for doc in self.docs.values() if _match(doc, filter_)])
 
     async def count_documents(self, filter_):
         return sum(1 for doc in self.docs.values() if _match(doc, filter_))
@@ -142,7 +161,7 @@ class DoctorPatientsContractTests(DoctorRouterContractTestBase):
         db = FakeDatabase()
         db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "name": "医生",
                          "patients": [PATIENT_ID]})
-        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient", "name": "张三",
+        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient", "name": "张三", "practitioners": [DOCTOR_ID],
                          "age": 40, "gender": "男", "diagnosis": "腰椎间盘突出",
                          "status": "在治疗"})
         self._setup(db, _make_user())
@@ -188,6 +207,9 @@ class DoctorStatisticsContractTests(DoctorRouterContractTestBase):
         db = FakeDatabase()
         db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "name": "医生",
                          "patients": [PATIENT_ID, OTHER_PATIENT_ID]})
+        for patient_id in [PATIENT_ID, OTHER_PATIENT_ID]:
+            db.users.insert({"_id": ObjectId(patient_id), "role": "patient",
+                             "practitioners": [DOCTOR_ID]})
         plans = db.rehab_plans
         plans.insert({"_id": "r1", "practitioner_id": DOCTOR_ID, "status": "active"})
         plans.insert({"_id": "r2", "practitioner_id": DOCTOR_ID, "status": "active"})
@@ -242,7 +264,7 @@ class PatientMonitoringContractTests(DoctorRouterContractTestBase):
         """命中数据：绑定设备数、计划状态分布、近 30 天完成训练记录数为真实聚合。"""
         db = FakeDatabase()
         self._seed_doctor(db)
-        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient", "name": "张三"})
+        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient", "name": "张三", "practitioners": [DOCTOR_ID]})
         db.devices.insert({"_id": "dev1", "patient_id": PATIENT_ID, "status": "active"})
         db.devices.insert({"_id": "dev2", "patient_id": PATIENT_ID, "status": "inactive"})
         db.rehab_plans.insert({"_id": "r1", "patient_id": PATIENT_ID, "status": "active"})
@@ -267,6 +289,72 @@ class PatientMonitoringContractTests(DoctorRouterContractTestBase):
         self._setup(db, _make_user())
         response = await self._client.get("/api/doctors/patient-monitoring/not-an-objectid")
         self.assertEqual(response.status_code, 404, response.text)
+
+
+class DoctorPatientAuthorityTests(DoctorRouterContractTestBase):
+    async def test_patient_side_link_controls_list_and_statistics(self):
+        db = FakeDatabase()
+        # 旧反向列表只指向已撤销患者；当前归属包含历史 ObjectId 类型。
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor",
+                         "patients": [OTHER_PATIENT_ID]})
+        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient",
+                         "name": "当前患者", "practitioners": [ObjectId(DOCTOR_ID)]})
+        db.users.insert({"_id": ObjectId(OTHER_PATIENT_ID), "role": "patient",
+                         "practitioners": []})
+        self._setup(db, _make_user())
+        listed = await self._client.get("/api/doctors/patients")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual([doc["id"] for doc in listed.json()], [PATIENT_ID])
+        stats = await self._client.get("/api/doctors/statistics")
+        self.assertEqual(stats.status_code, 200, stats.text)
+        self.assertEqual(stats.json()["patientCount"], 1)
+
+    async def test_stale_doctor_link_does_not_grant_record_or_monitoring(self):
+        db = FakeDatabase()
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor",
+                         "patients": [PATIENT_ID]})
+        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient",
+                         "practitioners": []})
+        self._setup(db, _make_user())
+        with patch("app.api.routers.doctor_router.get_health_record_for_patient",
+                   new_callable=AsyncMock) as load_record:
+            for endpoint in ["health-records", "patient-monitoring"]:
+                response = await self._client.get(f"/api/doctors/{endpoint}/{PATIENT_ID}")
+                self.assertEqual(response.status_code, 403, response.text)
+            load_record.assert_not_awaited()
+
+    async def test_current_patient_link_grants_record_and_monitoring_without_reverse_link(self):
+        db = FakeDatabase()
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "patients": []})
+        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient",
+                         "name": "当前患者", "practitioners": [DOCTOR_ID]})
+        self._setup(db, _make_user())
+        with patch("app.api.routers.doctor_router.get_health_record_for_patient",
+                   new_callable=AsyncMock, return_value=None):
+            response = await self._client.get(f"/api/doctors/health-records/{PATIENT_ID}")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["name"], "当前患者")
+        response = await self._client.get(f"/api/doctors/patient-monitoring/{PATIENT_ID}")
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_revocation_applies_to_next_list_record_and_monitoring_request(self):
+        db = FakeDatabase()
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "patients": [PATIENT_ID]})
+        patient_key = ObjectId(PATIENT_ID)
+        db.users.insert({"_id": patient_key, "role": "patient", "practitioners": [ObjectId(DOCTOR_ID)]})
+        self._setup(db, _make_user())
+        with patch("app.api.routers.doctor_router.get_health_record_for_patient",
+                   new_callable=AsyncMock, return_value=None):
+            allowed = await self._client.get(f"/api/doctors/health-records/{PATIENT_ID}")
+            self.assertEqual(allowed.status_code, 200, allowed.text)
+            # 模拟患者侧移除已成功、旧医生侧兼容镜像尚未同步。
+            db.users.docs[patient_key]["practitioners"] = []
+            for endpoint in ["health-records", "patient-monitoring"]:
+                denied = await self._client.get(f"/api/doctors/{endpoint}/{PATIENT_ID}")
+                self.assertEqual(denied.status_code, 403, denied.text)
+        listed = await self._client.get("/api/doctors/patients")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(listed.json(), [])
 
 
 if __name__ == "__main__":

@@ -12,16 +12,12 @@ import {
   REGISTER 
 } from 'redux-persist';
 import storage from 'redux-persist/lib/storage';
-import { setupListeners } from '@reduxjs/toolkit/query';
 
 // 导入reducers
 import authReducer from './slices/authSlice';
 import uiReducer from './slices/uiSlice';
 import rehabReducer from './slices/rehabSlice';
 import agentsReducer from './slices/agentSlice';
-
-// 导入RTK查询API
-import { api } from './api';
 
 // Redux持久化配置
 const persistConfig = {
@@ -46,20 +42,17 @@ const rootReducer = combineReducers({
   ui: uiReducer,
   rehab: rehabReducer,
   agents: agentsReducer,
-  [api.reducerPath]: api.reducer,
 });
 
 // 创建持久化reducer
 const persistedReducer = persistReducer(persistConfig, rootReducer);
 
 // 仅记录动作类型，避免在开发者控制台泄露患者数据、答卷或身份凭据。
-const logger: Middleware = (storeApi) => (next) => (action) => {
+const logger: Middleware = () => (next) => (action) => {
   if (import.meta.env.DEV && typeof action?.type === 'string') {
     console.debug(`Action: ${action.type}`);
   }
-  const result = next(action);
-  if (action?.type === 'auth/logout') storeApi.dispatch(api.util.resetApiState());
-  return result;
+  return next(action);
 };
 
 // 创建store
@@ -70,15 +63,12 @@ export const store = configureStore({
       serializableCheck: {
         ignoredActions: [FLUSH, REHYDRATE, PAUSE, PERSIST, PURGE, REGISTER],
       },
-    }).concat(logger, api.middleware),
+    }).concat(logger),
   devTools: import.meta.env.DEV,
 });
 
 // 创建持久化store
 export const persistor = persistStore(store);
-
-// 启用RTK Query的监听器，支持自动重新获取等功能
-setupListeners(store.dispatch);
 
 // 导出类型(定义在 types.ts,避免 slices <-> store/index.ts 的循环依赖)
 export type { RootState, AppDispatch } from './types';

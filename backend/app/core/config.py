@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     MONGODB_WAIT_QUEUE_TIMEOUT_MS: int = int(os.getenv("MONGODB_WAIT_QUEUE_TIMEOUT_MS", "2000"))
     MONGODB_CONNECT_TIMEOUT_MS: int = int(os.getenv("MONGODB_CONNECT_TIMEOUT_MS", "5000"))
     MONGODB_SERVER_SELECTION_TIMEOUT_MS: int = int(os.getenv("MONGODB_SERVER_SELECTION_TIMEOUT_MS", "30000"))
+    # Explicit release switch; enabled dispatch requires replica-set transactions.
+    FOLLOWUP_REMINDERS_ENABLED: bool = False
+    FOLLOWUP_REMINDERS_POLL_SECONDS: int = 30
+
+    @field_validator("FOLLOWUP_REMINDERS_POLL_SECONDS")
+    def validate_reminder_poll(cls, value):
+        if not 1 <= value <= 300:
+            raise ValueError("reminder polling must be between 1 and 300 seconds")
+        return value
     
     # Authentication Settings
     SECRET_KEY: str = secrets.token_urlsafe(32)

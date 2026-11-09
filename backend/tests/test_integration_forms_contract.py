@@ -6,6 +6,7 @@
 """
 
 import json
+import os
 import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -243,6 +244,9 @@ def make_remote_client(remote):
 
 class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        fill_feature = patch.dict(os.environ, {"FORM_PLATFORM_FILL_ENABLED": "true"})
+        fill_feature.start()
+        self.addCleanup(fill_feature.stop)
         self.operator = make_operator()
         self.patient_doc = make_patient_doc()
         self.remote = FakeRemote()

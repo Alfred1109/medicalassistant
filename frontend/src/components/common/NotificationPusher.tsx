@@ -35,7 +35,7 @@ interface NotificationPusherProps {
 const NotificationPusher: React.FC<NotificationPusherProps> = (props) => {
   const { token, user, mode } = useSelector((state: RootState) => state.auth);
   if (!user || (mode !== 'oidc' && !token)) return null;
-  return <ConnectedNotificationPusher {...props} />;
+  return <ConnectedNotificationPusher key={`${user.id}:${user.role}`} {...props} />;
 };
 
 interface ConnectedNotificationPusherProps extends NotificationPusherProps {
@@ -57,15 +57,17 @@ const ConnectedNotificationPusher: React.FC<ConnectedNotificationPusherProps> = 
   // 初始拉取真实未读数（后端 GET /api/notifications/unread/count 直接返回 int）
   useEffect(() => {
     let cancelled = false;
-    notificationApi.getUnreadCount()
+    const refreshCount = () => { notificationApi.getUnreadCount()
       .then((count) => {
         if (!cancelled && typeof count === 'number') setUnreadCount(count);
       })
       .catch((error) => {
         // 静默降级：拉取失败仅保留徽标为 0，不打扰用户
         console.error('获取未读通知数量失败:', error);
-      });
-    return () => { cancelled = true; };
+      }); };
+    refreshCount();
+    window.addEventListener('notifications:changed', refreshCount);
+    return () => { cancelled = true; window.removeEventListener('notifications:changed', refreshCount); };
   }, []);
 
   // WebSocket连接，用于接收实时通知（后端 /ws/notifications）
