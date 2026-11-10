@@ -297,22 +297,11 @@ async def get_doctor_statistics(
 # 知情同意
 @router.get("/informed-consents", response_model=List[dict])
 async def get_informed_consents(
-    status: Optional[str] = None,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """获取知情同意书列表"""
+    """获取当前医生发出的知情同意。"""
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return []
-
-@router.post("/informed-consents", status_code=status.HTTP_201_CREATED)
-async def create_informed_consent(
-    consent_data: dict,
-    current_user: UserResponse = Depends(get_current_user)
-):
-    """创建知情同意书"""
-    if current_user.role != "doctor":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {"id": "new_consent_id"}
+    from app.directory.records import list_consents
+    return await list_consents(db, current_user)

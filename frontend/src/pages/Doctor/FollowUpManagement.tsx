@@ -88,6 +88,8 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
   const [editTarget, setEditTarget] = useState<FollowUpRecord | null>(null);
   const [cancelTarget, setCancelTarget] = useState<FollowUpRecord | null>(null);
   const [rescheduleTarget, setRescheduleTarget] = useState<FollowUpRecord | null>(null);
+  const [disposition, setDisposition] = useState<{ id: string; kind: 'overdue' | 'lost' } | null>(null);
+  const [dispositionReason, setDispositionReason] = useState('');
 
   // 新建随访表单
   const [createForm, setCreateForm] = useState<{
@@ -300,6 +302,26 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
     }
   };
 
+  const submitDisposition = async () => {
+    if (!disposition || !dispositionReason.trim()) {
+      showSnackbar('请填写原因', 'warning');
+      return;
+    }
+    try {
+      setSubmitting(true);
+      const payload = { reason: dispositionReason.trim() };
+      if (disposition.kind === 'overdue') await apiService.markFollowUpOverdue(disposition.id, payload);
+      else await apiService.markFollowUpLost(disposition.id, payload);
+      setDisposition(null);
+      showSnackbar(disposition.kind === 'overdue' ? '随访已标记为逾期' : '随访已认定为失访', 'success');
+      await loadFollowUps();
+    } catch (err) {
+      showSnackbar(getApiErrorMessage(err, '操作失败'), 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   // -------- 删除随访：后端暂无 DELETE /health-records/followups/{id} --------
   const handleDeleteFollowUp = () => {
     showSnackbar('后端暂未提供随访删除接口，该功能待随访领域收敛后开放', 'info');
@@ -331,7 +353,8 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         随访管理
       </Typography>
       <Typography variant="body2" color="text.secondary" paragraph>
-        查看并管理患者的随访计划。手工录入后进入待审阅，责任医护审阅通过后完成随访；
+        查看并管理患者的随访计划。手工录入后进入待审阅，责任医护审阅通过后完成随访。
+        仍待填写的随访可以由医护写明原因后标记逾期；已经逾期的可以认定失访。系统不会按固定天数自动判断。
         删除功能待随访领域收敛后开放。
       </Typography>
       <Divider sx={{ mb: 2 }} />
@@ -367,6 +390,8 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
       <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
         <Button variant={!hasFilters ? 'contained' : 'outlined'} onClick={() => applyFilters({})}>全部随访</Button>
         <Button variant={filters.status === 'in_review' ? 'contained' : 'outlined'} onClick={() => applyFilters({ status: 'in_review' })}>待医护审阅</Button>
+        <Button variant={filters.status === 'overdue' ? 'contained' : 'outlined'} onClick={() => applyFilters({ status: 'overdue' })}>已逾期</Button>
+        <Button variant={filters.status === 'lost' ? 'contained' : 'outlined'} onClick={() => applyFilters({ status: 'lost' })}>已失访</Button>
         <Button variant={!filters.status && filters.start_date === today && filters.end_date === today ? 'contained' : 'outlined'} onClick={() => { const day = format(new Date(), 'yyyy-MM-dd'); applyFilters({ start_date: day, end_date: day }); }}>今日安排</Button>
       </Stack>
 
@@ -389,6 +414,8 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         canReview={record => canReviewFollowUp(record, currentUser)}
         onCancel={handleCancelFollowUp}
         onReschedule={handleRescheduleFollowUp}
+        onMarkOverdue={id => { setDispositionReason(''); setDisposition({ id, kind: 'overdue' }); }}
+        onMarkLost={id => { setDispositionReason(''); setDisposition({ id, kind: 'lost' }); }}
         onDelete={handleDeleteFollowUp}
         onFilterChange={applyFilters}
         onRefresh={loadFollowUps}
@@ -421,6 +448,21 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         onClose={() => setReviewId(null)}
         onReviewed={async () => { setReviewId(null); showSnackbar('审阅结果已保存', 'success'); await loadFollowUps(); }}
       />
+      <Dialog open={!!disposition} onClose={() => setDisposition(null)} fullWidth maxWidth="sm">
+        <DialogTitle>{disposition?.kind === 'lost' ? '认定失访' : '标记逾期'}</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            {disposition?.kind === 'lost'
+              ? '只有已经逾期的随访可以认定失访。认定后不能再复评。系统不会按固定天数自动认定。'
+              : '用于仍待填写、且医护确认已经超过应访时间的随访。系统不会按固定天数自动标记。'}
+          </Typography>
+          <TextField fullWidth label="原因" value={dispositionReason} onChange={event => setDispositionReason(event.target.value)} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDisposition(null)}>取消</Button>
+          <Button variant="contained" disabled={submitting} onClick={submitDisposition}>确认</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* 新建随访对话框：对齐后端 FollowUpRecordCreate（第二代）必填字段 */}
       <Dialog

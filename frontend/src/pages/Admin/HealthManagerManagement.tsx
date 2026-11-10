@@ -19,6 +19,7 @@ import {
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
 import apiClient from '../../services/api';
+import AccountCreateDialog from '../../components/Admin/AccountCreateDialog';
 
 // 健康管理师管理：数据来自 GET /api/admin/health-managers
 // 该接口目前为后端占位实现（恒返回 []），创建/编辑/删除接口未持久化，故禁用相关入口
@@ -42,6 +43,7 @@ const HealthManagerManagement: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterDepartment, setFilterDepartment] = useState('全部');
   const [reloadKey, setReloadKey] = useState(0);
+  const [createOpen, setCreateOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,12 +151,9 @@ const HealthManagerManagement: React.FC = () => {
           健康管理师管理
         </Typography>
         <Box textAlign="right">
-          <Button variant="contained" color="primary" startIcon={<AddIcon />} disabled>
+          <Button variant="contained" color="primary" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
             添加健康管理师
           </Button>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-            后端健康管理师创建/编辑/删除接口尚未实现持久化，功能待开放
-          </Typography>
         </Box>
       </Box>
 
@@ -237,6 +236,10 @@ const HealthManagerManagement: React.FC = () => {
                     ) : (
                       '—'
                     )}
+                    {manager.id && <Button size="small" onClick={async () => {
+                      await apiClient.put(`/admin/accounts/${manager.id}/active`, { active: manager.status !== '在职' });
+                      setReloadKey(key => key + 1);
+                    }}>{manager.status === '在职' ? '停用' : '恢复'}</Button>}
                   </TableCell>
                 </TableRow>
               ))
@@ -244,6 +247,7 @@ const HealthManagerManagement: React.FC = () => {
           </TableBody>
         </Table>
       </TableContainer>
+      <AccountCreateDialog open={createOpen} title="添加健康管理师" path="/admin/health-managers" role="health_manager" onClose={() => setCreateOpen(false)} onCreated={() => setReloadKey(key => key + 1)} />
     </Box>
   );
 };

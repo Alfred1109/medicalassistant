@@ -1,4 +1,5 @@
 """Patient self-reports against a confirmed, published prescription snapshot."""
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List
@@ -22,6 +23,14 @@ class PatientFeedbackCreate(BaseModel):
     execution_status: PatientExecutionStatus
     feelings: str = Field(min_length=1, max_length=2000)
     performed_at: datetime
+    media_ids: List[str] = Field(default_factory=list, max_length=4)
+
+    @field_validator("media_ids")
+    @classmethod
+    def distinct_media(cls, value):
+        if len(set(value)) != len(value) or any(not re.fullmatch(r"[a-f0-9]{32}", item) for item in value):
+            raise ValueError("media identifiers must be distinct stored files")
+        return value
 
     @field_validator("version_id", "prescription_item_id")
     @classmethod
@@ -39,6 +48,13 @@ class PatientFeedbackCreate(BaseModel):
         return value.replace(microsecond=value.microsecond // 1000 * 1000)
 
 
+class FeedbackAttachment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    content_type: str
+    name: str
+
+
 class PatientFeedbackResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
@@ -49,6 +65,7 @@ class PatientFeedbackResponse(BaseModel):
     execution_status: PatientExecutionStatus
     feelings: str
     performed_at: datetime
+    attachments: List[FeedbackAttachment] = Field(default_factory=list)
     recorded_by: str
     created_at: datetime
 

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from bson import ObjectId
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -163,7 +163,10 @@ async def get_user_devices(
     """获取当前用户绑定的设备列表"""
     # 无需对象级归属校验：查询对象即操作者本人（按 current_user.id 过滤），
     # 不存在跨患者访问面。
-    devices = await device_service.get_user_devices(current_user.id)
+    if getattr(current_user, "role", None) == "admin":
+        devices = await device_service.list_registered_devices()
+    else:
+        devices = await device_service.get_user_devices(current_user.id)
     return [_to_device_response(device) for device in devices]
 
 
@@ -260,6 +263,28 @@ async def sync_device_data(
     if not result.get("success"):
         raise HTTPException(status_code=503, detail=result.get("message", "设备数据源未接入"))
     return result
+
+
+class ManualReading(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    data_type: str = Field(min_length=1, max_length=40)
+    value: str = Field(min_length=1, max_length=80)
+    unit: str = Field(default="", max_length=20)
+    measured_at: datetime
+
+
+@router.post("/{device_id}/readings", response_model=DeviceDataResponse, status_code=201)
+async def record_reading(
+    device_id: str,
+    payload: ManualReading,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Save a value a person entered. The record is marked 手工登记 and does not update battery or last connection."""
+    device = await _get_device_or_404(device_id)
+    await _ensure_device_access(device, current_user, db, list(DEVICE_READ_ROLES))
+    return await device_service.record_manual_reading(
+        device_id, payload.data_type, payload.value, payload.unit, payload.measured_at)
 
 
 @router.get("/{device_id}/status", response_model=DeviceStatusResponse)

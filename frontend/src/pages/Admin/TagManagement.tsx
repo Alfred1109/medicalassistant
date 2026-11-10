@@ -13,6 +13,11 @@ import {
   Divider,
   CircularProgress,
   SelectChangeEvent,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  TextField,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import LocalOfferIcon from '@mui/icons-material/LocalOffer';
@@ -33,6 +38,9 @@ const TagManagement: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [currentCategory, setCurrentCategory] = useState('全部');
   const [reloadKey, setReloadKey] = useState(0);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [tagName, setTagName] = useState('');
+  const [tagCategory, setTagCategory] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -118,12 +126,9 @@ const TagManagement: React.FC = () => {
           标签管理
         </Typography>
         <Box textAlign="right">
-          <Button variant="contained" color="primary" startIcon={<AddIcon />} disabled>
+          <Button variant="contained" color="primary" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
             添加标签
           </Button>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-            后端标签创建/编辑/删除接口尚未实现持久化，功能待开放
-          </Typography>
         </Box>
       </Box>
 
@@ -184,12 +189,27 @@ const TagManagement: React.FC = () => {
                   <Typography variant="caption" color="text.secondary" sx={{ ml: 1, mr: 2 }}>
                     {tag.category || '—'}
                   </Typography>
+                  {tag.id !== undefined && <Button size="small" onClick={async () => { await apiClient.delete(`/admin/tags/${tag.id}`); setReloadKey(key => key + 1); }}>删除</Button>}
                 </Box>
               </Grid>
             ))}
           </Grid>
         )}
       </Paper>
+      <Dialog open={createOpen} onClose={() => setCreateOpen(false)}>
+        <DialogTitle>添加标签</DialogTitle>
+        <DialogContent>
+          <TextField fullWidth margin="dense" label="名称" value={tagName} onChange={event => setTagName(event.target.value)} />
+          <TextField fullWidth margin="dense" label="类别" value={tagCategory} onChange={event => setTagCategory(event.target.value)} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCreateOpen(false)}>取消</Button>
+          <Button variant="contained" onClick={async () => {
+            await apiClient.post('/admin/tags', { name: tagName.trim(), category: tagCategory.trim() });
+            setTagName(''); setTagCategory(''); setCreateOpen(false); setReloadKey(key => key + 1);
+          }}>保存</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

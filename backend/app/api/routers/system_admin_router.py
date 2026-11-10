@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from app.schemas.user import (
     UserResponse, DoctorCreate, PatientCreate, HealthManagerCreate,
 )
@@ -8,6 +8,9 @@ from app.core.auth import get_current_user
 from app.services.user_service import UserService
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import get_database
+from app.directory.records import (
+    create_tag, delete_tag, list_tags, save_system_setting, set_account_active, set_organization_active,
+)
 from bson import ObjectId
 import logging
 from datetime import datetime
@@ -328,27 +331,124 @@ async def create_organization(
 # 标签管理
 # 说明：标签域当前没有数据模型与集合（app/models/ 无 tag 模型，后端无任何集合读写 tags）。
 # 按约定不发明集合：GET 如实返回真实空列表，POST 如实返回 501，待标签域建模后再实现。
+class TagWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=40)
+    category: str = Field(min_length=1, max_length=40)
+    color: str = ""
+
+
+class ActiveChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    active: bool
+
+
+class RegistrationChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allow_registration: bool
+
+
 @router.get("/tags", response_model=List[dict])
 async def get_tags(
     category: Optional[str] = None,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """获取标签列表（标签域尚无数据模型/集合，真实空态，非桩数据）"""
+    """获取已保存的标签。"""
     await _require_admin(current_user)
-    return []
+    return await list_tags(db, category)
 
 
 @router.post("/tags", status_code=status.HTTP_201_CREATED)
-async def create_tag(
-    tag_data: dict,
-    current_user: UserResponse = Depends(get_current_user)
+async def add_tag(
+    tag_data: TagWrite,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """创建新标签（未实现：标签域尚无数据模型/集合，不落库故返回 501）"""
+    """保存标签。同名同类不能重复。"""
     await _require_admin(current_user)
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="标签域尚无数据模型与持久化集合，创建接口未实现"
-    )
+    return await create_tag(db, tag_data.name, tag_data.category, tag_data.color)
+
+
+@router.delete("/tags/{tag_id}")
+async def remove_tag(
+    tag_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    await _require_admin(current_user)
+    return await delete_tag(db, tag_id)
+
+
+@router.put("/accounts/{user_id}/active")
+async def account_active(
+    user_id: str,
+    payload: ActiveChange,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """停用或恢复医生、患者、健管师账号。不删除已有临床记录。"""
+    await _require_admin(current_user)
+    return await set_account_active(db, user_id, payload.active)
+
+
+@router.put("/organizations/{organization_id}/active")
+async def organization_active(
+    organization_id: str,
+    payload: ActiveChange,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    await _require_admin(current_user)
+    return await set_organization_active(db, organization_id, payload.active)
+
+
+@router.put("/settings/registration")
+async def registration_setting(
+    payload: RegistrationChange,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """只控制本地自助注册。统一登录模式下本地注册本来就关闭。"""
+    await _require_admin(current_user)
+    return await save_system_setting(db, payload.allow_registration)
+
+
+class OperationsWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allow_registration: bool
+    maintenance_mode: bool
+    session_timeout_minutes: int = Field(ge=15, le=480)
+    data_retention_days: int = Field(ge=7, le=3650)
+    backup_frequency: str
+    log_level: str
+    login_notifications: bool
+
+
+@router.get("/settings/operations")
+async def read_operation_settings(current_user: UserResponse = Depends(get_current_user),
+                                  db: AsyncIOMotorDatabase = Depends(get_database)):
+    await _require_admin(current_user)
+    from app.operations.runtime import read_operations
+    return await read_operations(db)
+
+
+@router.put("/settings/operations")
+async def write_operation_settings(payload: OperationsWrite, current_user: UserResponse = Depends(get_current_user),
+                                   db: AsyncIOMotorDatabase = Depends(get_database)):
+    """保存维护模式、注册开关、会话时长、日志级别，并按保留天数清理日志和通知。"""
+    await _require_admin(current_user)
+    from app.operations.runtime import save_operations
+    return await save_operations(db, payload)
+
+
+@router.get("/settings/backup")
+async def download_backup(current_user: UserResponse = Depends(get_current_user),
+                          db: AsyncIOMotorDatabase = Depends(get_database)):
+    """下载去掉密码、令牌和头像字节的数据文件。每个集合最多 2000 条。"""
+    await _require_admin(current_user)
+    from app.operations.runtime import build_backup
+    return await build_backup(db)
 
 
 # 设备查看

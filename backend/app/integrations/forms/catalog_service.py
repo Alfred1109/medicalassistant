@@ -71,6 +71,22 @@ class Form(RemoteModel):
     current_version: Optional[FormVersion]
 
 
+class RosterPerson(RemoteModel):
+    person_key: Annotated[str, Field(strict=True, pattern=r"^(patient|user):[1-9][0-9]{0,18}$")]
+    kind: Literal["subject", "member"]
+    display_name: Annotated[str, Field(strict=True, max_length=100)]
+    project_id: PositiveId
+    source: Source
+    subject_id: Optional[PositiveId] = None
+    center_id: Optional[PositiveId] = None
+    subject_code: Optional[ShortText] = None
+    subject_status: Optional[Literal["screening", "enrolled", "completed", "withdrawn"]] = None
+    source_patient_id: Optional[PositiveId] = None
+    source_user_id: Optional[PositiveId] = None
+    oidc_subject: Optional[Annotated[str, Field(strict=True, min_length=1, max_length=64)]] = None
+    source_roles: list[Annotated[str, Field(strict=True, max_length=50)]] = Field(default_factory=list, max_length=20)
+
+
 class PatientReference(RemoteModel):
     source: Source
     project_id: PositiveId
@@ -133,6 +149,35 @@ async def subjects(client: FormPlatformClient, project_id: int, *, center_id=Non
     return _page(await _fetch(client.list_subjects(project_id, center_id=center_id, status=status,
                                                   limit=limit, cursor=cursor)), Subject,
                  limit=limit, project_id=project_id, center_id=center_id)
+
+
+def _check_person(row: RosterPerson, project_id: int):
+    prefix, number = row.person_key.split(":", 1)
+    if row.project_id != project_id:
+        raise ValueError()
+    if row.kind == "subject":
+        if prefix != "patient" or row.source_patient_id != int(number) or row.subject_id is None:
+            raise ValueError()
+        if row.source_user_id is not None or row.source_roles:
+            raise ValueError()
+    elif prefix != "user" or row.source_user_id != int(number) or row.subject_id is not None:
+        raise ValueError()
+
+
+async def people(client: FormPlatformClient, project_id: int, *, limit=50, cursor=None):
+    body = await _fetch(client.list_people(project_id, limit=limit, cursor=cursor))
+    try:
+        if not isinstance(body, dict) or not isinstance(body.get("data"), list) or len(body["data"]) > limit:
+            raise ValueError()
+        page = Page.model_validate(body["page"])
+        if page.limit != limit or page.has_more != bool(page.next_cursor):
+            raise ValueError()
+        rows = [RosterPerson.model_validate(item) for item in body["data"]]
+        for row in rows:
+            _check_person(row, project_id)
+        return {"data": [row.model_dump() for row in rows], "page": page.model_dump()}
+    except (ValidationError, ValueError, KeyError, TypeError):
+        raise _invalid_response() from None
 
 
 async def forms(client: FormPlatformClient, project_id: int, *, status="active", limit=50, cursor=None):

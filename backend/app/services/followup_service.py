@@ -1024,7 +1024,7 @@ class FollowupService:
             return map_followup_record_to_response(followup_from_mongo(child))
         return await self._mutate(followup_id, operation)
 
-    async def mark_overdue(self, followup_id, *, operator_id=None):
+    async def mark_overdue(self, followup_id, *, operator_id=None, reason=None):
         """逾期状态转换（D-3 结构先行，阈值口径待 FU03）：open 状态 → overdue。
 
         overdue = 超窗口未填、可补救（可经补填/催办回到 awaiting_fill，
@@ -1038,13 +1038,15 @@ class FollowupService:
             now = datetime.utcnow()
             metadata = deepcopy(doc.get("metadata") or {})
             metadata["overdue"] = {"marked_at": now, "operator_id": operator_id}
+            if isinstance(reason, str) and reason.strip():
+                metadata["overdue"]["reason"] = reason.strip()
             updated = await self._write_node(
                 doc, {"status": "overdue", "metadata": metadata, "updated_at": now}, session)
             await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
-    async def mark_lost(self, followup_id, *, operator_id=None):
+    async def mark_lost(self, followup_id, *, operator_id=None, reason=None):
         """失访认定（D-3 结构先行，认定人口径待 FU03）：仅 overdue → lost（终态）。
 
         幂等：已是 lost 直接返回当前节点；非 overdue 节点拒绝认定。
@@ -1057,6 +1059,8 @@ class FollowupService:
             now = datetime.utcnow()
             metadata = deepcopy(doc.get("metadata") or {})
             metadata["lost"] = {"recognized_at": now, "recognized_by": operator_id}
+            if isinstance(reason, str) and reason.strip():
+                metadata["lost"]["reason"] = reason.strip()
             updated = await self._write_node(
                 doc, {"status": "lost", "metadata": metadata, "updated_at": now}, session)
             await self._write_timeline(updated, session)

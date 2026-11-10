@@ -163,6 +163,11 @@ class FormPlatformClient:
             params["center_id"] = center_id
         return await self._request("GET", f"/integration/v1/projects/{project_id}/subjects", params=params)
 
+    async def list_people(self, project_id: int, *, limit: int = 50,
+                          cursor: Optional[str] = None) -> Dict[str, Any]:
+        return await self._request("GET", f"/integration/v1/projects/{project_id}/people",
+                                   params=self._catalog_params(limit, cursor))
+
     async def list_forms(self, project_id: int, *, status: str = "active", limit: int = 50,
                          cursor: Optional[str] = None) -> Dict[str, Any]:
         return await self._request("GET", f"/integration/v1/projects/{project_id}/forms",

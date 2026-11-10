@@ -8,6 +8,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import asyncio
 import logging
+import os
+import smtplib
+from email.message import EmailMessage
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -135,6 +138,7 @@ class NotificationService:
         }
         
         result = await db.notifications.insert_one(notification)
+        await _maybe_send_email(db, recipient_id, title, content)
         
         # 异步推送通知（如果启用了WebSocket连接管理器）
         try:
@@ -261,3 +265,41 @@ class NotificationService:
                 logger.warning(f"批量通知实时推送失败: {str(e)}")
         
         return notification_ids
+
+
+def _send_smtp(recipient: str, title: str, content: str) -> None:
+    message = EmailMessage()
+    message["Subject"] = title[:200]
+    message["From"] = os.environ["MAIL_DEFAULT_SENDER"]
+    message["To"] = recipient
+    message.set_content(content[:4000])
+    port = int(os.getenv("MAIL_PORT") or "465")
+    use_ssl = os.getenv("MAIL_USE_SSL", "1") in {"1", "true", "True"}
+    if use_ssl:
+        with smtplib.SMTP_SSL(os.environ["MAIL_SERVER"], port, timeout=20) as smtp:
+            smtp.login(os.environ["MAIL_USERNAME"], os.environ["MAIL_PASSWORD"])
+            smtp.send_message(message)
+        return
+    with smtplib.SMTP(os.environ["MAIL_SERVER"], port, timeout=20) as smtp:
+        if os.getenv("MAIL_USE_TLS", "0") in {"1", "true", "True"}:
+            smtp.starttls()
+        smtp.login(os.environ["MAIL_USERNAME"], os.environ["MAIL_PASSWORD"])
+        smtp.send_message(message)
+
+
+async def _maybe_send_email(db, recipient_id: str, title: str, content: str) -> None:
+    """Send only when this account turned email on and local mail settings exist."""
+    if not os.getenv("MAIL_SERVER") or not os.getenv("MAIL_USERNAME") or not os.getenv("MAIL_PASSWORD"):
+        return
+    try:
+        prefs = await db.user_preferences.find_one({"_id": str(recipient_id)}) or {}
+        if not (prefs.get("notifications") or {}).get("enableEmail"):
+            return
+        query = {"_id": ObjectId(recipient_id)} if ObjectId.is_valid(str(recipient_id)) else {"_id": recipient_id}
+        user = await db.users.find_one(query, {"email": 1})
+        address = (user or {}).get("email")
+        if not address or not os.getenv("MAIL_DEFAULT_SENDER"):
+            return
+        await asyncio.to_thread(_send_smtp, address, title, content)
+    except Exception:
+        logger.warning("通知邮件没有发出")

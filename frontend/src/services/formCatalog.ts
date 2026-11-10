@@ -2,7 +2,7 @@ import api from './httpClient';
 import type {
   CatalogCenter, CatalogForm, CatalogProject, CatalogResult, CatalogSubject,
   AddPatientContext, CreatePatientLink, LocalLinkPatient, PatientLink, PatientLinksResult, PatientReference,
-  CreateFormBinding, FormBinding, FormBindingsResult,
+  CreateFormBinding, FormBinding, FormBindingsResult, ImportedPerson, ImportedPeopleResult, ImportedRole,
 } from '../types/formCatalog';
 
 const ROOT = '/integrations/forms';
@@ -10,6 +10,10 @@ interface PageQuery { limit?: number; cursor?: string; }
 
 export const formCatalog = {
   projects: (query: PageQuery = {}, signal?: AbortSignal) => api.get<CatalogResult<CatalogProject>>(`${ROOT}/catalog/projects`, { params: query, signal }),
+  importedPeople: (projectId: number, signal?: AbortSignal) => api.get<{ people: ImportedPerson[] }>(`${ROOT}/catalog/projects/${projectId}/people`, { signal }),
+  importPeople: (projectId: number) => api.post<ImportedPeopleResult>(`${ROOT}/catalog/projects/${projectId}/people/import`),
+  assignImportedRole: (userId: string, role: ImportedRole, evidence_reference: string) => api.post<ImportedPerson>(`${ROOT}/catalog/people/${encodeURIComponent(userId)}/role`, { role, evidence_reference }),
+  setImportedCare: (patientId: string, practitionerId: string, assigned: boolean, evidence_reference: string) => api.post<ImportedPerson>(`${ROOT}/catalog/people/${encodeURIComponent(patientId)}/care`, { practitioner_id: practitionerId, assigned, evidence_reference }),
   centers: (projectId: number, query: PageQuery = {}, signal?: AbortSignal) => api.get<CatalogResult<CatalogCenter>>(`${ROOT}/catalog/projects/${projectId}/centers`, { params: query, signal }),
   subjects: (projectId: number, centerId: number, query: PageQuery = {}, signal?: AbortSignal) => api.get<CatalogResult<CatalogSubject>>(`${ROOT}/catalog/projects/${projectId}/subjects`, { params: { ...query, center_id: centerId, status: 'all' }, signal }),
   forms: (projectId: number, query: PageQuery = {}, signal?: AbortSignal) => api.get<CatalogResult<CatalogForm>>(`${ROOT}/catalog/projects/${projectId}/forms`, { params: { ...query, status: 'active' }, signal }),

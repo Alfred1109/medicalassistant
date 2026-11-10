@@ -30,7 +30,7 @@ from app.schemas.health_record import (
 )
 from app.core.permissions import Permission
 from app.core.health_record_access import ensure_health_record_patient_access
-from app.schemas.followup import FollowUpWorkbenchPage
+from app.schemas.followup import FollowUpDispositionRequest, FollowUpWorkbenchPage
 
 router = APIRouter(prefix="/health-records", tags=["健康档案"])
 
@@ -464,6 +464,44 @@ async def re_evaluate_followup(
         raise HTTPException(status_code=404, detail="随访记录不存在")
 
     return result
+
+@router.post("/followups/{followup_id}/overdue", response_model=FollowUpRecordResponse)
+async def mark_followup_overdue(
+    data: FollowUpDispositionRequest,
+    followup_id: str = Path(..., description="随访记录ID"),
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
+):
+    """把仍待填写的随访标为逾期。由医护写明原因，不按固定天数自动判断。"""
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+    result = await followup_service.mark_overdue(followup_id, operator_id=current_user.id, reason=data.reason)
+    if not result:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    return result
+
+
+@router.post("/followups/{followup_id}/lost", response_model=FollowUpRecordResponse)
+async def mark_followup_lost(
+    data: FollowUpDispositionRequest,
+    followup_id: str = Path(..., description="随访记录ID"),
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
+):
+    """把已经逾期的随访认定为失访。认定后不能再复评。"""
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+    result = await followup_service.mark_lost(followup_id, operator_id=current_user.id, reason=data.reason)
+    if not result:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    return result
+
 
 @router.post("/followups/{followup_id}/cancel", response_model=FollowUpRecordResponse)
 async def cancel_followup(

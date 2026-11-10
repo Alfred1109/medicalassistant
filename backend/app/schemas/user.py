@@ -9,6 +9,10 @@ class UserBase(BaseModel):
     role: str = "patient"  # 默认角色为病人
     permissions: Optional[List[str]] = None
     is_active: bool = True
+    phone: Optional[str] = None
+    bio: Optional[str] = None
+    has_avatar: bool = False
+    local_password: bool = False
 
 # 用户创建模型
 class UserCreate(UserBase):
@@ -48,15 +52,19 @@ class PublicPatientRegistration(BaseModel):
 
 
 class SelfUserUpdate(BaseModel):
-    """Only a legacy local display name can be edited through this endpoint."""
+    """Display fields only. Password, email, role and permissions stay off this schema."""
     model_config = ConfigDict(extra="forbid")
 
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    phone: Optional[str] = Field(default=None, max_length=40)
+    bio: Optional[str] = Field(default=None, max_length=500)
 
 # 用户更新模型
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     name: Optional[str] = None
+    phone: Optional[str] = None
+    bio: Optional[str] = None
     password: Optional[str] = None
     role: Optional[str] = None
     permissions: Optional[List[str]] = None

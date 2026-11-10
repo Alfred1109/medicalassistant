@@ -26,6 +26,7 @@ import {
   Snackbar,
   Chip,
   CircularProgress,
+  Stack,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DevicesIcon from '@mui/icons-material/Devices';
@@ -130,6 +131,10 @@ const DeviceBinding: React.FC = () => {
   const [openDeviceDialog, setOpenDeviceDialog] = React.useState(false);
   const [dialogTabValue, setDialogTabValue] = React.useState(0);
   const [syncing, setSyncing] = React.useState(false);
+  const [readingType, setReadingType] = React.useState('');
+  const [readingValue, setReadingValue] = React.useState('');
+  const [readingUnit, setReadingUnit] = React.useState('');
+  const [readingVersion, setReadingVersion] = React.useState(0);
   // 详情打开时实时查询的状态（GET /api/devices/{id}/status）
   const [dialogStatus, setDialogStatus] = React.useState<DeviceStatus | null>(null);
   const [dialogStatusLoading, setDialogStatusLoading] = React.useState(false);
@@ -688,11 +693,30 @@ const DeviceBinding: React.FC = () => {
               <TabPanel value={dialogTabValue} index={1}>
                 <Box textAlign="center" my={2}>
                   <Typography variant="h6" gutterBottom>
-                    设备数据同步
+                    设备数据
                   </Typography>
-                  <Typography variant="body2" color="text.secondary" paragraph>
-                    从设备拉取最新的健康数据和训练记录，同步结果以服务端返回为准。
-                  </Typography>
+                  <Alert severity="info" sx={{ textAlign: 'left', mb: 2 }}>
+                    还没有接入设备厂商接口。开始同步不会生成电量或测量值。下面可以登记一条你实际看到的读数，记录会标明“手工登记”。
+                  </Alert>
+                  <Stack direction="row" spacing={1} justifyContent="center" sx={{ mb: 2 }}>
+                    <TextField size="small" label="类型" value={readingType} onChange={event => setReadingType(event.target.value)} />
+                    <TextField size="small" label="数值" value={readingValue} onChange={event => setReadingValue(event.target.value)} />
+                    <TextField size="small" label="单位" value={readingUnit} onChange={event => setReadingUnit(event.target.value)} />
+                    <Button variant="outlined" disabled={!selectedDevice || !readingType.trim() || !readingValue.trim()} onClick={async () => {
+                      if (!selectedDevice) return;
+                      try {
+                        await deviceService.recordReading(selectedDevice.id, {
+                          data_type: readingType.trim(), value: readingValue.trim(), unit: readingUnit.trim(),
+                          measured_at: new Date().toISOString(),
+                        });
+                        setReadingValue('');
+                        setReadingVersion(value => value + 1);
+                        setSnackbar({ open: true, message: '已保存手工登记的读数', severity: 'success' });
+                      } catch (err: any) {
+                        setSnackbar({ open: true, message: getApiErrorMessage(err, '读数没有保存'), severity: 'error' });
+                      }
+                    }}>登记读数</Button>
+                  </Stack>
 
                   {syncing ? (
                     <Box sx={{ width: '100%', mt: 3 }}>
@@ -722,6 +746,7 @@ const DeviceBinding: React.FC = () => {
                   {/* 真实设备数据展示（无数据时显示诚实空状态） */}
                   <Box sx={{ mt: 5, textAlign: 'left' }}>
                     <DeviceDataDisplay
+                      key={readingVersion}
                       deviceId={selectedDevice.id}
                       showChart={true}
                       timeRange="day"

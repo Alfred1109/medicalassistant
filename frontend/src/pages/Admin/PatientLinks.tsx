@@ -6,6 +6,7 @@ import type { CatalogCenter, CatalogProject, CatalogSubject } from '../../types/
 import CatalogPageState from '../../components/Admin/CatalogPageState';
 import PatientLinkPanel from '../../components/Admin/PatientLinkPanel';
 import FormBindingPanel from '../../components/Admin/FormBindingPanel';
+import ProjectPeoplePanel from '../../components/Admin/ProjectPeoplePanel';
 
 export default function PatientLinks() {
   const [projectId, setProjectId] = useState(0);
@@ -25,7 +26,7 @@ export default function PatientLinks() {
   return <Box>
     <Typography variant="h5" component="h1" gutterBottom>患者与问卷来源</Typography>
     <Typography color="text.secondary" sx={{ mb: 2 }}>从问卷平台获授权的项目中核实患者对应关系，并选择康复业务使用的正式问卷。</Typography>
-    <Alert severity="info" sx={{ mb: 2 }}>患者关联和问卷选择需要管理员核实。此处不创建患者账号，也不发起填报。</Alert>
+    <Alert severity="info" sx={{ mb: 2 }}>导入只建立本地档案。受试者记为患者，其他成员先不指定角色；角色可以之后更改，不会自动发起填报。</Alert>
     <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, mb: 3 }}>
       <TextField select fullWidth label="来源项目" value={projectId || ''} onChange={event => { setProjectId(Number(event.target.value)); setCenterId(0); setSubjectId(0); }} disabled={projects.loading}>
         <MenuItem value="" disabled>请选择项目</MenuItem>
@@ -36,9 +37,10 @@ export default function PatientLinks() {
       {project && <Typography variant="caption" component="p" sx={{ mt: 1 }}>来源：{project.source.system} · {project.source.environment === 'production' ? '正式环境' : project.source.environment}</Typography>}
     </Paper>
     <Tabs value={tab} onChange={(_, next: number) => setTab(next)} sx={{ mb: 2 }} variant="scrollable">
-      <Tab label="患者关联" /><Tab label="问卷用途" />
+      <Tab label="项目人员" /><Tab label="患者关联" /><Tab label="问卷用途" />
     </Tabs>
-    {tab === 0 && <>
+    {tab === 0 && <ProjectPeoplePanel project={project} />}
+    {tab === 1 && <>
       <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, mb: 3 }}>
         <Typography variant="h6" gutterBottom>选择来源患者</Typography>
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2 }}>
@@ -60,6 +62,6 @@ export default function PatientLinks() {
       </Paper>
       <PatientLinkPanel key={`${projectId}:${centerId}:${subjectId}`} project={project} center={center} subject={subject} />
     </>}
-    {tab === 1 && <FormBindingPanel key={projectId} project={project} />}
+    {tab === 2 && <FormBindingPanel key={projectId} project={project} />}
   </Box>;
 }

@@ -8,6 +8,7 @@ import {
   Divider,
   FormControl,
   Grid,
+  MenuItem,
   IconButton,
   InputLabel,
   TextField,
@@ -26,6 +27,7 @@ import {
 import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import InfoIcon from '@mui/icons-material/Info';
 
+import httpClient from '../../services/httpClient';
 import { AppDispatch, RootState } from '../../store';
 import { login, clearAuthError, checkAuthStatus, signOut, User } from '../../store/slices/authSlice';
 
@@ -105,6 +107,18 @@ const Login: React.FC = () => {
     server?: string;
   }
   const [formErrors, setFormErrors] = useState({} as FormErrors);
+  const [requestedRole, setRequestedRole] = useState('patient');
+  const [applicationNote, setApplicationNote] = useState('');
+  const [applicationStatus, setApplicationStatus] = useState('');
+  const [applicationError, setApplicationError] = useState('');
+
+  useEffect(() => {
+    if (identityState !== 'pending_binding') return;
+    httpClient.get('/auth/access-applications/mine').then(({ data }) => {
+      if (data?.status === 'pending') setApplicationStatus('申请已提交，等待管理员关联到已有人员。');
+      if (data?.status === 'rejected') setApplicationError(data.reason ? `上次申请未通过：${data.reason}` : '上次申请未通过。');
+    }).catch(() => undefined);
+  }, [identityState]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -264,6 +278,28 @@ const Login: React.FC = () => {
       <Typography color="text.secondary" sx={{ mb: 3 }}>使用问卷系统账号登录康复系统</Typography>
       {(error || callbackFailed) && <Alert severity="error" sx={{ mb: 2 }}>{error || '登录验证未完成，请重新尝试'}</Alert>}
       {identityState === 'pending_binding' && <Alert severity="info" sx={{ mb: 2 }}>身份已验证，账号尚待关联或重新审核。完成关联前无法访问业务资料。</Alert>}
+      {identityState === 'pending_binding' && <Box component="form" sx={{ mb: 2, textAlign: 'left' }} onSubmit={async event => {
+        event.preventDefault();
+        setApplicationError('');
+        try {
+          const { data } = await httpClient.post('/auth/access-applications', { requested_role: requestedRole, note: applicationNote });
+          setApplicationStatus(data.status === 'pending' ? '申请已提交，等待管理员关联到已有人员。' : '申请已处理。');
+        } catch {
+          setApplicationError('申请没有提交成功。请确认当前登录仍待关联。');
+        }
+      }}>
+        <TextField select fullWidth size="small" label="申请角色" value={requestedRole} sx={{ mb: 1 }}
+          onChange={event => setRequestedRole(event.target.value)}>
+          <MenuItem value="patient">患者</MenuItem>
+          <MenuItem value="doctor">医生</MenuItem>
+          <MenuItem value="health_manager">健管师</MenuItem>
+        </TextField>
+        <TextField fullWidth size="small" label="补充说明" value={applicationNote} sx={{ mb: 1 }}
+          onChange={event => setApplicationNote(event.target.value)} />
+        {applicationStatus && <Alert severity="success" sx={{ mb: 1 }}>{applicationStatus}</Alert>}
+        {applicationError && <Alert severity="error" sx={{ mb: 1 }}>{applicationError}</Alert>}
+        <Button type="submit" variant="outlined" fullWidth>提交接入申请</Button>
+      </Box>}
       <Button variant="contained" fullWidth disabled={!loginUrl} onClick={() => { if (loginUrl) window.location.assign(loginUrl); }}>前往统一登录</Button>
       {identityState === 'pending_binding' && <Box sx={{ mt: 2 }}>
         <Button onClick={() => dispatch(checkAuthStatus())}>重新检查关联状态</Button>

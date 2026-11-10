@@ -32,6 +32,8 @@ export interface Exercise {
   benefits?: string[];
   video_url?: string;
   image_url?: string;
+  source?: string;
+  model?: string;
   metadata?: Record<string, any>;
   created_at?: string;
   updated_at?: string;

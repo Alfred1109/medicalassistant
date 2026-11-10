@@ -40,6 +40,7 @@ import {
   updateExercise
 } from '../../store/slices/rehabSlice';
 import { ExerciseFormValues } from '../../types/rehab';
+import httpClient from '../../services/httpClient';
 
 // 表单状态类型:难度使用与后端一致的字面量联合类型
 interface ExerciseFormState {
@@ -213,11 +214,12 @@ const ExerciseForm: React.FC = () => {
     const errors = { image_url: '', video_url: '' };
     let isValid = true;
 
-    if (formData.image_url.trim() && !/^https?:\/\//i.test(formData.image_url.trim())) {
+    const localMedia = /^\/api\/rehabilitation\/exercises\/media\/[a-z0-9]+\.(jpg|png|mp4|webm)$/;
+    if (formData.image_url.trim() && !/^https?:\/\//i.test(formData.image_url.trim()) && !localMedia.test(formData.image_url.trim())) {
       errors.image_url = '请输入以 http:// 或 https:// 开头的图片链接';
       isValid = false;
     }
-    if (formData.video_url.trim() && !/^https?:\/\//i.test(formData.video_url.trim())) {
+    if (formData.video_url.trim() && !/^https?:\/\//i.test(formData.video_url.trim()) && !localMedia.test(formData.video_url.trim())) {
       errors.video_url = '请输入以 http:// 或 https:// 开头的视频链接';
       isValid = false;
     }
@@ -540,10 +542,23 @@ const ExerciseForm: React.FC = () => {
                 </Typography>
                 <Divider sx={{ mb: 2 }} />
 
-                {/* 后端暂无文件上传接口，仅支持粘贴已有的图片 URL */}
                 <Alert severity="info" sx={{ mb: 2 }}>
-                  系统暂不支持文件上传，请直接粘贴已有的图片链接（http/https）。
+                  可以上传 JPG、PNG，或继续粘贴已有的 http/https 链接。
                 </Alert>
+                <Button component="label" sx={{ mb: 2 }}>上传图片
+                  <input hidden accept="image/jpeg,image/png" type="file" onChange={async event => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    const form = new FormData();
+                    form.set('file', file);
+                    try {
+                      const { data } = await httpClient.post('/rehabilitation/exercises/media', form);
+                      setFormData(current => ({ ...current, image_url: data.url }));
+                    } catch {
+                      setMediaErrors(current => ({ ...current, image_url: '图片没有上传。' }));
+                    }
+                  }} />
+                </Button>
 
                 <TextField
                   fullWidth
@@ -557,7 +572,7 @@ const ExerciseForm: React.FC = () => {
                 />
 
                 {/* 仅在链接合法时展示预览，避免渲染非法内容 */}
-                {formData.image_url.trim() && /^https?:\/\//i.test(formData.image_url.trim()) && (
+                {formData.image_url.trim() && (/^https?:\/\//i.test(formData.image_url.trim()) || formData.image_url.startsWith('/api/rehabilitation/exercises/media/')) && (
                   <Box mt={2} textAlign="center">
                     <img
                       src={formData.image_url.trim()}
@@ -579,10 +594,23 @@ const ExerciseForm: React.FC = () => {
                 </Typography>
                 <Divider sx={{ mb: 2 }} />
 
-                {/* 后端暂无文件上传接口，仅支持粘贴已有的视频 URL */}
                 <Alert severity="info" sx={{ mb: 2 }}>
-                  系统暂不支持文件上传，请直接粘贴已有的视频链接（http/https）。
+                  可以上传 MP4、WebM，或继续粘贴已有的 http/https 链接。
                 </Alert>
+                <Button component="label" sx={{ mb: 2 }}>上传视频
+                  <input hidden accept="video/mp4,video/webm" type="file" onChange={async event => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    const form = new FormData();
+                    form.set('file', file);
+                    try {
+                      const { data } = await httpClient.post('/rehabilitation/exercises/media', form);
+                      setFormData(current => ({ ...current, video_url: data.url }));
+                    } catch {
+                      setMediaErrors(current => ({ ...current, video_url: '视频没有上传。' }));
+                    }
+                  }} />
+                </Button>
 
                 <TextField
                   fullWidth

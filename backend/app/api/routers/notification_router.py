@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, status, Query
 from typing import List, Optional
 from bson import ObjectId
 from datetime import datetime
@@ -11,6 +11,24 @@ from app.schemas.user import UserResponse
 from ...services.notification_service import NotificationService
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
+
+
+@router.get("/settings")
+async def notification_settings(db: AsyncIOMotorClient = Depends(get_database),
+                                current_user: UserResponse = Depends(get_current_user)):
+    from app.directory.records import read_preferences
+    saved = await read_preferences(db, current_user.id)
+    return saved["notifications"]
+
+
+@router.put("/settings")
+async def update_notification_settings(payload: dict = Body(...), db: AsyncIOMotorClient = Depends(get_database),
+                                       current_user: UserResponse = Depends(get_current_user)):
+    from app.directory.records import save_preferences
+    if not isinstance(payload, dict) or any(not isinstance(value, bool) for value in payload.values()):
+        raise HTTPException(status_code=422, detail={"code": "INVALID_NOTIFICATION_SETTINGS"})
+    saved = await save_preferences(db, current_user.id, notifications=payload)
+    return saved["notifications"]
 
 @router.get("/", response_model=List[Notification])
 async def get_notifications(

@@ -49,6 +49,7 @@ import {
 
 // 导入通知设置组件
 import NotificationSettings from '../../components/common/NotificationSettings';
+import httpClient from '../../services/httpClient';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -125,6 +126,31 @@ const SystemSettings: React.FC = () => {
   // 数据清理对话框状态
   const [clearDataDialog, setClearDataDialog] = useState(false);
 
+  const [syncSummary, setSyncSummary] = useState('人员同步记录在管理端的「同步记录」里。');
+  const [lastBackup, setLastBackup] = useState('');
+
+  useEffect(() => {
+    httpClient.get('/settings/me').then(({ data }) => {
+      if (data?.ui) setUiSettings(current => ({ ...current, ...data.ui }));
+    }).catch(() => undefined);
+    if (userRole !== 'admin') return;
+    httpClient.get('/admin/settings/operations').then(({ data }) => {
+      setSystemSettings({
+        maintenanceMode: Boolean(data.maintenance_mode),
+        allowRegistration: data.allow_registration !== false,
+        dataRetentionDays: String(data.data_retention_days ?? 365),
+        backupFrequency: data.backup_frequency || 'daily',
+        logLevel: data.log_level || 'info',
+      });
+      setSecuritySettings(current => ({ ...current, loginNotifications: data.login_notifications !== false, sessionTimeout: String(data.session_timeout_minutes ?? 480) }));
+      setLastBackup(data.last_backup_at ? new Date(data.last_backup_at).toLocaleString() : '');
+    }).catch(() => undefined);
+    httpClient.get('/integrations/forms/catalog/runs/summary').then(({ data }) => {
+      const projects = Array.isArray(data?.projects) ? data.projects : [];
+      setSyncSummary(projects.length ? `已有 ${projects.length} 个项目的人员导入记录。` : '还没有人员导入记录。');
+    }).catch(() => setSyncSummary('人员同步记录在管理端的「同步记录」里。'));
+  }, [userRole]);
+
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
   };
@@ -153,9 +179,36 @@ const SystemSettings: React.FC = () => {
     }));
   };
 
-  // 后端尚未提供设置保存/备份接口：不提供假成功提示，仅如实告知未实现
-  const SETTINGS_NOT_IMPLEMENTED =
-    '该功能后端未实现：系统尚未提供设置保存/备份接口，本页修改仅在内存中生效，不会持久化到服务器。';
+  const saveOperations = async () => {
+    try {
+      await httpClient.put('/admin/settings/operations', {
+        allow_registration: systemSettings.allowRegistration,
+        maintenance_mode: systemSettings.maintenanceMode,
+        session_timeout_minutes: Number(securitySettings.sessionTimeout),
+        data_retention_days: Number(systemSettings.dataRetentionDays),
+        backup_frequency: systemSettings.backupFrequency,
+        log_level: systemSettings.logLevel,
+        login_notifications: securitySettings.loginNotifications,
+      });
+      setNotification({ open: true, message: '系统设置已保存。超过保留天数的日志和通知已清理。', severity: 'success' });
+    } catch {
+      setNotification({ open: true, message: '系统设置没有保存。', severity: 'error' });
+    }
+  };
+
+  const downloadBackup = async () => {
+    try {
+      const response = await httpClient.get('/admin/settings/backup', { responseType: 'blob' });
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'rehab-backup.json';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setNotification({ open: true, message: '备份没有下载。', severity: 'error' });
+    }
+  };
 
   // 重置设置到默认值（仅重置本页内存状态）
   const handleResetSettings = (category: string) => {
@@ -336,15 +389,22 @@ const SystemSettings: React.FC = () => {
             </FormGroup>
 
             <Alert severity="info" sx={{ mt: 3, mb: 2 }}>
-              {SETTINGS_NOT_IMPLEMENTED}
+              界面偏好会按当前账号保存。
             </Alert>
             <Box sx={{ display: 'flex', gap: 2 }}>
               <Button
                 variant="contained"
                 startIcon={<SaveIcon />}
-                disabled
+                onClick={async () => {
+                  try {
+                    await httpClient.put('/settings/me', { ui: uiSettings });
+                    setNotification({ open: true, message: '界面设置已保存', severity: 'success' });
+                  } catch {
+                    setNotification({ open: true, message: '界面设置没有保存', severity: 'error' });
+                  }
+                }}
               >
-                保存设置（后端未实现）
+                保存界面设置
               </Button>
               <Button
                 variant="outlined"
@@ -363,42 +423,19 @@ const SystemSettings: React.FC = () => {
             <Typography variant="h6" gutterBottom>
               账户安全
             </Typography>
+            <Alert severity="info" sx={{ mb: 2 }}>
+              双重验证和信任设备由问卷系统账号负责，本系统不另发一套验证码。本地密码在个人资料里修改。
+            </Alert>
             <FormGroup>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={securitySettings.twoFactorAuth}
-                    onChange={(e) => handleSecuritySettingChange('twoFactorAuth', e.target.checked)}
-                  />
-                }
-                label="启用双重身份验证"
-              />
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={securitySettings.autoLogout}
-                    onChange={(e) => handleSecuritySettingChange('autoLogout', e.target.checked)}
-                  />
-                }
-                label="自动注销（长时间无操作时自动登出）"
-              />
               <FormControlLabel
                 control={
                   <Switch
                     checked={securitySettings.loginNotifications}
                     onChange={(e) => handleSecuritySettingChange('loginNotifications', e.target.checked)}
+                    disabled={userRole !== 'admin'}
                   />
                 }
-                label="登录通知（新设备登录时发送通知）"
-              />
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={securitySettings.deviceTrust}
-                    onChange={(e) => handleSecuritySettingChange('deviceTrust', e.target.checked)}
-                  />
-                }
-                label="信任此设备（30天内无需重复验证）"
+                label="登录后写入一条站内通知"
               />
             </FormGroup>
 
@@ -423,22 +460,11 @@ const SystemSettings: React.FC = () => {
             </FormControl>
 
             <Alert severity="info" sx={{ mt: 3, mb: 2 }}>
-              {SETTINGS_NOT_IMPLEMENTED}
+              会话时长作用于新的登录。统一登录会按这里的上限缩短本系统会话；问卷系统自己的会话不在这里改。
             </Alert>
             <Box sx={{ display: 'flex', gap: 2 }}>
-              <Button
-                variant="contained"
-                startIcon={<SaveIcon />}
-                disabled
-              >
-                保存设置（后端未实现）
-              </Button>
-              <Button
-                variant="outlined"
-                startIcon={<RefreshIcon />}
-                onClick={() => handleResetSettings('security')}
-              >
-                重置为默认
+              <Button variant="contained" startIcon={<SaveIcon />} disabled={userRole !== 'admin'} onClick={saveOperations}>
+                保存安全设置
               </Button>
             </Box>
           </Box>
@@ -473,11 +499,11 @@ const SystemSettings: React.FC = () => {
               
               <ListItem>
                 <ListItemText
-                  primary="数据同步"
-                  secondary="数据同步功能后端未实现，暂未接入同步数据源，无真实同步记录可展示"
+                  primary="人员同步"
+                  secondary={syncSummary}
                 />
                 <ListItemSecondaryAction>
-                  <Chip label="未接入" size="small" />
+                  <Chip label="导入记录" size="small" />
                 </ListItemSecondaryAction>
               </ListItem>
 
@@ -486,10 +512,10 @@ const SystemSettings: React.FC = () => {
               <ListItem>
                 <ListItemText
                   primary="离线数据"
-                  secondary="该功能后端未实现，暂不可配置"
+                  secondary="临床记录不保存离线副本，避免把过期内容当成当前记录。"
                 />
                 <ListItemSecondaryAction>
-                  <Switch disabled />
+                  <Chip label="不离线" size="small" />
                 </ListItemSecondaryAction>
               </ListItem>
             </List>
@@ -539,7 +565,7 @@ const SystemSettings: React.FC = () => {
                     type="number"
                     value={systemSettings.dataRetentionDays}
                     onChange={(e) => handleSystemSettingChange('dataRetentionDays', e.target.value)}
-                    helperText="超过此天数的日志和临时数据将被自动清理"
+                    helperText="保存时清理早于这个天数的审计日志和通知，不删除临床记录。"
                   />
                 </Grid>
                 
@@ -577,31 +603,11 @@ const SystemSettings: React.FC = () => {
               </Grid>
 
               <Alert severity="info" sx={{ mt: 3, mb: 2 }}>
-                {SETTINGS_NOT_IMPLEMENTED}
+                立即备份会下载一份去掉密码、令牌和头像的数据文件，每个集合最多 2000 条。服务保持运行时，会按备份频率在服务器数据目录再写一份同样的文件。上次备份：{lastBackup || '还没有'}。
               </Alert>
               <Box sx={{ display: 'flex', gap: 2 }}>
-                <Button
-                  variant="contained"
-                  startIcon={<SaveIcon />}
-                  disabled
-                >
-                  保存设置（后端未实现）
-                </Button>
-                <Button
-                  variant="outlined"
-                  startIcon={<RefreshIcon />}
-                  onClick={() => handleResetSettings('system')}
-                >
-                  重置为默认
-                </Button>
-                <Button
-                  variant="outlined"
-                  startIcon={<BackupIcon />}
-                  color="info"
-                  disabled
-                >
-                  立即备份（后端未实现）
-                </Button>
+                <Button variant="contained" startIcon={<SaveIcon />} onClick={saveOperations}>保存系统设置</Button>
+                <Button variant="outlined" startIcon={<BackupIcon />} color="info" onClick={downloadBackup}>立即备份</Button>
               </Box>
             </Box>
           </TabPanel>

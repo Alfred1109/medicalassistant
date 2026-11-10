@@ -18,6 +18,7 @@ import {
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
 import apiClient from '../../services/api';
+import AccountCreateDialog from '../../components/Admin/AccountCreateDialog';
 
 // 患者管理：数据来自 GET /api/admin/patients
 // 该接口目前为后端占位实现（恒返回 []），创建/编辑/删除接口未持久化，故禁用相关入口
@@ -43,6 +44,7 @@ const PatientManagement: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
+  const [createOpen, setCreateOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -133,12 +135,9 @@ const PatientManagement: React.FC = () => {
           患者管理
         </Typography>
         <Box textAlign="right">
-          <Button variant="contained" color="primary" startIcon={<AddIcon />} disabled>
+          <Button variant="contained" color="primary" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
             添加患者
           </Button>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-            后端患者创建/编辑/删除接口尚未实现持久化，功能待开放
-          </Typography>
         </Box>
       </Box>
 
@@ -183,6 +182,7 @@ const PatientManagement: React.FC = () => {
                   <TableCell>治疗方案</TableCell>
                   <TableCell>联系方式</TableCell>
                   <TableCell>状态</TableCell>
+                  <TableCell>账号</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -204,6 +204,12 @@ const PatientManagement: React.FC = () => {
                         '—'
                       )}
                     </TableCell>
+                    <TableCell>
+                      <Button size="small" onClick={async () => {
+                        await apiClient.put(`/admin/accounts/${patient.id}/active`, { active: patient.status !== '正常' });
+                        setReloadKey(key => key + 1);
+                      }}>{patient.status === '正常' ? '停用' : '恢复'}</Button>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -211,6 +217,7 @@ const PatientManagement: React.FC = () => {
           </TableContainer>
         )}
       </Paper>
+      <AccountCreateDialog open={createOpen} title="添加患者" path="/admin/patients" role="patient" onClose={() => setCreateOpen(false)} onCreated={() => setReloadKey(key => key + 1)} />
     </Box>
   );
 };

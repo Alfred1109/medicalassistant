@@ -7,6 +7,7 @@ import { API_BASE_URL } from '../../config/api';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import { notificationApi } from '../../services/notificationService';
+import httpClient from '../../services/httpClient';
 
 /**
  * 通知 WS 地址推导（与 chatWsService.resolveChatWsBaseUrl 同规则）：
@@ -80,6 +81,11 @@ const ConnectedNotificationPusher: React.FC<ConnectedNotificationPusherProps> = 
         const data = JSON.parse(lastMessage.data);
         // 后端广播形状：{"type":"notification","data":{content,priority,...}}（websockets.py send_notification）
         if (data.type === 'notification' && data.data) {
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            httpClient.get('/notifications/settings').then(({ data: prefs }) => {
+              if (prefs?.enablePush) new Notification(data.data.title || '通知', { body: data.data.content || '' });
+            }).catch(() => undefined);
+          }
           const priority = data.data.priority;
           setNotification({
             open: true,

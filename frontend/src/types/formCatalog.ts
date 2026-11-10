@@ -31,6 +31,13 @@ export interface FormBinding {
   purpose: FormPurpose; status: string; verified_at: string;
 }
 export interface FormBindingsResult { items: FormBinding[]; skip: number; limit: number; total: number; }
+export type ImportedRole = 'unassigned' | 'patient' | 'doctor' | 'health_manager';
+export interface ImportedPerson {
+  id: string; name: string; role: ImportedRole; source_kind: 'subject' | 'member';
+  source_person_ref: string; source_project_id: number; subject_code?: string | null;
+  practitioners: string[]; health_managers: string[];
+}
+export interface ImportedPeopleResult { created: number; existing: number; people: ImportedPerson[]; }
 export interface CreateFormBinding {
   project_id: number; form_id: number; version: number; purpose: FormPurpose;
   evidence_reference: string; confirmed: true;

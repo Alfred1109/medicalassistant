@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.encoders import jsonable_encoder
 
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
+
+from app.core.auth import get_current_active_user
 from app.db.mongodb import get_database
+from .applications import decide_application, list_applications, own_application, submit_application
 from .config import oidc_settings
 from .service import OidcClient, OidcUnavailable
 from .access import unified_authentication
@@ -71,6 +75,16 @@ async def callback(request: Request, client=Depends(oidc_client)):
     try:
         sid, csrf, seconds = await client.callback(request.query_params["state"],
             request.query_params["code"], request.cookies.get(TRANSACTION_COOKIE))
+        try:
+            from app.operations.runtime import record_login_notice, session_timeout_minutes
+            from app.core.config import settings as runtime_settings
+            limit = await session_timeout_minutes(client.db, runtime_settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+            seconds = min(int(seconds), limit * 60)
+            result = await client.session(sid)
+            if result and result.get("actor_id"):
+                await record_login_notice(client.db, result["actor_id"])
+        except Exception:
+            pass
         old_sid = request.cookies.get(SESSION_COOKIE)
         if old_sid:
             from .service import digest
@@ -101,6 +115,62 @@ async def session(request: Request, client=Depends(oidc_client)):
     except OidcUnavailable:
         return headers(JSONResponse({"code": "IDENTITY_SOURCE_UNAVAILABLE"}, status_code=503))
     return headers(JSONResponse(result or {"authenticated": False}, status_code=200 if result else 401))
+
+
+class AccessApplicationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    requested_role: str = Field(pattern=r"^(patient|doctor|health_manager)$")
+    note: str = ""
+
+
+class AccessDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    approved: StrictBool
+    local_user_id: str = ""
+    evidence_reference: str = ""
+    reason: str = ""
+
+
+async def current_session(request: Request, client=Depends(oidc_client)):
+    try:
+        return await client.session(request.cookies.get(SESSION_COOKIE))
+    except OidcUnavailable:
+        raise HTTPException(503, detail={"code": "IDENTITY_SOURCE_UNAVAILABLE"}) from None
+
+
+@router.get("/access-applications/mine")
+async def my_access_application(response: Response, session=Depends(current_session), db=Depends(get_database)):
+    headers(response)
+    return await own_application(db, session)
+
+
+@router.post("/access-applications", status_code=201)
+async def create_access_application(payload: AccessApplicationRequest, response: Response,
+                                    session=Depends(current_session), db=Depends(get_database)):
+    headers(response)
+    return await submit_application(db, session, payload.requested_role, payload.note)
+
+
+def require_admin(user=Depends(get_current_active_user)):
+    if user.role != "admin":
+        raise HTTPException(403, detail={"code": "ADMIN_REQUIRED"})
+    return user
+
+
+@router.get("/access-applications")
+async def access_applications(response: Response, status: str = "pending",
+                              _=Depends(require_admin), db=Depends(get_database)):
+    headers(response)
+    return {"applications": await list_applications(db, status)}
+
+
+@router.post("/access-applications/{application_id}/decision")
+async def access_decision(application_id: str, payload: AccessDecisionRequest, response: Response,
+                          actor=Depends(require_admin), db=Depends(get_database)):
+    headers(response)
+    return await decide_application(db, actor, application_id, approved=payload.approved,
+                                    local_user_id=payload.local_user_id, evidence_reference=payload.evidence_reference,
+                                    reason=payload.reason)
 
 
 @router.post("/logout")

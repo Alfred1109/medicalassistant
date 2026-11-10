@@ -13,6 +13,10 @@ export interface User {
   createdAt: string;
   updatedAt: string;
   avatar?: string;
+  phone?: string;
+  bio?: string;
+  has_avatar?: boolean;
+  local_password?: boolean;
 }
 
 // Auth state interface
@@ -214,10 +218,9 @@ export const signOut = createAsyncThunk<void, void, ThunkApiConfig>(
 );
 
 interface UpdateUserProfileArg {
-  name: string;
-  email?: string;
-  currentPassword?: string;
-  newPassword?: string;
+  name?: string;
+  phone?: string;
+  bio?: string;
 }
 
 // 添加更新用户资料的异步操作
@@ -233,7 +236,7 @@ export const updateUserProfile = createAsyncThunk<
       const configuration = await getAuthConfig();
       if (configuration.mode !== 'oidc' && !auth.token) return rejectWithValue('请先登录');
       const options = await authRequestOptions('PUT');
-      const response: AxiosResponse<User> = await axios.put(`${API_BASE_URL}/users/profile`, userData, {
+      const response: AxiosResponse<User> = await axios.put(`${API_BASE_URL}/users/me`, userData, {
         ...options, headers: configuration.mode === 'oidc' ? options.headers : { Authorization: `Bearer ${auth.token}` }
       });
       return response.data;
@@ -286,6 +289,9 @@ const authSlice = createSlice({
     },
     clearAuthError: (state: AuthState) => {
       state.error = null;
+    },
+    replaceUser: (state: AuthState, action: PayloadAction<User>) => {
+      state.user = action.payload;
     },
   },
   extraReducers: (builder) => {
@@ -379,5 +385,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { logout, clearAuthError } = authSlice.actions;
+export const { logout, clearAuthError, replaceUser } = authSlice.actions;
 export default authSlice.reducer;

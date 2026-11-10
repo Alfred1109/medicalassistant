@@ -61,6 +61,9 @@ class AnalyticsService:
         "doctor": ("users", {"role": "doctor"}, "$department"),
         "device": ("devices", {}, "$device_type"),
         "rehabilitation": ("rehab_plans", {}, "$status"),
+        "region": ("users", {"role": "patient"}, {
+            "$ifNull": ["$demographic_info.city", {"$ifNull": ["$demographic_info.region", "$demographic_info.address"]}],
+        }),
     }
 
     # 对比聚合的数据源：data_type -> (集合名, 过滤条件, 类别标签)

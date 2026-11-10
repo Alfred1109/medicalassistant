@@ -130,7 +130,7 @@ const ExerciseRecommendations: React.FC = () => {
           </Typography>
         </Box>
         <Typography variant="body1" color="text.secondary" paragraph>
-          基于患者情况与病症/目标条件，获取真实的个性化训练推荐
+          按病症和目标询问本机已配置的文本模型。结果是参考建议，不是已签署的训练处方。
         </Typography>
 
         {/* 查询控件：患者（必填，后端 patient_id 必填） + 病症/目标（可选过滤） */}
@@ -258,7 +258,7 @@ const ExerciseRecommendations: React.FC = () => {
                           {exerciseId && (
                             <Chip
                               size="small"
-                              label={`ID: ${exerciseId}`}
+                              label={exercise.source === 'configured_model' ? `模型 ${exercise.model || ''}`.trim() : `ID: ${exerciseId}`}
                               variant="outlined"
                               sx={{ mr: 0.5 }}
                             />

@@ -32,6 +32,9 @@ const InformedConsent: React.FC = () => {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [searchTerm, setSearchTerm] = React.useState('');
+  const [title, setTitle] = React.useState('');
+  const [body, setBody] = React.useState('');
+  const [patientId, setPatientId] = React.useState('');
 
   // 加载知情同意书列表（后端为桩，当前始终返回空列表）
   const loadConsents = async () => {
@@ -76,8 +79,18 @@ const InformedConsent: React.FC = () => {
 
       {/* 后端知情同意能力建设中：列表为桩接口，创建接口不落库，相关操作暂不可用 */}
       <Alert severity="info" sx={{ mb: 3 }}>
-        知情同意书功能后端建设中，暂无数据。新建、查看、下载能力待后端建设后重新接入。
+        先保存一份模板，再填患者编号发给对方。患者签署前，文档保持待签署。这里不预置法律文本。
       </Alert>
+      <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
+        <TextField size="small" label="标题" value={title} onChange={event => setTitle(event.target.value)} />
+        <TextField size="small" label="正文" value={body} onChange={event => setBody(event.target.value)} />
+        <TextField size="small" label="患者编号" value={patientId} onChange={event => setPatientId(event.target.value)} />
+        <Button variant="contained" onClick={async () => {
+          const created = await api.post('/consent/templates', { title, body });
+          await api.post('/consent/documents', { template_id: created.data.id, patient_id: patientId.trim() });
+          setTitle(''); setBody(''); await loadConsents();
+        }}>保存并发给患者</Button>
+      </Box>
 
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between' }}>
         <TextField
@@ -96,15 +109,7 @@ const InformedConsent: React.FC = () => {
           }}
         />
         {/* 后端 POST /doctors/informed-consents 为不落库的桩，禁用以免伪造创建成功 */}
-        <Button
-          variant="contained"
-          color="primary"
-          startIcon={<AddIcon />}
-          disabled
-          title="知情同意书创建接口后端暂未落库，暂不可用"
-        >
-          新建知情同意书
-        </Button>
+        <Button variant="outlined" onClick={loadConsents}>刷新</Button>
       </Box>
 
       {error && (
@@ -135,7 +140,7 @@ const InformedConsent: React.FC = () => {
             ) : filteredForms.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} align="center">
-                  {error ? '加载失败，请稍后重试' : '知情同意书功能后端建设中，暂无数据'}
+                  {error ? '加载失败，请稍后重试' : '还没有知情同意'}
                 </TableCell>
               </TableRow>
             ) : (
@@ -157,12 +162,10 @@ const InformedConsent: React.FC = () => {
                   <TableCell>{form.doctor_name ?? form.doctorName ?? '-'}</TableCell>
                   <TableCell align="right">
                     {/* 后端无知情同意书详情/文件下载接口，按钮禁用 */}
-                    <IconButton
-                      color="primary"
-                      size="small"
-                      title="查看（后端暂未提供）"
-                      disabled
-                    >
+                    <IconButton color="primary" size="small" title="查看文本" onClick={async () => {
+                      const { data } = await api.get(`/consent/documents/${form.id}/text`, { responseType: 'blob' });
+                      window.open(URL.createObjectURL(data), '_blank');
+                    }}>
                       <VisibilityIcon fontSize="small" />
                     </IconButton>
                   </TableCell>

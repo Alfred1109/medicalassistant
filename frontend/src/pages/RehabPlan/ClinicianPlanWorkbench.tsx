@@ -4,11 +4,13 @@ import { Alert, Box, Button, Card, CardContent, Checkbox, Chip, CircularProgress
   TablePagination, TextField, Typography } from '@mui/material';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
+import httpClient from '../../services/httpClient';
 import type { Patient } from '../../types/patient.types';
 import { rehabClinicalWorkbench as api, type ClinicalPlan, type ClinicalFeedback, type DraftItem,
   type DraftState } from '../../services/rehabClinicalWorkbench';
 import { contentForm, contentPayload, emptyContent, interventionLabels, operationId, validateItems,
   workbenchError, type FormContent } from '../../utils/rehabClinicalWorkbench';
+import { FeedbackAttachments } from './PatientPlans';
 
 type Actor = { id: string; role: string };
 const LIMIT = 20;
@@ -38,9 +40,17 @@ export function ClinicalContentFields({ value, onChange, disabled = false, inclu
   </Stack>;
 }
 
-function InterventionEditor({ item, index, disabled, change, remove }: {
+function safeGuidanceVideo(url?: string | null): string {
+  const value = url?.trim() || '';
+  return /^(https?:\/\/\S+|\/api\/rehabilitation\/exercises\/media\/[a-f\d]{32}\.(mp4|webm))$/i.test(value) ? value : '';
+}
+
+function InterventionEditor({ item, index, disabled, change, remove, library }: {
   item: DraftItem; index: number; disabled: boolean; change: (next: DraftItem) => void; remove: () => void;
+  library: { id: string; name: string; video_url: string }[];
 }) {
+  const [videoError, setVideoError] = useState('');
+  const video = safeGuidanceVideo(item.guidance_video_url);
   const lines = (value?: string[] | null) => (value || []).join('\n');
   const parseLines = (value: string) => value.split('\n').map(line => line.trim()).filter(Boolean);
   const labels: Record<string, string> = { drug_ref: '药品', dosage: '用量', frequency: '频率', route: '给药方式',
@@ -83,6 +93,33 @@ function InterventionEditor({ item, index, disabled, change, remove }: {
         disabled={disabled} onChange={event => change({ ...item, contraindications: parseLines(event.target.value) })} />
       <TextField label="给患者的执行说明（选填）" multiline minRows={2} value={item.patient_instructions || ''} disabled={disabled}
         inputProps={{ maxLength: 5000 }} onChange={event => change({ ...item, patient_instructions: event.target.value })} />
+      <Typography variant="body2">指导动作视频（选填，只属于本项任务，发布后随这项任务给患者看）</Typography>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+        <Button component="label" disabled={disabled}>上传本项视频
+          <input hidden type="file" accept="video/mp4,video/webm" onChange={async event => {
+            const file = event.target.files?.[0];
+            event.target.value = '';
+            if (!file) return;
+            setVideoError('');
+            const body = new FormData();
+            body.append('file', file);
+            try {
+              const { data } = await httpClient.post<{ url?: string }>('/rehabilitation/exercises/media', body, { headers: { 'Content-Type': 'multipart/form-data' } });
+              if (!safeGuidanceVideo(data.url)) { setVideoError('视频没有保存。'); return; }
+              change({ ...item, guidance_video_url: data.url });
+            } catch { setVideoError('视频没有上传。'); }
+          }} />
+        </Button>
+        <TextField select size="small" label="或选用运动库里的动作视频" disabled={disabled} sx={{ minWidth: 240 }}
+          value={library.some(entry => entry.video_url === video) ? video : ''}
+          onChange={event => change({ ...item, guidance_video_url: event.target.value || null })}>
+          <MenuItem value="">不从运动库选择</MenuItem>
+          {library.map(entry => <MenuItem key={entry.id} value={entry.video_url}>{entry.name}</MenuItem>)}
+        </TextField>
+        {video && <Button color="error" disabled={disabled} onClick={() => change({ ...item, guidance_video_url: null })}>移除本项视频</Button>}
+      </Stack>
+      {videoError && <Alert severity="error">{videoError}</Alert>}
+      {video && <video src={video} controls style={{ width: '100%', maxHeight: 280 }} />}
     </Stack>
   </Paper>;
 }
@@ -121,6 +158,7 @@ function FeedbackList({ planId, publication }: { planId: string; publication: Dr
         : '历史方案干预反馈'}</Typography>
       <Typography>{labels[row.execution_status] || '执行情况未识别'} · {dateText(row.performed_at)}</Typography>
       <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{row.feelings}</Typography>
+      <FeedbackAttachments planId={planId} items={row.attachments} />
     </Paper>)}
     {total > LIMIT && <TablePagination component="div" count={total} page={page} rowsPerPage={LIMIT} rowsPerPageOptions={[]}
       onPageChange={(_, next) => setPage(next)} labelDisplayedRows={({ from, to, count }) => `${from}-${to} 共 ${count}`} />}
@@ -131,6 +169,22 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
   const [snapshot, setSnapshot] = useState<DraftState | null>(null);
   const [form, setForm] = useState(emptyContent);
   const [items, setItems] = useState<DraftItem[]>([]);
+  const [library, setLibrary] = useState<{ id: string; name: string; video_url: string }[]>([]);
+  useEffect(() => {
+    const controller = new AbortController();
+    httpClient.post('/rehabilitation/exercises/list', { skip: 0, limit: 100 }, { signal: controller.signal }).then(({ data }) => {
+      if (!Array.isArray(data)) return;
+      setLibrary(data.flatMap(row => {
+        if (!row || typeof row !== 'object') return [];
+        const entry = row as Record<string, unknown>;
+        const videoUrl = typeof entry.video_url === 'string' ? entry.video_url : '';
+        const name = typeof entry.name === 'string' ? entry.name : '';
+        const id = typeof entry._id === 'string' ? entry._id : typeof entry.id === 'string' ? entry.id : videoUrl;
+        return safeGuidanceVideo(videoUrl) && name ? [{ id, name, video_url: videoUrl }] : [];
+      }));
+    }).catch(() => { if (!controller.signal.aborted) setLibrary([]); });
+    return () => controller.abort();
+  }, []);
   const [editing, setEditing] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -224,7 +278,7 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
           <Typography variant="body2" color="text.secondary">逐项填写经核实的内容和执行说明；未配置的干预不会自动生成。</Typography>
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">{Object.entries(interventionLabels).map(([type, label]) => <Button key={type} variant="outlined" disabled={pending || needsReload || items.length >= 200}
             onClick={() => { setItems(value => [...value, { intervention_type: type as DraftItem['intervention_type'], name: '' }]); changed(); }}>添加{label}干预</Button>)}</Stack>
-          {items.map((item, index) => <InterventionEditor key={item.item_id || `new-${index}`} item={item} index={index} disabled={pending || needsReload}
+          {items.map((item, index) => <InterventionEditor key={item.item_id || `new-${index}`} item={item} index={index} library={library} disabled={pending || needsReload}
             change={next => { setItems(value => value.map((entry, position) => position === index ? next : entry)); changed(); }}
             remove={() => { setItems(value => value.filter((_, position) => position !== index)); changed(); }} />)}
           <Box><Button variant="contained" disabled={pending || needsReload} onClick={save}>保存医护草稿</Button></Box>

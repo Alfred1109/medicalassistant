@@ -15,7 +15,7 @@ from app.main import app
 from app.schemas.user import UserResponse
 from app.services.agent_optimized_service import AgentOptimizedService
 from app.services.agent_service import AgentService
-from app.services.rehabilitation_service import RehabilitationService
+from app.services.rehabilitation_service import RehabilitationService, recommendations_from_model
 from app.services.user_service import UserService
 
 SYNTHETIC_OPERATOR_ID = "507f1f77bcf86cd799439011"
@@ -75,6 +75,20 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
         self.optimized._get_cache.assert_not_awaited()
         self.assertTrue(self.optimized.response_queue.empty())
         self.assert_no_writes()
+
+    async def test_recommendations_use_configured_model_text_and_fail_closed(self):
+        parsed = recommendations_from_model(
+            '[{"name":"踝泵","description":"卧位勾脚","difficulty":"easy","duration_minutes":5,"body_part":"踝"}]',
+            "synthetic-model",
+        )
+        self.assertEqual(parsed[0]["name"], "踝泵")
+        self.assertEqual(parsed[0]["source"], "configured_model")
+        prose = recommendations_from_model("先由医生确认负重。", "synthetic-model")
+        self.assertEqual(prose[0]["name"], "模型建议")
+        with patch.object(settings, "LLM_API_KEY", None), patch("openai.OpenAI") as client:
+            with self.assertRaises(LLMConfigurationError):
+                await self.rehab.get_recommendations("synthetic")
+            client.assert_not_called()
 
     async def test_rehabilitation_outer_fallback_does_not_swallow_missing_configuration(self):
         with patch.object(settings, "LLM_API_KEY", None):

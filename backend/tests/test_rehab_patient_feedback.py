@@ -29,7 +29,8 @@ class FeedbackSchemaTests(unittest.TestCase):
                 "feelings": "需要休息后再继续", "performed_at": "2026-11-09T08:00:00Z"}
         for change in ({"patient_id": "someone"}, {"event_type": "patient_report"},
                        {"execution_status": "diagnosed"}, {"feelings": "   "},
-                       {"performed_at": "2026-11-09T08:00:00"}, {"version_id": "bad"}):
+                       {"performed_at": "2026-11-09T08:00:00"}, {"version_id": "bad"},
+                       {"media_ids": ["not-a-file"]}, {"media_ids": ["a" * 32, "a" * 32]}):
             with self.assertRaises(ValidationError):
                 PatientFeedbackCreate.model_validate({**base, **change})
 

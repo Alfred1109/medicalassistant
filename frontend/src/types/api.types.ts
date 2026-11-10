@@ -22,6 +22,10 @@ export interface User {
   last_login?: string;
   /** 头像地址(可选) */
   avatar?: string;
+  phone?: string;
+  bio?: string;
+  has_avatar?: boolean;
+  local_password?: boolean;
 }
 
 export interface LoginCredentials {

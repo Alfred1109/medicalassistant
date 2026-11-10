@@ -70,6 +70,8 @@ interface FollowUpListProps {
   canReview?: (record: FollowUpRecord) => boolean;
   onCancel?: (id: string) => void;
   onReschedule?: (id: string) => void;
+  onMarkOverdue?: (id: string) => void;
+  onMarkLost?: (id: string) => void;
   onDelete?: (id: string) => void;
   onFilterChange?: (filters: FollowUpFilters) => void;
   onRefresh?: () => void;
@@ -97,6 +99,8 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   canReview,
   onCancel,
   onReschedule,
+  onMarkOverdue,
+  onMarkLost,
   onDelete,
   onFilterChange,
   onRefresh,
@@ -234,12 +238,14 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
             >
               <CancelIcon fontSize="small" />
             </IconButton>
+            {onMarkOverdue && <Button size="small" onClick={() => onMarkOverdue(record.id)}>标记逾期</Button>}
           </Stack>
         );
+      case 'overdue':
+        return onMarkLost ? <Button size="small" color="warning" onClick={() => onMarkLost(record.id)}>认定失访</Button> : null;
       case 'completed':
       case 'canceled':
       case 'missed':
-      case 'overdue':
       case 'lost':
         if (onView) return null;
         return (

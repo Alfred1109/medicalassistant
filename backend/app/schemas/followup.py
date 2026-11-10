@@ -150,6 +150,12 @@ class ReviewFollowUpRequest(BaseModel):
     evidence: Optional[Dict[str, Any]] = None
 
 
+class FollowUpDispositionRequest(BaseModel):
+    """医护手工标记逾期或认定失访。不按未确认的天数自动判断。"""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class ReEvaluateFollowUpRequest(BaseModel):
     """复评请求（FU01 S6，设计稿 §4.4）
 

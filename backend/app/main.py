@@ -1,3 +1,4 @@
+from bson import ObjectId
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -51,12 +52,18 @@ from .api.routers.device_data_standard_router import router as device_data_stand
 from app.core.permission_audit import PermissionAuditMiddleware
 
 # 创建应用实例
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path as FilePath
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="A dynamic agent system for medical rehabilitation assistance",
     version="0.1.0",
     root_path=settings.MEDICALASSISTANT_ROOT_PATH,
 )
+_exercise_media = FilePath(__file__).resolve().parents[1] / "data" / "exercise-media"
+_exercise_media.mkdir(parents=True, exist_ok=True)
+app.mount("/media/exercises", StaticFiles(directory=_exercise_media), name="exercise-media")
 
 # 异常处理中间件
 @app.middleware("http")
@@ -127,6 +134,48 @@ async def cors_debug_middleware(request: Request, call_next):
     
     return response
 
+
+@app.middleware("http")
+async def maintenance_gate(request: Request, call_next):
+    """Block non-admin API calls while maintenance mode is stored as on."""
+    path = request.url.path
+    if request.method == "OPTIONS" or not path.startswith("/api/"):
+        return await call_next(request)
+    if path.startswith("/api/auth") or path.startswith("/api/admin/settings") or path in {"/api/users/login", "/api/users/me"} or path.startswith("/api/users/me/"):
+        return await call_next(request)
+    try:
+        from app.db.mongodb import db as mongo
+        if not mongo.is_connected():
+            return await call_next(request)
+        database = mongo.db
+        row = await database.system_settings.find_one({"_id": "system"})
+        if not row or not row.get("maintenance_mode"):
+            return await call_next(request)
+        role = await _maintenance_role(request, database)
+    except Exception:
+        return await call_next(request)
+    if role == "admin":
+        return await call_next(request)
+    return JSONResponse(status_code=503, content={"code": "MAINTENANCE", "message": "系统正在维护，请稍后再试。"})
+
+
+async def _maintenance_role(request: Request, database):
+    from app.core.auth import _access_token_user_id
+    from app.integrations.identity.access import SESSION_COOKIE, unified_authentication
+    from app.integrations.identity.config import oidc_settings
+    from app.integrations.identity.service import OidcClient
+    if unified_authentication():
+        _record, actor = await OidcClient(database, oidc_settings).actor_for_session(request.cookies.get(SESSION_COOKIE))
+        return (actor or {}).get("role")
+    header = request.headers.get("authorization") or ""
+    token = header[7:] if header.lower().startswith("bearer ") else ""
+    user_id = _access_token_user_id(token) if token else None
+    if not user_id or not ObjectId.is_valid(user_id):
+        return None
+    user = await database.users.find_one({"_id": ObjectId(user_id)}, {"role": 1})
+    return (user or {}).get("role")
+
+
 # 添加MongoDB连接和关闭事件
 @app.on_event("startup")
 async def startup_db_client():
@@ -145,6 +194,8 @@ async def startup_db_client():
             await ensure_identity_indexes(mongodb_state.db)
         await reminder_runtime.start(mongodb_state.db, enabled=settings.FOLLOWUP_REMINDERS_ENABLED,
                                      interval=settings.FOLLOWUP_REMINDERS_POLL_SECONDS)
+        from app.operations.runtime import backup_schedule
+        await backup_schedule.start(mongodb_state.db)
     except DatabaseConnectionError as e:
         logger.critical(f"Failed to connect to database: {str(e)}")
         # 不启动无法访问数据库的服务。
@@ -155,6 +206,8 @@ async def shutdown_db_client():
     """应用关闭时断开数据库连接"""
     logger.info("Application shutting down...")
     await reminder_runtime.stop()
+    from app.operations.runtime import backup_schedule
+    await backup_schedule.stop()
     await close_mongodb_connection()
 
 # 自定义异常处理
@@ -272,6 +325,10 @@ app.include_router(form_catalog_router, prefix="/api")
 app.include_router(form_patient_links_router, prefix="/api")
 app.include_router(form_bindings_router, prefix="/api")
 app.include_router(identity_router, prefix="/api")
+from app.clinical.router import router as clinical_router
+app.include_router(clinical_router, prefix="/api")
+from app.directory.router import router as directory_router
+app.include_router(directory_router, prefix="/api")
 
 @app.get("/api")
 async def api_root():

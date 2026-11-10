@@ -1,5 +1,6 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Request, status, Body, Query, Path
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status, Body, Query, Path
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
 import logging
@@ -28,6 +29,9 @@ async def register_user(
 ):
     """注册新用户(仅限患者自注册)"""
     # 权限、状态和角色由服务端决定；该旧入口尚未接入统一身份。
+    from app.directory.records import registration_open
+    if not await registration_open(user_service.db):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={"code": "REGISTRATION_CLOSED"})
     return await user_service.create_user(UserCreate(**user_data.model_dump()))
 
 @router.post("/login", response_model=Token, dependencies=[Depends(reject_legacy_credentials)])
@@ -154,6 +158,46 @@ async def update_current_user(
 ):
     """更新旧版本地显示名；账户与凭据不通过此接口修改。"""
     return await user_service.update_user(current_user.id, UserUpdate(**user_data.model_dump(exclude_unset=True)))
+
+
+class PasswordChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+
+@router.post("/me/password")
+async def change_own_password(
+    payload: PasswordChange,
+    current_user: UserResponse = Depends(get_current_user),
+    user_service: UserService = Depends(get_user_service)
+):
+    """Local bcrypt passwords only. Questionnaire accounts stay unchanged."""
+    await user_service.change_own_password(current_user.id, payload.current_password, payload.new_password)
+    return {"changed": True}
+
+
+@router.post("/me/avatar")
+async def upload_avatar(
+    file: UploadFile = File(...),
+    current_user: UserResponse = Depends(get_current_user),
+    user_service: UserService = Depends(get_user_service)
+):
+    content = await file.read()
+    await user_service.save_avatar(current_user.id, content, file.content_type or "")
+    return {"has_avatar": True}
+
+
+@router.get("/me/avatar")
+async def own_avatar(
+    current_user: UserResponse = Depends(get_current_user),
+    user_service: UserService = Depends(get_user_service)
+):
+    stored = await user_service.read_avatar(current_user.id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="还没有头像")
+    content, content_type = stored
+    return Response(content=content, media_type=content_type, headers={"Cache-Control": "private, no-store"})
 
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user(

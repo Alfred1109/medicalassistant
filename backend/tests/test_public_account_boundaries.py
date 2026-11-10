@@ -20,6 +20,7 @@ class PublicAccountBoundariesTests(unittest.IsolatedAsyncioTestCase):
                                  createdAt=datetime.utcnow(), updatedAt=datetime.utcnow())
         self.service = MagicMock()
         self.service.create_user = AsyncMock(return_value=self.user)
+        self.service.db.system_settings.find_one = AsyncMock(return_value=None)
         self.service.update_user = AsyncMock(return_value=self.user)
         self.app.dependency_overrides[get_current_user] = lambda: self.user
         self.app.dependency_overrides[get_user_service] = lambda: self.service

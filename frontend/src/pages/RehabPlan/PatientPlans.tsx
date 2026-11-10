@@ -3,7 +3,7 @@ import { Alert, Box, Button, Card, CardContent, CircularProgress, Container, Div
 import { useSelector } from 'react-redux';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { RootState } from '../../store';
-import { rehabPublications, type PatientRehabFeedback, type PublishedRehabPlan, type RehabInterventionType } from '../../services/rehabPublications';
+import { rehabPublications, type PatientRehabAttachment, type PatientRehabFeedback, type PublishedRehabPlan, type RehabInterventionType } from '../../services/rehabPublications';
 
 const categories: Record<RehabInterventionType, string> = {
   diet: '饮食', exercise: '运动', medication: '用药', psychology: '心理',
@@ -73,7 +73,31 @@ export function validPatientFeedback(value: unknown, planId: string, accountId: 
     && typeof record.version_id === 'string' && /^[a-f\d]{24}$/i.test(record.version_id)
     && typeof record.prescription_item_id === 'string' && /^[a-f\d]{24}$/i.test(record.prescription_item_id)
     && ['completed', 'partial', 'not_done'].includes(record.execution_status)
-    && typeof record.feelings === 'string' && typeof record.performed_at === 'string';
+    && typeof record.feelings === 'string' && typeof record.performed_at === 'string'
+    && (!record.attachments || (Array.isArray(record.attachments) && record.attachments.every(item =>
+      typeof item?.id === 'string' && /^[a-f\d]{32}$/i.test(item.id) && typeof item.content_type === 'string' && typeof item.name === 'string')));
+}
+
+function FeedbackFile({ planId, item }: { planId: string; item: PatientRehabAttachment }) {
+  const [url, setUrl] = useState('');
+  useEffect(() => {
+    const controller = new AbortController();
+    let object = '';
+    rehabPublications.feedbackMedia(planId, item.id).then(({ data }) => {
+      if (controller.signal.aborted) return;
+      object = URL.createObjectURL(data);
+      setUrl(object);
+    }).catch(() => { if (!controller.signal.aborted) setUrl(''); });
+    return () => { controller.abort(); if (object) URL.revokeObjectURL(object); };
+  }, [planId, item.id]);
+  if (!url) return <Typography variant="body2" color="text.secondary">{item.name} 暂时无法打开</Typography>;
+  if (item.content_type.startsWith('video/')) return <video src={url} controls style={{ maxWidth: '100%', maxHeight: 280 }} />;
+  return <img src={url} alt={item.name} style={{ maxWidth: '100%', maxHeight: 240, objectFit: 'contain' }} />;
+}
+
+export function FeedbackAttachments({ planId, items }: { planId: string; items?: PatientRehabAttachment[] }) {
+  if (!items?.length) return null;
+  return <Stack spacing={1}>{items.map(item => <FeedbackFile key={item.id} planId={planId} item={item} />)}</Stack>;
 }
 
 function FeedbackForm({ plan, itemId, onSaved, onUnavailable }: { plan: PublishedRehabPlan; itemId: string; onSaved: () => void; onUnavailable: () => void }) {
@@ -83,19 +107,33 @@ function FeedbackForm({ plan, itemId, onSaved, onUnavailable }: { plan: Publishe
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [files, setFiles] = useState<File[]>([]);
   const attempt = useRef<string | null>(null);
+  const uploaded = useRef<{ key: string; id: string }[]>([]);
   const changed = () => { attempt.current = null; setMessage(''); setError(''); };
   const submit = async () => {
     if (!status || !feelings.trim() || !when || Number.isNaN(new Date(when).getTime())) {
       setError('请选择执行情况，填写感受和执行时间。'); return;
     }
+    if (files.length > 4) { setError('每次最多上传 4 个图片或视频。'); return; }
     try { if (!attempt.current) attempt.current = newRequestId(); }
     catch (failure) { setError(failure instanceof Error ? failure.message : '无法安全创建提交，请更换浏览器。'); return; }
     setPending(true); setError(''); setMessage('');
     try {
+      const mediaIds: string[] = [];
+      for (const file of files) {
+        const key = `${file.name}:${file.size}:${file.lastModified}`;
+        const existing = uploaded.current.find(item => item.key === key);
+        if (existing) { mediaIds.push(existing.id); continue; }
+        const { data } = await rehabPublications.uploadFeedbackMedia(plan.id, file);
+        if (!data?.id) throw new Error('附件没有保存成功');
+        uploaded.current.push({ key, id: data.id });
+        mediaIds.push(data.id);
+      }
       await rehabPublications.submitFeedback(plan.id, { event_id: attempt.current, version_id: plan.version_id,
-        prescription_item_id: itemId, execution_status: status, feelings: feelings.trim(), performed_at: new Date(when).toISOString() });
-      setMessage('反馈已提交，医护可以查看。'); setFeelings(''); setWhen(''); setStatus(''); attempt.current = null; onSaved();
+        prescription_item_id: itemId, execution_status: status, feelings: feelings.trim(),
+        performed_at: new Date(when).toISOString(), media_ids: mediaIds });
+      setMessage('反馈已提交，医护可以查看。'); setFeelings(''); setWhen(''); setStatus(''); setFiles([]); uploaded.current = []; attempt.current = null; onSaved();
     } catch (failure) {
       const code = (failure as { response?: { status?: number } })?.response?.status;
       if (code === 403 || code === 404) { onUnavailable(); return; }
@@ -110,6 +148,14 @@ function FeedbackForm({ plan, itemId, onSaved, onUnavailable }: { plan: Publishe
     </TextField>
     <TextField label="执行时间" type="datetime-local" size="small" value={when} disabled={pending} onChange={event => { changed(); setWhen(event.target.value); }} InputLabelProps={{ shrink: true }} />
     <TextField label="您的感受或遇到的问题" multiline minRows={2} value={feelings} disabled={pending} inputProps={{ maxLength: 2000 }} onChange={event => { changed(); setFeelings(event.target.value); }} />
+    <Button component="label" disabled={pending}>上传图片或视频
+      <input hidden type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" multiple onChange={event => {
+        changed();
+        setFiles(Array.from(event.target.files || []).slice(0, 4));
+        event.target.value = '';
+      }} />
+    </Button>
+    {files.map(file => <Typography key={`${file.name}:${file.size}:${file.lastModified}`} variant="body2">{file.name}</Typography>)}
     {error && <Alert severity="error">{error}</Alert>}{message && <Alert severity="success">{message}</Alert>}
     <Box><Button variant="outlined" disabled={pending} onClick={submit}>提交反馈</Button></Box>
   </Stack>;
@@ -130,6 +176,8 @@ function PlanSummary({ plan, onFeedbackSaved, onUnavailable }: { plan: Published
           <Stack spacing={1.5}>{items.map(item => <Paper variant="outlined" sx={{ p: 2 }} key={item.item_id}>
             <Typography fontWeight="medium">{item.name}</Typography>
             {item.description && <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{item.description}</Typography>}
+            {item.guidance_video_url && /^(https?:\/\/\S+|\/api\/rehabilitation\/exercises\/media\/[a-f\d]{32}\.(mp4|webm))$/i.test(item.guidance_video_url) &&
+              <Box><Typography variant="body2">本项指导动作</Typography><video src={item.guidance_video_url} controls style={{ width: '100%', maxHeight: 320 }} /></Box>}
             {([['安排', item.schedule], ['饮食内容', item.diet_fields], ['用药内容', item.medication_fields], ['心理内容', item.psychology_fields], ['医护提示', item.patient_instructions], ['注意事项', item.contraindications]] as const).map(([label, value]) => displayValue(value) &&
               <Typography key={label} variant="body2" sx={{ overflowWrap: 'anywhere' }}>{label}：{displayValue(value)}</Typography>)}
             <FeedbackForm key={`${plan.version_id}:${item.item_id}`} plan={plan} itemId={item.item_id} onSaved={onFeedbackSaved} onUnavailable={onUnavailable} />
@@ -242,7 +290,7 @@ function PatientPlanDetailForActor({ id, accountId }: { id?: string; accountId: 
       {historyError && <Alert severity="error">{historyError}</Alert>}
       {historyLoading && <CircularProgress size={20} aria-label="正在加载反馈" />}
       {!historyLoading && !historyError && history.length === 0 && <Typography color="text.secondary">暂无反馈记录。</Typography>}
-      {history.map(record => <Box key={record.id}><Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{feedbackReference(record, plan)}</Typography><Typography variant="body2">{dateText(record.performed_at)} · {record.execution_status === 'completed' ? '已执行' : record.execution_status === 'partial' ? '部分执行' : '未执行'}</Typography><Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{record.feelings}</Typography></Box>)}
+      {history.map(record => <Box key={record.id}><Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{feedbackReference(record, plan)}</Typography><Typography variant="body2">{dateText(record.performed_at)} · {record.execution_status === 'completed' ? '已执行' : record.execution_status === 'partial' ? '部分执行' : '未执行'}</Typography><Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{record.feelings}</Typography><FeedbackAttachments planId={plan.id} items={record.attachments} /></Box>)}
       {historyTotal > 20 && <Stack direction="row" alignItems="center" spacing={1}><Button disabled={historyLoading || historyPage === 0} onClick={() => setHistoryPage(value => value - 1)}>上一页</Button><Typography variant="body2">第 {historyPage + 1} 页，共 {historyTotal} 条</Typography><Button disabled={historyLoading || (historyPage + 1) * 20 >= historyTotal} onClick={() => setHistoryPage(value => value + 1)}>下一页</Button></Stack>}
     </Stack></Paper>}
   </Stack></Container>;

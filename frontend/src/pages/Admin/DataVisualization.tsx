@@ -41,7 +41,8 @@ const DataVisualization: React.FC = () => {
   const [trendData, setTrendData] = useState<TrendData[]>([]);
   const [distributionData, setDistributionData] = useState<DistributionData[]>([]);
   const [comparisonData, setComparisonData] = useState<ComparisonData[]>([]);
-  const [exportLoading, setExportLoading] = useState(false);
+  const [exportLoading] = useState(false);
+  const [regionData, setRegionData] = useState<DistributionData[]>([]);
   // 处理类型变更
   const handleDataTypeChange = (event: SelectChangeEvent<string>) => {
     setDataType(event.target.value as ChartDataType);
@@ -74,6 +75,8 @@ const DataVisualization: React.FC = () => {
       setTrendData(trend);
       setDistributionData(distribution);
       setComparisonData(comparison);
+      const region = await analyticsService.getDistributionData('region' as ChartDataType, timeRange);
+      setRegionData(region);
     } catch (err: any) {
       // 错误不再静默吞掉（原实现会回退模拟数据），改为明确的错误态
       console.error('加载数据失败:', err);
@@ -124,19 +127,28 @@ const DataVisualization: React.FC = () => {
             </Select>
           </FormControl>
           
-          {/* 后端 /api/analytics 无导出端点（能力待建设），导出按钮禁用 */}
-          <Tooltip title="后端导出报表能力待建设，暂不可用">
-            <span>
-              <Button
-                variant="outlined"
-                size="small"
-                startIcon={<DownloadIcon />}
-                disabled
-              >
-                导出
-              </Button>
-            </span>
-          </Tooltip>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<DownloadIcon />}
+            disabled={exportLoading}
+            onClick={() => {
+              const rows = [
+                ...trendData.map(row => `趋势,${row.date},${row.value}`),
+                ...distributionData.map(row => `分布,${row.name},${row.value}`),
+                ...comparisonData.map(row => `对比,${row.category},${row.currentValue},${row.compareValue}`),
+              ];
+              const blob = new Blob([`\uFEFF种类,名称,数值,对比\n${rows.join('\n')}`], { type: 'text/csv;charset=utf-8' });
+              const url = URL.createObjectURL(blob);
+              const anchor = document.createElement('a');
+              anchor.href = url;
+              anchor.download = 'analytics.csv';
+              anchor.click();
+              URL.revokeObjectURL(url);
+            }}
+          >
+            导出当前图表
+          </Button>
         </Box>
       </Box>
 
@@ -358,29 +370,15 @@ const DataVisualization: React.FC = () => {
           <Grid item xs={12} md={6}>
             <Paper sx={{ p: 3 }}>
               <Typography variant="h6" gutterBottom>
-                地域分布
+                患者所在地
               </Typography>
               <Divider sx={{ mb: 2 }} />
-              {/* 后端 /api/analytics 下无地域分布数据源，此处不再展示硬编码城市数据 */}
-              <Box
-                sx={{
-                  height: 350,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  border: '1px dashed grey',
-                  borderRadius: 1,
-                  p: 2
-                }}
-              >
-                <Typography variant="subtitle1" gutterBottom>
-                  暂无数据源
-                </Typography>
-                <Typography variant="body2" color="text.secondary" align="center">
-                  后端分析接口暂不提供地域分布数据，待后端支持后接入
-                </Typography>
-              </Box>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                按患者资料里的城市、地区或地址汇总。没有填写的计入「未填写」，不会补造城市。
+              </Typography>
+              {regionData.length === 0 ? <Typography>还没有可汇总的患者资料。</Typography> : regionData.map(row => (
+                <Typography key={row.name}>{row.name}：{row.value}</Typography>
+              ))}
             </Paper>
           </Grid>
           

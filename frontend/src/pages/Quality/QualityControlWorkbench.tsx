@@ -24,7 +24,8 @@ function QualityWorkspace({ actor }: {actor: {id: string; role: string}}) {
   const [endDate, setEndDate] = useState('');
   const [filters, setFilters] = useState<QualityFilters>({});
   const [filterError, setFilterError] = useState('');
-  const [tab, setTab] = useState<'followup' | 'rehab_plan' | 'issues'>('rehab_plan');
+  const [tab, setTab] = useState<'followup' | 'rehab_plan' | 'issues' | 'indicators'>('rehab_plan');
+  const [indicatorMessage, setIndicatorMessage] = useState('');
   const [createFact, setCreateFact] = useState<QualityFact | null>(null);
   const [issueId, setIssueId] = useState<string | null>(null);
   const [issueRefresh, setIssueRefresh] = useState(0);
@@ -61,10 +62,11 @@ function QualityWorkspace({ actor }: {actor: {id: string; role: string}}) {
       <Typography variant="body2" color="text.secondary">日期按本地日历日查询，包含所选结束日。日期筛选仅作用过程事实与统计报告。</Typography>
       {patientError && <Alert severity="warning">{patientError}</Alert>}{filterError && <Alert severity="error">{filterError}</Alert>}
     </Stack></Paper>
-    <Tabs value={tab} onChange={(_, value) => setTab(value)} variant="scrollable" scrollButtons="auto" aria-label="质控工作区">
-      <Tab value="rehab_plan" label="康复方案过程" /><Tab value="followup" label="随访过程" /><Tab value="issues" label="人工问题处置" />
+    <Tabs value={tab} onChange={(_, value) => { setTab(value); if (value === 'indicators') api.get('/clinical/indicators').then(({ data }) => setIndicatorMessage(data.message)).catch(() => setIndicatorMessage('正式指标状态没有加载出来。')); }} variant="scrollable" scrollButtons="auto" aria-label="质控工作区">
+      <Tab value="rehab_plan" label="康复方案过程" /><Tab value="followup" label="随访过程" /><Tab value="issues" label="人工问题处置" /><Tab value="indicators" label="正式指标" />
     </Tabs>
-    {tab === 'issues' ? <QualityIssueList key={scopeKey} patientId={filters.patient_id} actor={actor} patientNames={patientNames} refresh={issueRefresh} onOpen={setIssueId} /> :
+    {tab === 'indicators' && <Alert severity="info">{indicatorMessage || '正在读取正式指标状态。'}</Alert>}
+    {tab === 'issues' ? <QualityIssueList key={scopeKey} patientId={filters.patient_id} actor={actor} patientNames={patientNames} refresh={issueRefresh} onOpen={setIssueId} /> : tab === 'indicators' ? null :
       <QualityMonitoringPanel key={`${scopeKey}:${tab}`} filters={filters} source={tab} patientNames={patientNames} canCreate={medical}
         onCreate={fact => { if (fact.issue_eligible && fact.source_reference_state === 'valid') setCreateFact(fact); }} />}
     {createFact && medical && <CreateQualityIssueDialog key={`${createFact.source_type}:${createFact.source_id}`} fact={createFact}

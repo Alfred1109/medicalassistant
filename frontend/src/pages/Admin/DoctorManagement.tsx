@@ -44,6 +44,8 @@ import EventIcon from '@mui/icons-material/Event';
 import ArrowForwardIosIcon from '@mui/icons-material/ArrowForwardIos';
 import PeopleIcon from '@mui/icons-material/People';
 import { apiService } from '../../services/api';
+import apiClient from '../../services/api';
+import AccountCreateDialog from '../../components/Admin/AccountCreateDialog';
 import { Doctor } from '../../types/doctor.types';
 
 // 医生管理：列表数据来自真实接口 GET /api/admin/doctors（后端已实现查询）
@@ -60,6 +62,7 @@ const DoctorManagement: React.FC = () => {
   const [tabValue, setTabValue] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [createOpen, setCreateOpen] = useState(false);
 
   // 从API加载医生数据（真实接口，失败时展示错误状态并提供重试）
   useEffect(() => {
@@ -201,12 +204,9 @@ const DoctorManagement: React.FC = () => {
           医生管理
         </Typography>
         <Box textAlign="right">
-          <Button variant="contained" color="primary" startIcon={<AddIcon />} disabled>
+          <Button variant="contained" color="primary" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
             添加医生
           </Button>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-            后端医生创建/编辑/删除接口尚未实现持久化，功能待开放
-          </Typography>
         </Box>
       </Box>
 
@@ -527,9 +527,15 @@ const DoctorManagement: React.FC = () => {
           </Grid>
         </DialogContent>
         <DialogActions>
+          {selectedDoctor?.id && <Button onClick={async () => {
+            await apiClient.put(`/admin/accounts/${selectedDoctor.id}/active`, { active: false });
+            handleCloseDialog();
+            setReloadKey(key => key + 1);
+          }}>停用账号</Button>}
           <Button onClick={handleCloseDialog}>关闭</Button>
         </DialogActions>
       </Dialog>
+      <AccountCreateDialog open={createOpen} title="添加医生" path="/admin/doctors" role="doctor" onClose={() => setCreateOpen(false)} onCreated={() => setReloadKey(key => key + 1)} />
     </Box>
   );
 };

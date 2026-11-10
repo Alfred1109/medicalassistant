@@ -33,6 +33,12 @@ class DeviceService:
         ).to_list(None)
         
         return [{**device, "_id": str(device["_id"])} for device in devices]
+
+    async def list_registered_devices(self) -> List[Dict]:
+        """管理员查看已登记设备。没有上报记录时不补造读数。"""
+        db = await get_db()
+        devices = await db.devices.find({"status": {"$ne": "deleted"}}).to_list(500)
+        return [{**device, "_id": str(device["_id"])} for device in devices]
     
     async def get_device(self, device_id: str) -> Optional[Dict]:
         """获取设备详情；畸形 ID 与不存在的设备语义一致，返回 None"""
@@ -131,6 +137,23 @@ class DeviceService:
             return {"success": False, "message": "设备不存在"}
 
         return {"success": False, "message": "设备数据源未接入，无法同步真实采集数据"}
+
+    async def record_manual_reading(self, device_id: str, data_type: str, value: str, unit: str, measured_at: datetime) -> Dict:
+        """Store a reading a person typed. It is not a device upload and does not change battery or connection time."""
+        db = await get_db()
+        document = {
+            "_id": ObjectId(),
+            "device_id": device_id,
+            "timestamp": measured_at,
+            "data_type": data_type,
+            "value": value,
+            "unit": unit,
+            "metadata": {"source": "手工登记"},
+            "created_at": datetime.utcnow(),
+        }
+        await db.device_data.insert_one(document)
+        document["id"] = str(document.pop("_id"))
+        return document
     
     async def get_device_status(self, device_id: str) -> Dict:
         """获取设备状态

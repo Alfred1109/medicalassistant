@@ -1,4 +1,5 @@
 from app.core.llm import LLMConfigurationError
+import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -8,7 +9,8 @@ from pymongo.errors import PyMongoError
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 from copy import deepcopy
-from app.core.exceptions import AppBaseException
+from app.core.config import settings
+from app.core.exceptions import AppBaseException, ExternalServiceException
 from app.core.patient_access import assigned_patient_query, PatientAccessError
 import numpy as np
 
@@ -21,6 +23,49 @@ from app.schemas.rehabilitation import (
     AssessmentUpdate,
 )
 from app.services.agent_service import AgentService
+
+
+def recommendations_from_model(text: str, model: str) -> List[Dict[str, Any]]:
+    """Turn the model reply into cards. Keep the raw reply when it is not a list."""
+    rows = None
+    start, end = text.find("["), text.rfind("]")
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            rows = parsed
+    if not rows:
+        return [{
+            "id": "model-advice",
+            "name": "模型建议",
+            "description": text.strip() or "模型没有返回内容",
+            "source": "configured_model",
+            "model": model,
+        }]
+    items = []
+    for index, row in enumerate(rows[:5]):
+        if not isinstance(row, dict):
+            continue
+        items.append({
+            "id": f"model-{index + 1}",
+            "name": str(row.get("name") or f"建议 {index + 1}"),
+            "description": str(row.get("description") or ""),
+            "difficulty": row.get("difficulty") if row.get("difficulty") in {"easy", "medium", "hard"} else None,
+            "duration_minutes": row.get("duration_minutes") if isinstance(row.get("duration_minutes"), int) else None,
+            "body_part": str(row["body_part"]) if row.get("body_part") else None,
+            "source": "configured_model",
+            "model": model,
+        })
+    return items or [{
+        "id": "model-advice",
+        "name": "模型建议",
+        "description": text.strip(),
+        "source": "configured_model",
+        "model": model,
+    }]
+
 
 class RehabilitationService:
     def __init__(self, db: AsyncIOMotorDatabase):
@@ -418,47 +463,32 @@ class RehabilitationService:
             return False
 
     async def get_recommendations(
-        self, patient_id: str, condition: Optional[str] = None, 
+        self, patient_id: str, condition: Optional[str] = None,
         goal: Optional[str] = None, agent_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Get personalized exercise recommendations using the dynamic agent system"""
-        # Use the default recommendation agent if none specified
-        if not agent_id:
-            # In a real implementation, we would query for a suitable agent
-            # For now, we'll assume there's a specific agent for recommendations
-            # This would need to be replaced with actual agent discovery logic
-            agent_cursor = await self.db.agents.find_one({"name": "RehabRecommender"})
-            if agent_cursor:
-                agent_id = str(agent_cursor["_id"])
-            else:
-                # No suitable agent found
-                return []
-                
-        # Build the query for the agent
-        query = {
-            "query": "Recommend exercises",
-            "parameters": {
-                "patient_id": patient_id,
-                "condition": condition,
-                "goal": goal
-            }
-        }
-        
-        # Process the query with the agent
-        agent_response = await self.agent_service.process_query(agent_id, query)
-        if not agent_response:
-            return []
-            
-        # In a real implementation, the agent would return exercise IDs or details
-        # For now, we'll just return some sample exercises
-        cursor = self.exercises_collection.find({"body_part": condition}).limit(5)
-        recommendations = []
-        
-        async for exercise in cursor:
-            exercise["_id"] = str(exercise["_id"])
-            recommendations.append(exercise)
-            
-        return recommendations 
+        """Ask the configured text model for exercise suggestions. Failures stay visible."""
+        from app.core.llm import require_llm_api_key
+        require_llm_api_key()
+        prompt = (
+            "根据以下康复条件给出不超过5条家庭训练建议。只返回JSON数组，"
+            "每项包含name、description、difficulty（easy、medium或hard）、duration_minutes、body_part。"
+            "这是参考建议，不是已签署处方。不要编造患者没有提供的检查数值。"
+            f"\n病症：{condition or '未提供'}\n目标：{goal or '未提供'}"
+        )
+        try:
+            from openai import OpenAI
+            client = OpenAI(base_url=settings.LLM_API_BASE_URL, api_key=require_llm_api_key())
+            completion = client.chat.completions.create(
+                model=settings.LLM_API_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+            text = completion.choices[0].message.content or ""
+        except LLMConfigurationError:
+            raise
+        except Exception as exc:
+            raise ExternalServiceException(message="训练推荐模型没有返回结果", service_name="llm") from exc
+        return recommendations_from_model(text, settings.LLM_API_MODEL) 
 
     # 新增 - 康复评估相关功能
     async def create_assessment(self, assessment_data: AssessmentCreate) -> Dict[str, Any]:

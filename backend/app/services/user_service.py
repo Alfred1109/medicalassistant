@@ -151,7 +151,46 @@ class UserService:
         )
         
         return await self.get_user_by_id(user_id)
-    
+
+    async def change_own_password(self, user_id: str, current_password: str, new_password: str) -> None:
+        """Change a bcrypt password. Accounts without one keep the external password."""
+        if not ObjectId.is_valid(user_id):
+            raise HTTPException(status_code=404, detail="用户不存在")
+        user = await self.collection.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        stored = user.get("hashed_password") or ""
+        if not isinstance(stored, str) or not stored.startswith("$2"):
+            raise HTTPException(status_code=409, detail={"code": "PASSWORD_NOT_LOCAL",
+                                                         "message": "这个账号的密码由问卷系统管理，这里不能修改。"})
+        if not self._verify_password(current_password, stored):
+            raise HTTPException(status_code=400, detail={"code": "WRONG_PASSWORD", "message": "当前密码不正确。"})
+        if len(new_password) < 8:
+            raise HTTPException(status_code=422, detail={"code": "PASSWORD_TOO_SHORT", "message": "新密码至少 8 位。"})
+        await self.collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"hashed_password": self._get_password_hash(new_password), "updated_at": datetime.utcnow()}})
+
+    async def save_avatar(self, user_id: str, content: bytes, content_type: str) -> None:
+        if not ObjectId.is_valid(user_id):
+            raise HTTPException(status_code=404, detail="用户不存在")
+        content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        if content_type not in {"image/jpeg", "image/png"} or not content or len(content) > 512 * 1024:
+            raise HTTPException(status_code=422, detail={"code": "INVALID_AVATAR"})
+        updated = await self.collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"avatar_bytes": content, "avatar_type": content_type, "updated_at": datetime.utcnow()}})
+        if updated.matched_count != 1:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+    async def read_avatar(self, user_id: str):
+        if not ObjectId.is_valid(user_id):
+            return None
+        user = await self.collection.find_one({"_id": ObjectId(user_id)}, {"avatar_bytes": 1, "avatar_type": 1})
+        if not user or not user.get("avatar_bytes"):
+            return None
+        return user["avatar_bytes"], user.get("avatar_type") or "image/jpeg"
+
     async def update_user_permissions(
         self, 
         user_id: str, 
@@ -447,7 +486,7 @@ class UserService:
         """Create access token for user"""
         reject_legacy_credentials()
         user_obj = self._map_user_to_schema(user)
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.utcnow() + timedelta(minutes=await self._session_minutes())
         
         # Create JWT token
         to_encode = {
@@ -467,7 +506,8 @@ class UserService:
         user_obj = self._map_user_to_schema(user)
         
         # 创建访问令牌 (短期)
-        access_token_expires = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_minutes = await self._session_minutes()
+        access_token_expires = datetime.utcnow() + timedelta(minutes=access_minutes)
         access_token_payload = {
             "sub": str(user["_id"]),
             "exp": access_token_expires,
@@ -504,7 +544,7 @@ class UserService:
             refresh_token=refresh_token,
             token_type="bearer", 
             user=user_obj,
-            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60 # 秒为单位
+            expires_in=access_minutes * 60
         )
     
     async def refresh_access_token(self, refresh_token: str) -> TokenResponse:
@@ -627,6 +667,13 @@ class UserService:
         return await self.get_user_by_id(patient_id)
         
     # Helper methods
+    async def _session_minutes(self) -> int:
+        try:
+            from app.operations.runtime import session_timeout_minutes
+            return await session_timeout_minutes(self.db, settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        except Exception:
+            return settings.ACCESS_TOKEN_EXPIRE_MINUTES
+
     def _get_password_hash(self, password: str) -> str:
         """Hash a password"""
         # Use bcrypt for password hashing
@@ -645,6 +692,7 @@ class UserService:
         
     def _map_user_to_schema(self, user: Dict[str, Any]) -> UserResponse:
         """Map a user document to a UserResponse schema"""
+        stored_password = user.get("hashed_password") or ""
         base_user = {
             "id": str(user["_id"]),
             "email": user["email"],
@@ -652,6 +700,10 @@ class UserService:
             "role": user["role"],
             "permissions": user.get("permissions", []),
             "is_active": user.get("is_active", True),
+            "phone": user.get("phone") or None,
+            "bio": user.get("bio") or None,
+            "has_avatar": bool(user.get("avatar_bytes")),
+            "local_password": isinstance(stored_password, str) and stored_password.startswith("$2"),
             "createdAt": user["created_at"],
             "updatedAt": user["updated_at"],
             "last_login": user.get("last_login")

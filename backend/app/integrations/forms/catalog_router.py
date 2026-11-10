@@ -1,12 +1,18 @@
 """Administrator-only directory reader; no mutation or frontend actor claims."""
+from datetime import datetime, timezone
 from typing import Literal, Optional
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
+
 from app.core.auth import get_current_active_user
+from app.db.mongodb import get_database
 from .client import FormPlatformClient, FormPlatformError
 from . import catalog_service as service
+from .people_import import assign_imported_role, import_project_people, list_imported_people, set_imported_care
+from .sync_runs import list_runs, load_failed_import, record_run, summarize_runs
 
 router = APIRouter(prefix="/integrations/forms/catalog", tags=["form-catalog"])
 MAX_ID = 9223372036854775807
@@ -99,3 +105,86 @@ async def form_version(request: Request, response: Response,
                        _=Depends(require_catalog_admin), client=Depends(get_catalog_client)):
     _query(request, response, {"version"})
     return await service.form_version(client, project_id, form_id, version=version)
+
+
+class ImportedRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    role: str = Field(pattern=r"^(unassigned|patient|doctor|health_manager)$")
+    evidence_reference: str = Field(min_length=1, max_length=256)
+
+
+class ImportedCareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    practitioner_id: str = Field(min_length=24, max_length=24)
+    assigned: StrictBool
+    evidence_reference: str = Field(min_length=1, max_length=256)
+
+
+@router.get("/projects/{project_id}/people")
+async def imported_people(request: Request, response: Response, project_id: int = Path(gt=0, le=MAX_ID),
+                          _=Depends(require_catalog_admin), client=Depends(get_catalog_client),
+                          db=Depends(get_database)):
+    _query(request, response, set())
+    return {"people": await list_imported_people(db, client.source_origin, project_id)}
+
+
+async def _import_and_record(db, client, actor, project_id):
+    started = datetime.now(timezone.utc)
+    try:
+        result = await import_project_people(db, client, actor, project_id)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        await record_run(db, kind="people_import", project_id=project_id, actor_id=str(actor.id),
+                         status="failed", started_at=started, error_code=detail.get("code") or "IMPORT_FAILED",
+                         message=detail.get("message") or "")
+        raise
+    run = await record_run(db, kind="people_import", project_id=project_id, actor_id=str(actor.id),
+                           status="succeeded", started_at=started, created=result["created"],
+                           existing=result["existing"])
+    return {**result, "run": run}
+
+
+@router.post("/projects/{project_id}/people/import")
+async def import_people(request: Request, response: Response, project_id: int = Path(gt=0, le=MAX_ID),
+                        actor=Depends(require_catalog_admin), client=Depends(get_catalog_client),
+                        db=Depends(get_database)):
+    _query(request, response, set())
+    return await _import_and_record(db, client, actor, project_id)
+
+
+@router.get("/runs/summary")
+async def integration_summary(request: Request, response: Response, _=Depends(require_catalog_admin),
+                              db=Depends(get_database)):
+    _query(request, response, set())
+    return {"projects": await summarize_runs(db)}
+
+
+@router.get("/runs")
+async def integration_runs(request: Request, response: Response, _=Depends(require_catalog_admin),
+                           db=Depends(get_database)):
+    _query(request, response, set())
+    return {"runs": await list_runs(db)}
+
+
+@router.post("/runs/{run_id}/retry")
+async def retry_integration_run(request: Request, response: Response, run_id: str,
+                                actor=Depends(require_catalog_admin), client=Depends(get_catalog_client),
+                                db=Depends(get_database)):
+    _query(request, response, set())
+    failed = await load_failed_import(db, run_id)
+    return await _import_and_record(db, client, actor, failed["project_id"])
+
+
+@router.post("/people/{user_id}/role")
+async def imported_role(request: Request, response: Response, payload: ImportedRoleRequest, user_id: str,
+                        actor=Depends(require_catalog_admin), db=Depends(get_database)):
+    _query(request, response, set())
+    return await assign_imported_role(db, actor, user_id, payload.role, payload.evidence_reference)
+
+
+@router.post("/people/{user_id}/care")
+async def imported_care(request: Request, response: Response, payload: ImportedCareRequest, user_id: str,
+                        actor=Depends(require_catalog_admin), db=Depends(get_database)):
+    _query(request, response, set())
+    return await set_imported_care(db, actor, user_id, payload.practitioner_id,
+                                   assigned=payload.assigned, evidence_reference=payload.evidence_reference)

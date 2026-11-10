@@ -33,7 +33,8 @@ export function contentPayload(value: FormContent): DraftContent {
 export function validateItems(items: DraftItem[]): DraftItem[] {
   if (items.some(item => !item.name.trim())) throw new Error('请为每条干预填写名称。');
   return items.map(item => ({ ...item, name: item.name.trim(), description: item.description?.trim() || null,
-    patient_instructions: item.patient_instructions?.trim() || null }));
+    patient_instructions: item.patient_instructions?.trim() || null,
+    guidance_video_url: item.guidance_video_url?.trim() || null }));
 }
 export function operationId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));

@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Box, Typography, Switch, FormGroup, FormControlLabel,
   Divider, Button, Alert,
   Card, CardContent
 } from '@mui/material';
 import { NotificationSettings as NotificationSettingsType } from '../../services/notificationService';
+import httpClient from '../../services/httpClient';
 
 /**
  * 通知偏好设置面板。
@@ -14,6 +15,7 @@ import { NotificationSettings as NotificationSettingsType } from '../../services
  * 保存按钮禁用，不再发起注定 404 的请求。
  */
 const NotificationSettings: React.FC = () => {
+  const [message, setMessage] = useState('');
   const [settings, setSettings] = useState<NotificationSettingsType>({
     enableEmail: true,
     enablePush: true,
@@ -26,7 +28,13 @@ const NotificationSettings: React.FC = () => {
     dailySummary: false
   });
 
-  // 处理设置变更（仅本地演示状态，不会持久化）
+  useEffect(() => {
+    httpClient.get('/notifications/settings').then(({ data }) => {
+      if (data && typeof data === 'object') setSettings(current => ({ ...current, ...data }));
+    }).catch(() => setMessage('已保存的通知偏好没有加载出来。'));
+  }, []);
+
+  // 处理设置变更，保存后才会写入服务器。
   const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     setSettings({
       ...settings,
@@ -43,9 +51,9 @@ const NotificationSettings: React.FC = () => {
         </Box>
 
         <Alert severity="info" sx={{ mb: 3 }}>
-          通知偏好设置的后端接口尚未建设（GET/PUT /api/notifications/settings 不存在），
-          以下开关仅为本地演示，暂无法保存。
+          这些开关会按当前账号保存。打开邮件后，新通知会发到账号邮箱（使用本机已配置的发信账号）。打开浏览器通知后，页面开着时会弹出系统通知。
         </Alert>
+        {message && <Alert severity="warning" sx={{ mb: 2 }}>{message}</Alert>}
 
         <Box mb={4}>
           <Typography variant="subtitle1" gutterBottom>通知方式</Typography>
@@ -102,11 +110,14 @@ const NotificationSettings: React.FC = () => {
         </Box>
 
         <Box display="flex" justifyContent="flex-end">
-          <Button
-            variant="contained"
-            color="primary"
-            disabled
-          >
+          <Button variant="contained" color="primary" onClick={async () => {
+            try {
+              if (settings.enablePush && 'Notification' in window) await Notification.requestPermission();
+              await httpClient.put('/notifications/settings', settings);
+              setMessage('通知偏好已保存。');
+            }
+            catch { setMessage('通知偏好没有保存。'); }
+          }}>
             保存设置
           </Button>
         </Box>

@@ -8,6 +8,59 @@ import re
 
 load_dotenv()
 
+
+def _read_env_values(path: str) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text or text.startswith("#") or "=" not in text:
+                continue
+            key, value = text.split("=", 1)
+            values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def _apply_local_text_model() -> None:
+    """Fill unset model and mail settings from this project, then the questionnaire env."""
+    here = os.path.dirname(__file__)
+    candidates = [
+        os.getenv("LLM_ENV_FILE", ""),
+        os.path.abspath(os.path.join(here, "..", "..", ".env")),
+        os.path.abspath(os.path.join(here, "..", "..", "..", "..", "康复问卷管理系统", ".env")),
+    ]
+    found: Dict[str, str] = {}
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        for key, value in _read_env_values(path).items():
+            found.setdefault(key, value)
+    aliases = {
+        "LLM_API_KEY": ("QUESTIONNAIRE_AI_TEXT_API_KEY",),
+        "LLM_API_BASE_URL": ("QUESTIONNAIRE_AI_TEXT_BASE_URL",),
+        "LLM_API_MODEL": ("QUESTIONNAIRE_AI_TEXT_MODEL",),
+        "VISION_API_KEY": ("QUESTIONNAIRE_AI_VISION_API_KEY",),
+        "VISION_API_BASE_URL": ("QUESTIONNAIRE_AI_VISION_BASE_URL",),
+        "VISION_API_MODEL": ("QUESTIONNAIRE_AI_VISION_MODEL",),
+        "MAIL_SERVER": (),
+        "MAIL_PORT": (),
+        "MAIL_USE_SSL": (),
+        "MAIL_USE_TLS": (),
+        "MAIL_USERNAME": (),
+        "MAIL_PASSWORD": (),
+        "MAIL_DEFAULT_SENDER": (),
+    }
+    for name, extras in aliases.items():
+        if os.getenv(name):
+            continue
+        for key in (name, *extras):
+            if found.get(key):
+                os.environ[name] = found[key]
+                break
+
+
+_apply_local_text_model()
+
 class Settings(BaseSettings):
     # API Settings
     API_V1_STR: str = "/api"

@@ -5,7 +5,9 @@ type. They are observations by the patient, never inferred adherence or diagnosi
 """
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from bson import ObjectId
 from pymongo import ReturnDocument
@@ -22,6 +24,9 @@ PATIENT_REPORT = "patient_report"
 REPORT_NAMESPACE = "patient-report:"
 REPORT_SCHEMA = 1
 EVENT_INDEX = "uniq_plan_event_id"
+MEDIA_DIR = Path(__file__).resolve().parents[2] / "data" / "patient-feedback"
+MEDIA_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+               "video/mp4": ".mp4", "video/webm": ".webm"}
 
 
 def _error(code, message, status=409):
@@ -35,11 +40,14 @@ def _utc(value):
 
 
 def _request_data(payload):
-    return {"version_id": payload.version_id,
+    data = {"version_id": payload.version_id,
             "prescription_item_id": payload.prescription_item_id,
             "execution_status": payload.execution_status.value,
             "feelings": payload.feelings,
             "performed_at": payload.performed_at.isoformat()}
+    if payload.media_ids:
+        data["media_ids"] = sorted(payload.media_ids)
+    return data
 
 
 def _fingerprint(payload):
@@ -58,7 +66,8 @@ def _response(document):
             prescription_item_id=document["prescription_item_id"],
             execution_status=document["execution_status"], feelings=document["feelings"],
             performed_at=_utc(document["performed_at"]), recorded_by=document["recorded_by"],
-            created_at=_utc(document["created_at"]))
+            created_at=_utc(document["created_at"]),
+            attachments=document.get("attachments") or [])
     except (KeyError, TypeError, ValueError, AttributeError):
         raise _error("REHAB_FEEDBACK_INVALID_HISTORY", "反馈历史格式异常，请联系管理员核查", 503) from None
 
@@ -146,6 +155,7 @@ class RehabFeedbackService:
                 session=session)
             if locked is None:
                 raise _error("REHAB_FEEDBACK_VERSION_CHANGED", "方案已变化，请刷新后重新确认")
+            attachments = await self._claim_media(plan, event_id, payload.media_ids, session)
             now = datetime.now(timezone.utc)
             if payload.performed_at > now:
                 raise _error("REHAB_FEEDBACK_FUTURE_TIME", "执行时间不能晚于当前时间", 422)
@@ -156,7 +166,7 @@ class RehabFeedbackService:
                 "prescription_item_id": payload.prescription_item_id,
                 "execution_status": payload.execution_status.value, "feelings": payload.feelings,
                 "performed_at": payload.performed_at, "created_at": now,
-                "source": "patient_self_report"}
+                "attachments": attachments, "source": "patient_self_report"}
             await self.events.insert_one(document, session=session)
             return PatientFeedbackResult(feedback=_response(document), created=True)
 
@@ -204,3 +214,58 @@ class RehabFeedbackService:
                 raise _error("REHAB_FEEDBACK_INVALID_HISTORY", "反馈处方引用异常", 503)
         return PatientFeedbackPage(items=[_response(item) for item in page["items"]],
             total=page["count"][0]["total"] if page["count"] else 0, skip=skip, limit=limit)
+
+    async def _claim_media(self, plan, event_id, media_ids, session):
+        attachments = []
+        for media_id in media_ids:
+            row = await self.db.patient_feedback_media.find_one(
+                {"_id": media_id, "plan_id": str(plan["_id"]), "patient_id": plan["patient_id"]}, session=session)
+            if not row:
+                raise _error("REHAB_FEEDBACK_MEDIA_MISSING", "图片或视频还没有保存，请重新上传", 422)
+            bound = row.get("bound_event_id")
+            if bound not in (None, event_id):
+                raise _error("REHAB_FEEDBACK_MEDIA_USED", "该图片或视频已经用于另一条反馈", 409)
+            if bound is None:
+                updated = await self.db.patient_feedback_media.update_one(
+                    {"_id": media_id, "bound_event_id": None},
+                    {"$set": {"bound_event_id": event_id}}, session=session)
+                if updated.matched_count != 1:
+                    raise _error("REHAB_FEEDBACK_MEDIA_USED", "该图片或视频已经用于另一条反馈", 409)
+            attachments.append({"id": media_id, "content_type": row["content_type"], "name": row.get("name") or "附件"})
+        return attachments
+
+    async def save_media(self, plan_id, actor, content: bytes, content_type: str, filename: str):
+        if getattr(actor, "role", None) != "patient":
+            raise _error("REHAB_FEEDBACK_PATIENT_REQUIRED", "仅患者本人可以上传任务检查附件", 403)
+        plan = await self._plan(plan_id)
+        await self.publication._authorize(plan, actor, None, write=False, fence=False)
+        content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        suffix = MEDIA_TYPES.get(content_type)
+        limit = 8 * 1024 * 1024 if content_type.startswith("image/") else 20 * 1024 * 1024
+        if suffix is None or not content or len(content) > limit:
+            raise _error("REHAB_FEEDBACK_MEDIA_INVALID", "请上传 8MB 以内的 JPG、PNG、WebP，或 20MB 以内的 MP4、WebM", 422)
+        media_id = uuid.uuid4().hex
+        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+        (MEDIA_DIR / f"{media_id}{suffix}").write_bytes(content)
+        name = (filename or "附件")[:80]
+        await self.db.patient_feedback_media.insert_one({
+            "_id": media_id, "plan_id": str(plan["_id"]), "patient_id": plan["patient_id"],
+            "content_type": content_type, "name": name, "suffix": suffix, "size": len(content),
+            "bound_event_id": None, "created_at": datetime.now(timezone.utc)})
+        return {"id": media_id, "content_type": content_type, "name": name}
+
+    async def open_media(self, plan_id, media_id, actor):
+        plan = await self._plan(plan_id)
+        await self.publication._authorize(plan, actor, None, write=False, fence=False)
+        if not isinstance(media_id, str) or len(media_id) != 32:
+            raise _error("REHAB_FEEDBACK_MEDIA_MISSING", "附件不存在", 404)
+        row = await self.db.patient_feedback_media.find_one(
+            {"_id": media_id, "plan_id": str(plan["_id"]), "patient_id": plan["patient_id"]})
+        if not row:
+            raise _error("REHAB_FEEDBACK_MEDIA_MISSING", "附件不存在", 404)
+        if getattr(actor, "role", None) != "patient" and not row.get("bound_event_id"):
+            raise _error("REHAB_FEEDBACK_MEDIA_MISSING", "附件不存在", 404)
+        path = MEDIA_DIR / f"{media_id}{row.get('suffix') or ''}"
+        if not path.is_file():
+            raise _error("REHAB_FEEDBACK_MEDIA_MISSING", "附件文件不存在", 404)
+        return path, row["content_type"]

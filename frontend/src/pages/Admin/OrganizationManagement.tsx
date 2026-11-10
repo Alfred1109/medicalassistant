@@ -14,6 +14,10 @@ import {
   TableHead,
   TableRow,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
@@ -38,6 +42,8 @@ const OrganizationManagement: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [orgName, setOrgName] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -128,12 +134,9 @@ const OrganizationManagement: React.FC = () => {
           组织机构管理
         </Typography>
         <Box textAlign="right">
-          <Button variant="contained" color="primary" startIcon={<AddIcon />} disabled>
+          <Button variant="contained" color="primary" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
             添加机构
           </Button>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-            后端组织机构创建/编辑/删除接口尚未实现持久化，功能待开放
-          </Typography>
         </Box>
       </Box>
 
@@ -198,6 +201,10 @@ const OrganizationManagement: React.FC = () => {
                     ) : (
                       '—'
                     )}
+                    <Button size="small" onClick={async () => {
+                      await apiClient.put(`/admin/organizations/${org.id}/active`, { active: org.status !== 'active' });
+                      setReloadKey(key => key + 1);
+                    }}>{org.status === 'active' ? '停用' : '恢复'}</Button>
                   </TableCell>
                 </TableRow>
               ))
@@ -205,6 +212,19 @@ const OrganizationManagement: React.FC = () => {
           </TableBody>
         </Table>
       </TableContainer>
+      <Dialog open={createOpen} onClose={() => setCreateOpen(false)}>
+        <DialogTitle>添加机构</DialogTitle>
+        <DialogContent>
+          <TextField fullWidth label="机构名称" value={orgName} onChange={event => setOrgName(event.target.value)} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCreateOpen(false)}>取消</Button>
+          <Button variant="contained" onClick={async () => {
+            await apiClient.post('/admin/organizations', { name: orgName.trim(), type: 'hospital' });
+            setOrgName(''); setCreateOpen(false); setReloadKey(key => key + 1);
+          }}>保存</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

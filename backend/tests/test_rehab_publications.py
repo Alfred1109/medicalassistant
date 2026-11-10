@@ -39,6 +39,10 @@ class PublicationSchemaTests(unittest.TestCase):
             PublicationItem(intervention_type="diet", name="x", medication_fields={"frequency": "daily"})
         with self.assertRaises(ValidationError):
             PublicationItem(intervention_type="exercise", name="x", schedule={"days_per_week": 8})
+        with self.assertRaises(ValidationError):
+            PublicationItem(intervention_type="exercise", name="x", guidance_video_url="javascript:alert(1)")
+        self.assertEqual(PublicationItem(intervention_type="exercise", name="x",
+            guidance_video_url="/api/rehabilitation/exercises/media/" + "ab" * 16 + ".mp4").guidance_video_url.endswith(".mp4"), True)
 
 
 class EventIndexSafetyTests(unittest.IsolatedAsyncioTestCase):

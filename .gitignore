@@ -57,3 +57,8 @@ data/
 mongodb-*
 # 手工测试遗留(含真实 JWT),不再入库
 token.json
+
+# 本机工具配置、试点专用配置与运行产物
+.claude/
+output/
+frontend/vite.config.pilot.ts

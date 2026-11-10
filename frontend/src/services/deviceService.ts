@@ -107,6 +107,11 @@ const deviceService = {
   },
 
   // 同步设备数据（POST /api/devices/{id}/sync，返回后端 device_service 的同步结果）
+  recordReading: async (deviceId: string, body: { data_type: string; value: string; unit: string; measured_at: string }) => {
+    const response = await apiService.recordDeviceReading(deviceId, body);
+    return response.data;
+  },
+
   syncDeviceData: async (
     deviceId: string
   ): Promise<{ success: boolean; message: string; new_data?: any[]; [key: string]: any }> => {

@@ -1,4 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Body, Path, Query
+import uuid
+from pathlib import Path as FilePath
+
+from fastapi import APIRouter, Depends, File, HTTPException, status, Body, Path, Query, UploadFile
+from fastapi.responses import FileResponse
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -32,6 +36,33 @@ from app.core.patient_access import ensure_patient_access
 from app.core.auth import get_current_active_user
 
 router = APIRouter()
+EXERCISE_MEDIA = FilePath(__file__).resolve().parents[3] / "data" / "exercise-media"
+EXERCISE_MEDIA_TYPES = {
+    "image/jpeg": ".jpg", "image/png": ".png", "video/mp4": ".mp4", "video/webm": ".webm",
+}
+
+
+@router.post("/exercises/media")
+async def upload_exercise_media(file: UploadFile = File(...), current_user: Any = Depends(get_current_active_user)):
+    """Store an exercise image or video and return a same-origin file address."""
+    if current_user.role not in {"admin", "doctor", "health_manager"}:
+        raise HTTPException(status_code=403, detail={"code": "ROLE_NOT_ALLOWED"})
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    suffix = EXERCISE_MEDIA_TYPES.get(content_type)
+    content = await file.read()
+    if suffix is None or not content or len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail={"code": "INVALID_MEDIA"})
+    EXERCISE_MEDIA.mkdir(parents=True, exist_ok=True)
+    name = f"{uuid.uuid4().hex}{suffix}"
+    (EXERCISE_MEDIA / name).write_bytes(content)
+    return {"url": f"/api/rehabilitation/exercises/media/{name}", "content_type": content_type}
+
+
+@router.get("/exercises/media/{name}")
+async def read_exercise_media(name: str):
+    if "/" in name or ".." in name or not (EXERCISE_MEDIA / name).is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(EXERCISE_MEDIA / name)
 
 # AUTH01 对象级授权第一层：带患者标识的端点校验操作者与患者的归属关系
 # （操作者须在患者档案 practitioners 列表中，admin 豁免，否则 403 PATIENT_NOT_ASSIGNED）

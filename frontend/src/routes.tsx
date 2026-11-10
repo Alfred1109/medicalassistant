@@ -87,6 +87,9 @@ import AdminDashboard from './pages/Admin/AdminDashboard';
 import DoctorManagement from './pages/Admin/DoctorManagement';
 import AdminPatientManagement from './pages/Admin/PatientManagement';
 import PatientLinks from './pages/Admin/PatientLinks';
+import AccessApplications from './pages/Admin/AccessApplications';
+import IntegrationRuns from './pages/Admin/IntegrationRuns';
+import ClinicalWorkbench from './pages/Clinical/ClinicalWorkbench';
 import HealthManagerManagement from './pages/Admin/HealthManagerManagement';
 import OrganizationManagement from './pages/Admin/OrganizationManagement';
 import TagManagement from './pages/Admin/TagManagement';
@@ -318,6 +321,7 @@ const AppRoutes: React.FC = () => (
         <Route path="patients" element={<PatientManagement />} />
         <Route path="health-records/:patientId?" element={<HealthRecords />} />
         <Route path="follow-ups" element={<FollowUpManagement />} />
+        <Route path="clinical" element={<ClinicalWorkbench />} />
         <Route path="monitoring/:patientId?" element={<DataMonitoring />} />
         <Route path="communications/:patientId?" element={<Communication />} />
         <Route path="statistics" element={<Statistics />} />
@@ -342,6 +346,7 @@ const AppRoutes: React.FC = () => (
         <Route path="health-data-timeline/:patientId?" element={<HealthDataTimelinePage />} />
         <Route path="thresholds/:patientId?" element={<HealthThresholdPage />} />
         <Route path="follow-ups" element={<FollowUpManagement />} />
+        <Route path="clinical" element={<ClinicalWorkbench />} />
         <Route path="monitoring/:patientId?" element={<DataMonitoring />} />
         <Route path="communications/:patientId?" element={<Communication />} />
         <Route path="statistics" element={<Statistics />} />
@@ -362,14 +367,15 @@ const AppRoutes: React.FC = () => (
         <Route index element={<Navigate to="/app/patient/main-dashboard" replace />} />
         <Route path="main-dashboard" element={<PatientMainDashboard />} />
         <Route path="health-records" element={<PatientHealthRecords />} />
+        <Route path="clinical" element={<ClinicalWorkbench />} />
         <Route path="daily-records" element={<DailyRecords />} />
         <Route path="devices" element={<DeviceBinding />} />
         <Route path="communications" element={<PatientCommunication />} />
         <Route path="statistics" element={<PatientStatistics />} />
         {/* 患者端知情同意文档路由 - 注意路由顺序 */}
+        <Route path="documents/templates" element={<ConsentTemplateList />} />
         <Route path="documents/:documentId/sign" element={<ConsentDocumentView />} />
         <Route path="documents/:documentId" element={<ConsentDocumentView />} />
-        <Route path="documents/templates" element={<ConsentTemplateList />} />
         <Route path="documents" element={<ConsentDocumentList />} />
       </Route>
       
@@ -382,6 +388,9 @@ const AppRoutes: React.FC = () => (
         <Route path="doctors" element={<DoctorManagement />} />
         <Route path="patients" element={<AdminPatientManagement />} />
         <Route path="patient-links" element={<PatientLinks />} />
+        <Route path="access-applications" element={<AccessApplications />} />
+        <Route path="integration-runs" element={<IntegrationRuns />} />
+        <Route path="clinical" element={<ClinicalWorkbench />} />
         <Route path="health-managers" element={<HealthManagerManagement />} />
         <Route path="organizations" element={<OrganizationManagement />} />
         <Route path="tags" element={<TagManagement />} />

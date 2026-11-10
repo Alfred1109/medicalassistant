@@ -22,6 +22,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import HealthDataTimeline from '../../components/HealthManager/HealthDataTimeline';
 import { apiService } from '../../services/api';
 import api from '../../services/api';
+import * as XLSX from 'xlsx';
 
 // 健康数据时间线项目类型
 interface HealthDataTimelineItem {
@@ -175,6 +176,71 @@ const convertHealthDataToTimelineItems = (healthData: HealthData[]): HealthDataT
   });
 };
 
+function timelinePdfPages(rows: HealthDataTimelineItem[]) {
+  const chunks = rows.length ? Array.from({ length: Math.ceil(rows.length / 26) }, (_, index) => rows.slice(index * 26, index * 26 + 26)) : [[]];
+  return Promise.all(chunks.map(chunk => new Promise<{ jpeg: Uint8Array; width: number; height: number }>(resolve => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1240;
+    canvas.height = 1754;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) { resolve({ jpeg: new Uint8Array(), width: canvas.width, height: canvas.height }); return; }
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#111111';
+    ctx.font = '36px sans-serif';
+    ctx.fillText('健康数据时间线', 64, 90);
+    ctx.font = '24px sans-serif';
+    (chunk.length ? chunk : [{ timestamp: '', data_type: '', title: '当前没有可导出的记录', value: '', unit: '' } as HealthDataTimelineItem]).forEach((item, index) => {
+      ctx.fillText(`${item.timestamp}  ${item.data_type}  ${item.title}  ${item.value} ${item.unit}`.slice(0, 72), 64, 170 + index * 58);
+    });
+    canvas.toBlob(blob => {
+      if (!blob) { resolve({ jpeg: new Uint8Array(), width: canvas.width, height: canvas.height }); return; }
+      blob.arrayBuffer().then(buffer => resolve({ jpeg: new Uint8Array(buffer), width: canvas.width, height: canvas.height }));
+    }, 'image/jpeg', 0.85);
+  })));
+}
+
+function jpegPagesToPdf(pages: Array<{ jpeg: Uint8Array; width: number; height: number }>) {
+  const encoder = new TextEncoder();
+  const parts: Uint8Array[] = [];
+  const offsets: number[] = [];
+  let length = 0;
+  const push = (value: string | Uint8Array) => {
+    const bytes = typeof value === 'string' ? encoder.encode(value) : value;
+    parts.push(bytes);
+    length += bytes.length;
+  };
+  push('%PDF-1.4\n');
+  const kids: string[] = [];
+  pages.forEach((page, index) => {
+    const pageId = 3 + index * 3;
+    const content = 'q\n595 0 0 842 0 0 cm\n/Im0 Do\nQ\n';
+    kids.push(`${pageId} 0 R`);
+    offsets[pageId] = length;
+    push(`${pageId} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ${pageId + 1} 0 R /Resources << /XObject << /Im0 ${pageId + 2} 0 R >> >> >>\nendobj\n`);
+    offsets[pageId + 1] = length;
+    push(`${pageId + 1} 0 obj\n<< /Length ${encoder.encode(content).length} >>\nstream\n${content}endstream\nendobj\n`);
+    offsets[pageId + 2] = length;
+    push(`${pageId + 2} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${page.width} /Height ${page.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${page.jpeg.length} >>\nstream\n`);
+    push(page.jpeg);
+    push('\nendstream\nendobj\n');
+  });
+  offsets[1] = length;
+  push('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+  offsets[2] = length;
+  push(`2 0 obj\n<< /Type /Pages /Count ${pages.length} /Kids [${kids.join(' ')}] >>\nendobj\n`);
+  const xref = length;
+  const count = 3 + pages.length * 3;
+  let xrefText = `xref\n0 ${count}\n0000000000 65535 f \n`;
+  for (let id = 1; id < count; id += 1) xrefText += `${String(offsets[id] || 0).padStart(10, '0')} 00000 n \n`;
+  push(xrefText);
+  push(`trailer\n<< /Size ${count} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);
+  const out = new Uint8Array(length);
+  let cursor = 0;
+  parts.forEach(part => { out.set(part, cursor); cursor += part.length; });
+  return out;
+}
+
 // 健康数据时间线页面组件
 const HealthDataTimelinePage: React.FC = () => {
   // 状态
@@ -271,22 +337,60 @@ const HealthDataTimelinePage: React.FC = () => {
     }
   };
 
-  // 处理数据导出：后端暂未提供导出接口，不伪造导出成功
-  const handleExport = () => {
-    setSnackbar({
-      open: true,
-      message: '导出功能后端暂未提供',
-      severity: 'info'
-    });
+  const tableRows = () => timelineData.map(item => ({
+    时间: item.timestamp, 类型: item.data_type, 标题: item.title, 数值: item.value, 单位: item.unit,
+  }));
+
+  const saveBlob = (blob: Blob, name: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    URL.revokeObjectURL(url);
   };
 
-  // 处理数据分享：后端暂未提供分享接口，不伪造分享链接
-  const handleShare = () => {
-    setSnackbar({
-      open: true,
-      message: '分享功能后端暂未提供',
-      severity: 'info'
-    });
+  const csvBlob = () => {
+    const header = ['时间', '类型', '标题', '数值', '单位'];
+    const lines = timelineData.map(item => [item.timestamp, item.data_type, item.title, item.value, item.unit]
+      .map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','));
+    return new Blob([`\uFEFF${[header.join(','), ...lines].join('\n')}`], { type: 'text/csv;charset=utf-8' });
+  };
+
+  const downloadExcel = () => {
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet(tableRows()), '时间线');
+    const bytes = XLSX.write(book, { bookType: 'xlsx', type: 'array' });
+    saveBlob(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'health-timeline.xlsx');
+    setSnackbar({ open: true, message: `已下载 ${timelineData.length} 条记录的 Excel 文件。`, severity: 'info' });
+  };
+
+  const downloadPdf = async () => {
+    const pages = await timelinePdfPages(timelineData);
+    saveBlob(new Blob([jpegPagesToPdf(pages)], { type: 'application/pdf' }), 'health-timeline.pdf');
+    setSnackbar({ open: true, message: `已下载 ${timelineData.length} 条记录的 PDF。`, severity: 'info' });
+  };
+
+  const handleExport = (_data: HealthDataTimelineItem[], format: 'csv' | 'pdf' | 'excel') => {
+    if (format === 'excel') { downloadExcel(); return; }
+    if (format === 'pdf') { void downloadPdf(); return; }
+    saveBlob(csvBlob(), 'health-timeline.csv');
+    setSnackbar({ open: true, message: `已下载 ${timelineData.length} 条记录的 CSV。`, severity: 'info' });
+  };
+
+  const handleShare = async () => {
+    const file = new File([csvBlob()], 'health-timeline.csv', { type: 'text/csv' });
+    if (navigator.share && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: '健康数据时间线' });
+        setSnackbar({ open: true, message: '已交给系统分享当前能看到的记录。', severity: 'info' });
+        return;
+      } catch {
+        return;
+      }
+    }
+    saveBlob(csvBlob(), 'health-timeline.csv');
+    setSnackbar({ open: true, message: '当前浏览器不能直接分享文件，已改为下载 CSV。没有生成公开链接。', severity: 'info' });
   };
 
   // 切换仅显示预警数据

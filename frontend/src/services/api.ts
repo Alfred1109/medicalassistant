@@ -30,6 +30,8 @@ export const apiService = {
     } : undefined,
   }),
   syncDeviceData: (deviceId: string) => api.post(`/devices/${deviceId}/sync`),
+  recordDeviceReading: (deviceId: string, body: { data_type: string; value: string; unit: string; measured_at: string }) =>
+    api.post(`/devices/${deviceId}/readings`, body),
   getDeviceStatus: (deviceId: string) => api.get(`/devices/${deviceId}/status`),
   // 后端为 PUT /api/devices/{device_id}/config（DeviceConfigUpdate: sync_frequency /
   // notifications_enabled / custom_name / alarm_settings），没有 POST /devices/{id}/configure
@@ -156,6 +158,12 @@ export const apiService = {
 
   rescheduleFollowUp: (followUpId: string, data: { new_date: string; reason?: string }): Promise<AxiosResponse<any>> =>
     api.post(`/health-records/followups/${followUpId}/reschedule`, data),
+
+  markFollowUpOverdue: (followUpId: string, data: { reason: string }): Promise<AxiosResponse<FollowUpRecord>> =>
+    api.post(`/health-records/followups/${followUpId}/overdue`, data),
+
+  markFollowUpLost: (followUpId: string, data: { reason: string }): Promise<AxiosResponse<FollowUpRecord>> =>
+    api.post(`/health-records/followups/${followUpId}/lost`, data),
 
   // 健康数据(体征、化验结果等)
   getHealthData: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<any[]>> =>

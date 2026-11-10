@@ -1,6 +1,8 @@
 """Explicit clinical drafts and immutable patient-visible publication contracts."""
+import re
 from datetime import datetime, timezone
 from typing import Literal
+from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 from app.schemas.rehab_plan_structure import (
     PrescriptionSchedule, DietInterventionFields, MedicationInterventionFields,
@@ -44,9 +46,22 @@ class PublicationItem(BaseModel):
     contraindications: list[str] | None = Field(default=None, max_length=100)
     applicability_conditions: list[str] | None = Field(default=None, max_length=100)
     patient_instructions: str | None = Field(default=None, max_length=5000)
+    guidance_video_url: str | None = Field(default=None, max_length=500)
     diet_fields: DietInterventionFields | None = None
     medication_fields: MedicationInterventionFields | None = None
     psychology_fields: PsychologyInterventionFields | None = None
+
+    @field_validator("guidance_video_url")
+    @classmethod
+    def guidance_video(cls, value):
+        if value is None:
+            return None
+        if re.fullmatch(r"/api/rehabilitation/exercises/media/[0-9a-f]{32}\.(mp4|webm)", value):
+            return value
+        parsed = urlsplit(value)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return value
+        raise ValueError("guidance video must be an uploaded file or an http(s) address")
 
     @model_validator(mode="after")
     def matching_fields_and_positive_schedule(self):
