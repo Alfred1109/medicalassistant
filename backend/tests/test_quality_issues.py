@@ -1,7 +1,9 @@
 """Manual issue lifecycle on unique, disposable replica-set databases."""
 import asyncio
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -17,12 +19,15 @@ from app.api.routers.quality_issue_router import router, get_current_active_user
 from app.core.exceptions import AppBaseException
 from app.core.patient_access import assigned_patient_query
 from app.patients.legacy import LegacyPatientRepository
+from app.patients.migration import inspect_migration, migrate_legacy_patients
+from app.patients.repository import ACCOUNT_LINKS, PATIENTS, ClinicalPatientRepository
 from app.schemas.quality_issue import (AssignQualityIssue, ConfirmQualityIssue, QualityIssueCreate,
     ResolveQualityIssue, ReviewQualityIssue)
 from app.services.quality_issue_service import QualityIssueService
 from app.services.rehabilitation_service import RehabilitationService
 
 URI = os.environ.get("REHAB_TEST_QUALITY_ISSUE_MONGO_URI")
+E2E_URI = os.environ.get("REHAB_TEST_PATIENT_E2E_URI")
 
 
 class QualityIssueSchemaTests(unittest.TestCase):
@@ -309,12 +314,16 @@ class QualityIssueMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.svc.list(SimpleNamespace(id=str(self.outsider), role="doctor")))["total"], 0)
         self.assertEqual((await self.svc.list(self.actor, status="closed"))["total"], 0)
 
-    async def test_canonical_domain_and_inactive_account_do_not_fall_back(self):
+    async def test_canonical_domain_does_not_fall_back_to_users(self):
+        # T63 波次 2 门闩移除：canonical 不再 503，但患者实体只读
+        # clinical_patients——本用例只造了 users 患者，canonical 下必须
+        # fail-closed 404，绝不回读 users 命中存量账号文档。
         await self.db.patient_domain_state.insert_one(
             {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         with self.assertRaises(AppBaseException) as caught:
             await self.issue()
-        self.assertEqual(caught.exception.error_code, "QUALITY_PATIENT_DOMAIN_UNSUPPORTED")
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertEqual(caught.exception.error_code, "QUALITY_PATIENT_UNAVAILABLE")
         await self.db.patient_domain_state.delete_many({})
         await self.db.users.update_one({"_id": self.doctor}, {"$set": {"is_active": False}})
         with self.assertRaises(AppBaseException) as caught:
@@ -405,3 +414,152 @@ class QualityIssueMongoTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(directory.status_code, 200)
             self.actor.id, self.actor.role = str(self.patient), "patient"
             self.assertEqual((await client.get("/api/quality/issues")).status_code, 403)
+
+
+
+@unittest.skipUnless(E2E_URI, "set REHAB_TEST_PATIENT_E2E_URI to an isolated replica set")
+class QualityIssueCanonicalReplicaTests(unittest.IsolatedAsyncioTestCase):
+    """T63 波次 2：副本集门控下 canonical 模式质控全流程。
+
+    造数手法复用 test_canonical_accountless_loop.py：legacy 最小数据 →
+    migrate_legacy_patients → canonical 模式 → 质控全生命周期；断言栅栏
+    双载体（account_fences + clinical_patients._fence_access，users 不再
+    承担栅栏计数）与 patient_id 引用一致性语义（迁移保留主键值不变）。
+    """
+
+    SOURCE = {"origin": "https://source.example", "system": "form-platform-11344",
+              "environment": "production", "patient_id": 311}
+
+    @staticmethod
+    def stopped():
+        return {"application_stopped": True, "guard_reference": "qc-replica-fixture"}
+
+    async def asyncSetUp(self):
+        self.assertTrue(E2E_URI.startswith(("mongodb://127.0.0.1:", "mongodb://localhost:")))
+
+        self.mongo = AsyncIOMotorClient(E2E_URI, serverSelectionTimeoutMS=4000)
+        self.db = self.mongo["rehab_quality_canonical_" + uuid4().hex]
+        self.temp = tempfile.TemporaryDirectory()
+        self.doctor, self.manager, self.outsider, self.admin = (str(ObjectId()) for _ in range(4))
+        self.patient = ObjectId()
+        self.plan = ObjectId()
+        await self.db.users.insert_many([
+            {"_id": self.patient, "role": "patient", "is_active": True, "name": "迁移患者",
+             "practitioners": [self.doctor], "health_managers": [self.manager]},
+            {"_id": ObjectId(self.doctor), "role": "doctor", "is_active": True, "name": "Clinician"},
+            {"_id": ObjectId(self.manager), "role": "health_manager", "is_active": True, "name": "Manager"},
+            {"_id": ObjectId(self.outsider), "role": "doctor", "is_active": True, "name": "Outsider"},
+            {"_id": ObjectId(self.admin), "role": "admin", "is_active": True},
+        ])
+        await self.db.rehab_plans.insert_one(
+            {"_id": self.plan, "patient_id": str(self.patient), "status": "active"})
+        result = await migrate_legacy_patients(self.db,
+            expected_manifest=await inspect_migration(self.db),
+            backup_directory=Path(self.temp.name) / uuid4().hex,
+            reviewer="qc-replica-reviewer", evidence_reference="qc-replica-evidence",
+            maintenance_guard=self.stopped)
+        self.assertEqual(result["migrated_count"], 1)
+        self.repo = ClinicalPatientRepository(self.db)
+        self.patient_id = str(self.patient)  # 迁移保留主键：clinical.patient_id == str(users._id)
+        self.assertEqual((await self.repo.get(self.patient_id))["patient_id"], self.patient_id)
+        self.svc = QualityIssueService(self.db)
+        self.actor = SimpleNamespace(id=self.doctor, role="doctor")
+
+    async def asyncTearDown(self):
+        await self.mongo.drop_database(self.db.name)
+        self.mongo.close()
+        self.temp.cleanup()
+
+    def create_payload(self, **changes):
+        return QualityIssueCreate.model_validate({"request_id": uuid4().hex, "patient_id": self.patient_id,
+            "source_type": "rehab_plan", "source_id": str(self.plan), "title": "Manual concern",
+            "description": "A clinician observed missing documentation", "evidence_refs": ["review-record-1"], **changes})
+
+    async def issue(self, **changes):
+        return (await self.svc.create(self.create_payload(**changes), self.actor))[0]
+
+    async def fence_state(self):
+        return {"account": await self.db.account_fences.find_one(
+                    {"account_id": self.doctor, "fence_name": "access"}),
+                "patient": (await self.repo.get(self.patient_id)).get("_fence_access"),
+                "users_doctor": (await self.db.users.find_one({"_id": ObjectId(self.doctor)})).get("_access_fence"),
+                "users_patient": (await self.db.users.find_one({"_id": self.patient})).get("_access_fence")}
+
+    async def test_full_lifecycle_scope_and_dual_carrier_fence(self):
+        # 创建即双载体复核：账号跳 account_fences（count=1）、患者跳
+        # clinical_patients._fence_access（=1）；users 文档零栅栏写入。
+        issue = await self.issue()
+        state = await self.fence_state()
+        self.assertEqual(state["patient"], 1)
+        self.assertEqual(state["account"]["count"], 1)
+        self.assertIsNone(state["users_doctor"])
+        self.assertIsNone(state["users_patient"])
+        # 全生命周期：指派（第二次账号跳 → count=2）→ 确认 → 处置 → 复核关闭
+        issue = await self.svc.mutate(issue["id"], "assign", AssignQualityIssue(
+            request_id=uuid4().hex, expected_version=0, assignee_id=self.doctor,
+            note="Assign for verification"), self.actor)
+        # assign 两跳栅栏：_patient 双载体复核（账号跳 + 患者跳）+ _assignee
+        # 账号跳 → 账号计数 1+2=3，患者栅栏 1+1=2。
+        state = await self.fence_state()
+        self.assertEqual(state["account"]["count"], 3)
+        self.assertEqual(state["patient"], 2)
+        issue = await self.svc.mutate(issue["id"], "confirm", ConfirmQualityIssue(
+            request_id=uuid4().hex, expected_version=1, note="Verified and accepted"), self.actor)
+        issue = await self.svc.mutate(issue["id"], "resolve", ResolveQualityIssue(
+            request_id=uuid4().hex, expected_version=2, resolution="Documentation completed",
+            evidence_refs=["action-record-1"]), self.actor)
+        issue = await self.svc.mutate(issue["id"], "review", ReviewQualityIssue(
+            request_id=uuid4().hex, expected_version=3, decision="approve",
+            note="Evidence reviewed", evidence_refs=["review-final"]), self.actor)
+        self.assertEqual((issue["status"], issue["version"]), ("closed", 4))
+        self.assertEqual([entry["action"] for entry in issue["timeline"]],
+                         ["create", "assign", "confirm", "resolve", "review"])
+        self.assertEqual((await self.svc.detail(issue["id"], self.actor))["resolution"],
+                         "Documentation completed")
+        # list 范围走 clinical_patients 归属：本人可见，越权医生不可见；
+        # admin 经 _all_patient_ids 枚举全部 active canonical 患者。
+        outsider = SimpleNamespace(id=self.outsider, role="doctor")
+        mine = await self.svc.list(self.actor, limit=100)
+        self.assertEqual((mine["total"], [item["id"] for item in mine["items"]]), (1, [issue["id"]]))
+        self.assertEqual((await self.svc.list(outsider, limit=100))["total"], 0)
+        self.assertEqual((await self.svc.list(SimpleNamespace(id=self.admin, role="admin")))["total"], 1)
+        # 未分配医生的创建与读取被拒（canonical 归属校验同构）
+        with self.assertRaises(AppBaseException) as denied:
+            await self.svc.create(self.create_payload(request_id=uuid4().hex), outsider)
+        self.assertEqual(denied.exception.error_code, "QUALITY_PATIENT_NOT_ASSIGNED")
+        with self.assertRaises(AppBaseException):
+            await self.svc.detail(issue["id"], outsider)
+
+    async def test_accountless_patient_reference_and_deactivation_semantics(self):
+        # 无账号临床患者：canonical 建档（无 users/links 写入）→ 直接更新归属
+        # 替位（与迁移投影同一数据形态）→ 质控全流程引用其 patient_id。
+        document = await self.repo.create_from_source(self.SOURCE,
+            reviewer="qc-replica-reviewer", evidence_reference="qc-replica-evidence-2",
+            name="无账号患者")
+        accountless_id = document["patient_id"]
+        self.assertEqual(await self.db.users.count_documents({"role": "patient"}), 1)
+        self.assertEqual(await self.db[ACCOUNT_LINKS].count_documents({"patient_id": accountless_id}), 0)
+        await self.db[PATIENTS].update_one({"patient_id": accountless_id},
+            {"$set": {"practitioners": [self.doctor], "health_managers": [self.manager]}})
+        accountless_plan = ObjectId()
+        await self.db.rehab_plans.insert_one(
+            {"_id": accountless_plan, "patient_id": accountless_id, "status": "active"})
+        issue = await self.issue(patient_id=accountless_id, source_id=str(accountless_plan))
+        self.assertEqual(issue["patient_id"], accountless_id)
+        listed = await self.svc.list(self.actor, limit=100)
+        self.assertEqual([item["id"] for item in listed["items"]], [issue["id"]])
+        self.assertEqual({item["id"] for item in (await self.svc.assignees(accountless_id, self.actor))["items"]},
+                         {self.doctor, self.manager})
+        # 停用（status != active）后：历史文档保留，但对象级访问 404、范围枚举排除
+        await self.db[PATIENTS].update_one({"patient_id": accountless_id}, {"$set": {"status": "inactive"}})
+        with self.assertRaises(AppBaseException) as unavailable:
+            await self.svc.detail(issue["id"], self.actor)
+        self.assertEqual((unavailable.exception.status_code, unavailable.exception.error_code), (404, "QUALITY_PATIENT_UNAVAILABLE"))
+        self.assertEqual((await self.svc.list(self.actor, limit=100))["total"], 0)
+        with self.assertRaises(AppBaseException):
+            await self.issue(patient_id=accountless_id)
+        self.assertEqual(await self.db.quality_issues.count_documents({}), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

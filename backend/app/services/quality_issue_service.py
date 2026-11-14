@@ -10,10 +10,13 @@ from bson import ObjectId, json_util
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.core.exceptions import AppBaseException
+from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump
 from app.db.transactions import run_transaction
-from app.core.patient_access import assigned_scope_ids, patient_assignment_field, patient_domain_mode
+from app.core.patient_access import (PatientAccessError, assigned_scope_ids, is_domain_state_unavailable,
+                                     load_patient_doc, patient_assignment_field, patient_domain_mode)
 from app.core.patient_identity import identity_key, load_identity_groups
 from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
+from app.patients.repository import ClinicalPatientRepository
 from app.services.followup_service import FollowupService
 from app.services.rehabilitation_service import RehabilitationService
 
@@ -21,6 +24,14 @@ ISSUES = "quality_issues"
 OPERATIONS = "quality_issue_operations"
 CLINICAL_ROLES = {"doctor", "health_manager"}
 READ_ROLES = CLINICAL_ROLES | {"admin"}
+# 质控问题文档 patient_id 引用语义（T63 波次 2）：沿用迁移「保留主键、值不变」
+# 约定——clinical_patients.patient_id = str(legacy users._id)，因此存量质控文档
+# 的 patient_id 字符串在 canonical 模式下与 clinical_patients 主键一一对应，
+# 切换无需改写历史文档；canonical 下新建质控同样引用当前域的患者 ID
+# （新建档患者为 create_from_source 生成的 ObjectId 字符串）。
+# 栅栏载体名（波次 2）：canonical 账号跳落 account_fences、患者跳落
+# clinical_patients 的 _fence_access 字段（core/fences.py 命名约定）。
+ACCESS_FENCE = "access"
 
 
 def fail(code, message, status=409):
@@ -71,13 +82,17 @@ class QualityIssueService:
             raise fail("QUALITY_STORAGE_UNAVAILABLE", "质控存储暂不可用", 503) from exc
 
     async def _account(self, identifier, session=None):
+        # 账号身份批量读取两域同源：canonical 只迁患者实体，医护/患者账号
+        # （含质控 actor 与被指派责任人的账号域）仍以 users 为载体。
         groups = await load_identity_groups(self.db, [identifier], session=session)
         documents = groups.get(identity_key(identifier), [])
         return documents[0] if len(documents) == 1 else None
 
     async def _fence(self, document, session):
-        # TODO(栅栏载体改造): 并发栅栏仍直接写 users._access_fence，第一波段
-        # 保持不动；切 canonical 患者域时需随载体一起迁移。
+        # legacy 载体（行为不变）：账号与患者实体同文档，users 上一次 $inc
+        # 同时覆盖"账号态"与"患者归属"两种语义。canonical 的双载体栅栏
+        # （account_fences + clinical_patients._fence_access）在 _patient/
+        # _assignee 的栅栏跳里按域分派，不经过本方法。
         value = document.get("_access_fence", 0)
         if type(value) is not int or value < 0:
             raise fail("QUALITY_ACCESS_FENCE_INVALID", "账号并发状态异常", 503)
@@ -86,32 +101,51 @@ class QualityIssueService:
     async def _actor(self, actor, session=None, *, write=False):
         if actor.role not in (CLINICAL_ROLES if write else READ_ROLES):
             raise fail("QUALITY_CLINICAL_ROLE_REQUIRED", "需要当前医护权限", 403)
+        # 账号复核不依赖患者域开关：canonical 下账号域仍在 users（T63 波次 2
+        # 门闩移除，患者域分派由 _patient/load_patient_doc 承担）。
         account = await self._account(actor.id, session)
         if not account or account.get("role") != actor.role or account.get("is_active") is not True:
             raise fail("QUALITY_ACCOUNT_UNAVAILABLE", "当前账号不可用", 403)
-        # 域门闩按显式开关判定（canonical 才拒绝）：显式 legacy 状态文档
-        # {mode:"legacy"} 是回拨 SOP 载体，行为必须与无文档 legacy 完全一致，
-        # 不得误伤 503。canonical 模式下本域尚未迁移，仍 fail-closed；
-        # 状态读取失败/未知状态时 patient_domain_mode 自然传播 503。
-        if await patient_domain_mode(self.db, session=session) == "canonical":
-            raise fail("QUALITY_PATIENT_DOMAIN_UNSUPPORTED", "当前患者档案尚未接入质控授权", 503)
         return account
 
     async def _patient(self, patient_id, actor, session=None, *, write=False, fence=False):
         account = await self._actor(actor, session, write=write)
-        # Patient existence and identity disambiguation come only from the
-        # legacy patient adapter; visible-ID collisions surface as the
-        # adapter's LegacyPatientIdentityError instead of a 404.
-        patient = await LegacyPatientRepository(self.db).get(patient_id, session=session)
-        if not patient or patient.get("is_active") is not True:
+        # 患者存在性与身份歧义消解按域分派（内核 load_patient_doc）：
+        # legacy 走 legacy 适配器——可见 ID 冲突以适配器的
+        # LegacyPatientIdentityError（503）呈现而非 404；canonical 走
+        # clinical_patients——患者主键唯一，无歧义防护对应物，status != active
+        # 视同不存在。canonical 绝不回读 users（无账号患者也必须可质控），
+        # 内核统一的 404 在此映射回本域既有语义码；域状态不可用 503 原样透传。
+        try:
+            patient = await load_patient_doc(self.db, patient_id, session=session)
+        except PatientAccessError as error:
+            if is_domain_state_unavailable(error):
+                raise
+            raise fail("QUALITY_PATIENT_UNAVAILABLE", "患者档案不可用", 404) from None
+        # 患者实体可用性策略仍由本域执行：canonical 文档恒带 status，inactive
+        # 已由内核统一 404（文档存在即 active）；legacy 文档无 status 字段，
+        # is_active 精化校验逐字保留（内核 legacy 分支不代查）。
+        if not patient or ("status" not in patient and patient.get("is_active") is not True):
             raise fail("QUALITY_PATIENT_UNAVAILABLE", "患者档案不可用", 404)
+        # 归属校验两域同构：clinical_patients 迁移保留原归属列表与账号 ID
+        # 字面量，字段名与比较逻辑无需分派。
         if actor.role != "admin":
             values = patient.get(patient_assignment_field(actor.role))
             if not isinstance(values, list) or str(account["_id"]) not in {str(value) for value in values}:
                 raise fail("QUALITY_PATIENT_NOT_ASSIGNED", "当前未分配管理该患者", 403)
         if fence:
-            await self._fence(account, session)
-            await self._fence(patient, session)
+            # 栅栏载体按域分派（T63 波次 2）：legacy 双跳仍写 users 载体
+            # （行为不变）；canonical 切换双载体——账号跳 account_fences、
+            # 患者跳 clinical_patients._fence_access，同一事务内经 dual_bump
+            # 先后复核，任一跳失败由外层事务整体回滚。
+            if await patient_domain_mode(self.db, session=session) == "canonical":
+                await dual_bump(
+                    (AccountFenceStore(self.db), str(account["_id"]), ACCESS_FENCE),
+                    (PatientFenceStore(self.db), str(patient["patient_id"]), ACCESS_FENCE),
+                    session=session)
+            else:
+                await self._fence(account, session)
+                await self._fence(patient, session)
         return patient
 
     async def _source(self, patient_id, source_type, source_id, session):
@@ -181,7 +215,12 @@ class QualityIssueService:
         assigned = patient.get(patient_assignment_field(account["role"]))
         if not isinstance(assigned, list) or str(account["_id"]) not in {str(item) for item in assigned}:
             raise fail("QUALITY_ASSIGNEE_NOT_ASSIGNED", "责任医护当前未分配管理该患者", 422)
-        await self._fence(account, session)
+        # 栅栏只有账号跳（无患者侧写入），载体随域分派：canonical 落
+        # account_fences，不写 users（保持其 canonical 只读约定）。
+        if await patient_domain_mode(self.db, session=session) == "canonical":
+            await AccountFenceStore(self.db).bump(str(account["_id"]), ACCESS_FENCE, session=session)
+        else:
+            await self._fence(account, session)
         return str(account["_id"])
 
     async def mutate(self, issue_id, kind, payload, actor):
@@ -239,6 +278,17 @@ class QualityIssueService:
         await self._patient(document["patient_id"], actor)
         return issue_view(document)
 
+    async def _all_patient_ids(self):
+        """admin 全量患者枚举按域分派；legacy 分支保留歧义防护语义。"""
+        if await patient_domain_mode(self.db) == "canonical":
+            # canonical：clinical_patients 全部 active 患者 ID（主键唯一，
+            # 无 legacy 双形态歧义防护对应物）。
+            cursor = ClinicalPatientRepository(self.db).collection.find(
+                {"status": "active"}, {"patient_id": 1})
+            return [document["patient_id"] async for document in cursor]
+        return await LegacyPatientRepository(self.db).assigned_ids(
+            {"role": "patient", "is_active": True})
+
     async def list(self, actor, *, patient_id=None, status=None, assignee_id=None, skip=0, limit=20):
         await self._actor(actor)
         if skip < 0 or not 1 <= limit <= 100:
@@ -252,15 +302,15 @@ class QualityIssueService:
             # disambiguation all live in the legacy patient adapter: one
             # candidate read plus one identity batch, never an N+1 patient loop.
             # T50 缺陷 1 同型迁移：构造+执行改走内核 assigned_scope_ids（legacy
-            # 落 users 且 is_active 精化语义逐字保留），防止门闩移除后 canonical
-            # 查询形状被交给 users 执行。admin 无归属角色字段，保持原全量分支。
+            # 落 users 且 is_active 精化语义逐字保留）；canonical 执行于
+            # clinical_patients（T63 门闩移除后可达）。admin 无归属角色字段，
+            # 经 _all_patient_ids 按域分派保持原全量分支。
             try:
                 identifiers = (
                     await assigned_scope_ids(self.db, str(actor.id), actor.role,
                                              extra_query={"is_active": True})
                     if actor.role != "admin" else
-                    await LegacyPatientRepository(self.db).assigned_ids(
-                        {"role": "patient", "is_active": True}))
+                    await self._all_patient_ids())
             except LegacyPatientIdentityError:
                 raise fail("QUALITY_PATIENT_IDENTITY_AMBIGUOUS", "患者身份无法唯一核实，请联系管理员核查", 503) from None
             query["patient_id"] = {"$in": identifiers}
@@ -276,6 +326,8 @@ class QualityIssueService:
 
     async def assignees(self, patient_id, actor):
         patient = await self._patient(patient_id, actor)
+        # 归属候选两域同构：clinical_patients 迁移保留原归属列表与账号 ID
+        # 字面量，账号域仍在 users，身份批量读取无需域分派。
         identifiers = list({str(item) for field in ("practitioners", "health_managers") for item in (patient.get(field) or [])})
         groups = await load_identity_groups(self.db, identifiers,
             projection={"name": 1, "role": 1, "is_active": 1})

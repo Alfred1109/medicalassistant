@@ -21,12 +21,14 @@ from app.core.auth import get_current_active_user
 from app.core.followup_access import followup_patient_scope
 from app.core.patient_access import assigned_patient_query
 from app.patients.legacy import LegacyPatientRepository
+from app.patients.repository import PATIENTS
 from app.core.exceptions import AppBaseException
 from app.services.quality_monitoring_service import QualityMonitoringService, csv_safe
 from app.services.followup_service import FollowupService, followup_from_mongo, map_followup_record_to_response
 from app.models.health_record import FollowUpRecord
 
 URI = os.environ.get("REHAB_TEST_QUALITY_MONITORING_MONGO_URI")
+E2E_URI = os.environ.get("REHAB_TEST_PATIENT_E2E_URI")
 
 
 def application(actor, svc):
@@ -331,7 +333,10 @@ class QualityMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不是窗口内发布次数", response.text)
         self.assertIn("不保证全部嵌套内容通过患者DTO校验", response.text)
 
-    async def test_canonical_domain_and_nonmedical_roles_fail_closed(self):
+    async def test_nonmedical_roles_fail_closed(self):
+        # canonical 域分派行为（T63 波次 3 门闩移除后）由
+        # QualityMonitoringCanonicalTests 在副本集门控下覆盖；本文件级
+        # fixture 的造数只在 users，canonical 下应 fail-closed 不回读 users。
         for role in ("patient", "researcher", "organization_admin"):
             self.actor.role = role
             self.assertEqual((await self.get()).status_code, 403)
@@ -339,8 +344,9 @@ class QualityMongoTests(unittest.IsolatedAsyncioTestCase):
         await self.db.patient_domain_state.insert_one(
             {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         response = await self.get()
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["code"], "QUALITY_PATIENT_DOMAIN_UNSUPPORTED")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["scope_kind"], "assigned_patients")
+        self.assertEqual(response.json()["followups"]["selected_total"], 0)
 
     async def test_actor_identity_must_be_unique_active_and_role_consistent_for_all_reads(self):
         await self.followup()
@@ -383,3 +389,89 @@ class QualityMongoTests(unittest.IsolatedAsyncioTestCase):
         stored["_access_fence"] = "bad"
         with self.assertRaises(AppBaseException):
             await domain.fence_quality_source(stored, None)
+
+
+@unittest.skipUnless(E2E_URI, "set REHAB_TEST_PATIENT_E2E_URI to an isolated replica set")
+class QualityMonitoringCanonicalTests(unittest.IsolatedAsyncioTestCase):
+    """T63 波次 3：canonical 模式过程监测范围解析、统计与第二道复核。
+
+    范围解析经域感知内核执行于 clinical_patients；临床文档与 users 存量
+    账号保持迁移「保留主键、值不变」的同一 ID 字面量。
+    """
+
+    async def asyncSetUp(self):
+        self.assertTrue(E2E_URI.startswith(("mongodb://127.0.0.1:", "mongodb://localhost:")))
+        self.client = AsyncIOMotorClient(E2E_URI, serverSelectionTimeoutMS=3000)
+        self.db = self.client["rehab_qmon_canonical_" + uuid4().hex]
+        self.doctor, self.manager, self.other, self.admin = map(str, (ObjectId(), ObjectId(), ObjectId(), ObjectId()))
+        self.patient, self.second, self.outside = map(str, (ObjectId(), ObjectId(), ObjectId()))
+        await self.db.users.insert_many([
+            {"_id": ObjectId(self.doctor), "role": "doctor", "is_active": True},
+            {"_id": ObjectId(self.manager), "role": "health_manager", "is_active": True},
+            {"_id": ObjectId(self.other), "role": "doctor", "is_active": True},
+            {"_id": ObjectId(self.admin), "role": "admin", "is_active": True},
+        ])
+        await self.db.patient_domain_state.insert_one(
+            {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
+        await self.db[PATIENTS].insert_many([
+            {"patient_id": self.patient, "status": "active",
+             "practitioners": [self.doctor], "health_managers": [self.manager]},
+            {"patient_id": self.second, "status": "active", "practitioners": [ObjectId(self.doctor)]},
+            {"patient_id": self.outside, "status": "active", "practitioners": [self.other]},
+        ])
+        self.when = datetime(2026, 11, 9, 8, tzinfo=timezone.utc)
+        for status, patient_id in (("scheduled", self.patient), ("in_review", self.patient),
+                                   ("scheduled", self.second), ("scheduled", self.outside)):
+            await self.db.followup_records.insert_one({"_id": ObjectId(), "patient_id": patient_id,
+                "status": status, "scheduled_date": self.when})
+        self.actor = SimpleNamespace(id=self.doctor, role="doctor")
+        self.svc = QualityMonitoringService(self.db)
+        self.http = AsyncClient(transport=ASGITransport(app=application(self.actor, self.svc)), base_url="http://test")
+
+    async def asyncTearDown(self):
+        await self.http.aclose()
+        await self.client.drop_database(self.db.name)
+        self.client.close()
+
+    async def get(self, path="overview", **params):
+        return await self.http.get("/api/quality-monitoring/" + path, params=params)
+
+    async def test_scope_resolves_from_clinical_domain_and_statistics_follow(self):
+        self.assertEqual(set(await self.svc.scope(self.actor)), {self.patient, self.second})
+        self.actor.id, self.actor.role = self.manager, "health_manager"
+        self.assertEqual(await self.svc.scope(self.actor), [self.patient])
+        self.actor.id, self.actor.role = self.doctor, "doctor"
+        overview = (await self.get()).json()
+        self.assertEqual(overview["scope_kind"], "assigned_patients")
+        self.assertEqual(overview["followups"]["selected_total"], 3)
+        selected = (await self.get(patient_id=self.patient)).json()
+        self.assertEqual((selected["scope_kind"], selected["followups"]["selected_total"]),
+                         ("selected_patient", 2))
+        self.assertEqual((await self.get(patient_id=self.outside)).status_code, 403)
+        # admin 选定患者：canonical 下按 clinical_patients 核实身份与可用性
+        self.actor.id, self.actor.role = self.admin, "admin"
+        self.assertEqual(await self.svc.scope(self.actor, patient_id=self.patient), [self.patient])
+        await self.db[PATIENTS].update_one({"patient_id": self.patient}, {"$set": {"status": "inactive"}})
+        with self.assertRaises(AppBaseException) as unverified:
+            await self.svc.scope(self.actor, patient_id=self.patient)
+        self.assertEqual((unverified.exception.status_code, unverified.exception.error_code),
+                         (503, "QUALITY_PATIENT_SCOPE_UNVERIFIED"))
+        self.actor.id, self.actor.role = self.doctor, "doctor"
+        with self.assertRaises(AppBaseException) as unavailable:
+            await self.svc.scope(self.actor, patient_id=self.patient)
+        self.assertEqual(unavailable.exception.status_code, 404)
+
+    async def test_second_review_excludes_stale_or_broadened_scope_against_clinical_documents(self):
+        # 与 legacy 对 users 的逐例复核同构：上游范围解析陈旧/被放宽时，
+        # 第二道复核以 clinical_patients 当前归属排除（一次批量读取）。
+        await self.db[PATIENTS].update_one({"patient_id": self.second}, {"$set": {"practitioners": []}})
+        with patch("app.services.quality_monitoring_service.followup_patient_scope",
+                   new=AsyncMock(return_value=[self.patient, self.second])):
+            self.assertEqual(await self.svc.scope(self.actor), [self.patient])
+            self.actor.id, self.actor.role = self.manager, "health_manager"
+            with patch("app.services.quality_monitoring_service.followup_patient_scope",
+                       new=AsyncMock(return_value=[self.patient])):
+                self.assertEqual(await self.svc.scope(self.actor), [self.patient])
+                await self.db[PATIENTS].update_one({"patient_id": self.patient},
+                                                   {"$set": {"health_managers": []}})
+                self.assertEqual(await self.svc.scope(self.actor), [])

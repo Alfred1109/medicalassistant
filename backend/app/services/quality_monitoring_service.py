@@ -10,12 +10,18 @@ from app.core.followup_access import followup_patient_scope
 from app.core.patient_access import ensure_patient_access, patient_domain_mode
 from app.core.patient_identity import identity_key, load_identity_groups
 from app.patients.legacy import LegacyPatientIdentityError
+from app.patients.repository import ClinicalPatientRepository
 from app.schemas.quality_monitoring import (
     FollowupProcessSummary, PlanProcessSummary, ProcessWindow,
     QualityProcessOverview, QualityProcessPage,
 )
 from app.services.followup_service import FollowupService
 from app.services.rehab_publication_service import RehabPublicationService
+# 波次 3 登记（T63 只登记不实施）：quality_process_queries 的患者引用核验
+# 聚合仍经 PATIENT_USERS_COLLECTION=$lookup users——canonical 下无账号患者
+# （clinical_patients 无 users 文档）的引用会被误判为 not_found，该聚合换源
+# clinical_patients 属波次 3 换源项；当前门闩移除后 canonical 统计的
+# unresolved_patient_count 对无账号患者会如实按「引用不可核实」计数。
 from app.services.quality_process_queries import FOLLOWUP_STATUSES, PLAN_STATUSES, PUBLICATION_STATES
 
 
@@ -77,18 +83,15 @@ class QualityMonitoringService:
     async def scope(self, actor, patient_id=None):
         if actor.role not in {"doctor", "health_manager", "admin"}:
             raise _error("QUALITY_MEDICAL_ROLE_REQUIRED", "需要医护或管理员权限", 403)
+        # 账号身份复核两域同源：canonical 只迁患者实体，账号域仍在 users
+        # （T63 波次 3 门闩移除，患者域分派交给内核与下方的域感知复核）。
         accounts = await load_identity_groups(self.db, [actor.id], projection={"role": 1, "is_active": 1})
         matches = accounts.get(identity_key(actor.id), [])
         if (len(matches) != 1 or matches[0].get("role") != actor.role
                 or matches[0].get("is_active") is not True):
             raise _error("QUALITY_ACCOUNT_UNAVAILABLE", "当前账号身份不可唯一核实或已停用", 403)
-        # 域门闩按显式开关判定（canonical 才拒绝）：显式 legacy 状态文档
-        # {mode:"legacy"} 是回拨 SOP 载体，行为必须与无文档 legacy 完全一致，
-        # 不得误伤 503。canonical 模式下本域尚未迁移，仍 fail-closed；
-        # 状态读取失败/未知状态时 patient_domain_mode 自然传播 503。
-        if await patient_domain_mode(self.db) == "canonical":
-            raise _error("QUALITY_PATIENT_DOMAIN_UNSUPPORTED", "当前患者域尚未接入质控患者范围", 503)
-        # The shared scope helper reads through the legacy patient adapter; its
+        # The shared scope helper is domain-aware: legacy reads through the
+        # legacy patient adapter, canonical executes on clinical_patients; its
         # ambiguity failure is restated here so this domain keeps one contract
         # code for unverifiable patient scope.
         try:
@@ -97,30 +100,59 @@ class QualityMonitoringService:
             raise _error("QUALITY_PATIENT_SCOPE_UNVERIFIED", "患者身份存在歧义，请先核实范围", 503) from None
         if values is not None:
             field = "practitioners" if actor.role == "doctor" else "health_managers"
-            grouped = await load_identity_groups(self.db, values,
-                projection={"role": 1, "is_active": 1, field: 1})
-            verified = []
-            for identifier in values:
-                matches = grouped.get(identity_key(identifier), [])
-                if len(matches) > 1:
-                    raise _error("QUALITY_PATIENT_SCOPE_UNVERIFIED", "患者身份存在歧义，请先核实范围", 503)
-                document = matches[0] if len(matches) == 1 else None
-                assignments = document.get(field) if document else None
-                if (not document or document.get("role") != "patient" or document.get("is_active") is not True
-                        or not isinstance(assignments, list) or str(actor.id) not in {str(item) for item in assignments}):
-                    continue
-                verified.append(str(document["_id"]))
-            values = list(dict.fromkeys(verified))
+            if await patient_domain_mode(self.db) == "canonical":
+                # canonical 第二道复核：候选逐一对照 clinical_patients
+                # （status=active 且归属字段含当前账号），防止上游范围解析
+                # 陈旧或被放宽（与 legacy 对 users 的逐例复核同构）。一次批量
+                # 读取，不逐例 N+1；canonical 患者主键唯一，无歧义防护对应物。
+                documents = {}
+                cursor = ClinicalPatientRepository(self.db).collection.find(
+                    {"patient_id": {"$in": [str(value) for value in values]}})
+                async for document in cursor:
+                    documents[str(document["patient_id"])] = document
+                verified = []
+                for identifier in values:
+                    document = documents.get(str(identifier))
+                    assignments = document.get(field) if document else None
+                    if (not document or document.get("status") != "active"
+                            or not isinstance(assignments, list)
+                            or str(actor.id) not in {str(item) for item in assignments}):
+                        continue
+                    verified.append(str(document["patient_id"]))
+                values = list(dict.fromkeys(verified))
+            else:
+                grouped = await load_identity_groups(self.db, values,
+                    projection={"role": 1, "is_active": 1, field: 1})
+                verified = []
+                for identifier in values:
+                    matches = grouped.get(identity_key(identifier), [])
+                    if len(matches) > 1:
+                        raise _error("QUALITY_PATIENT_SCOPE_UNVERIFIED", "患者身份存在歧义，请先核实范围", 503)
+                    document = matches[0] if len(matches) == 1 else None
+                    assignments = document.get(field) if document else None
+                    if (not document or document.get("role") != "patient" or document.get("is_active") is not True
+                            or not isinstance(assignments, list) or str(actor.id) not in {str(item) for item in assignments}):
+                        continue
+                    verified.append(str(document["_id"]))
+                values = list(dict.fromkeys(verified))
         if patient_id:
             patient_id = str(ObjectId(patient_id)) if ObjectId.is_valid(patient_id) else patient_id
             await ensure_patient_access(self.db, patient_id, str(actor.id), actor.role)
             if actor.role == "admin":
-                grouped = await load_identity_groups(self.db, [patient_id], projection={"role": 1, "is_active": 1})
-                matches = grouped.get(identity_key(patient_id), [])
-                if (len(matches) != 1 or matches[0].get("role") != "patient"
-                        or matches[0].get("is_active") is not True):
-                    raise _error("QUALITY_PATIENT_SCOPE_UNVERIFIED", "选定患者身份不可唯一核实，请先核实范围", 503)
-                patient_id = str(matches[0]["_id"])
+                # admin 豁免不核归属，但患者实体身份仍须按域核实（对象级可用
+                # 性：legacy is_active / canonical status）。
+                if await patient_domain_mode(self.db) == "canonical":
+                    document = await ClinicalPatientRepository(self.db).get(patient_id)
+                    if not document or document.get("status") != "active":
+                        raise _error("QUALITY_PATIENT_SCOPE_UNVERIFIED", "选定患者身份不可唯一核实，请先核实范围", 503)
+                    patient_id = str(document["patient_id"])
+                else:
+                    grouped = await load_identity_groups(self.db, [patient_id], projection={"role": 1, "is_active": 1})
+                    matches = grouped.get(identity_key(patient_id), [])
+                    if (len(matches) != 1 or matches[0].get("role") != "patient"
+                            or matches[0].get("is_active") is not True):
+                        raise _error("QUALITY_PATIENT_SCOPE_UNVERIFIED", "选定患者身份不可唯一核实，请先核实范围", 503)
+                    patient_id = str(matches[0]["_id"])
             if values is not None and patient_id not in values:
                 raise _error("QUALITY_PATIENT_NOT_ASSIGNED", "无权访问该患者的过程统计", 403)
             return [patient_id]
