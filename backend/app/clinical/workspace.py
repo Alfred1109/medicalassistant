@@ -1,11 +1,14 @@
 """Visible clinical records that already exist locally.
 
 Imported roster data, follow-ups and published plans are shown with their real
-status. Education is text written by a clinician. Reports and voice notes are
-stored for a person to review; nothing here extracts measurements or a transcript.
-A clinician and a patient who both carry a source project must share that project.
+status. Education is text written by a clinician. Report text can yield measurements
+that stay unconfirmed until a person reviews them. A browser transcript stays
+unconfirmed until someone saves it after listening. Indicator bounds are only the
+numbers a clinician stored. A clinician and a patient who both carry a source
+project must share that project.
 """
 import hashlib
+import re
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -261,8 +264,39 @@ async def add_report(db, actor, patient_id, *, filename, content_type, content, 
     if excerpt and source:
         document["parse_status"] = "model_suggested"
         document["findings"] = [{"label": "报告文字摘录", "value": excerpt, "unit": "", "source": source}]
+        document["extracted_values"] = extract_measurements(excerpt)
     await db.clinical_reports.insert_one(document)
     return _report_public(document, include_findings=True)
+
+
+_MEASUREMENT = re.compile(
+    r"(?P<label>[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9（）()]{1,30})"
+    r"(?P<sep>\s*[:：]\s*|\s+)"
+    r"(?P<value>-?\d+(?:\.\d+)?)"
+    r"(?:\s*(?P<unit>%|mmHg|mmol/L|μmol/L|umol/L|mg/dL|g/L|bpm|kg|cm|mL|次/分))?",
+    re.IGNORECASE,
+)
+
+
+def extract_measurements(text: str):
+    """Keep label, number and unit only when that triple is written in the text."""
+    found = []
+    seen = set()
+    for match in _MEASUREMENT.finditer(text or ""):
+        unit = (match.group("unit") or "").strip()
+        if not unit and ":" not in match.group("sep") and "：" not in match.group("sep"):
+            continue
+        label = match.group("label").strip()[:80]
+        value = match.group("value")[:120]
+        unit = unit[:40]
+        key = (label, value, unit)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append({"label": label, "value": value, "unit": unit, "source": "报告原文，待人工审核"})
+        if len(found) >= 40:
+            break
+    return found
 
 
 async def _report_excerpt(content: bytes, content_type: str):
@@ -335,6 +369,7 @@ async def _image_excerpt(content: bytes, content_type: str):
     """Ask the configured vision model to copy visible text. Failure leaves the report unparsed."""
     import base64
     import os
+    import app.core.config  # load the questionnaire vision settings into the environment
     key = os.getenv("VISION_API_KEY")
     base = os.getenv("VISION_API_BASE_URL")
     model = os.getenv("VISION_API_MODEL")
@@ -364,7 +399,8 @@ def _report_public(row, *, include_findings):
     findings = row.get("findings") or [] if include_findings else []
     return {"id": str(row["_id"]), "patient_id": row["patient_id"], "filename": row["filename"],
             "report_date": row["report_date"], "content_type": row["content_type"], "size": row["size"],
-            "sha256": row["sha256"], "parse_status": row.get("parse_status") or "not_parsed", "extracted_values": [],
+            "sha256": row["sha256"], "parse_status": row.get("parse_status") or "not_parsed",
+            "extracted_values": list(row.get("extracted_values") or []) if include_findings else [],
             "findings": [{"label": item["label"], "value": item["value"], "unit": item.get("unit") or "",
                           "source": item.get("source") or "人工阅读原件", "report_id": str(row["_id"])} for item in findings],
             "review_status": row.get("review_status") or "pending", "review_note": row.get("review_note") or ""}
@@ -429,13 +465,17 @@ async def report_content(db, actor, report_id):
     return row
 
 
-async def add_voice(db, actor, patient_id, *, content_type, content, consent):
+async def add_voice(db, actor, patient_id, *, content_type, content, consent, browser_transcript=""):
     await _patient_for(db, actor, patient_id)
     if consent is not True:
         raise HTTPException(422, detail={"code": "VOICE_CONSENT_REQUIRED"})
     stored = _store_file("voice", content_type, content, VOICE_TYPES, 2 * 1024 * 1024)
+    transcript = (browser_transcript or "").strip()
+    if len(transcript) > 2000:
+        raise HTTPException(422, detail={"code": "INVALID_TRANSCRIPT"})
+    status = "browser_suggested" if transcript else "not_transcribed"
     document = {"_id": ObjectId(), "patient_id": str(patient_id), "recorded_by": str(actor.id),
-                "consent": True, "transcription_status": "not_transcribed", "transcript": None,
+                "consent": True, "transcription_status": status, "transcript": transcript or None,
                 "created_at": _now(), **stored}
     await db.voice_notes.insert_one(document)
     return _voice_public(document)
@@ -484,6 +524,54 @@ async def record_voice_event(db, actor, patient_id, kind):
     return {"id": str(document["_id"]), "kind": kind}
 
 
+def _form_platform_ready():
+    from app.core.config import settings
+    return bool(settings.FORM_PLATFORM_BASE_URL and settings.FORM_PLATFORM_CLIENT_ID
+                and settings.FORM_PLATFORM_CLIENT_SECRET is not None)
+
+
+def _source_identity(patient):
+    values = {}
+    for key in ("source_project_id", "source_center_id", "source_subject_id"):
+        value = patient.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
+        values[key] = value
+    return values
+
+
+def _remote_share_status(remote):
+    status = remote.get("status")
+    granted = remote.get("access_granted")
+    if status == "pending" and granted is False:
+        return "pending_source_authorization"
+    if status == "approved" and granted is True:
+        return "source_approved"
+    if status == "denied" and granted is False:
+        return "source_denied"
+    if status == "withdrawn" and granted is False:
+        return "withdrawn"
+    raise HTTPException(502, detail={"code": "SOURCE_SHARE_REJECTED"})
+
+
+async def _contact_source(action, payload):
+    """Talk to the questionnaire system. Missing configuration returns None and grants nothing."""
+    if not _form_platform_ready():
+        return None
+    from app.integrations.forms.client import FormPlatformClient, FormPlatformError
+    try:
+        client = FormPlatformClient.from_settings()
+        if action == "create":
+            return await client.create_share_request(payload)
+        if action == "read":
+            return await client.get_share_request(payload)
+        if action == "withdraw":
+            return await client.withdraw_share_request(payload)
+    except FormPlatformError as exc:
+        raise HTTPException(502, detail={"code": "SOURCE_SHARE_UNAVAILABLE"}) from exc
+    raise HTTPException(502, detail={"code": "SOURCE_SHARE_UNAVAILABLE"})
+
+
 async def request_share(db, actor, patient_id, target_project_id, reason):
     if actor.role not in CLINICAL_ROLES:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
@@ -493,21 +581,52 @@ async def request_share(db, actor, patient_id, target_project_id, reason):
     reason = reason.strip()
     if not reason:
         raise HTTPException(422, detail={"code": "REASON_REQUIRED"})
-    document = {"_id": ObjectId(), "patient_id": str(patient["_id"]), "source_project_id": patient.get("source_project_id"),
+    identity = _source_identity(patient)
+    remote_id = None
+    if _form_platform_ready():
+        if identity is None:
+            raise HTTPException(422, detail={"code": "SOURCE_IDENTITY_REQUIRED"})
+        remote = await _contact_source("create", {
+            "source_project_id": identity["source_project_id"],
+            "target_project_id": target_project_id,
+            "subject_id": identity["source_subject_id"],
+            "center_id": identity["source_center_id"],
+            "reason": reason,
+        })
+        if remote is None or _remote_share_status(remote) != "pending_source_authorization" \
+                or not isinstance(remote.get("id"), int):
+            raise HTTPException(502, detail={"code": "SOURCE_SHARE_REJECTED"})
+        remote_id = remote["id"]
+    document = {"_id": ObjectId(), "patient_id": str(patient["_id"]),
+                "source_project_id": patient.get("source_project_id"),
                 "target_project_id": target_project_id, "reason": reason, "requested_by": str(actor.id),
-                "status": "pending_source_authorization", "created_at": _now()}
+                "status": "pending_source_authorization", "remote_share_id": remote_id, "created_at": _now()}
     await db.share_requests.insert_one(document)
     return _share_public(document)
 
 
 def _share_public(row):
     return {"id": str(row["_id"]), "patient_id": row["patient_id"], "target_project_id": row["target_project_id"],
-            "status": row["status"], "reason": row["reason"], "access_granted": False}
+            "status": row["status"], "reason": row["reason"], "remote_share_id": row.get("remote_share_id"),
+            "access_granted": row.get("status") == "source_approved"}
 
 
 async def list_shares(db, actor, patient_id):
     await _patient_for(db, actor, patient_id)
-    return [_share_public(row) async for row in db.share_requests.find({"patient_id": str(patient_id)})]
+    rows = [row async for row in db.share_requests.find({"patient_id": str(patient_id)})]
+    for row in rows:
+        remote_id = row.get("remote_share_id")
+        if not remote_id or row.get("status") != "pending_source_authorization":
+            continue
+        remote = await _contact_source("read", remote_id)
+        if remote is None:
+            continue
+        mapped = _remote_share_status(remote)
+        if mapped != row["status"]:
+            await db.share_requests.update_one(
+                {"_id": row["_id"]}, {"$set": {"status": mapped, "source_checked_at": _now()}})
+            row["status"] = mapped
+    return [_share_public(row) for row in rows]
 
 
 async def withdraw_share(db, actor, request_id):
@@ -519,6 +638,10 @@ async def withdraw_share(db, actor, request_id):
     if actor.role != "admin" and row.get("requested_by") != str(actor.id):
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
     await _patient_for(db, actor, row["patient_id"])
+    if row.get("remote_share_id"):
+        remote = await _contact_source("withdraw", row["remote_share_id"])
+        if remote is None or _remote_share_status(remote) != "withdrawn":
+            raise HTTPException(502, detail={"code": "SOURCE_SHARE_UNAVAILABLE"})
     await db.share_requests.update_one({"_id": row["_id"]}, {"$set": {"status": "withdrawn", "withdrawn_at": _now()}})
     row["status"] = "withdrawn"
     return _share_public(row)
@@ -534,6 +657,145 @@ async def voice_content(db, actor, voice_id):
     return row
 
 
-def indicator_status():
-    return {"configured": False, "indicators": [],
-            "message": "临床指标字典尚未确认，这里不计算达标率、ICF 评分或正式质控报告。"}
+def _plain(value):
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _number(value):
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+async def dictionary_status(db):
+    rules = [_rule(row) async for row in db.clinical_indicator_rules.find({"active": True})]
+    if not rules:
+        return {"configured": False, "indicators": [],
+                "message": "还没有医护录入的指标字典，这里不计算达标率或 ICF 评分。"}
+    return {"configured": True, "indicators": rules,
+            "message": "字典由医护录入。ICF 编码只按原样保存，这里不计算 ICF 评分。"}
+
+
+def _rule(row):
+    return {"id": str(row["_id"]), "label": row["label"], "source_label": row["source_label"],
+            "unit": row.get("unit") or "", "low": row.get("low"), "high": row.get("high"),
+            "icf_code": row.get("icf_code") or ""}
+
+
+async def create_indicator(db, actor, *, label, source_label, unit, low, high, icf_code):
+    if actor.role not in CLINICAL_ROLES:
+        raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
+    label, source_label = label.strip(), source_label.strip()
+    unit, icf_code = (unit or "").strip(), (icf_code or "").strip()
+    if not label or not source_label or len(label) > 80 or len(source_label) > 80 or len(unit) > 40 or len(icf_code) > 20:
+        raise HTTPException(422, detail={"code": "INVALID_INDICATOR"})
+    if low is not None and high is not None and low > high:
+        raise HTTPException(422, detail={"code": "INVALID_BOUNDS"})
+    document = {"_id": ObjectId(), "label": label, "source_label": source_label, "unit": unit,
+                "low": low, "high": high, "icf_code": icf_code, "active": True,
+                "author_id": str(actor.id), "created_at": _now()}
+    await db.clinical_indicator_rules.insert_one(document)
+    return _rule(document)
+
+
+async def retire_indicator(db, actor, rule_id):
+    if actor.role not in CLINICAL_ROLES:
+        raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
+    if not ObjectId.is_valid(rule_id):
+        raise HTTPException(422, detail={"code": "INVALID_INDICATOR"})
+    row = await db.clinical_indicator_rules.find_one({"_id": ObjectId(rule_id), "active": True})
+    if not row:
+        raise HTTPException(404, detail={"code": "INDICATOR_NOT_FOUND"})
+    await db.clinical_indicator_rules.update_one(
+        {"_id": row["_id"], "active": True}, {"$set": {"active": False, "retired_at": _now()}})
+    return {"id": rule_id, "active": False}
+
+
+async def evaluate_indicators(db, actor, patient_id):
+    await _patient_for(db, actor, patient_id)
+    rules = [_rule(row) async for row in db.clinical_indicator_rules.find({"active": True})]
+    if not rules:
+        return {"configured": False, "indicators": [], "coverage": None, "within_bounds": None,
+                "message": "还没有医护录入的指标字典，这里不计算达标率或 ICF 评分。"}
+    findings = []
+    async for report in db.clinical_reports.find({"patient_id": str(patient_id), "review_status": "reviewed"}):
+        findings.extend(report.get("findings") or [])
+    rows = []
+    for rule in rules:
+        matches = [item for item in findings if item.get("label") == rule["source_label"]]
+        if not matches:
+            state, value = "missing", None
+        else:
+            value = matches[-1].get("value")
+            number = _number(value)
+            if rule["low"] is None and rule["high"] is None:
+                state = "unbounded"
+            elif number is None:
+                state = "not_numeric"
+            elif (rule["low"] is not None and number < rule["low"]) or (rule["high"] is not None and number > rule["high"]):
+                state = "outside"
+            else:
+                state = "inside"
+        rows.append({**rule, "state": state, "value": value})
+    compared = [row for row in rows if row["state"] in {"inside", "outside"}]
+    return {"configured": True, "indicators": rows,
+            "coverage": {"matched": sum(row["state"] != "missing" for row in rows), "defined": len(rows)},
+            "within_bounds": {"inside": sum(row["state"] == "inside" for row in rows), "compared": len(compared)} if compared else None,
+            "message": "达标只对照医护录入的上下限。ICF 编码按录入原样显示，这里不计算 ICF 评分，也不是正式质控报告。"}
+
+
+def indicators_csv(result):
+    lines = ["指标,来源项目,结果,单位,下限,上限,ICF编码,对照状态", f"# {result['message']}"]
+    for row in result["indicators"]:
+        lines.append(",".join(_csv(row.get(key)) for key in
+                              ("label", "source_label", "value", "unit", "low", "high", "icf_code", "state")))
+    return "\n".join(lines) + "\n"
+
+
+def _csv(value):
+    text = "" if value is None else str(value)
+    if any(character in text for character in ",\"\n"):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+async def recorded_plan_sources(db, actor, patient_id):
+    """Copy stored profile text and reviewed findings. Missing topics stay missing."""
+    patient = await _patient_for(db, actor, patient_id)
+    medical = patient.get("medical_info") if isinstance(patient.get("medical_info"), dict) else {}
+    lifestyle = patient.get("lifestyle") if isinstance(patient.get("lifestyle"), dict) else {}
+    genes = patient.get("genetic_info") if isinstance(patient.get("genetic_info"), dict) else {}
+    diagnosis = _plain(medical.get("diagnosis") or medical.get("condition"))
+    goal = _plain(medical.get("goal"))
+    gene_text = _plain(genes.get("summary") or genes.get("note"))
+    topics = {"diet": _plain(lifestyle.get("diet")), "exercise": _plain(lifestyle.get("exercise")),
+              "medication": _plain(lifestyle.get("medication") or medical.get("medication")),
+              "psychology": _plain(lifestyle.get("psychology"))}
+    reviewed = []
+    async for report in db.clinical_reports.find({"patient_id": str(patient_id), "review_status": "reviewed"}):
+        for item in report.get("findings") or []:
+            if item.get("label") == "报告文字摘录":
+                continue
+            reviewed.append(" ".join(part for part in (item.get("label"), item.get("value"), item.get("unit")) if part))
+    missing = [name for name, present in (("病情", diagnosis), ("生活习惯", any(topics.values())), ("基因", gene_text)) if not present]
+    items = []
+    names = {"diet": "已记录的饮食", "exercise": "已记录的运动", "medication": "已记录的用药", "psychology": "已记录的心理"}
+    for kind, text in topics.items():
+        if text:
+            items.append({"intervention_type": kind, "name": names[kind], "description": text[:5000],
+                          "source": "患者档案中已保存的文字"})
+    parts = ["以下只转写已经保存在档案和已审核报告里的内容，没有补写缺失项。"]
+    if diagnosis:
+        parts.append(f"病情：{diagnosis}")
+    for item in items:
+        parts.append(f"{item['name']}：{item['description']}")
+    if reviewed:
+        parts.append("已审核指标：" + "；".join(reviewed[:20]))
+    if gene_text:
+        parts.append(f"基因记录：{gene_text}")
+    if missing:
+        parts.append("未记录、因此没有生成：" + "、".join(missing))
+    return {"name": f"{_plain(patient.get('name')) or '患者'}的待核对方案"[:200],
+            "description": "\n".join(parts)[:5000], "goal": goal, "items": items,
+            "missing": missing, "published": False}

@@ -25,6 +25,7 @@ import { AppDispatch, RootState } from '../../store';
 import { getRecommendations } from '../../store/slices/rehabSlice';
 import { Exercise } from '../../types/rehab';
 import { apiService } from '../../services/api';
+import httpClient from '../../services/httpClient';
 
 /**
  * 训练推荐页面（真实数据版）
@@ -57,6 +58,8 @@ const ExerciseRecommendations: React.FC = () => {
   const [patientsLoading, setPatientsLoading] = useState(false);
   const [patientsError, setPatientsError] = useState<string | null>(null);
   const [patientId, setPatientId] = useState<string>(searchParams.get('patientId') || '');
+  const role = useSelector((state: RootState) => state.auth.user?.role);
+  const [draftNotice, setDraftNotice] = useState('');
 
   // 过滤条件（均为可选，后端对应可选查询参数）
   const [condition, setCondition] = useState('');
@@ -265,7 +268,30 @@ const ExerciseRecommendations: React.FC = () => {
                           )}
                         </Box>
 
-                        <Box sx={{ display: 'flex', gap: 1 }}>
+                        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                          {(role === 'doctor' || role === 'health_manager') && <Button
+                            variant="outlined"
+                            disabled={!goal.trim()}
+                            onClick={async () => {
+                              setDraftNotice('');
+                              try {
+                                await httpClient.post('/rehabilitation/plans', {
+                                  patient_id: patientId,
+                                  name: exercise.name || '待核对的训练建议',
+                                  description: `模型参考，尚未发布，不能当作已签署处方。${exercise.description || ''}`.slice(0, 5000),
+                                  goal: goal.trim(),
+                                  start_date: new Date().toISOString(),
+                                  status: 'draft',
+                                  exercises: [],
+                                });
+                                setDraftNotice('已存为未发布草稿。患者看不到，需要在康复方案里核对后再发布。');
+                              } catch {
+                                setDraftNotice('没有存成草稿。请确认当前账号可以管理这名患者。');
+                              }
+                            }}
+                          >
+                            存为未发布草稿
+                          </Button>}
                           <Button
                             variant="contained"
                             color="primary"
@@ -295,6 +321,8 @@ const ExerciseRecommendations: React.FC = () => {
       )}
 
       {/* 诚实说明：推荐历史与训练反馈暂无后端支持 */}
+      {draftNotice && <Alert severity="info" sx={{ mt: 2 }}>{draftNotice}</Alert>}
+      {!goal.trim() && (role === 'doctor' || role === 'health_manager') && <Alert severity="info" sx={{ mt: 2 }}>填写康复目标后，才能把一条建议存成未发布草稿。</Alert>}
       <Alert severity="info" sx={{ mt: 3 }}>
         推荐历史与训练反馈功能暂无后端支持，本页不做展示。
       </Alert>

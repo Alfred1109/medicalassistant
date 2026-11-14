@@ -182,6 +182,15 @@ class FormPlatformClient:
         return await self._request("GET", f"/integration/v1/forms/{form_id}/definition",
                                    params={"version": version} if version is not None else None)
 
+    async def create_share_request(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._request("POST", "/integration/v1/share-requests", json_body=body)
+
+    async def get_share_request(self, share_id: int) -> Dict[str, Any]:
+        return await self._request("GET", f"/integration/v1/share-requests/{share_id}")
+
+    async def withdraw_share_request(self, share_id: int) -> Dict[str, Any]:
+        return await self._request("POST", f"/integration/v1/share-requests/{share_id}/withdraw")
+
     @staticmethod
     def _catalog_params(limit: int, cursor: Optional[str]) -> Dict[str, Any]:
         return {"limit": limit, **({"cursor": cursor} if cursor is not None else {})}

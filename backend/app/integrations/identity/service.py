@@ -53,7 +53,8 @@ class OidcClient:
         if data.get("issuer") != self.settings.issuer:
             raise OidcFailure()
         issuer_origin = urlsplit(self.settings.issuer)
-        for key in ("authorization_endpoint", "token_endpoint", "jwks_uri", "introspection_endpoint"):
+        for key in ("authorization_endpoint", "token_endpoint", "jwks_uri",
+                    "introspection_endpoint", "revocation_endpoint"):
             parsed = urlsplit(data.get(key, ""))
             if (parsed.scheme != "https" or parsed.netloc != issuer_origin.netloc
                     or parsed.username or parsed.password or parsed.query or parsed.fragment):
@@ -65,6 +66,8 @@ class OidcClient:
             if expected not in data.get(key, []):
                 raise OidcFailure()
         if data["introspection_endpoint"] != self.settings.issuer + "/oidc/introspect":
+            raise OidcFailure()
+        if data["revocation_endpoint"] != self.settings.issuer + "/oidc/revoke":
             raise OidcFailure()
         return data
 
@@ -219,7 +222,23 @@ class OidcClient:
     async def logout(self, sid, csrf):
         if not sid or not csrf or max(len(sid), len(csrf)) > 256:
             raise OidcFailure()
-        result = await self.db.oidc_application_sessions.delete_one({
+        record = await self.db.oidc_application_sessions.find_one({
             "_id": digest(sid), "csrf_hash": digest(csrf)})
-        if result.deleted_count != 1:
+        if record is None:
+            raise OidcFailure()
+        try:
+            source_token = Fernet(self.settings.session_encryption_key.get_secret_value().encode("ascii")).decrypt(
+                record["source_token_encrypted"].encode("ascii")).decode("utf-8")
+            async with httpx.AsyncClient(transport=self.transport, follow_redirects=False, timeout=10) as client:
+                result = await client.post(
+                    self.settings.issuer + "/oidc/revoke",
+                    auth=httpx.BasicAuth(self.settings.client_id, self.settings.client_secret.get_secret_value()),
+                    data={"token": source_token, "token_type_hint": "access_token"})
+        except httpx.HTTPError:
+            raise OidcUnavailable() from None
+        if result.status_code != 200:
+            raise OidcUnavailable()
+        deleted = await self.db.oidc_application_sessions.delete_one({
+            "_id": digest(sid), "csrf_hash": digest(csrf)})
+        if deleted.deleted_count != 1:
             raise OidcFailure()

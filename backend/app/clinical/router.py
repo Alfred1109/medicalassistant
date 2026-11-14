@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
-from fastapi.responses import Response as BinaryResponse
+from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
+from fastapi.responses import PlainTextResponse, Response as BinaryResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.auth import get_current_active_user
@@ -44,6 +44,16 @@ class ShareRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class IndicatorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    label: str = Field(min_length=1, max_length=80)
+    source_label: str = Field(min_length=1, max_length=80)
+    unit: str = ""
+    low: float | None = None
+    high: float | None = None
+    icf_code: str = ""
+
+
 class VoiceEventRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: str
@@ -61,9 +71,46 @@ def _file(response: Response):
 
 
 @router.get("/indicators")
-async def indicators(response: Response, _=Depends(get_current_active_user)):
+async def indicators(response: Response, _=Depends(get_current_active_user), db=Depends(get_database)):
     _file(response)
-    return workspace.indicator_status()
+    return await workspace.dictionary_status(db)
+
+
+@router.post("/indicators", status_code=201)
+async def add_indicator(payload: IndicatorRequest, response: Response, actor=Depends(get_current_active_user),
+                        db=Depends(get_database)):
+    _file(response)
+    return await workspace.create_indicator(db, actor, label=payload.label, source_label=payload.source_label,
+                                           unit=payload.unit, low=payload.low, high=payload.high,
+                                           icf_code=payload.icf_code)
+
+
+@router.post("/indicators/{rule_id}/retire")
+async def retire_indicator(rule_id: str, response: Response, actor=Depends(get_current_active_user),
+                           db=Depends(get_database)):
+    _file(response)
+    return await workspace.retire_indicator(db, actor, rule_id)
+
+
+@router.get("/patients/{patient_id}/indicators")
+async def patient_indicators(patient_id: str, response: Response, actor=Depends(get_current_active_user),
+                             db=Depends(get_database)):
+    _file(response)
+    return await workspace.evaluate_indicators(db, actor, patient_id)
+
+
+@router.get("/patients/{patient_id}/indicators.csv")
+async def patient_indicators_csv(patient_id: str, actor=Depends(get_current_active_user), db=Depends(get_database)):
+    result = await workspace.evaluate_indicators(db, actor, patient_id)
+    return PlainTextResponse(workspace.indicators_csv(result), media_type="text/csv; charset=utf-8",
+                             headers={"Cache-Control": "no-store", "Content-Disposition": "attachment; filename=indicators.csv"})
+
+
+@router.get("/patients/{patient_id}/recorded-plan")
+async def recorded_plan(patient_id: str, response: Response, actor=Depends(get_current_active_user),
+                        db=Depends(get_database)):
+    _file(response)
+    return await workspace.recorded_plan_sources(db, actor, patient_id)
 
 
 @router.get("/patients/{patient_id}/scope")
@@ -170,11 +217,12 @@ async def voice_event(patient_id: str, payload: VoiceEventRequest, response: Res
 
 @router.post("/patients/{patient_id}/voice", status_code=201)
 async def upload_voice(patient_id: str, response: Response, file: UploadFile = File(...),
-                       consent: str = Form(""), actor=Depends(get_current_active_user),
-                       db=Depends(get_database)):
+                       consent: str = Form(""), browser_transcript: str = Form(""),
+                       actor=Depends(get_current_active_user), db=Depends(get_database)):
     _file(response)
     return await workspace.add_voice(db, actor, patient_id, content_type=file.content_type or "",
-                                     content=await file.read(), consent=consent == "true")
+                                     content=await file.read(), consent=consent == "true",
+                                     browser_transcript=browser_transcript)
 
 
 @router.get("/patients/{patient_id}/shares")

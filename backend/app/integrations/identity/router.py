@@ -180,6 +180,8 @@ async def logout(request: Request, client=Depends(oidc_client)):
         raise HTTPException(403, detail={"code": "CSRF_REJECTED"})
     try:
         await client.logout(request.cookies.get(SESSION_COOKIE), request.headers.get("x-csrf-token"))
+    except OidcUnavailable:
+        raise HTTPException(503, detail={"code": "SOURCE_LOGOUT_UNAVAILABLE"}) from None
     except Exception:
         raise HTTPException(403, detail={"code": "CSRF_REJECTED"}) from None
     response = headers(Response(status_code=204))

@@ -69,6 +69,7 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
             data = dict(issuer=self.config.issuer, authorization_endpoint=self.config.issuer + "/oidc/authorize",
                 token_endpoint=self.config.issuer + "/oidc/token", jwks_uri=self.config.issuer + "/oidc/jwks",
                 introspection_endpoint=self.config.issuer + "/oidc/introspect",
+                revocation_endpoint=self.config.issuer + "/oidc/revoke",
                 response_types_supported=["code"], code_challenge_methods_supported=["S256"],
                 id_token_signing_alg_values_supported=["RS256"],
                 token_endpoint_auth_methods_supported=["client_secret_basic"])
@@ -98,6 +99,11 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(parse_qs(request.content.decode())["token"], ["source-token-never-stored"])
             return httpx.Response(200, json={"active": self.source_active, "sub": "opaque-stable-subject",
                 "client_id": "care", "iss": self.config.issuer, "exp": int(time.time()) + 3600})
+        if request.url.path == "/oidc/revoke":
+            self.assertEqual(request.headers["authorization"], "Basic " + base64.b64encode(b"care:secret").decode())
+            self.assertEqual(parse_qs(request.content.decode())["token"], ["source-token-never-stored"])
+            self.source_active = False
+            return httpx.Response(200, json={})
         return httpx.Response(404)
 
     async def begin(self):
@@ -155,6 +161,7 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["clinical_access"])
         self.assertIsNone(result["actor_id"])
         await self.service.logout(sid, csrf)
+        self.assertFalse(self.source_active)
         self.assertIsNone(await self.service.session(sid))
 
     async def test_state_cookie_and_transaction_expiry_are_required(self):

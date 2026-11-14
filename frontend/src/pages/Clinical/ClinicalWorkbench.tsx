@@ -15,8 +15,11 @@ interface Portrait {
 }
 interface Material { id: string; title: string; body: string; assignment_id?: string; status?: string; feedback?: string; guidance?: string }
 interface Finding { label: string; value: string; unit: string; source: string }
-interface ReportRow { id: string; filename: string; report_date: string; parse_status: string; review_status: string; review_note: string; findings: Finding[] }
+interface Extracted { label: string; value: string; unit: string; source: string }
+interface ReportRow { id: string; filename: string; report_date: string; parse_status: string; review_status: string; review_note: string; findings: Finding[]; extracted_values?: Extracted[] }
 interface VoiceRow { id: string; transcription_status: string; transcript: string | null; size: number }
+interface IndicatorRow { id: string; label: string; source_label: string; unit: string; low: number | null; high: number | null; icf_code: string; state?: string; value?: string | null }
+interface IndicatorResult { configured: boolean; message: string; indicators: IndicatorRow[]; coverage?: { matched: number; defined: number } | null; within_bounds?: { inside: number; compared: number } | null }
 interface VoiceEvent { id: string; kind: string }
 interface ShareRow { id: string; target_project_id: number; status: string; access_granted: boolean }
 interface Scope { same_project: boolean | null; clinical_access: boolean; message: string; share_granted: boolean }
@@ -24,7 +27,10 @@ const displayLabel: Record<string, string> = {
   void: '作废', missing_time: '缺少时间', overdue: '计划时间已过，仍未完成', recorded: '有记录',
   followup: '随访', plan: '方案', education: '宣教', report: '报告', voice: '语音',
   assigned: '已分配', read: '已阅读', pending: '待审核', reviewed: '已审核', rejected: '已退回',
-  not_transcribed: '未转写', published: '已发布', draft: '草稿', lost: '已失访',
+  not_transcribed: '未转写', browser_suggested: '浏览器识别，待医护确认', manual: '人工确认',
+  published: '已发布', draft: '草稿', lost: '已失访',
+  missing: '没有已审核结果', unbounded: '已记录，未设上下限', not_numeric: '结果不是数字',
+  inside: '在录入的上下限内', outside: '超出录入的上下限',
 };
 
 const timeLabel: Record<string, string> = { present: '有时间', missing: '缺少时间', invalid: '时间无法读取' };
@@ -57,6 +63,8 @@ export default function ClinicalWorkbench() {
   const [targetProject, setTargetProject] = useState('');
   const [shareReason, setShareReason] = useState('');
   const [scope, setScope] = useState<Scope | null>(null);
+  const [indicators, setIndicators] = useState<IndicatorResult | null>(null);
+  const [rule, setRule] = useState({ label: '', source_label: '', unit: '', low: '', high: '', icf_code: '' });
   const clinical = actor?.role === 'doctor' || actor?.role === 'health_manager' || actor?.role === 'admin';
 
   useEffect(() => {
@@ -74,13 +82,14 @@ export default function ClinicalWorkbench() {
     if (!id) return;
     setError('');
     try {
-      const [scopeResult, portraitResult, materialResult, reportResult, voiceResult, shareResult] = await Promise.all([
+      const [scopeResult, portraitResult, materialResult, reportResult, voiceResult, shareResult, indicatorResult] = await Promise.all([
         httpClient.get(`/clinical/patients/${id}/scope`),
         httpClient.get(`/clinical/patients/${id}/portrait`),
         httpClient.get('/clinical/education', { params: { patient_id: id } }),
         httpClient.get(`/clinical/patients/${id}/reports`),
         httpClient.get(`/clinical/patients/${id}/voice`),
         httpClient.get(`/clinical/patients/${id}/shares`),
+        httpClient.get(`/clinical/patients/${id}/indicators`),
       ]);
       setScope(scopeResult.data);
       setPortrait(portraitResult.data);
@@ -89,6 +98,7 @@ export default function ClinicalWorkbench() {
       setVoice(voiceResult.data.notes || []);
       setVoiceEvents(voiceResult.data.events || []);
       setShares(shareResult.data.requests || []);
+      setIndicators(indicatorResult.data);
     } catch {
       setPortrait(null);
       setError('这份资料没有打开。如果患者属于另一个来源项目，需要 113.44 的共享授权。');
@@ -102,7 +112,7 @@ export default function ClinicalWorkbench() {
 
   return <Box>
     <Typography variant="h5" gutterBottom>患者记录</Typography>
-    <Alert severity="info" sx={{ mb: 2 }}>图片和带文字层的 PDF 会摘录可见文字，扫描页会请视觉模型看第一页。摘录都要人工审核后患者才能看到。语音没有识别模型，请听原声后自己填写转写。</Alert>
+    <Alert severity="info" sx={{ mb: 2 }}>带文字的报告会抽出原文里的数字，扫描页在配置了视觉模型时才摘录。抽出的数字要人工审核后才参与对照。浏览器能识别语音时会给出待确认文字，听原声保存后才算人工转写。</Alert>
     {clinical && actor.role !== 'admin' && <TextField select size="small" label="患者" value={selected} sx={{ mb: 2, minWidth: 240 }}
       onChange={event => setPatientId(event.target.value)}>
       <MenuItem value="">选择患者</MenuItem>
@@ -113,7 +123,8 @@ export default function ClinicalWorkbench() {
     {error && <Alert severity="warning" sx={{ mb: 2 }}>{error}</Alert>}
     <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
       <Tab value="portrait" label="画像" /><Tab value="education" label="宣教" />
-      <Tab value="reports" label="报告" /><Tab value="voice" label="语音" /><Tab value="scope" label="项目范围" />
+      <Tab value="reports" label="报告" /><Tab value="voice" label="语音" />
+      <Tab value="indicators" label="指标" /><Tab value="scope" label="项目范围" />
     </Tabs>
     {tab === 'portrait' && portrait && <Stack spacing={1}>
       <Typography>{portrait.patient.name}，来源项目 {portrait.patient.source_project_id ?? '未标记'}，读取时间 {portrait.recorded_at}</Typography>
@@ -165,7 +176,8 @@ export default function ClinicalWorkbench() {
       </Button>
       {reports.map(row => <Box key={row.id}>
         <Typography>{row.filename}，日期 {row.report_date}，识别状态：{row.parse_status === 'model_suggested' ? '已摘录，待审核' : '未自动识别'}，审核：{row.review_status === 'pending' ? '待人工审核' : row.review_status === 'reviewed' ? '已审核' : '已退回'}</Typography>
-        <Typography color="text.secondary">模型摘录不是已确认指标。人工填写的项目标明来自原件。</Typography>
+        <Typography color="text.secondary">从原文抽出的数字还不是已确认指标。人工填写的项目标明来自原件。</Typography>
+        {(row.extracted_values || []).map(item => <Typography key={`${row.id}-x-${item.label}-${item.value}`}>{item.label} {item.value} {item.unit}（{item.source}）</Typography>)}
         {(row.findings || []).map(item => <Typography key={`${row.id}-${item.label}`}>{item.label} {item.value} {item.unit}（{item.source}）</Typography>)}
         {row.review_note && <Typography color="text.secondary">{row.review_note}</Typography>}
         <Button size="small" onClick={async () => {
@@ -184,20 +196,34 @@ export default function ClinicalWorkbench() {
       </Box>)}
     </Stack>}
     {tab === 'voice' && <Stack spacing={2}>
-      <Alert severity="info">录音前需要同意保存这段语音。系统保存原声。转写需要听完后手工填写，不会自动识别。</Alert>
+      <Alert severity="info">录音前需要同意保存这段语音。系统保存原声。浏览器识别出的文字标为待确认，听原声核对后再保存。</Alert>
       <Button size="small" variant={consent ? 'contained' : 'outlined'} onClick={() => setConsent(true)}>同意保存本次录音</Button>
       <Button variant="outlined" disabled={!consent || !selected} onClick={async () => {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           const recorder = new MediaRecorder(stream);
           const chunks: Blob[] = [];
+          let heard = '';
+          const speechWindow = window as Window & { SpeechRecognition?: new () => { lang: string; continuous: boolean; onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null; start: () => void; stop: () => void }; webkitSpeechRecognition?: new () => { lang: string; continuous: boolean; onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null; start: () => void; stop: () => void } };
+          const SpeechRecognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+          const recognition = SpeechRecognition ? new SpeechRecognition() : null;
+          if (recognition) {
+            recognition.lang = 'zh-CN';
+            recognition.continuous = true;
+            recognition.onresult = event => {
+              heard = Array.from(event.results).map(result => result[0]?.transcript || '').join('');
+            };
+            try { recognition.start(); } catch { heard = ''; }
+          }
           recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
           recorder.onstop = async () => {
             stream.getTracks().forEach(track => track.stop());
+            try { recognition?.stop(); } catch { /* 识别器可能已经结束 */ }
             const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
             const form = new FormData();
             form.set('file', new File([blob], 'voice.webm', { type: blob.type }));
             form.set('consent', 'true');
+            if (heard.trim()) form.set('browser_transcript', heard.trim());
             await sendFile(`/clinical/patients/${selected}/voice`, form);
             await load(selected);
           };
@@ -210,7 +236,7 @@ export default function ClinicalWorkbench() {
       }}>录制 5 秒语音</Button>
       {voiceEvents.map(event => <Typography key={event.id}>失败记录：麦克风权限被拒绝</Typography>)}
       {voice.map(row => <Box key={row.id}>
-        <Typography>语音 {row.size} 字节，转写：{row.transcription_status === 'manual' ? '人工听写' : '未转写'}</Typography>
+        <Typography>语音 {row.size} 字节，转写：{displayLabel[row.transcription_status] || row.transcription_status}</Typography>
         {row.transcript && <Typography color="text.secondary">{row.transcript}</Typography>}
         <Button size="small" onClick={async () => {
           const { data } = await httpClient.get(`/clinical/voice/${row.id}/content`, { responseType: 'blob' });
@@ -220,6 +246,39 @@ export default function ClinicalWorkbench() {
         <TextField size="small" placeholder="听原声后填写转写" value={transcriptDraft[row.id] || ''} onChange={event => setTranscriptDraft(current => ({ ...current, [row.id]: event.target.value }))} />
         <Button size="small" onClick={async () => { await httpClient.post(`/clinical/voice/${row.id}/transcript`, { text: transcriptDraft[row.id] || '' }); await load(selected); }}>保存人工转写</Button>
       </Box>)}
+    </Stack>}
+    {tab === 'indicators' && <Stack spacing={2}>
+      <Alert severity="info">{indicators?.message || '还没有对照结果。'}</Alert>
+      {indicators?.coverage && <Typography>已有审核结果的指标 {indicators.coverage.matched} / {indicators.coverage.defined}</Typography>}
+      {indicators?.within_bounds && <Typography>落在医护录入上下限内的 {indicators.within_bounds.inside} / {indicators.within_bounds.compared}</Typography>}
+      {(indicators?.indicators || []).map(item => <Typography key={item.id}>{item.label}：{item.value || '无已审核结果'} {item.unit}，{displayLabel[item.state || ''] || item.state}{item.icf_code ? `，ICF 编码 ${item.icf_code}（只保存，不评分）` : ''}</Typography>)}
+      {clinical && <>
+        <TextField size="small" label="指标名称" value={rule.label} onChange={event => setRule(current => ({ ...current, label: event.target.value }))} />
+        <TextField size="small" label="对应的已审核项目名" value={rule.source_label} onChange={event => setRule(current => ({ ...current, source_label: event.target.value }))} />
+        <TextField size="small" label="单位" value={rule.unit} onChange={event => setRule(current => ({ ...current, unit: event.target.value }))} />
+        <TextField size="small" label="下限（选填）" value={rule.low} onChange={event => setRule(current => ({ ...current, low: event.target.value }))} />
+        <TextField size="small" label="上限（选填）" value={rule.high} onChange={event => setRule(current => ({ ...current, high: event.target.value }))} />
+        <TextField size="small" label="ICF 编码（选填，不参与评分）" value={rule.icf_code} onChange={event => setRule(current => ({ ...current, icf_code: event.target.value }))} />
+        <Button variant="outlined" onClick={async () => {
+          await httpClient.post('/clinical/indicators', {
+            label: rule.label, source_label: rule.source_label, unit: rule.unit, icf_code: rule.icf_code,
+            low: rule.low === '' ? null : Number(rule.low), high: rule.high === '' ? null : Number(rule.high),
+          });
+          setRule({ label: '', source_label: '', unit: '', low: '', high: '', icf_code: '' });
+          if (selected) await load(selected);
+        }}>保存这条指标</Button>
+        {(indicators?.indicators || []).map(item => <Button key={`retire-${item.id}`} size="small" onClick={async () => {
+          await httpClient.post(`/clinical/indicators/${item.id}/retire`);
+          if (selected) await load(selected);
+        }}>停用 {item.label}</Button>)}
+      </>}
+      {selected && <Button size="small" onClick={async () => {
+        const { data } = await httpClient.get(`/clinical/patients/${selected}/indicators.csv`, { responseType: 'blob' });
+        const url = URL.createObjectURL(data);
+        const anchor = document.createElement('a');
+        anchor.href = url; anchor.download = 'indicators.csv'; anchor.click();
+        URL.revokeObjectURL(url);
+      }}>下载这次对照</Button>}
     </Stack>}
     {tab === 'scope' && scope && <Stack spacing={2}>
       <Alert severity={scope.clinical_access ? 'info' : 'warning'}>{scope.message}当前没有生效的跨项目授权。</Alert>

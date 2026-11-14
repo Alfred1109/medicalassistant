@@ -315,6 +315,7 @@ function PatientWorkspace({ actor, patient }: { actor: Actor; patient: Patient }
   const [form, setForm] = useState(emptyContent);
   const [pending, setPending] = useState(false);
   const [createError, setCreateError] = useState('');
+  const [sourceNote, setSourceNote] = useState('');
   const [uncertain, setUncertain] = useState(false);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -349,7 +350,7 @@ function PatientWorkspace({ actor, patient }: { actor: Actor; patient: Patient }
     <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" spacing={1}>
       <Typography variant="h6">{patient.name}的康复方案</Typography>
       <Stack direction="row" spacing={1}><Button onClick={() => setReload(value => value + 1)} disabled={loading}>刷新列表</Button>
-        <Button variant="contained" onClick={() => { setForm(emptyContent()); setUncertain(false); setCreateError(''); setCreating(true); }}>新建方案草稿</Button></Stack>
+        <Button variant="contained" onClick={() => { setForm(emptyContent()); setSourceNote(''); setUncertain(false); setCreateError(''); setCreating(true); }}>新建方案草稿</Button></Stack>
     </Stack>
     {loading && <CircularProgress size={24} aria-label="正在加载方案列表" />}{error && <Alert severity="error">{error}</Alert>}
     {!loading && !error && !plans.length && <Alert severity="info">该患者暂无康复方案，可以从草稿开始填写。</Alert>}
@@ -366,6 +367,13 @@ function PatientWorkspace({ actor, patient }: { actor: Actor; patient: Patient }
     <Dialog open={creating} fullWidth maxWidth="sm" onClose={() => { if (!pending) setCreating(false); }}>
       <DialogTitle>为{patient.name}新建方案草稿</DialogTitle><DialogContent dividers>
         <Stack spacing={2}><Typography variant="body2">填写经核实的方案基本信息，保存后继续配置四类干预。草稿不会直接展示给患者。</Typography>
+          <Button disabled={pending || uncertain} onClick={async () => {
+            const { data } = await httpClient.get<{ name: string; description: string; goal: string; missing: string[]; published: boolean }>(`/clinical/patients/${patient.id}/recorded-plan`);
+            if (data.published) { setCreateError('已记录资料不能直接发布。'); return; }
+            setForm(current => ({ ...current, name: data.name || current.name, description: data.description || current.description, goal: data.goal || current.goal }));
+            setSourceNote(data.missing?.length ? `没有写入：${data.missing.join('、')}。这些项留空，需要医护另行核实后再填。` : '已填入档案和已审核报告里的文字。发布前仍需逐项核对。');
+          }}>填入已保存的病情和记录</Button>
+          {sourceNote && <Alert severity="info">{sourceNote}</Alert>}
           <ClinicalContentFields value={form} onChange={setForm} disabled={pending || uncertain} includePatientInstructions={false} />{createError && <Alert severity="error">{createError}</Alert>}</Stack>
       </DialogContent><DialogActions><Button disabled={pending} onClick={() => setCreating(false)}>关闭</Button>
         <Button disabled={pending || uncertain} variant="contained" onClick={create}>创建草稿并继续配置</Button></DialogActions>

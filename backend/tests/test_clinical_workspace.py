@@ -6,9 +6,12 @@ from types import SimpleNamespace
 from bson import ObjectId
 from fastapi import HTTPException
 
+from unittest.mock import AsyncMock, patch
+
 from app.clinical.workspace import (
-    acknowledge_material, add_finding, add_report, add_voice, assign_material, create_material, guide_material,
-    portrait, request_share, review_report, withdraw_share,
+    acknowledge_material, add_finding, add_report, add_voice, assign_material, create_indicator, create_material,
+    evaluate_indicators, extract_measurements, guide_material, list_shares, portrait, recorded_plan_sources,
+    request_share, retire_indicator, review_report, withdraw_share,
 )
 from app.integrations.forms.sync_runs import list_runs, load_failed_import, record_run, summarize_runs
 
@@ -68,6 +71,7 @@ class Database:
         self.voice_events = Collection()
         self.share_requests = Collection()
         self.integration_runs = Collection()
+        self.clinical_indicator_rules = Collection()
 
 
 class ClinicalWorkspaceTests(unittest.IsolatedAsyncioTestCase):
@@ -169,6 +173,101 @@ class ClinicalWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         withdrawn = await withdraw_share(db, doctor, created["id"])
         self.assertEqual(withdrawn["status"], "withdrawn")
         self.assertFalse(withdrawn["access_granted"])
+
+    async def test_share_access_follows_the_source_decision(self):
+        db = Database()
+        patient_id = ObjectId()
+        doctor_id = ObjectId()
+        db.users.docs.extend([
+            {"_id": patient_id, "role": "patient", "source_project_id": 4, "source_center_id": 2,
+             "source_subject_id": 8, "practitioners": [str(doctor_id)]},
+            {"_id": doctor_id, "role": "doctor", "source_project_id": 4},
+        ])
+        doctor = SimpleNamespace(id=doctor_id, role="doctor")
+        state = {"status": "pending"}
+
+        async def contact(action, payload):
+            if action == "create":
+                self.assertEqual(payload["subject_id"], 8)
+                self.assertNotIn("access_granted", payload)
+                return {"id": 15, "status": "pending", "access_granted": False}
+            if action == "read":
+                return {"id": 15, "status": state["status"], "access_granted": state["status"] == "approved"}
+            state["status"] = "withdrawn"
+            return {"id": 15, "status": "withdrawn", "access_granted": False}
+
+        with patch("app.clinical.workspace._form_platform_ready", return_value=True), \
+                patch("app.clinical.workspace._contact_source", new=contact):
+            created = await request_share(db, doctor, str(patient_id), 9, "会诊需要看随访")
+            self.assertFalse(created["access_granted"])
+            self.assertEqual(created["remote_share_id"], 15)
+            state["status"] = "approved"
+            listed = await list_shares(db, doctor, str(patient_id))
+            self.assertEqual(listed[0]["status"], "source_approved")
+            self.assertTrue(listed[0]["access_granted"])
+
+    def test_measurements_come_only_from_written_numbers(self):
+        found = extract_measurements("收缩压 120 mmHg\n第 1 页\n空腹血糖：5.6 mmol/L")
+        self.assertEqual([(item["label"], item["value"], item["unit"]) for item in found],
+                         [("收缩压", "120", "mmHg"), ("空腹血糖", "5.6", "mmol/L")])
+
+    async def test_report_excerpt_keeps_measurements_unconfirmed(self):
+        db, doctor, patient_id = self._pair()
+        with patch("app.clinical.workspace._report_excerpt", new=AsyncMock(return_value=("收缩压 120 mmHg", "PDF文字层，待人工审核"))):
+            report = await add_report(db, doctor, str(patient_id), filename="a.pdf", content_type="application/pdf",
+                                      content=b"%PDF", report_date="2026-11-10", stated_patient_id=str(patient_id))
+        self.assertEqual(report["parse_status"], "model_suggested")
+        self.assertEqual(report["extracted_values"][0]["value"], "120")
+        self.assertEqual(report["extracted_values"][0]["source"], "报告原文，待人工审核")
+
+    async def test_browser_transcript_stays_unconfirmed_until_saved(self):
+        db, doctor, patient_id = self._pair()
+        patient = SimpleNamespace(id=patient_id, role="patient")
+        voice = await add_voice(db, patient, str(patient_id), content_type="audio/webm", content=b"abc",
+                                consent=True, browser_transcript="走路有点喘")
+        self.assertEqual(voice["transcription_status"], "browser_suggested")
+        self.assertEqual(voice["transcript"], "走路有点喘")
+
+    async def test_indicator_dictionary_compares_only_reviewed_findings(self):
+        db, doctor, patient_id = self._pair()
+        rule = await create_indicator(db, doctor, label="收缩压", source_label="收缩压", unit="mmHg",
+                                     low=90, high=140, icf_code="b420")
+        report = await add_report(db, doctor, str(patient_id), filename="a.pdf", content_type="application/pdf",
+                                  content=b"%PDF", report_date="2026-11-10", stated_patient_id=str(patient_id))
+        await review_report(db, doctor, report["id"], accepted=True, note="已核对原件")
+        await add_finding(db, doctor, report["id"], "收缩压", "150", "mmHg")
+        result = await evaluate_indicators(db, doctor, str(patient_id))
+        self.assertEqual(result["indicators"][0]["state"], "outside")
+        self.assertEqual(result["indicators"][0]["icf_code"], "b420")
+        self.assertIsNone(result["indicators"][0].get("score"))
+        self.assertIn("不计算 ICF 评分", result["message"])
+        await retire_indicator(db, doctor, rule["id"])
+        empty = await evaluate_indicators(db, doctor, str(patient_id))
+        self.assertFalse(empty["configured"])
+
+    async def test_recorded_plan_leaves_missing_topics_blank(self):
+        db, doctor, patient_id = self._pair()
+        db.users.docs[0]["medical_info"] = {"diagnosis": "慢性肾病"}
+        db.users.docs[0]["lifestyle"] = {"exercise": "每日步行 20 分钟"}
+        suggestion = await recorded_plan_sources(db, doctor, str(patient_id))
+        self.assertFalse(suggestion["published"])
+        self.assertEqual(suggestion["missing"], ["基因"])
+        self.assertEqual(suggestion["items"], [{
+            "intervention_type": "exercise", "name": "已记录的运动", "description": "每日步行 20 分钟",
+            "source": "患者档案中已保存的文字"}])
+        self.assertIn("慢性肾病", suggestion["description"])
+        self.assertIn("每日步行 20 分钟", suggestion["description"])
+        self.assertNotIn("基因记录", suggestion["description"])
+
+    def _pair(self):
+        db = Database()
+        patient_id = ObjectId()
+        doctor_id = ObjectId()
+        db.users.docs.extend([
+            {"_id": patient_id, "role": "patient", "name": "甲", "practitioners": [str(doctor_id)]},
+            {"_id": doctor_id, "role": "doctor"},
+        ])
+        return db, SimpleNamespace(id=doctor_id, role="doctor"), patient_id
 
 
 if __name__ == "__main__":
