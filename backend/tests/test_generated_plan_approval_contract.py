@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """Generated-plan persistence and atomic approval, without LLM or external data."""
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -215,6 +216,7 @@ class ApprovalRouteTests(unittest.IsolatedAsyncioTestCase):
         self.actor = SimpleNamespace(id='doctor', role='doctor')
         self.db = SimpleNamespace(users=SimpleNamespace(find_one=AsyncMock(return_value={
             '_id': ObjectId(self.doc['patient_id']), 'role': 'patient', 'practitioners': ['doctor']})))
+        identity_find_from_lookup(self.db.users)
         self.app = FastAPI()
         self.app.include_router(router, prefix='/rehabilitation')
         self.app.dependency_overrides[get_current_active_user] = lambda: self.actor

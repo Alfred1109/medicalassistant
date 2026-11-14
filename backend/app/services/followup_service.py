@@ -32,7 +32,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 from copy import deepcopy
 from hashlib import sha256
-import re
+from app.patients.legacy import LegacyPatientRepository
 from bson import encode
 from app.core.exceptions import AppBaseException
 from app.db.transactions import run_followup_transaction
@@ -381,15 +381,8 @@ class FollowupService:
             query["scheduled_date"] = dates
 
         if patient_name:
-            # Escape input so names containing regex syntax remain literal.
-            patient_query = {"role": "patient", "name": {
-                "$regex": re.escape(patient_name), "$options": "i"}}
-            if scope is not None:
-                identifiers = [value for item in scope for value in
-                               ([item, ObjectId(item)] if ObjectId.is_valid(item) else [item])]
-                patient_query["_id"] = {"$in": identifiers}
-            matches = await self.db.users.find(patient_query, {"_id": 1}).to_list(length=None)
-            matched_ids = {str(row["_id"]) for row in matches}
+            matched_ids = await LegacyPatientRepository(self.db).matching_name_ids(
+                patient_name, patient_ids=scope)
             if scope is not None:
                 matched_ids.intersection_update(scope)
             query["patient_id"] = {"$in": sorted(matched_ids)}
@@ -405,14 +398,7 @@ class FollowupService:
         batch = result[0] if result else {"items": [], "count": []}
         documents = batch["items"]
         ids = {str(row["patient_id"]) for row in documents}
-        identifiers = [value for item in ids for value in
-                       ([item, ObjectId(item)] if ObjectId.is_valid(item) else [item])]
-        names = {}
-        if identifiers:
-            patients = await self.db.users.find(
-                {"role": "patient", "_id": {"$in": identifiers}}, {"name": 1}
-            ).to_list(length=None)
-            names = {str(row["_id"]): row.get("name") for row in patients}
+        names = await LegacyPatientRepository(self.db).names(ids)
         items = [FollowUpWorkbenchItem(
             **map_followup_record_to_response(followup_from_mongo(row)).model_dump(),
             patient_name=names.get(str(row["patient_id"]))) for row in documents]
@@ -846,6 +832,11 @@ class FollowupService:
                 or confirmation.get("response_id") != reference.get("response_id")
                 or confirmation.get("remote_status") not in {"submitted", "restored"}):
             raise followup_conflict("当前答卷与本地确认证据不一致，请退回重新提交")
+        from app.integrations.forms.service import require_task_reviewed_context, FormIntegrationError
+        try:
+            await require_task_reviewed_context(self.db, task, session=session)
+        except FormIntegrationError as exc:
+            raise followup_conflict("当前答卷的患者关联或问卷审核已失效，请重新核实") from exc
         visit_code = doc.get("visit_code")
         if visit_code and any(value != visit_code for value in (
                 task.get("visit_code"), reference.get("visit_code"),

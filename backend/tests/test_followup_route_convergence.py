@@ -103,7 +103,7 @@ class FakeCollection:
     async def count_documents(self, query):
         return len(self.docs)
 
-    def find(self, query, *args):
+    def find(self, query, *args, **kwargs):
         return FakeCursor([dict(doc) for doc in self.docs.values() if _match(doc, query)])
 
     def aggregate(self, pipeline):

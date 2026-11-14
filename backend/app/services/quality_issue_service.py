@@ -8,10 +8,9 @@ from datetime import datetime, timezone
 
 from bson import ObjectId, json_util
 from pymongo.errors import DuplicateKeyError, PyMongoError
-from pymongo.read_concern import ReadConcern
-from pymongo.write_concern import WriteConcern
 
 from app.core.exceptions import AppBaseException
+from app.db.transactions import run_transaction
 from app.core.patient_access import assigned_patient_query, patient_assignment_field
 from app.core.patient_identity import identity_key, load_identity_groups
 from app.services.followup_service import FollowupService
@@ -37,14 +36,9 @@ def iso(value):
 
 
 async def transaction(db, callback):
-    try:
-        async with await db.client.start_session() as session:
-            return await session.with_transaction(callback, read_concern=ReadConcern("snapshot"),
-                                                   write_concern=WriteConcern("majority"))
-    except AppBaseException:
-        raise
-    except PyMongoError as exc:
-        raise fail("QUALITY_TRANSACTION_UNAVAILABLE", "质控事务未能确认提交，请使用相同请求重试", 503) from exc
+    return await run_transaction(db, callback,
+        error_code="QUALITY_TRANSACTION_UNAVAILABLE",
+        error_message="质控事务未能确认提交，请使用相同请求重试")
 
 
 def issue_view(document, *, detail=True):

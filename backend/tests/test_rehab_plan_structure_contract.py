@@ -59,6 +59,10 @@ class FakeCursor:
     def limit(self, count):
         return FakeCursor(self._docs, sort=self._sort, skip=self._skip, limit=count)
 
+    async def to_list(self, length=None):
+        result = [row async for row in self]
+        return result if length is None else result[:length]
+
     def __aiter__(self):
         docs = deepcopy(self._docs)
         if self._sort:
@@ -92,7 +96,11 @@ class FakeCollection:
         for doc in self.docs:
             ok = True
             for key, value in query.items():
-                if key == "_id":
+                if isinstance(value, dict) and "$in" in value:
+                    actual = doc.get(key)
+                    values = actual if isinstance(actual, list) else [actual]
+                    ok = any(item in value["$in"] for item in values)
+                elif key == "_id":
                     if isinstance(value, ObjectId):
                         ok = doc.get("_id") == value
                     else:
@@ -114,7 +122,7 @@ class FakeCollection:
                              reverse=direction < 0)
         return deepcopy(matched[0]) if matched else None
 
-    def find(self, query):
+    def find(self, query, projection=None, **kwargs):
         return FakeCursor(deepcopy(self._match(query)))
 
     async def insert_one(self, doc):

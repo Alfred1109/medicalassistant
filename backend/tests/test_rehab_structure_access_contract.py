@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """REH01 方案结构化端点（版本/处方项/执行事件）对象级授权契约测试。
 
 契约与既有康复对象级端点一致（见 test_rehab_agent_auth_contract.py）：
@@ -66,6 +67,7 @@ class RehabStructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
             lambda: self.structure_service
         self.database = MagicMock()
         self.database.users.find_one = AsyncMock(return_value=self.patient_doc)
+        identity_find_from_lookup(self.database.users)
 
         async def fake_database():
             yield self.database

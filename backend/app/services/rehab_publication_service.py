@@ -8,12 +8,11 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 from bson import ObjectId, json_util
-from pymongo.errors import PyMongoError, DuplicateKeyError
-from pymongo.read_concern import ReadConcern
-from pymongo.write_concern import WriteConcern
+from pymongo.errors import DuplicateKeyError
 from pydantic import ValidationError
 
 from app.core.exceptions import AppBaseException
+from app.db.transactions import run_transaction
 from app.schemas.rehab_publication import PublicationContent, PublicationItem
 
 WORKFLOW = "patient_publication"
@@ -25,14 +24,9 @@ def error(code, message, status=409):
 
 
 async def run_rehab_transaction(db, callback):
-    try:
-        async with await db.client.start_session() as session:
-            return await session.with_transaction(callback, read_concern=ReadConcern("snapshot"),
-                                                  write_concern=WriteConcern("majority"))
-    except AppBaseException:
-        raise
-    except PyMongoError as exc:
-        raise error("REHAB_TRANSACTION_UNAVAILABLE", "康复事务未能确认提交，请使用相同请求重试", 503) from exc
+    return await run_transaction(db, callback,
+        error_code="REHAB_TRANSACTION_UNAVAILABLE",
+        error_message="康复事务未能确认提交，请使用相同请求重试")
 
 
 def now_utc():

@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """康复计划/Agent 路由鉴权契约测试（AUTH01）。
 
 三层契约：
@@ -85,6 +86,7 @@ class RehabAgentAuthContractTests(unittest.IsolatedAsyncioTestCase):
         # 患者归属校验走 db.users.find_one 打桩，库连接本身不打真实 MongoDB
         self.database = MagicMock()
         self.database.users.find_one = AsyncMock(return_value=self.patient_doc)
+        identity_find_from_lookup(self.database.users)
 
         async def fake_database():
             yield self.database

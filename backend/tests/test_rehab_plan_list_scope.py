@@ -47,6 +47,9 @@ class Cursor:
         self.rows = self.rows[:count]
         return self
 
+    async def to_list(self, length=None):
+        return copy.deepcopy(self.rows if length is None else self.rows[:length])
+
     def __aiter__(self):
         async def rows():
             for row in self.rows:
@@ -59,7 +62,7 @@ class Collection:
         self.documents = documents
         self.queries = []
 
-    def find(self, query, projection=None):
+    def find(self, query, projection=None, **kwargs):
         self.queries.append(copy.deepcopy(query))
         return Cursor([row for row in self.documents if matches(row, query)])
 

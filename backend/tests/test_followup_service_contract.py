@@ -61,7 +61,7 @@ def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
                 if op == "$lte" and (actual is None or actual > val):
                     return False
         elif isinstance(actual, list):
-            if cond not in actual:
+            if (actual != cond if isinstance(cond, list) else cond not in actual):
                 return False
         elif actual != cond:
             return False
@@ -150,9 +150,11 @@ def _make_service():
     # audit_logs：FU01 S5 起手工录入/审阅在同一事务写审计，需要预置该集合
     collections = {name: FakeCollection() for name in (
         FollowUpRecord.collection_name, "medical_timelines", "audit_logs",
-        "integration_fill_tasks",
+        "integration_fill_tasks", "external_patient_links", "external_form_bindings",
     )}
     service = FollowupService(FakeTransactionalDatabase(collections))
+    service.db.external_patient_links = collections["external_patient_links"]
+    service.db.external_form_bindings = collections["external_form_bindings"]
     return service, collections
 
 
@@ -677,9 +679,12 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         """approved：表单答卷的 effective_response 保留（证据链不丢）。"""
         effective = {"task_id": str(ObjectId()), "response_id": "resp-1"}
         followup_id = await self._seed_with_status("in_review", effective_response=effective)
+        context = await self._seed_reviewed_fill_context()
         await self.collections["integration_fill_tasks"].insert_one({
             "_id": ObjectId(effective["task_id"]), "status": "confirmed", "patient_id": PATIENT_ID,
             "followup_visit_id": followup_id,
+            "reviewed_context": context,
+            "remote_refs": {"project_id": 1, "center_id": 2, "subject_id": 3, "questionnaire_id": 4},
             "confirmation": {"response_id": "resp-1", "remote_status": "submitted", "answers": []}})
         await self.service.review_followup(
             followup_id, ReviewFollowUpRequest(expected_version=0, decision=ReviewDecision.APPROVED),
@@ -847,6 +852,15 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.submission_history[0]["snapshot"]["effective_response"]["response_id"], 42)
         self.assertEqual(response.submission_history[-1]["snapshot"]["notes"], "current")
 
+    async def _seed_reviewed_fill_context(self):
+        from test_integration_forms_contract import reviewed_documents
+        link, binding = reviewed_documents(PATIENT_ID)
+        await self.collections["external_patient_links"].insert_one(link)
+        await self.collections["external_form_bindings"].insert_one(binding)
+        return {"patient_link_id": link["_id"], "form_binding_id": binding["_id"],
+                "reference": link["reference"], "version_ref": binding["version_ref"],
+                "purpose": binding["purpose"]}
+
     async def test_external_approval_requires_matching_persisted_confirmation(self):
         for override in (
             {"status": "failed"}, {"patient_id": "other"}, {"followup_visit_id": "other"},
@@ -858,6 +872,8 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
             followup_id = await self._seed_with_status("in_review", visit_code="V1",
                 effective_response={"task_id": str(task_id), "response_id": 42, "visit_code": "V1"})
             task = {"_id": task_id, "status": "confirmed", "patient_id": PATIENT_ID,
+                    "reviewed_context": await self._seed_reviewed_fill_context(),
+                    "remote_refs": {"project_id": 1, "center_id": 2, "subject_id": 3, "questionnaire_id": 4},
                     "followup_visit_id": followup_id, "visit_code": "V1",
                     "confirmation": {"response_id": 42, "remote_status": "submitted", "visit_code": "V1"}}
             if override:

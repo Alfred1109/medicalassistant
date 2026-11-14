@@ -12,6 +12,7 @@ from copy import deepcopy
 from app.core.config import settings
 from app.core.exceptions import AppBaseException, ExternalServiceException
 from app.core.patient_access import assigned_patient_query, PatientAccessError
+from app.patients.legacy import LegacyPatientRepository
 import numpy as np
 
 from app.schemas.rehabilitation import (
@@ -207,9 +208,8 @@ class RehabilitationService:
             if patient_id:
                 filter_dict["patient_id"] = patient_id
         elif actor_role in {"doctor", "health_manager"}:
-            patients = self.db.users.find(
-                assigned_patient_query(str(actor_id), actor_role), {"_id": 1})
-            patient_ids = [str(patient["_id"]) async for patient in patients]
+            patient_ids = await LegacyPatientRepository(self.db).assigned_ids(
+                assigned_patient_query(str(actor_id), actor_role))
             if patient_id and str(patient_id) not in patient_ids:
                 raise PatientAccessError("无权访问该患者的康复方案")
             # An empty authorized scope must stay empty, never become find({}).

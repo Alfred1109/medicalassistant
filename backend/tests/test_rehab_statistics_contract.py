@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """康复计划统计/趋势端点契约测试（statistics / trends）。
 
 覆盖 GET /api/rehabilitation/plans/{plan_id}/statistics 与
@@ -109,6 +110,7 @@ class RehabStatisticsContractTests(unittest.IsolatedAsyncioTestCase):
         # 患者归属校验走 db.users.find_one 打桩，不连真实 MongoDB
         self.database = MagicMock()
         self.database.users.find_one = AsyncMock(return_value=self.patient_doc)
+        identity_find_from_lookup(self.database.users)
 
         async def fake_database():
             yield self.database
