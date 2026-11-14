@@ -1,4 +1,4 @@
-from patient_identity_fake import identity_find_from_lookup
+from patient_identity_fake import identity_find_from_lookup, legacy_domain_state
 """设备维修记录路由契约测试（缺陷 A / 缺陷 B 收敛）。
 
 device_repair_router 此前以 dict.get("roles", []) 访问认证用户，
@@ -76,7 +76,7 @@ class DeviceRepairRouterContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.operator = make_operator()
         # 路由内以模块属性引用 get_db，直接替换模块属性打桩
-        self.db = MagicMock()
+        self.db = legacy_domain_state(MagicMock())
         patient = {"_id": "repair-patient", "role": "patient", "practitioners": [OPERATOR_ID],
                    "health_managers": [OPERATOR_ID]}
         self.db.users.find_one = AsyncMock(return_value=patient)

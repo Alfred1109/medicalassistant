@@ -47,3 +47,31 @@ async def ensure_communication_indexes(db: Any, *, for_write: bool = False) -> b
             raise CommunicationStorageUnavailable() from error
         return False
     return True
+
+
+# 患者归属域的普通辅助索引：仅加速既有查询（devices.patient_id 此前无任何
+# 索引；clinical_patients.name 支撑大小写不敏感姓名搜索）。全部为非唯一普通
+# 索引，不依赖任何未知现有数据的取值假设，也不参与迁移唯一性校验。
+PATIENT_SCOPE_INDEXES = (
+    ("devices", [("patient_id", ASCENDING)], "device_patient_query"),
+    ("clinical_patients", [("name", ASCENDING)], "clinical_patient_name_query"),
+)
+
+
+async def ensure_patient_scope_indexes(db: Any) -> bool:
+    """声明患者归属域普通辅助索引；集合不存在时跳过（不隐式建集合）。
+
+    与 ensure_communication_indexes 同一惯例：索引声明幂等，失败只记录日志
+    不阻断历史读取。canonical 迁移（patients/repository.create_patient_indexes）
+    仍负责 clinical_patients 的唯一索引；本函数仅为已存在集合补齐查询索引。
+    """
+    try:
+        names = await db.list_collection_names()
+        for collection, keys, name in PATIENT_SCOPE_INDEXES:
+            if collection not in names:
+                continue
+            await db[collection].create_index(keys, name=name)
+    except Exception as error:
+        logger.error("Patient scope indexes could not be established: %s", error)
+        return False
+    return True

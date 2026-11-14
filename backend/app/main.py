@@ -28,7 +28,7 @@ from app.api.routers import health_record_router
 # 导入数据库连接函数
 from app.db.mongodb import connect_to_mongodb, close_mongodb_connection, DatabaseConnectionError, db as mongodb_state
 # 启动期索引基建（通信域唯一索引等）
-from app.db.indexes import ensure_communication_indexes
+from app.db.indexes import ensure_communication_indexes, ensure_patient_scope_indexes
 from app.integrations.identity.config import oidc_settings
 from app.integrations.identity.service import ensure_identity_indexes
 from app.integrations.identity.router import router as identity_router
@@ -190,6 +190,8 @@ async def startup_db_client():
 
         # 启动期声明通信域索引（幂等；失败仅告警，不阻断启动）
         await ensure_communication_indexes(mongodb_state.db)
+        # 患者域查询索引（devices.patient_id / clinical_patients.name；幂等，失败仅告警）
+        await ensure_patient_scope_indexes(mongodb_state.db)
         if oidc_settings.enabled:
             await ensure_identity_indexes(mongodb_state.db)
         await reminder_runtime.start(mongodb_state.db, enabled=settings.FOLLOWUP_REMINDERS_ENABLED,

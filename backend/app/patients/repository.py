@@ -6,6 +6,7 @@ an absent or inactive clinical record must never revive a legacy relationship.
 """
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -34,6 +35,33 @@ async def require_canonical(db, *, session=None):
     return state
 
 
+async def domain_mode(db, *, session=None):
+    """Read the durable domain switch; an unknown observed state fails closed.
+
+    No state document means the legacy users-backed domain is still the active
+    default. Any other observed state (migrating, a different schema version or
+    an unrecognized mode) is rejected: callers must never guess a domain, and
+    transport-level read failures must surface to the caller instead of being
+    mistaken for a legacy deployment.
+
+    Attribute access is equivalent to `db[STATE]` on a real Mongo database and
+    always yields a collection proxy there; only in-memory test doubles that do
+    not model the switch at all yield None, and those stay legacy by definition.
+    """
+    state_collection = getattr(db, STATE, None)
+    if state_collection is None:
+        return "legacy"
+    if session is None:
+        state = await state_collection.find_one({"_id": STATE_ID})
+    else:
+        state = await state_collection.find_one({"_id": STATE_ID}, session=session)
+    if state is None:
+        return "legacy"
+    if state.get("mode") == "canonical" and state.get("schema_version") == SCHEMA_VERSION:
+        return "canonical"
+    raise PatientDomainError("PATIENT_DOMAIN_STATE_UNAVAILABLE")
+
+
 async def create_patient_indexes(db):
     """Explicit maintenance writes only; not a read-time schema repair."""
     await db[ACCOUNT_LINKS].create_index("account_id", unique=True, name="patient_account_unique")
@@ -46,6 +74,9 @@ async def create_patient_indexes(db):
         [("status", ASCENDING), ("practitioners", ASCENDING)], name="clinical_practitioner_scope")
     await db[PATIENTS].create_index(
         [("status", ASCENDING), ("health_managers", ASCENDING)], name="clinical_health_manager_scope")
+    # 姓名搜索辅助索引（普通非唯一索引）：支撑大小写不敏感的 name 查询，
+    # 与 create_from_source 的唯一索引校验无关，缺失不会阻断该索引校验。
+    await db[PATIENTS].create_index("name", name="clinical_patient_name_query")
 
 
 def source_key(identity):
@@ -122,6 +153,29 @@ class ClinicalPatientRepository:
             raise PatientDomainError("INVALID_PATIENT_PAGINATION")
         cursor = self.collection.find(assigned_query(operator_id, role)).sort("patient_id", ASCENDING)
         return await cursor.skip(skip).limit(limit).to_list(length=limit)
+
+    async def matching_name_ids(self, name, *, patient_ids=None, operator_id=None,
+                                operator_role=None, session=None):
+        """Case-insensitive name search aligned with the legacy adapter semantics.
+
+        Returns clinical `patient_id` strings. Without a scope argument every
+        active-domain patient whose name matches is returned; `operator_id` with
+        `operator_role` restricts the search to one assignment range (already
+        status=active), and `patient_ids` restricts it to explicitly supplied
+        identifiers. Canonical patient IDs are unique, so the legacy adapter's
+        dual-literal ambiguity guard has no canonical counterpart.
+        """
+        await require_canonical(self.db, session=session)
+        if not isinstance(name, str):
+            raise PatientDomainError("INVALID_PATIENT_NAME_QUERY")
+        query = {"name": {"$regex": re.escape(name), "$options": "i"}}
+        if operator_role is not None:
+            query.update(assigned_query(operator_id, operator_role))
+        if patient_ids is not None:
+            query["patient_id"] = {"$in": [str(item) for item in patient_ids]}
+        documents = await self.collection.find(query, {"patient_id": 1},
+                                               session=session).to_list(length=None)
+        return {document["patient_id"] for document in documents}
 
     async def create_from_source(self, identity, *, reviewer, evidence_reference, name=None, session=None):
         """Store a previously verified source identity; never infer an account.

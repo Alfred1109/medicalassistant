@@ -78,6 +78,36 @@ unknown; a crash or uncertain Mongo commit must be investigated without loading
 an old backup. Success adds a separate immutable committed receipt. Subsequent
 invocations never overwrite or refresh an existing canonical domain.
 
+## Domain switch (patient_access kernel dispatch)
+
+The authorization kernel `app/core/patient_access.py` reads the durable
+`patient_domain_state` singleton (`clinical-patients-v1`) through
+`repository.domain_mode` and dispatches per mode:
+
+- No state document (the current default) means the legacy users-backed domain:
+  every kernel entry point (`load_patient_doc`, `ensure_patient_access`,
+  `ensure_self_patient_access`, `assigned_patient_query`) keeps its existing
+  legacy semantics, including the 503 ambiguity latch. Legacy-mode behavior is
+  unchanged; business consumers still drive legacy queries directly.
+- `mode == "canonical"` with the matching `schema_version` routes object loads
+  and assignment checks to `ClinicalPatientRepository` (clinical_patients) and
+  self resolution through `repo.resolve_self` (verified `patient_account_links`
+  only; an account ID is never assumed to be a patient ID). Range dispatch goes
+  through the kernel's async `assigned_scope_query`, whose canonical query is
+  `repository.assigned_query` and therefore already contains `status=active`;
+  medical-role validation errors are identical in both modes. The canonical
+  branch never reads `users.is_active` as a patient status — clinical
+  availability is the clinical document's `status` field.
+- Anything else fails closed: a missing/unrecognized state document variant
+  (`migrating`, wrong schema version, unknown mode) or a transport-level read
+  failure raises `PatientAccessError` with HTTP 503
+  (`PATIENT_DOMAIN_STATE_UNAVAILABLE`) instead of falling back to legacy.
+
+In-memory test doubles that model the switch declare `patient_domain_state`
+explicitly (see `tests/patient_identity_fake.legacy_domain_state`); a real Mongo
+database always resolves the state collection, and ordinary fakes that omit it
+stay legacy by definition.
+
 ## Integration still required
 
 Switch clinical patient loading, physician lists, follow-up scope, clinical

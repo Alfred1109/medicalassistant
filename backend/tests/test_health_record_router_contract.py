@@ -1,4 +1,4 @@
-from patient_identity_fake import identity_find_from_lookup
+from patient_identity_fake import identity_find_from_lookup, legacy_domain_state
 """健康档案路由契约测试（WP0 路由层修复，2026-11-07）。
 
 覆盖三类路由层缺陷修复后的契约：
@@ -86,7 +86,7 @@ class HealthRecordRouterContractTests(unittest.IsolatedAsyncioTestCase):
         })
         # FU01 S2：随访端点改经 FollowupService 唯一入口，单独打桩
         self.followup_service = AsyncMock()
-        patient_db = MagicMock()
+        patient_db = legacy_domain_state(MagicMock())
         patient_db.users.find_one = AsyncMock(return_value={"_id": ObjectId(PATIENT_ID), "role": "patient", "practitioners": [CREATOR_ID]})
         identity_find_from_lookup(patient_db.users)
         cursor = MagicMock()
@@ -103,7 +103,7 @@ class HealthRecordRouterContractTests(unittest.IsolatedAsyncioTestCase):
         # get_current_user 的 get_database 依赖也会做真实 Mongo ping；
         # 全部内存打桩，避免触碰（或等待）真实数据库
         async def fake_database():
-            yield MagicMock()
+            yield legacy_domain_state(MagicMock())
 
         app.dependency_overrides[get_database] = fake_database
         # get_current_user 内部经 UserService 查库；按既有契约测试模式打桩

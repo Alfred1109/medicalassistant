@@ -1,4 +1,4 @@
-from patient_identity_fake import identity_find_from_lookup
+from patient_identity_fake import identity_find_from_lookup, legacy_domain_state
 """康复计划统计/趋势端点契约测试（statistics / trends）。
 
 覆盖 GET /api/rehabilitation/plans/{plan_id}/statistics 与
@@ -108,7 +108,7 @@ class RehabStatisticsContractTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_rehabilitation_service] = \
             lambda: self.rehab_service
         # 患者归属校验走 db.users.find_one 打桩，不连真实 MongoDB
-        self.database = MagicMock()
+        self.database = legacy_domain_state(MagicMock())
         self.database.users.find_one = AsyncMock(return_value=self.patient_doc)
         identity_find_from_lookup(self.database.users)
 

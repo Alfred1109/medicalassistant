@@ -1,4 +1,4 @@
-from patient_identity_fake import identity_find_from_lookup
+from patient_identity_fake import identity_find_from_lookup, legacy_domain_state
 """设备分析路由注册契约测试（AUTH01 阶段一）。
 
 device_analysis_router 此前已在包 __init__ 导入但 main.py 从未注册，端点完全不可达。
@@ -85,7 +85,7 @@ class DeviceAnalysisRouterContractTests(unittest.IsolatedAsyncioTestCase):
 
         # get_database 依赖同时服务认证链与 AUTH01 归属校验
         # （ensure_patient_access 读 db.users.find_one），打桩为可按用例控制
-        self.db = MagicMock()
+        self.db = legacy_domain_state(MagicMock())
         self.db.users.find_one = AsyncMock(return_value=make_patient_doc(OPERATOR_ID))
         identity_find_from_lookup(self.db.users)
         app.dependency_overrides[get_database] = self._fake_database

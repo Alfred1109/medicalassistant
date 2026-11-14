@@ -5,6 +5,18 @@ all BSON ID candidates and retains only exact matches, including distinct BSON
 and string IDs; other queries retain the fixture's existing cursor behavior.
 """
 from copy import deepcopy
+from unittest.mock import AsyncMock
+
+
+def legacy_domain_state(db):
+    """Pin an in-memory db fixture to the legacy patient domain (no state doc).
+
+    MagicMock-style doubles auto-create unconfigured attribute chains, whose
+    find_one is not awaitable. Declaring the state read explicitly simulates the
+    "no patient_domain_state document => legacy domain" production semantics.
+    """
+    db.patient_domain_state.find_one = AsyncMock(return_value=None)
+    return db
 
 
 def identity_find_from_lookup(collection):

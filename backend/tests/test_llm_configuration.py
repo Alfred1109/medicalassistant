@@ -1,4 +1,4 @@
-from patient_identity_fake import identity_find_from_lookup
+from patient_identity_fake import identity_find_from_lookup, legacy_domain_state
 """Missing provider credentials must not become clinical or streaming success."""
 import unittest
 from datetime import datetime, timedelta
@@ -24,7 +24,7 @@ SYNTHETIC_OPERATOR_ID = "507f1f77bcf86cd799439011"
 
 class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.db = MagicMock()
+        self.db = legacy_domain_state(MagicMock())
         for name in ("agent_interactions", "llm_generations", "rehab_plans"):
             getattr(self.db, name).insert_one = AsyncMock()
         self.base = AgentService(self.db)
@@ -118,7 +118,7 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
 
         # AUTH01 对象级授权：/plans/generate 会校验患者归属，按契约测试模式
         # 打桩 db.users.find_one 返回带该操作者归属的患者文档
-        patient_db = MagicMock()
+        patient_db = legacy_domain_state(MagicMock())
         patient_db.users.find_one = AsyncMock(return_value={
             "_id": "synthetic", "role": "patient", "practitioners": [SYNTHETIC_OPERATOR_ID]})
 
