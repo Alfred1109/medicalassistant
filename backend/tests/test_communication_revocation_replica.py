@@ -10,11 +10,17 @@ T23 待验证项落地（架构收敛记录「通信」条目）：
   离线通知按现有语义落在重连时的未读数初始帧 + REST 拉取。
 - 消息幂等：同一 (会话, client_message_id) 经两条连接并发首写，唯一索引兜底
   恰好一封落库；跨连接重复投递返回既有消息。
+- 缺陷处置记录（T45）：D1——bus 模式下携带 server_seq 的聊天帧超出 BSON int64
+  上限发布失败、退回本进程直投，跨 worker 聊天实时分发实际失效——已修复：
+  server_seq 改为 ObjectId 12 字节的 24 字符 hex 字符串（帧构造点的 BSON 可编码
+  表示，消费端 decode_server_seq 还原），原「固化失败现状」的用例改为断言修复后
+  行为并注明原缺陷（见 CrossWorkerDistributionTests）；D3——停用账号 read_receipt
+  被 outbound 授权 ValueError 误导映射为 READ_RECEIPT_PERSIST_FAILED 且连接不断
+  ——已修复为 NOT_CONVERSATION_PARTICIPANT + 4403 断连（与 message 分支同语义，
+  见 ChatConnectionRevocationTests）。
 - 已知缺陷如实记录（不修复大改）：send_message 的授权→落库段不在事务内，
   授权通过后、插入完成前的并发停用不回滚写入（见
-  RevocationRaceWindowDocumentationTests）；bus 模式下携带 server_seq 的聊天帧
-  超出 BSON int64 上限发布失败、退回本进程直投（见
-  CrossWorkerDistributionTests，修复建议随报告给出）。
+  RevocationRaceWindowDocumentationTests）；typing 转发无撤权处置（D4，记录不动）。
 
 WS 端点形态：直接驱动 setup_websockets 注册的真实端点协程（真实 ConnectionManager、
 CommunicationService、ConversationPolicy、通知与身份复核路径），传输层用单事件
@@ -304,14 +310,15 @@ class ChatConnectionRevocationTests(EndpointHarness, ReplicaCase):
         finally:
             await self._cancel(task)
 
-    async def test_revoked_account_read_receipt_rejected_without_disconnect(self):
-        """非统一认证模式：停用账号的 read_receipt 写被拒（safe），但错误码语义失真。
+    async def test_revoked_account_read_receipt_rejected_with_4403_disconnect(self):
+        """非统一认证模式：停用账号的 read_receipt 被拒并 4403 断连（T45/D3 修复后）。
 
-        已知缺陷（低危）：read_receipt 分支的前置校验只有成员层
+        原缺陷（已修复）：read_receipt 分支的前置校验只有成员层
         （is_conversation_participant 不含账号层），账号停用后请求穿透到
         _mark_messages_as_read 的 outbound 授权，ValueError 被捕获后映射成
-        READ_RECEIPT_PERSIST_FAILED（"落库失败请重试"），且连接不断开。
-        固化现状：写入被拒、已读状态不变；修复错误码映射时须更新本用例。
+        READ_RECEIPT_PERSIST_FAILED（"落库失败请重试"，误导重试），且连接不断。
+        修复后与 message 分支同语义：ValueError → NOT_CONVERSATION_PARTICIPANT
+        + 4403 断连。写入仍被拒、已读状态不变。
         """
         self.start_identity(unified=False)
         ws, task = await self.open_chat(self.db_a)
@@ -320,11 +327,7 @@ class ChatConnectionRevocationTests(EndpointHarness, ReplicaCase):
             await set_account_active(self.db_a, self.alice_id, False)
             ws.send_frame({'type': 'read_receipt'})
             error = await self.next_frame(ws, 'error')
-            self.assertEqual(error['error_code'], 'READ_RECEIPT_PERSIST_FAILED')
-            # 连接未被摘除：下一条消息仍走消息分支的账号层拒绝 + 4403 断连
-            ws.send_frame({'type': 'message', 'content': 'after', 'client_message_id': 'm2'})
-            rejected = await self.next_frame(ws, 'error')
-            self.assertEqual(rejected['error_code'], 'NOT_CONVERSATION_PARTICIPANT')
+            self.assertEqual(error['error_code'], 'NOT_CONVERSATION_PARTICIPANT')
             await asyncio.wait_for(ws.closed.wait(), 5)
             self.assertEqual(ws.close_code, 4403)
         finally:
@@ -499,6 +502,16 @@ class CrossWorkerDistributionTests(ReplicaCase):
         await ensure_ws_collections(self.db_a)
 
     async def test_message_and_notification_reach_other_process_via_event_bus(self):
+        """bus 模式双进程聊天帧跨进程投递 + seq 编码往返（T45/D1 修复后行为）。
+
+        原缺陷（已修复，本用例曾固化失败现状）：server_seq 是 ObjectId 12 字节
+        大端整数（约 2^92），超出 BSON int64 上限——携带 server_seq 的聊天帧
+        publish_event 必然失败（"MongoDB can only handle up to 8-byte ints"），
+        send_chat_message 捕获后退回本进程直投，跨 worker 实时消息分发实际失效
+        且被回退掩盖。修复后 server_seq 为 24 字符 hex 字符串（BSON 可编码，
+        帧载荷逐字入总线），聊天帧正常跨进程投递；消费端 decode_server_seq
+        还原 ObjectId，与落库文档 _id 等价。
+        """
         manager_a = get_connection_manager()
         ws_alice_a = FakeManagerSocket()
         await manager_a.connect_to_chat(ws_alice_a, self.alice_id, self.cid, 'a1')
@@ -517,20 +530,26 @@ class CrossWorkerDistributionTests(ReplicaCase):
             await asyncio.sleep(0.2)  # 读侧任务就绪（首游标从最老存活事件起）
             result = await CommunicationService.send_message(
                 self.db_a, self.cid, self.alice_id, '跨进程 hello')
-            await self._wait_for(lambda: ws_bob_notif_b.sent)
+            await self._wait_for(lambda: ws_alice_a.sent and any(
+                f['type'] == 'message' for f in ws_bob_b.sent))
         finally:
             await self._cancel(task_a, task_b)
 
-        # 已知缺陷（高，随报告）：server_seq 是 ObjectId 12 字节大端整数（约
-        # 2^92），超出 BSON int64 上限——bus 模式下携带 server_seq 的聊天帧发布
-        # 必然失败（"MongoDB can only handle up to 8-byte ints"），send_chat_message
-        # 捕获后退回本进程直投。跨 worker 的实时消息分发实际失效，且被回退掩盖。
-        # 此处固化现状：消息帧不经总线跨进程投递（bob 的连接收不到 message 帧，
-        # 仅可能收到不带 server_seq 的 notification_count 计数帧）。
-        self.assertEqual([f['type'] for f in ws_bob_b.sent if f['type'] == 'message'], [])
+        # 修复后：携带 server_seq 的 message 帧经总线跨进程投递到 worker B，
+        # 发布者 worker A 的连接也经读侧投递（双轨不重复，各恰好一次）
+        message_frames = [f for f in ws_bob_b.sent if f['type'] == 'message']
+        self.assertEqual(len(message_frames), 1)
+        self.assertEqual(message_frames[0]['message']['content'], '跨进程 hello')
         self.assertEqual([f['type'] for f in ws_alice_a.sent], ['message'])
 
-        # 通知帧/未读数帧不带 server_seq：正常经总线跨进程投递
+        # seq 编码往返（副本集用例）：帧载荷中的 server_seq 还原为落库文档 _id
+        message_oid = ObjectId(result['id'])
+        self.assertEqual(message_frames[0]['server_seq'], message_oid.binary.hex())
+        self.assertEqual(
+            CommunicationService.decode_server_seq(message_frames[0]['server_seq']),
+            message_oid)
+
+        # 通知帧/未读数帧不带 server_seq：照旧经总线跨进程投递
         # （未读计数字帧按现有实现投递 active_connections，bob 的聊天与通知
         # 连接都在册，两侧各收到一份计数字）
         (notif_frame,) = [f for f in ws_bob_notif_b.sent if f['type'] == 'notification']
@@ -538,17 +557,17 @@ class CrossWorkerDistributionTests(ReplicaCase):
         # 跨进程可见性：B 进程客户端能读到 A 进程写入的消息与通知文档
         message_doc = await self.db_b.messages.find_one({'conversation_id': self.cid})
         self.assertEqual(message_doc['content'], '跨进程 hello')
-        self.assertEqual(message_doc['_id'], ObjectId(result['id']))
+        self.assertEqual(message_doc['_id'], message_oid)
         notifications = await NotificationService.get_notifications(self.db_b, self.bob_id)
         self.assertEqual(len(notifications), 1)
         self.assertEqual(notifications[0]['title'], '新消息')
         self.assertEqual(notif_frame['data']['id'], notifications[0]['id'])
 
-        # 总线帧时序：notification/personal 正常发布（chat 帧发布失败不落总线）；
-        # 同一事件流内 _id 单调，notification 先于 personal
+        # 总线帧时序：修复后 chat 帧（消息广播）正常入总线；同一事件流内
+        # _id 单调，chat 先于 notification（离线通知）先于 personal（未读数）
         frames = await self.db_b[WS_EVENTS_COLLECTION].find({}).sort('_id', 1).to_list(10)
         kinds = [frame['kind'] for frame in frames]
-        self.assertEqual(kinds, ['notification', 'personal'])
+        self.assertEqual(kinds, ['chat', 'notification', 'personal'])
 
 
 # ---------------------------------------------------------------------------

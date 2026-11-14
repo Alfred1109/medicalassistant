@@ -40,15 +40,49 @@ class CommunicationService:
     # 消息读取/分页/离线同步一律改按 _id（ObjectId 单调，真实插入时刻有序），
     # 彻底免疫历史时区漂移，见 get_messages / sync_offline_messages。
     @staticmethod
-    def _server_seq(oid: ObjectId) -> int:
-        """D7 事件信封 server_seq：ObjectId 12 字节大端整数。
+    def _server_seq(oid: ObjectId) -> str:
+        """D7 事件信封 server_seq：ObjectId 12 字节的 24 字符小写 hex 字符串。
 
         复用 _id 单调游标基建（ObjectId 按生成时刻单调递增）：插入型事件
         （message）取落库文档 _id（重放稳定）；非插入型事件（read_receipt /
         delete_message）取发射时刻新生 ObjectId（同进程内单调）。跨 worker
         全序属 D11/WS04 范畴。
+
+        编码选型（T45/D1 修复）：历史实现直接返回 ObjectId 12 字节大端整数
+        （约 2^92），超出 BSON int64 上限——bus 模式下携带 server_seq 的聊天帧
+        publish_event 必然抛 "MongoDB can only handle up to 8-byte ints"，
+        send_chat_message 捕获后退回本进程直投，跨 worker 聊天实时分发实际
+        失效且被回退掩盖。改为 24 字符 hex 字符串的理由：
+        - BSON/JSON 双可编码：帧 dict 原样可存 ws_events（ws_event_bus 冻结
+          契约：帧载荷按调用方传入的 dict 逐字存储），local 模式直投路径
+          send_json 也无需转码；bson.binary.Binary 会被 json.dumps 拒绝，
+          破坏直投路径与客户端帧形状，故弃用；
+        - 无损往返：24 hex ↔ 12 字节，decode_server_seq 精确还原 ObjectId；
+        - 定宽小写 hex 的字典序即数值序，单调比较语义保留；
+        - 与帧内既有 id 字段（24 hex 字符串）形态一致。
+        消费端经 decode_server_seq 还原。ws_events 存量帧不可能携带旧 int
+        形态 server_seq（发布即 BSON 编码失败、从未入库），无迁移需求。
         """
-        return int.from_bytes(oid.binary, "big")
+        return oid.binary.hex()
+
+    @staticmethod
+    def decode_server_seq(value) -> Optional[ObjectId]:
+        """还原 server_seq 为 ObjectId（与 _server_seq 的编码说明配对）。
+
+        - 现行表示：24 字符 hex 字符串（_server_seq 的输出）；
+        - 防御分支：int 形态（12 字节大端整数）等价还原——bus 存量帧不可能
+          携带该形态（int 约 2^92 发布即失败、从未入库），此分支仅防御未来
+          异构生产者，行为不变。
+        非法输入返回 None（调用方按"无序号帧"处置，不抛错）。
+        """
+        if isinstance(value, str) and len(value) == 24:
+            try:
+                return ObjectId(value)
+            except Exception:
+                return None
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < (1 << 96):
+            return ObjectId(value.to_bytes(12, "big"))
+        return None
 
     @staticmethod
     async def _participant_profile(db: AsyncIOMotorClient, identifier) -> Optional[Dict[str, Any]]:
@@ -427,7 +461,7 @@ class CommunicationService:
             manager = get_connection_manager()
             
             # 向聊天室发送消息（D7：事件信封携带 server_seq，
-            # 取落库文档 _id 的大端整数——重放稳定且与插入顺序单调）
+            # 取落库文档 _id 的 hex 编码——BSON 可编码（T45/D1 修复），重放稳定）
             await manager.send_chat_message(
                 {
                     "type": "message",
@@ -535,7 +569,7 @@ class CommunicationService:
                     "reader_id": user_id,
                     "message_ids": persisted_ids,
                     "read_at": now.isoformat(),
-                    # D7：非插入型事件用发射时刻新生 ObjectId 的单调整数
+                    # D7：非插入型事件用发射时刻新生 ObjectId 的 hex 编码
                     "server_seq": CommunicationService._server_seq(ObjectId()),
                 }, conversation_id)
             except Exception as e:

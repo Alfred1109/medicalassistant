@@ -448,6 +448,19 @@ def setup_websockets(app: FastAPI):
                             return
                         try:
                             await CommunicationService.mark_conversation_as_read(db, conversation_id, user_id)
+                        except ValueError:
+                            # 连接期间被移出会话或账号停用（_mark_messages_as_read 的
+                            # outbound 授权 ValueError）：与 message 分支同语义，拒绝
+                            # 并断连——不得映射成 READ_RECEIPT_PERSIST_FAILED 误导重试
+                            # （T45/D3 修复：原实现把该路径误标为落库失败且不断连）
+                            await websocket.send_json({
+                                "type": "error",
+                                "error_code": "NOT_CONVERSATION_PARTICIPANT",
+                                "message": "用户不是该会话参与者",
+                            })
+                            manager.disconnect(user_id, connection_id)
+                            await websocket.close(code=4403)
+                            return
                         except Exception as e:
                             # 数据库失败：向发送者回错误帧，不广播
                             logger.error(f"Failed to persist read receipt in conversation {conversation_id}: {str(e)}")

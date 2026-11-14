@@ -14,7 +14,8 @@ WS01 通信契约测试
 - D6 删除语义（默认采纳待评审追认 2026-11-09）：软删除、双方会话内不可见、
   保留审计与原文引用完整性、不硬删
 - D7 事件信封：message / read_receipt / delete_message 帧携带 server_seq
-  （_id 大端单调整数，插入型事件重放稳定）
+  （_id 12 字节的 24 字符 hex 字符串——BSON 可编码表示，插入型事件重放稳定；
+  T45/D1：原 int 形态约 2^92 超出 BSON int64，bus 模式发布必失败）+ 编解码往返
 - 会话对方资料读取：经 legacy 身份分组双字面兼容（歧义 fail-closed），
   消息/会话响应格式不变
 - 启动集合边界：普通启动不隐式建集合，索引声明跳过空库，
@@ -1259,11 +1260,16 @@ class DeletionSemanticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(doc["deleted_at"], datetime)
         self.assertEqual(doc["deleted_by"], str(self.alice["_id"]))
 
-        # 删除事件广播带 server_seq
+        # 删除事件广播带 server_seq（T45/D1：BSON 可编码的 hex 字符串；
+        # 非插入型事件取发射时刻新生 ObjectId，与消息 _id 不同源）
         delete_frame = self.manager.sent[-1][0]
         self.assertEqual(delete_frame["type"], "delete_message")
         self.assertEqual(delete_frame["message_id"], message["id"])
-        self.assertIsInstance(delete_frame["server_seq"], int)
+        self.assertRegex(delete_frame["server_seq"], r"^[0-9a-f]{24}$")
+        self.assertIsInstance(
+            CommunicationService.decode_server_seq(delete_frame["server_seq"]),
+            ObjectId,
+        )
 
     async def test_recipient_can_delete_received_message(self):
         message = await self._send("for bob")
@@ -1309,7 +1315,9 @@ class DeletionSemanticsTests(unittest.IsolatedAsyncioTestCase):
 class ServerSeqEnvelopeTests(unittest.IsolatedAsyncioTestCase):
     """message / read_receipt / delete_message 帧携带 server_seq：
     插入型事件取落库 _id（重放稳定、与插入顺序单调），非插入型事件取发射时刻
-    新生 ObjectId 的同进程单调整数。"""
+    新生 ObjectId。编码为 ObjectId 12 字节的 24 字符 hex 字符串（T45/D1：原
+    int 形态超出 BSON int64，bus 模式下 publish 必失败——帧构造点必须是 BSON
+    可编码表示，消费端经 decode_server_seq 还原，行为等价）。"""
 
     def setUp(self):
         self.db = FakeDB()
@@ -1339,10 +1347,12 @@ class ServerSeqEnvelopeTests(unittest.IsolatedAsyncioTestCase):
                   if payload["type"] == "message"]
         self.assertEqual(len(frames), 2)
         seqs = [frame["server_seq"] for frame in frames]
-        self.assertTrue(all(isinstance(seq, int) and seq > 0 for seq in seqs))
-        self.assertLess(seqs[0], seqs[1])  # 与落库顺序单调一致
-        # 与消息 id 同源：server_seq = _id 的 12 字节大端整数
-        self.assertEqual(seqs[0], int.from_bytes(ObjectId(first["id"]).binary, "big"))
+        self.assertTrue(all(isinstance(seq, str) and len(seq) == 24 for seq in seqs))
+        # 与落库顺序单调一致（定宽小写 hex 的字典序即数值序）
+        self.assertLess(seqs[0], seqs[1])
+        # 与消息 id 同源：server_seq = _id 12 字节的 24 字符 hex
+        self.assertEqual(seqs[0], ObjectId(first["id"]).binary.hex())
+        self.assertEqual(seqs[1], ObjectId(second["id"]).binary.hex())
 
     async def test_replayed_message_does_not_emit_second_frame(self):
         payload = {"client_message_id": "dup"}
@@ -1362,8 +1372,42 @@ class ServerSeqEnvelopeTests(unittest.IsolatedAsyncioTestCase):
 
         receipt = self.manager.sent[0][0]
         self.assertEqual(receipt["type"], "read_receipt")
-        self.assertIsInstance(receipt["server_seq"], int)
-        self.assertGreater(receipt["server_seq"], 0)
+        self.assertRegex(receipt["server_seq"], r"^[0-9a-f]{24}$")
+        self.assertIsInstance(
+            CommunicationService.decode_server_seq(receipt["server_seq"]), ObjectId)
+
+    async def test_server_seq_roundtrips_through_bson_storage(self):
+        """seq 编码往返：ObjectId → 帧载荷 → BSON 编解码 → 消费端还原（T45/D1）。
+
+        bson.encode 是 ws_events 落库编码的等价物：修复前 int 形态 seq 在这一步
+        即抛 InvalidDocument（约 2^92 超出 int64），hex 字符串必须无损通过且
+        还原后的 ObjectId 与发射端语义等价。
+        """
+        from bson import decode as bson_decode, encode as bson_encode
+        oid = ObjectId()
+        payload = {"type": "message", "server_seq": CommunicationService._server_seq(oid)}
+        stored = bson_decode(bson_encode(dict(payload)))
+        # 帧载荷逐字经 BSON 往返（ws_event_bus「帧载荷逐字存储」契约的编码前提）
+        self.assertEqual(stored, payload)
+        self.assertEqual(CommunicationService.decode_server_seq(stored["server_seq"]), oid)
+
+    async def test_decode_server_seq_accepts_legacy_int_form_defensively(self):
+        """兼容分支：int 形态（12 字节大端整数）可等价还原；非法输入返回 None。
+
+        如实分析：ws_events 存量帧不可能携带 int 形态 server_seq——该形态发布
+        即 BSON 编码失败、从未入库（历史聊天帧全数退回本进程直投），故存量帧
+        要么无 server_seq（notification/personal/user_joined/typing 等帧），要么
+        是本修复落地后才可能入库的 hex 字符串形态。int 分支纯防御异构生产者。
+        """
+        oid = ObjectId()
+        legacy = int.from_bytes(oid.binary, "big")
+        self.assertEqual(CommunicationService.decode_server_seq(legacy), oid)
+        # 范围外/非法输入一律 None（按"无序号帧"处置，不抛错）
+        self.assertIsNone(CommunicationService.decode_server_seq(None))
+        self.assertIsNone(CommunicationService.decode_server_seq(-1))
+        self.assertIsNone(CommunicationService.decode_server_seq(1 << 96))
+        self.assertIsNone(CommunicationService.decode_server_seq("zz"))
+        self.assertIsNone(CommunicationService.decode_server_seq("0" * 23))
 
 
 # ---------------------------------------------------------------------------
