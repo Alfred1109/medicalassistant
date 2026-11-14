@@ -12,7 +12,8 @@ import httpx
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
 
 from app.core.device_access import device_patient_scope, ensure_device_access, resolve_device_patient
-from app.core.patient_access import PatientAccessError, ensure_self_patient_access, resolve_self_patient_id
+from app.core.patient_access import (
+    PatientAccessError, assigned_patient_query, ensure_self_patient_access, resolve_self_patient_id)
 from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
 from app.services.device_service import DeviceService
 
@@ -149,6 +150,14 @@ class PatientDeviceMongoArchitectureTests(unittest.IsolatedAsyncioTestCase):
             await self.service.unbind_device(str(self.doctor_id), str(device_id), actor=admin)
         self.assertEqual(denied.exception.status_code, 404)
         self.assertEqual((await self.db.devices.find_one({"_id": device_id}))["status"], "active")
+
+    async def test_device_patient_scope_equals_legacy_assigned_ids(self):
+        """legacy 域：医护范围接入 assigned_scope_query 后与原 assigned_ids 路径等价。"""
+        legacy = await LegacyPatientRepository(self.db).assigned_ids(
+            {**assigned_patient_query(str(self.doctor_id), "doctor"), "$or": [
+                {"is_active": True}, {"is_active": {"$exists": False}}]})
+        self.assertEqual(await device_patient_scope(self.db, self.actor), legacy)
+        self.assertEqual(legacy, [str(self.patient_id)])
 
     async def test_cross_role_id_alias_is_rejected_for_scope_detail_and_self(self):
         await self.db.users.insert_one({"_id": str(self.patient_id), "role": "doctor"})

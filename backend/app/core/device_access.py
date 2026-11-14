@@ -3,7 +3,7 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from app.core.patient_access import (
-    assigned_patient_query, ensure_patient_access, load_patient_doc, resolve_self_patient_id,
+    assigned_scope_query, ensure_patient_access, load_patient_doc, resolve_self_patient_id,
 )
 from app.patients.legacy import LegacyPatientRepository
 from app.core.patient_identity import identity_key, load_identity_groups
@@ -65,5 +65,5 @@ async def device_patient_scope(db, actor, patient_id=None):
     if actor.role not in {"doctor", "health_manager"}:
         raise HTTPException(403, detail="无权查看患者设备")
     return await LegacyPatientRepository(db).assigned_ids(
-        {**assigned_patient_query(str(actor.id), actor.role), "$or": [
+        {**await assigned_scope_query(db, str(actor.id), actor.role), "$or": [
             {"is_active": True}, {"is_active": {"$exists": False}}]})

@@ -2,7 +2,7 @@
 from fastapi import HTTPException
 
 from app.core.patient_access import (
-    PatientAccessError, assigned_patient_query, ensure_patient_access, ensure_self_patient_access,
+    PatientAccessError, assigned_scope_query, ensure_patient_access, ensure_self_patient_access,
 )
 from app.patients.legacy import LegacyPatientRepository
 
@@ -30,4 +30,4 @@ async def followup_patient_scope(db, actor):
     if actor.role not in {"doctor", "health_manager"}:
         raise HTTPException(status_code=403, detail="无权访问随访记录")
     return await LegacyPatientRepository(db).assigned_ids(
-        assigned_patient_query(str(actor.id), actor.role))
+        await assigned_scope_query(db, str(actor.id), actor.role))

@@ -172,6 +172,18 @@ class RehabPlanListScopeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 422)
         self.assertEqual(self.database.rehab_plans.queries, [])
 
+    async def test_list_scope_ids_equal_legacy_assigned_ids(self):
+        """legacy 域：授权范围接入 assigned_scope_query 后与原 assigned_ids 路径等价。"""
+        from app.core.patient_access import assigned_patient_query
+        from app.patients.legacy import LegacyPatientRepository
+        for identifier, role in ((DOCTOR, "doctor"), (MANAGER, "health_manager")):
+            legacy = await LegacyPatientRepository(self.database).assigned_ids(
+                assigned_patient_query(identifier, role))
+            plans = await self.service.list_rehab_plans(actor_id=identifier, actor_role=role)
+            self.assertEqual(sorted({row["patient_id"] for row in plans}), sorted(legacy))
+            self.assertEqual(self.database.rehab_plans.queries[-1],
+                             {"patient_id": {"$in": legacy}})
+
     async def test_service_itself_refuses_unauthorized_explicit_filter(self):
         from app.core.patient_access import PatientAccessError
         with self.assertRaises(PatientAccessError):

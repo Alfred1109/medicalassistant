@@ -11,7 +11,7 @@ from pymongo.write_concern import WriteConcern
 from copy import deepcopy
 from app.core.config import settings
 from app.core.exceptions import AppBaseException, ExternalServiceException
-from app.core.patient_access import assigned_patient_query, PatientAccessError
+from app.core.patient_access import assigned_scope_query, PatientAccessError
 from app.patients.legacy import LegacyPatientRepository
 import numpy as np
 
@@ -209,7 +209,7 @@ class RehabilitationService:
                 filter_dict["patient_id"] = patient_id
         elif actor_role in {"doctor", "health_manager"}:
             patient_ids = await LegacyPatientRepository(self.db).assigned_ids(
-                assigned_patient_query(str(actor_id), actor_role))
+                await assigned_scope_query(self.db, str(actor_id), actor_role))
             if patient_id and str(patient_id) not in patient_ids:
                 raise PatientAccessError("无权访问该患者的康复方案")
             # An empty authorized scope must stay empty, never become find({}).

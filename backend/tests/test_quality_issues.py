@@ -15,6 +15,8 @@ from pydantic import ValidationError
 
 from app.api.routers.quality_issue_router import router, get_current_active_user, get_database
 from app.core.exceptions import AppBaseException
+from app.core.patient_access import assigned_patient_query
+from app.patients.legacy import LegacyPatientRepository
 from app.schemas.quality_issue import (AssignQualityIssue, ConfirmQualityIssue, QualityIssueCreate,
     ResolveQualityIssue, ReviewQualityIssue)
 from app.services.quality_issue_service import QualityIssueService
@@ -65,6 +67,24 @@ class QualityIssueMongoTests(unittest.IsolatedAsyncioTestCase):
         return QualityIssueCreate.model_validate({"request_id": uuid4().hex, "patient_id": str(self.patient),
             "source_type": "rehab_plan", "source_id": str(self.plan), "title": "Manual concern",
             "description": "A clinician observed missing documentation", "evidence_refs": ["review-record-1"], **changes})
+
+    async def test_list_patient_scope_equals_legacy_assigned_ids(self):
+        """legacy 域：list 患者范围接入 assigned_scope_query 后与原 assigned_ids 路径等价。"""
+        legacy = await LegacyPatientRepository(self.db).assigned_ids(
+            {**assigned_patient_query(str(self.doctor), "doctor"), "is_active": True})
+        self.assertEqual(legacy, [str(self.patient)])
+        outsider = SimpleNamespace(id=str(self.outsider), role="doctor")
+        self.assertEqual(await LegacyPatientRepository(self.db).assigned_ids(
+            {**assigned_patient_query(str(self.outsider), "doctor"), "is_active": True}),
+            [str(self.other_patient)])
+        mine = await self.issue()
+        theirs = await self.svc.create(
+            self.create_payload(patient_id=str(self.other_patient)), outsider)
+        result = await self.svc.list(self.actor, limit=100)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual([item["id"] for item in result["items"]], [mine["id"]])
+        self.assertEqual([item["id"] for item in (await self.svc.list(outsider, limit=100))["items"]],
+                         [theirs[0]["id"]])
 
     async def issue(self, **changes):
         return (await self.svc.create(self.create_payload(**changes), self.actor))[0]

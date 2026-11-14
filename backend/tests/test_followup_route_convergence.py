@@ -25,6 +25,9 @@ from bson import ObjectId
 from followup_transaction_fake import FakeTransactionClient
 
 from app.core.auth import get_current_user
+from app.core.followup_access import followup_patient_scope
+from app.core.patient_access import assigned_patient_query
+from app.patients.legacy import LegacyPatientRepository
 from app.db.mongodb import get_database
 from app.main import app
 from app.models.health_record import FollowUpRecord
@@ -286,6 +289,21 @@ class FollowupRouteConvergenceTests(unittest.IsolatedAsyncioTestCase):
             json={"expected_version": submitted.json()["mutation_version"], "decision": "approved"})
         self.assertEqual(reviewed.status_code, 200, reviewed.text)
         self.assertEqual(reviewed.json()["status"], "completed")
+
+    async def test_followup_patient_scope_equals_legacy_assigned_ids(self):
+        """legacy 域：范围接入 assigned_scope_query 后与原 assigned_ids 路径等价。"""
+        self.user = _make_user("doctor", DOCTOR_ID)
+        self.db.users.docs[ObjectId(MANAGER_ID)] = {
+            "_id": ObjectId(MANAGER_ID), "role": "patient", "health_managers": [MANAGER_ID]}
+        scope = await followup_patient_scope(self.db, self.user)
+        legacy = await LegacyPatientRepository(self.db).assigned_ids(
+            assigned_patient_query(DOCTOR_ID, "doctor"))
+        self.assertEqual(scope, legacy)
+        self.assertEqual(scope, [PATIENT_ID])
+        self.user = _make_user("health_manager", MANAGER_ID)
+        self.assertEqual(await followup_patient_scope(self.db, self.user),
+                         await LegacyPatientRepository(self.db).assigned_ids(
+                             assigned_patient_query(MANAGER_ID, "health_manager")))
 
     async def test_doctor_followups_rejects_non_doctor(self):
         self.user = _make_user("patient", PATIENT_ID)

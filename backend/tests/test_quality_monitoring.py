@@ -18,6 +18,9 @@ from unittest.mock import patch
 
 from app.api.routers.quality_monitoring_router import router, service
 from app.core.auth import get_current_active_user
+from app.core.followup_access import followup_patient_scope
+from app.core.patient_access import assigned_patient_query
+from app.patients.legacy import LegacyPatientRepository
 from app.core.exceptions import AppBaseException
 from app.services.quality_monitoring_service import QualityMonitoringService, csv_safe
 from app.services.followup_service import FollowupService, followup_from_mongo, map_followup_record_to_response
@@ -101,6 +104,18 @@ class QualityMongoTests(unittest.IsolatedAsyncioTestCase):
 
     async def get(self, path="overview", **params):
         return await self.http.get("/api/quality-monitoring/" + path, params=params)
+
+    async def test_medical_scope_equals_legacy_assigned_ids(self):
+        """legacy 域：scope 接入 assigned_scope_query 后与原 assigned_ids 路径等价。"""
+        legacy = await LegacyPatientRepository(self.db).assigned_ids(
+            assigned_patient_query(self.doctor, "doctor"))
+        self.assertEqual(legacy, [self.patient, self.second])
+        self.assertEqual(await self.svc.scope(self.actor), legacy)
+        self.assertEqual(await followup_patient_scope(self.db, self.actor), legacy)
+        self.actor.id, self.actor.role = self.manager, "health_manager"
+        self.assertEqual(await self.svc.scope(self.actor),
+                         await LegacyPatientRepository(self.db).assigned_ids(
+                             assigned_patient_query(self.manager, "health_manager")))
 
     async def test_scope_applies_before_counts_and_pages_for_each_medical_role(self):
         await self.followup(status="in_review")

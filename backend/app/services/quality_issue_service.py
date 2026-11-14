@@ -11,7 +11,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.core.exceptions import AppBaseException
 from app.db.transactions import run_transaction
-from app.core.patient_access import assigned_patient_query, patient_assignment_field
+from app.core.patient_access import assigned_scope_query, patient_assignment_field
 from app.core.patient_identity import identity_key, load_identity_groups
 from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
 from app.services.followup_service import FollowupService
@@ -245,7 +245,7 @@ class QualityIssueService:
             query["patient_id"] = patient_id
         else:
             patient_scope = ({"role": "patient"} if actor.role == "admin" else
-                             assigned_patient_query(str(actor.id), actor.role))
+                             await assigned_scope_query(self.db, str(actor.id), actor.role))
             # Scope, role/assignment filtering and same-visible-value identity
             # disambiguation all live in the legacy patient adapter: one
             # candidate read plus one identity batch, never an N+1 patient loop.
