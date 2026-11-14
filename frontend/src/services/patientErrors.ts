@@ -14,6 +14,8 @@ export const PATIENT_DOMAIN_ERROR_COPY: Record<string, string> = {
   REHAB_PATIENT_DOMAIN_UNSUPPORTED: '当前患者档案尚未接入康复账号，暂不支持康复计划相关操作。',
   // 患者域开关状态不可用，访问被拒绝（503）
   PATIENT_DOMAIN_STATE_UNAVAILABLE: '患者域状态暂时不可用，请稍后重试；若持续出现请联系管理员。',
+  // 患者列表分页参数越界（skip≥0、1≤limit≤200；503）
+  INVALID_PATIENT_PAGINATION: '患者列表分页参数超出允许范围，请调整分页设置后重试。',
 };
 
 type ApiErrorShape = { response?: { status?: number; data?: { error?: unknown } } };

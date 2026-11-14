@@ -21,20 +21,31 @@ router = APIRouter()
 # 患者管理
 @router.get("/patients", response_model=List[dict])
 async def get_doctor_patients(
+    skip: int = Query(0, description="分页偏移量，缺省 0（不翻页）"),
+    limit: Optional[int] = Query(
+        None, description="每页数量（1-200）；缺省不传=一次性全量（legacy）"
+                          "/canonical 域默认前 100 条按 patient_id 排序"),
     current_user: UserResponse = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """获取医生管理的患者列表"""
+    """获取医生管理的患者列表
+
+    T59 分页预适配：skip/limit 为可选参数，缺省（不传）与既有一次性全量
+    行为完全一致。显式分页时两域执行同一约束（skip≥0、1≤limit≤200），
+    越界返回 503 INVALID_PATIENT_PAGINATION（校验在服务层统一执行，
+    不在 Query 层拦截，保证错误码与 canonical 仓库语义一致）。
+    """
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    
+
     # 从数据库获取患者数据
     patient_crud = PatientCRUD(db, Patient)
 
     try:
         # 获取当前医生的所有患者
         doctor_id = current_user.id
-        patients_data = await patient_crud.find_by_doctor_id(doctor_id)
+        patients_data = await patient_crud.find_by_doctor_id(
+            doctor_id, skip=skip, limit=limit)
     except AppBaseException:
         # 适配器的患者标识歧义（PATIENT_IDENTITY_AMBIGUOUS/503）等业务异常
         # 保留全局处理器语义，不降级为 500

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -23,6 +23,14 @@ import EditIcon from '@mui/icons-material/Edit';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import { useNavigate } from 'react-router-dom';
 import { apiService } from '../../services/api';
+import { patientDomainErrorCopy } from '../../services/patientErrors';
+import {
+  mergePatientBatches,
+  patientBatchComplete,
+  patientLoadMoreAvailable,
+  PATIENT_LIST_ONE_SHOT_CAP,
+  PATIENT_LIST_PAGE_SIZE,
+} from '../../services/patientList';
 import { useApi } from '../../hooks/useApi';
 import { Patient } from '../../types/patient.types';
 
@@ -30,20 +38,39 @@ const PatientManagement: React.FC = () => {
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState('');
   const [filteredPatients, setFilteredPatients] = useState<Patient[]>([]);
-  
+  // T59 分页预适配：缺省仍为一次性全量拉取；「加载更多」为可选追加路径，
+  // 仅在一次性结果达到上限阈值（canonical 域缺省截断场景）时出现。
+  const [morePatients, setMorePatients] = useState<Patient[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState('');
+  const [allLoaded, setAllLoaded] = useState(false);
+
   // 使用API钩子获取患者列表
-  const { 
+  const {
     data: patients,
     loading,
     error,
-    execute: fetchPatients 
+    execute: fetchPatients
   } = useApi<Patient[], []>(apiService.doctor.getPatients, true);
-  
+
+  // 一次性全量 + 「加载更多」追加的合并视图；未追加时与原全量行为一致。
+  const allPatients = useMemo(
+    () => mergePatientBatches<Patient>(patients, morePatients),
+    [patients, morePatients]
+  );
+
+  // 基础列表刷新（首次/重试）时清空追加批次与加载完成标记
+  useEffect(() => {
+    setMorePatients([]);
+    setMoreError('');
+    setAllLoaded(false);
+  }, [patients]);
+
   // 搜索处理
   useEffect(() => {
-    if (patients) {
+    if (allPatients.length > 0) {
       if (searchTerm) {
-        const filtered = patients.filter(
+        const filtered = allPatients.filter(
           (patient) =>
             patient.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
             patient.diagnosis?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -51,13 +78,34 @@ const PatientManagement: React.FC = () => {
         );
         setFilteredPatients(filtered);
       } else {
-        setFilteredPatients(patients);
+        setFilteredPatients(allPatients);
       }
     } else {
       // 没有数据时显示空数组，而不是使用模拟数据
       setFilteredPatients([]);
     }
-  }, [searchTerm, patients]);
+  }, [searchTerm, allPatients]);
+
+  const totalLoaded = allPatients.length;
+  const showLoadMore = patientLoadMoreAvailable(totalLoaded, allLoaded);
+
+  const handleLoadMore = async () => {
+    if (loadingMore || loading) return;
+    setLoadingMore(true);
+    setMoreError('');
+    try {
+      const { data } = await apiService.doctor.getPatients(
+        { skip: totalLoaded, limit: PATIENT_LIST_PAGE_SIZE });
+      const batch = Array.isArray(data) ? data : [];
+      setMorePatients((prev) => mergePatientBatches<Patient>(prev, batch));
+      if (patientBatchComplete(batch.length)) setAllLoaded(true);
+    } catch (err) {
+      // 患者域错误（含 503 INVALID_PATIENT_PAGINATION）走统一文案映射
+      setMoreError(patientDomainErrorCopy(err) ?? '加载更多患者失败，请重试。');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
   
   // 重试获取数据
   const handleRetry = () => {
@@ -186,6 +234,39 @@ const PatientManagement: React.FC = () => {
           </TableBody>
         </Table>
       </TableContainer>
+
+      {moreError && (
+        <Alert
+          severity="error"
+          sx={{ mt: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={handleLoadMore}>
+              重试
+            </Button>
+          }
+        >
+          {moreError}
+        </Alert>
+      )}
+      {showLoadMore && (
+        <Box display="flex" flexDirection="column" alignItems="center" mt={2}>
+          <Typography variant="body2" color="text.secondary" gutterBottom>
+            已加载 {totalLoaded} 名患者，可能还有更多
+          </Typography>
+          <Button
+            variant="outlined"
+            onClick={handleLoadMore}
+            disabled={loadingMore}
+          >
+            {loadingMore ? '加载中...' : '加载更多患者'}
+          </Button>
+        </Box>
+      )}
+      {!showLoadMore && allLoaded && totalLoaded >= PATIENT_LIST_ONE_SHOT_CAP && (
+        <Typography variant="body2" color="text.secondary" align="center" mt={2}>
+          已加载全部患者
+        </Typography>
+      )}
     </Box>
   );
 };

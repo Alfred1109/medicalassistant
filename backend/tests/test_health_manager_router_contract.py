@@ -71,6 +71,14 @@ class FakeCollection:
     def __init__(self):
         self.docs = {}
 
+    async def find_one(self, filter_, *args, **kwargs):
+        # 域模式读取（patient_domain_state 单例）需要 find_one；
+        # 未播种状态文档时返回 None，即按 legacy 域处理。
+        for doc in self.docs.values():
+            if _match(doc, filter_):
+                return dict(doc)
+        return None
+
     def find(self, filter_, projection=None, **kwargs):
         return FakeCursor([doc for doc in self.docs.values() if _match(doc, filter_)])
 

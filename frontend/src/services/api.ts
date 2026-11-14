@@ -61,8 +61,16 @@ export const apiService = {
   
   // 医生相关接口
   doctor: {
-    getPatients: (): Promise<AxiosResponse<Patient[]>> => 
-      api.get('/doctors/patients'),
+    // T59 分页预适配：skip/limit 为可选参数；缺省（不传）保持一次性全量
+    // 请求不变（请求形态与历史完全一致）。显式分页时后端两域执行同一约束
+    // （skip≥0、1≤limit≤200），越界返回 503 INVALID_PATIENT_PAGINATION
+    // （文案映射见 services/patientErrors）。
+    getPatients: (options?: { skip?: number; limit?: number }): Promise<AxiosResponse<Patient[]>> => {
+      const params = options && (options.skip !== undefined || options.limit !== undefined)
+        ? { skip: options.skip, limit: options.limit }
+        : undefined;
+      return params ? api.get('/doctors/patients', { params }) : api.get('/doctors/patients');
+    },
     
     getPatientHealthRecord: (patientId: string): Promise<AxiosResponse<PatientHealthRecord>> => 
       api.get(`/doctors/health-records/${patientId}`),

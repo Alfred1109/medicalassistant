@@ -67,7 +67,26 @@ def _match(doc, filter_):
 
 class FakeCursor:
     def __init__(self, docs):
-        self.docs = docs
+        self.docs = list(docs)
+        # 分页路径调用记录：缺省路径必须完全不触碰（锁定「缺省=全量不排序」）
+        self.sort_call = None
+        self.skip_call = None
+        self.limit_call = None
+
+    def sort(self, key, direction=1):
+        self.sort_call = (key, direction)
+        self.docs = sorted(self.docs, key=lambda doc: doc.get(key) if doc.get(key) is not None else "")
+        return self
+
+    def skip(self, count):
+        self.skip_call = count
+        self.docs = self.docs[count:]
+        return self
+
+    def limit(self, count):
+        self.limit_call = count
+        self.docs = self.docs[:count]
+        return self
 
     async def to_list(self, length=None):
         return list(self.docs if length is None else self.docs[:length])
@@ -84,8 +103,10 @@ class FakeCollection:
     def __init__(self):
         self.docs = {}
         self.find_one_error = None
+        self.last_cursor = None
 
-    async def find_one(self, filter_):
+    async def find_one(self, filter_, *args, **kwargs):
+        # canonical 路径的 require_canonical 会以 session=None 关键字调用
         if self.find_one_error is not None:
             raise self.find_one_error
         for doc in self.docs.values():
@@ -96,7 +117,8 @@ class FakeCollection:
     def find(self, filter_, projection=None, **kwargs):
         if self.find_one_error is not None:
             raise self.find_one_error
-        return FakeCursor([doc for doc in self.docs.values() if _match(doc, filter_)])
+        self.last_cursor = FakeCursor([doc for doc in self.docs.values() if _match(doc, filter_)])
+        return self.last_cursor
 
     async def count_documents(self, filter_):
         return sum(1 for doc in self.docs.values() if _match(doc, filter_))
@@ -426,6 +448,174 @@ class PatientReadAdapterContractTests(DoctorRouterContractTestBase):
         self.assertEqual(record["name"], "老患者")
         self.assertEqual(record["age"], 55)
         self.assertEqual(record["gender"], "女")
+
+
+class DoctorPatientsPaginationContractTests(DoctorRouterContractTestBase):
+    """T59 分页预适配契约（legacy 域）。
+
+    - 缺省（不传 skip/limit）路径零行为变化：全量返回，游标不做 sort/skip/limit；
+    - 显式分页生效：按 _id 升序翻页（加法式新路径）；
+    - 参数越界统一 INVALID_PATIENT_PAGINATION/503（与 canonical 仓库语义一致）。
+    """
+
+    def _seed_patients(self, db, count):
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "name": "医生"})
+        ids = []
+        for index in range(count):
+            patient_id = ObjectId()
+            ids.append(str(patient_id))
+            db.users.insert({"_id": patient_id, "role": "patient",
+                             "name": f"患者{index}", "practitioners": [ObjectId(DOCTOR_ID)]})
+        return ids
+
+    async def test_default_request_keeps_full_unsorted_behavior(self):
+        """缺省请求：不排序、不跳页、不截断，游标保持原样。"""
+        db = FakeDatabase()
+        self._seed_patients(db, 5)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()), 5)
+        cursor = db.users.last_cursor
+        self.assertIsNone(cursor.sort_call)
+        self.assertIsNone(cursor.skip_call)
+        self.assertIsNone(cursor.limit_call)
+
+    async def test_explicit_pagination_applies_id_ascending_page(self):
+        """显式 skip/limit：按 _id 升序返回对应页（legacy 分页新路径）。"""
+        db = FakeDatabase()
+        ids = self._seed_patients(db, 5)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients?skip=2&limit=2")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([item["id"] for item in response.json()], sorted(ids)[2:4])
+        cursor = db.users.last_cursor
+        self.assertEqual(cursor.sort_call, ("_id", 1))
+        self.assertEqual(cursor.skip_call, 2)
+        self.assertEqual(cursor.limit_call, 2)
+
+    async def test_limit_only_page_is_sorted_and_capped(self):
+        """仅传 limit：排序生效并截断前 limit 条。"""
+        db = FakeDatabase()
+        ids = self._seed_patients(db, 4)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients?limit=2")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([item["id"] for item in response.json()], sorted(ids)[:2])
+
+    async def test_limit_boundary_200_accepted(self):
+        """limit=200 为合法上界（与 canonical 仓库约束一致）。"""
+        db = FakeDatabase()
+        self._seed_patients(db, 3)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients?limit=200")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()), 3)
+
+    async def test_invalid_pagination_returns_503_with_domain_code(self):
+        """越界/非法分页参数：统一 INVALID_PATIENT_PAGINATION/503。"""
+        db = FakeDatabase()
+        self._seed_patients(db, 2)
+        self._setup(db, _make_user())
+        for params in ["limit=201", "limit=0", "limit=-1", "skip=-1"]:
+            response = await self._client.get(f"/api/doctors/patients?{params}")
+            self.assertEqual(response.status_code, 503, f"{params}: {response.text}")
+            self.assertEqual(response.json()["error"], "INVALID_PATIENT_PAGINATION")
+
+
+class DoctorPatientsCanonicalPaginationContractTests(DoctorRouterContractTestBase):
+    """T59 canonical 语义映射契约。
+
+    - 缺省请求映射 list_assigned 仓库级缺省：limit=100、按 patient_id 排序、
+      仅 status=active，响应形状与 legacy 一致（id=patient_id）；
+    - 显式分页映射 skip/limit；
+    - 分页越界错误码与 legacy 一致；域状态异常 fail-closed 503。
+    """
+
+    CANONICAL_STATE = {"_id": "clinical-patients-v1", "mode": "canonical",
+                       "schema_version": 1}
+
+    def _seed_canonical(self, db, count, inactive=False):
+        db.patient_domain_state.insert(dict(self.CANONICAL_STATE))
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "name": "医生"})
+        ids = []
+        for index in range(count):
+            patient_id = ObjectId()
+            ids.append(str(patient_id))
+            db.clinical_patients.insert({
+                "_id": patient_id, "patient_id": str(patient_id),
+                "name": f"患者{index}",
+                "status": "inactive" if inactive and index == 0 else "active",
+                "practitioners": [DOCTOR_ID],
+                "demographic_info": {"age": 30 + index, "gender": "男"},
+                "medical_info": {"diagnosis": f"诊断{index}"},
+            })
+        return ids
+
+    async def test_canonical_default_maps_list_assigned_default(self):
+        """缺省请求：canonical 下按 patient_id 排序、剔除 inactive、形状不变。"""
+        db = FakeDatabase()
+        ids = self._seed_canonical(db, 3)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients")
+        self.assertEqual(response.status_code, 200, response.text)
+        patients = response.json()
+        self.assertEqual([item["id"] for item in patients], sorted(ids))
+        self.assertEqual(patients[0], {
+            "id": sorted(ids)[0], "name": "患者0", "age": 30,
+            "gender": "男", "diagnosis": "诊断0", "status": "active"})
+        cursor = db.clinical_patients.last_cursor
+        self.assertEqual(cursor.sort_call, ("patient_id", 1))
+        self.assertEqual(cursor.limit_call, 100)
+        self.assertEqual(cursor.skip_call, 0)
+
+    async def test_canonical_default_caps_at_repository_limit_100(self):
+        """缺省请求在 canonical 域最多返回仓库缺省 100 条（域切换语义差异的锁定）。"""
+        db = FakeDatabase()
+        self._seed_canonical(db, 103)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()), 100)
+
+    async def test_canonical_explicit_pagination_maps_skip_limit(self):
+        """显式 skip/limit：映射到 list_assigned 的分页语义。"""
+        db = FakeDatabase()
+        ids = self._seed_canonical(db, 5)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients?skip=1&limit=2")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([item["id"] for item in response.json()], sorted(ids)[1:3])
+
+    async def test_canonical_inactive_patients_excluded(self):
+        """canonical 仅返回 status=active（list_assigned 内建收窄）。"""
+        db = FakeDatabase()
+        ids = self._seed_canonical(db, 3, inactive=True)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([item["id"] for item in response.json()],
+                         sorted(ids)[1:])
+
+    async def test_canonical_invalid_pagination_returns_same_code(self):
+        """越界分页在 canonical 域与 legacy 同码：INVALID_PATIENT_PAGINATION/503。"""
+        db = FakeDatabase()
+        self._seed_canonical(db, 2)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients?limit=201")
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"], "INVALID_PATIENT_PAGINATION")
+
+    async def test_canonical_unknown_domain_state_fails_closed_503(self):
+        """域状态异常（未知 mode）：fail-closed 503，绝不静默回退 legacy。"""
+        db = FakeDatabase()
+        db.patient_domain_state.insert({"_id": "clinical-patients-v1",
+                                        "mode": "migrating", "schema_version": 1})
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "name": "医生"})
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients")
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"], "PATIENT_DOMAIN_STATE_UNAVAILABLE")
 
 
 if __name__ == "__main__":
