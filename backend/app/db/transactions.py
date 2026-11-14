@@ -1,4 +1,9 @@
-"""随访及其表单集成共享的 MongoDB 事务边界。"""
+"""MongoDB transaction execution shared by business domains.
+
+Domains retain their error codes and messages; driver retries and uncertain
+commit outcomes have one implementation. No domain falls back to sequential
+writes when transactions are unavailable.
+"""
 from pymongo.errors import PyMongoError
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
@@ -6,11 +11,11 @@ from pymongo.write_concern import WriteConcern
 from app.core.exceptions import AppBaseException
 
 
-async def run_followup_transaction(db, callback):
-    """事务提交重试由驱动处理；不支持事务时拒绝，绝不顺序写入降级。"""
+async def run_transaction(db, callback, *, error_code, error_message):
+    """Execute an atomic callback and preserve the driver's commit ambiguity."""
     if not hasattr(db, "client"):
         raise AppBaseException("数据库未提供事务会话", status_code=503,
-                               error_code="FOLLOWUP_TRANSACTION_UNAVAILABLE")
+                               error_code=error_code)
     try:
         async with await db.client.start_session() as session:
             return await session.with_transaction(
@@ -20,7 +25,14 @@ async def run_followup_transaction(db, callback):
         raise
     except PyMongoError as exc:
         raise AppBaseException(
-            "随访事务未能确认提交，请使用相同请求重试；数据库必须支持副本集事务",
-            status_code=503, error_code="FOLLOWUP_TRANSACTION_UNAVAILABLE",
+            error_message,
+            status_code=503, error_code=error_code,
             details={"commit_result_unknown": bool(
                 getattr(exc, "has_error_label", lambda _: False)("UnknownTransactionCommitResult"))}) from exc
+
+
+async def run_followup_transaction(db, callback):
+    """Compatibility entry point with the follow-up domain's public errors."""
+    return await run_transaction(db, callback,
+        error_code="FOLLOWUP_TRANSACTION_UNAVAILABLE",
+        error_message="随访事务未能确认提交，请使用相同请求重试；数据库必须支持副本集事务")
