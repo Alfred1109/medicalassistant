@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """设备分析路由注册契约测试（AUTH01 阶段一）。
 
 device_analysis_router 此前已在包 __init__ 导入但 main.py 从未注册，端点完全不可达。
@@ -27,6 +28,7 @@ device_analysis_router = importlib.import_module(
     "app.api.routers.device_analysis_router")
 from app.schemas.user import UserResponse
 from app.services.user_service import UserService
+from app.core.dependencies import get_device_service, get_device_analysis_service
 
 OPERATOR_ID = "507f1f77bcf86cd799439011"
 # 路由层现对 device_id 做 ObjectId.is_valid 粗判（畸形 ID → 404），
@@ -84,8 +86,11 @@ class DeviceAnalysisRouterContractTests(unittest.IsolatedAsyncioTestCase):
         # get_database 依赖同时服务认证链与 AUTH01 归属校验
         # （ensure_patient_access 读 db.users.find_one），打桩为可按用例控制
         self.db = MagicMock()
-        self.db.users.find_one = AsyncMock(return_value=None)
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(OPERATOR_ID))
+        identity_find_from_lookup(self.db.users)
         app.dependency_overrides[get_database] = self._fake_database
+        app.dependency_overrides[get_device_service] = lambda: self.device_service
+        app.dependency_overrides[get_device_analysis_service] = lambda: self.analysis_service
         self.get_user_mock = AsyncMock(return_value=self.operator)
         self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
         self.lookup.start()
@@ -192,6 +197,7 @@ class DeviceAnalysisRouterContractTests(unittest.IsolatedAsyncioTestCase):
         # AUTH01：患者档案不存在 → 404 PATIENT_NOT_FOUND（404 先于 403）
         self.operator = make_operator(role="doctor")
         self.get_user_mock.return_value = self.operator
+        self.db.users.find_one.return_value = None
         response = await self.client.get(
             f"/api/device-analysis/alerts/patient/{OTHER_PATIENT_ID}",
             headers=self.auth())

@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """设备主路由契约测试（AUTH01 阶段一）。
 
 device_router 此前以字典方式访问认证用户（user["_id"] / user.get("role")），
@@ -31,6 +32,7 @@ device_router = importlib.import_module("app.api.routers.device_router")
 from app.schemas.user import UserResponse
 from app.services import device_service as device_service_module
 from app.services.user_service import UserService
+from app.core.dependencies import get_device_service
 
 OPERATOR_ID = "507f1f77bcf86cd799439011"
 # 路由层对 device_id 做 ObjectId.is_valid 粗判（畸形 ID → 404），
@@ -73,6 +75,23 @@ def make_device_doc(patient_id=OPERATOR_ID, device_id=DEVICE_ID):
     }
 
 
+class TransactionSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def with_transaction(self, callback, **options):
+        return await callback(self)
+
+
+def _transaction_db(db):
+    db.client.start_session = AsyncMock(return_value=TransactionSession())
+    identity_find_from_lookup(db.users)
+    db.users.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+
+
 class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
     """路由层契约：认证、属主粗判、畸形 ID 语义。"""
 
@@ -89,8 +108,10 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
         # get_database 依赖同时服务认证链与 AUTH01 归属校验
         # （ensure_patient_access 读 db.users.find_one），打桩为可按用例控制
         self.db = MagicMock()
-        self.db.users.find_one = AsyncMock(return_value=None)
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(OPERATOR_ID))
+        identity_find_from_lookup(self.db.users)
         app.dependency_overrides[get_database] = self._fake_database
+        app.dependency_overrides[get_device_service] = lambda: self.device_service
         self.get_user_mock = AsyncMock(return_value=self.operator)
         self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
         self.lookup.start()
@@ -131,7 +152,9 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
         # 回归锁定：端点必须以 current_user.id 访问认证用户（真实 UserResponse），
         # 此前的 user["_id"] 字典访问在绑定写路径必然 TypeError
         inserted_id = ObjectId(DEVICE_ID)
-        db = MagicMock()
+        db = self.db
+        db.users.find_one = AsyncMock(return_value=make_patient_doc(OPERATOR_ID))
+        _transaction_db(db)
         db.devices.insert_one = AsyncMock(
             return_value=MagicMock(inserted_id=inserted_id))
         # 此测试走真实 device_service（打桩 db 落库），需恢复被 setUp
@@ -140,6 +163,7 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
                           device_service_module.device_service), \
              patch.object(device_service_module, "get_db",
                           AsyncMock(return_value=db)):
+            app.dependency_overrides[get_device_service] = lambda: device_service_module.DeviceService(db)
             response = await self.client.post(
                 "/api/devices/bind",
                 json={"device_type": "血压计", "name": "家用血压计"},
@@ -399,6 +423,8 @@ class DeviceServiceMalformedIdContractTests(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.db = MagicMock()
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(OPERATOR_ID))
+        _transaction_db(self.db)
         self.db.devices.insert_one = AsyncMock(
             return_value=MagicMock(inserted_id=ObjectId(DEVICE_ID)))
         self.db.devices.find_one = AsyncMock(return_value=None)
@@ -425,7 +451,7 @@ class DeviceServiceMalformedIdContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bind_device_persists_with_owner_and_string_id(self):
         result = await device_service_module.device_service.bind_device(
-            OPERATOR_ID, {"device_type": "血压计", "name": "家用血压计"})
+            OPERATOR_ID, {"device_type": "血压计", "name": "家用血压计"}, actor=make_operator())
         self.assertIsNone(result.get("error"))
         self.assertEqual(result["_id"], str(ObjectId(DEVICE_ID)))
         self.assertEqual(result["patient_id"], OPERATOR_ID)

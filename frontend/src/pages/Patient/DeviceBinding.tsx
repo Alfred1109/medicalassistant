@@ -103,6 +103,7 @@ const formatDateTime = (value?: string | null): string => {
 // 设备状态映射为展示文案与颜色
 const getStatusLabel = (status?: string | null): string => {
   switch ((status || '').toLowerCase()) {
+    case 'active': return '已登记';
     case 'online': return '在线';
     case 'offline': return '离线';
     case 'error': return '异常';
@@ -120,7 +121,13 @@ const getStatusChipColor = (status?: string | null): 'success' | 'default' | 'er
   }
 };
 
-const DeviceBinding: React.FC = () => {
+interface DeviceBindingProps {
+  patientId?: string;
+  patientName?: string;
+  onManagingChange?: (busy: boolean) => void;
+}
+
+const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, onManagingChange }) => {
   // 设备列表（真实数据：GET /api/devices）
   const [devices, setDevices] = React.useState<Device[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -160,27 +167,35 @@ const DeviceBinding: React.FC = () => {
     firmwareVersion: ''
   });
   const [binding, setBinding] = React.useState(false);
+  const listRequest = React.useRef(0);
+
+  React.useEffect(() => { onManagingChange?.(binding || deleting); }, [binding, deleting, onManagingChange]);
+  React.useEffect(() => () => onManagingChange?.(false), [onManagingChange]);
 
   // 主标签页状态
   const [mainTabValue, setMainTabValue] = React.useState(0);
 
   // 加载设备列表
   const loadDevices = React.useCallback(async () => {
+    const generation = ++listRequest.current;
     setLoading(true);
     setLoadError(null);
     try {
-      const list = await deviceService.getUserDevices();
+      const list = await (patientId ? deviceService.getPatientDevices(patientId) : deviceService.getUserDevices());
+      if (generation !== listRequest.current) return;
       setDevices(list);
     } catch (err: any) {
+      if (generation !== listRequest.current) return;
       setLoadError(getApiErrorMessage(err, '获取设备列表失败，请稍后再试'));
     } finally {
-      setLoading(false);
+      if (generation === listRequest.current) setLoading(false);
     }
-  }, []);
+  }, [patientId]);
 
   // 页面挂载时获取真实设备列表
   React.useEffect(() => {
     loadDevices();
+    return () => { listRequest.current += 1; };
   }, [loadDevices]);
 
   const handleOpenBindForm = () => {
@@ -206,6 +221,7 @@ const DeviceBinding: React.FC = () => {
       const payload: DeviceCreatePayload = {
         device_type: bindForm.deviceType,
         name,
+        ...(patientId ? { patient_id: patientId } : {}),
       };
       if (bindForm.model.trim()) payload.model = bindForm.model.trim();
       if (bindForm.manufacturer.trim()) payload.manufacturer = bindForm.manufacturer.trim();
@@ -346,8 +362,9 @@ const DeviceBinding: React.FC = () => {
   return (
     <Box>
       <Typography variant="h5" component="h1" gutterBottom>
-        设备绑定与管理
+        {patientId ? `${patientName || '当前患者'}的设备` : '设备绑定与管理'}
       </Typography>
+      <Alert severity="info" sx={{ mb: 2 }}>设备登记不代表已经连接。尚未接入厂商采集接口时，系统只显示已有记录和人工登记的读数。</Alert>
 
       {/* 主标签页切换 */}
       <Paper sx={{ mb: 3 }}>
@@ -447,7 +464,7 @@ const DeviceBinding: React.FC = () => {
                   康复监测设备说明
                 </Typography>
                 <Typography variant="body2" color="text.secondary" paragraph>
-                  绑定您的智能康复监测设备后，系统将展示设备上报的真实训练与健康数据。
+                  {patientId ? '设备绑定到当前选择的患者；医护可以查看记录并管理绑定。' : '设备绑定到您的患者档案；已有真实数据会在这里展示。'}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   设备类型:
@@ -784,7 +801,7 @@ const DeviceBinding: React.FC = () => {
         <DialogTitle>确认解除绑定？</DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary">
-            解绑后设备「{selectedDevice?.name}」将不再向您的账户上报数据，此操作通过服务端完成且不可撤销。
+            解除设备「{selectedDevice?.name}」与{patientName || '您的患者档案'}的绑定后，已有记录仍保留。
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -821,7 +838,7 @@ const DeviceBinding: React.FC = () => {
 
         <DialogContent dividers>
           <Typography variant="body2" color="text.secondary" paragraph>
-            请填写设备的真实信息，绑定后设备将关联到您的账户。
+            请填写设备的真实信息，设备将绑定到{patientName || '您的患者档案'}。
           </Typography>
 
           <Grid container spacing={3} sx={{ mt: 0 }}>

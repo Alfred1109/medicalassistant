@@ -3,9 +3,10 @@ from typing import List, Optional, Dict, Any
 from app.schemas.user import UserResponse
 from app.schemas.health_record import HealthRecordResponse
 from app.core.dependencies import (
-    get_current_user, get_database, get_health_record_service,
+    get_current_user, get_database, get_health_record_service, get_device_service,
 )
-from app.core.patient_access import ensure_patient_access
+from app.core.patient_access import PatientAccessError, ensure_patient_access, ensure_self_patient_access
+from app.core.device_access import device_patient_scope, resolve_device_patient
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from app.services.dashboard_service import DashboardService
 from app.services.device_service import device_service
@@ -38,12 +39,17 @@ async def _resolve_scoped_patient_id(db: AsyncIOMotorDatabase, current_user, pat
     - 未指定 patient_id 时回落操作者本人（含 admin，如实返回其名下数据）。
     """
     uid = str(current_user.id)
-    if not patient_id or patient_id == uid:
-        return uid
     if current_user.role == "patient":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问其他患者的数据")
+        try:
+            return await ensure_self_patient_access(db, current_user, patient_id or None)
+        except PatientAccessError:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问其他患者的数据") from None
     if current_user.role not in _PATIENT_SCOPED_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
+    if not patient_id:
+        # Preserve the legacy optional-filter behavior for medical/admin callers;
+        # their account ID is not resolved as a clinical self-patient identity.
+        return uid
     await ensure_patient_access(db, patient_id, uid, current_user.role)
     return patient_id
 
@@ -282,10 +288,11 @@ async def get_bound_devices(
     patient_id: Optional[str] = None,
     current_user: UserResponse = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """获取设备列表（2026-11-08 替换存根空列表）
 
-    复用 device_service.get_user_devices（devices 集合 patient_id 字段，
+    复用 device_api.get_user_devices（devices 集合 patient_id 字段，
     排除 deleted），无设备时如实返回空列表：
     - patient：本人设备；显式指定他人 patient_id → 403；
     - doctor / health_manager：指定 patient_id 且经归属校验（无归属 403）；
@@ -293,9 +300,14 @@ async def get_bound_devices(
     """
     if current_user.role not in _PATIENT_SCOPED_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    target_patient_id = await _resolve_scoped_patient_id(db, current_user, patient_id)
+    scope = await device_patient_scope(db, current_user, patient_id)
     try:
-        devices = await device_service.get_user_devices(target_patient_id)
+        if scope is None:
+            devices = await device_api.list_registered_devices()
+        elif current_user.role == "patient" or patient_id is not None:
+            devices = await device_api.get_user_devices(scope[0])
+        else:
+            devices = await device_api.get_patients_devices(scope)
     except PyMongoError:
         raise HTTPException(status_code=503, detail="读取设备列表失败，请稍后重试")
     return [_normalize_device(device) for device in devices]
@@ -304,18 +316,21 @@ async def get_bound_devices(
 @router.post("/devices", status_code=status.HTTP_201_CREATED, response_model=dict)
 async def bind_device(
     device_data: PatientDeviceBind,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """绑定新设备到本人（2026-11-08 替换存根假 ID）
 
-    复用 device_service.bind_device（设备类型/固件版本真实校验，
+    复用 device_api.bind_device（设备类型/固件版本真实校验，
     patient_id 即操作者本人，创建路径不触及他人对象）。
     """
     if current_user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
+    patient_id = await resolve_device_patient(db, current_user)
     try:
-        result = await device_service.bind_device(
-            str(current_user.id), device_data.model_dump())
+        result = await device_api.bind_device(
+            patient_id, device_data.model_dump(), actor=current_user)
     except PyMongoError:
         raise HTTPException(status_code=503, detail="绑定设备失败，请稍后重试")
     if isinstance(result, dict) and result.get("error"):
@@ -327,17 +342,20 @@ async def bind_device(
 @router.delete("/devices/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def unbind_device(
     device_id: str,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """解绑本人设备（2026-11-08 替换存根）
 
-    复用 device_service.unbind_device：查询条件含 patient_id=操作者本人，
+    复用 device_api.unbind_device：查询条件含 patient_id=操作者本人，
     属主语义对象级隔离（他人设备/不存在/畸形 ID 一律 False → 404）。
     """
     if current_user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
+    patient_id = await resolve_device_patient(db, current_user)
     try:
-        result = await device_service.unbind_device(str(current_user.id), device_id)
+        result = await device_api.unbind_device(patient_id, device_id, actor=current_user)
     except PyMongoError:
         raise HTTPException(status_code=503, detail="解绑设备失败，请稍后重试")
     if not result:

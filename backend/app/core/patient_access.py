@@ -6,6 +6,7 @@ from fastapi import status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import AppBaseException
+from app.patients.legacy import LegacyPatientRepository, self_patient_id
 
 
 class PatientAccessError(AppBaseException):
@@ -16,6 +17,21 @@ class PatientAccessError(AppBaseException):
                  details: Optional[Dict[str, Any]] = None):
         super().__init__(message=message, status_code=status_code,
                          error_code=error_code, details=details)
+
+
+def resolve_self_patient_id(actor, patient_id=None) -> str:
+    """Resolve only the active legacy domain's explicit same-document identity."""
+    identifier = self_patient_id(getattr(actor, "id", None), getattr(actor, "role", None), patient_id)
+    if identifier is None:
+        raise PatientAccessError("无权访问该患者的数据")
+    return identifier
+
+
+async def ensure_self_patient_access(db, actor, patient_id=None, *, session=None) -> str:
+    """Verify the legacy relation resolves to one patient entity, without alias merging."""
+    identifier = resolve_self_patient_id(actor, patient_id)
+    await load_patient_doc(db, identifier, session=session)
+    return identifier
 
 
 def patient_assignment_field(operator_role: str) -> str:
@@ -34,14 +50,9 @@ def assigned_patient_query(operator_id: str, operator_role: str = "doctor") -> D
     return {"role": "patient", patient_assignment_field(operator_role): {"$in": identifiers}}
 
 
-async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str) -> Dict[str, Any]:
+async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str, *, session=None) -> Dict[str, Any]:
     """按 ID 加载患者 users 文档（兼容 ObjectId 与非 ObjectId 主键）。"""
-    query: Dict[str, Any] = {}
-    if ObjectId.is_valid(patient_id):
-        query["_id"] = ObjectId(patient_id)
-    else:
-        query["_id"] = patient_id
-    doc = await db.users.find_one({**query, "role": "patient"})
+    doc = await LegacyPatientRepository(db).get(patient_id, session=session)
     if not doc:
         raise PatientAccessError("患者不存在", error_code="PATIENT_NOT_FOUND",
                                  status_code=status.HTTP_404_NOT_FOUND)
@@ -49,12 +60,12 @@ async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str) -> Dict[st
 
 
 async def ensure_patient_access(db: AsyncIOMotorDatabase, patient_id: str,
-                                operator_id: str, operator_role: str) -> Dict[str, Any]:
+                                operator_id: str, operator_role: str, *, session=None) -> Dict[str, Any]:
     """按已认证角色校验患者侧关联；admin 沿用既有豁免。"""
     if operator_role == "admin":
         return {}
     field = patient_assignment_field(operator_role)
-    patient = await load_patient_doc(db, patient_id)
+    patient = await load_patient_doc(db, patient_id, session=session)
     assignments = {str(item) for item in (patient.get(field) or [])}
     if str(operator_id) not in assignments:
         raise PatientAccessError(

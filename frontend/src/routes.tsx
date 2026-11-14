@@ -75,6 +75,7 @@ import PatientMainDashboard from './pages/Patient/PatientMainDashboard';
 import PatientHealthRecords from './pages/Patient/HealthRecords';
 import DailyRecords from './pages/Patient/DailyRecords';
 import DeviceBinding from './pages/Patient/DeviceBinding';
+import PatientDevices from './pages/Clinical/PatientDevices';
 import PatientCommunication from './pages/Patient/Communication';
 import PatientStatistics from './pages/Patient/Statistics';
 
@@ -322,6 +323,7 @@ const AppRoutes: React.FC = () => (
         <Route path="health-records/:patientId?" element={<HealthRecords />} />
         <Route path="follow-ups" element={<FollowUpManagement />} />
         <Route path="clinical" element={<ClinicalWorkbench />} />
+        <Route path="devices" element={<PatientDevices />} />
         <Route path="monitoring/:patientId?" element={<DataMonitoring />} />
         <Route path="communications/:patientId?" element={<Communication />} />
         <Route path="statistics" element={<Statistics />} />
@@ -347,6 +349,7 @@ const AppRoutes: React.FC = () => (
         <Route path="thresholds/:patientId?" element={<HealthThresholdPage />} />
         <Route path="follow-ups" element={<FollowUpManagement />} />
         <Route path="clinical" element={<ClinicalWorkbench />} />
+        <Route path="devices" element={<PatientDevices />} />
         <Route path="monitoring/:patientId?" element={<DataMonitoring />} />
         <Route path="communications/:patientId?" element={<Communication />} />
         <Route path="statistics" element={<Statistics />} />

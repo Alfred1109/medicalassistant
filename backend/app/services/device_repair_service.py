@@ -12,6 +12,12 @@ from ..models.device_repair_log import DeviceRepairLog
 class DeviceRepairService:
     """设备维修服务类"""
     
+    def __init__(self, db=None):
+        self.db = db
+
+    async def _database(self):
+        return self.db if self.db is not None else await get_db()
+
     async def get_repair_history(
         self, 
         device_id: Optional[str] = None, 
@@ -27,7 +33,7 @@ class DeviceRepairService:
         返回:
         - 维修历史记录列表
         """
-        db = await get_db()
+        db = await self._database()
         query = {}
         if device_id:
             query["device_id"] = device_id
@@ -53,7 +59,7 @@ class DeviceRepairService:
         返回:
         - 创建的维修记录
         """
-        db = await get_db()
+        db = await self._database()
         
         # 确保包含必要字段
         if "device_id" not in repair_data:
@@ -78,7 +84,7 @@ class DeviceRepairService:
         返回:
         - 维修统计信息
         """
-        db = await get_db()
+        db = await self._database()
         match_stage = {}
         if device_id:
             match_stage["device_id"] = device_id

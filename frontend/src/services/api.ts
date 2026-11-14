@@ -9,10 +9,11 @@ import type { FollowUpRecord, FollowUpWorkbenchQuery, FollowUpWorkbenchPage, Rev
 // API服务方法
 export const apiService = {
   // 设备相关API
-  // 后端 GET /api/devices 返回当前登录用户（token 主体）绑定的设备列表，
+  // 后端 GET /api/devices 返回当前登录用户有权访问的患者设备，
   // 不存在 GET /devices/user/{userId} 路由；userId 参数仅保留兼容旧调用方。
   getUserDevices: (userId?: string) => api.get(API_COLLECTION_PATHS.DEVICES),
-  // 后端 POST /api/devices/bind 以当前登录用户为绑定主体（body 为 DeviceCreate，
+  getPatientDevices: (patientId: string) => api.get(API_COLLECTION_PATHS.DEVICES, { params: { patient_id: patientId } }),
+  // 后端 POST /api/devices/bind 以患者为绑定主体（body 为 DeviceCreate，
   // device_type 必填），不再在 body 中传 user_id。
   bindUserDevice: (userId: string, deviceData: any) => {
     const { type, ...rest } = deviceData || {};

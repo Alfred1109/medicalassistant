@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 # 使用同一认证依赖，避免不同路由以不同方式解释同一令牌。
 get_current_user = auth_get_current_user
 
+
+async def get_device_service(db: AsyncIOMotorDatabase = Depends(get_database)):
+    from app.services.device_service import DeviceService
+    return DeviceService(db)
+
+
+async def get_device_analysis_service(db: AsyncIOMotorDatabase = Depends(get_database)):
+    from app.services.device_analysis_service import DeviceAnalysisService
+    return DeviceAnalysisService(db)
+
+
+async def get_device_repair_service(db: AsyncIOMotorDatabase = Depends(get_database)):
+    from app.services.device_repair_service import DeviceRepairService
+    return DeviceRepairService(db)
+
 # 业务服务依赖
 async def get_user_service(db: AsyncIOMotorDatabase = Depends(get_database)) -> UserService:
     logger.info("Attempting to get UserService instance.")

@@ -22,6 +22,8 @@ export interface Device {
 export interface DeviceCreatePayload {
   device_type: string;
   name: string;
+  /** 医护及管理员需明确选择患者；患者可省略以绑定本人。 */
+  patient_id?: string;
   manufacturer?: string;
   model?: string;
   connection_type?: string;
@@ -60,7 +62,16 @@ export interface DeviceConfig {
 
 // 设备服务（全部对接真实后端 /api/devices 接口）
 const deviceService = {
-  // 获取当前登录用户绑定的设备列表（GET /api/devices）
+  getPatientDevices: async (patientId: string): Promise<Device[]> => {
+    if (!patientId) throw new Error('请先选择患者');
+    const response = await apiService.getPatientDevices(patientId);
+    if (!Array.isArray(response.data) || response.data.some((device: Device) => device.patient_id !== patientId)) {
+      throw new Error('设备所属患者与当前选择不一致，请重新核实');
+    }
+    return response.data;
+  },
+
+  // 获取当前账号有权管理的患者设备（GET /api/devices）
   getUserDevices: async (): Promise<Device[]> => {
     try {
       const response = await apiService.getUserDevices();
@@ -71,7 +82,7 @@ const deviceService = {
     }
   },
 
-  // 绑定新设备到当前登录用户（POST /api/devices/bind，device_type / name 必填）
+  // 绑定设备到患者（POST /api/devices/bind，医护需要提供 patient_id）
   bindDevice: async (deviceData: DeviceCreatePayload): Promise<Device> => {
     try {
       const response = await apiService.bindUserDevice('', deviceData);

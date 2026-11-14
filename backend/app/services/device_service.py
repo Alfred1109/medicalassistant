@@ -11,6 +11,7 @@ from ..models.device_data_standard import DeviceType, DeviceStatus, ConnectionTy
 from .device_adapters import get_device_adapter
 from .device_data_validator_service import device_data_validator_service
 from ..db.mongodb import get_db
+from ..patients.legacy import LegacyPatientRepository
 
 
 # ── 设备域角色语义统一（缺陷 B 盘点后收敛）─────────────────────────────────
@@ -25,34 +26,58 @@ DEVICE_MUTATE_ROLES = ("doctor", "admin")
 class DeviceService:
     """设备服务类，处理设备管理和数据相关功能"""
     
+    def __init__(self, db=None):
+        self.db = db
+
+    async def _database(self):
+        return self.db if self.db is not None else await get_db()
+
     async def get_user_devices(self, user_id: str) -> List[Dict]:
         """获取用户关联的设备列表"""
-        db = await get_db()
+        return await self.get_patients_devices([str(user_id)])
+
+    async def get_patients_devices(self, patient_ids) -> List[Dict]:
+        db = await self._database()
+        identifiers = LegacyPatientRepository._identifiers(patient_ids)
         devices = await db.devices.find(
-            {"patient_id": user_id, "status": {"$ne": "deleted"}}
+            {"patient_id": {"$in": identifiers}, "status": {"$ne": "deleted"}}
         ).to_list(None)
-        
         return [{**device, "_id": str(device["_id"])} for device in devices]
 
     async def list_registered_devices(self) -> List[Dict]:
         """管理员查看已登记设备。没有上报记录时不补造读数。"""
-        db = await get_db()
+        db = await self._database()
         devices = await db.devices.find({"status": {"$ne": "deleted"}}).to_list(500)
         return [{**device, "_id": str(device["_id"])} for device in devices]
     
-    async def get_device(self, device_id: str) -> Optional[Dict]:
+    async def get_device(self, device_id: str, *, session=None) -> Optional[Dict]:
         """获取设备详情；畸形 ID 与不存在的设备语义一致，返回 None"""
         if not ObjectId.is_valid(device_id):
             return None
-        db = await get_db()
-        device = await db.devices.find_one({"_id": ObjectId(device_id)})
+        db = await self._database()
+        device = await db.devices.find_one({"_id": ObjectId(device_id)},
+                                          **({"session": session} if session is not None else {}))
         if device:
             device["_id"] = str(device["_id"])
         return device
     
-    async def bind_device(self, user_id: str, device_data: Dict) -> Dict:
-        """绑定新设备到用户"""
-        db = await get_db()
+    async def bind_device(self, user_id: str, device_data: Dict, *, actor) -> Dict:
+        from app.core.device_access import resolve_device_patient
+        from app.db.transactions import run_transaction
+        db = await self._database()
+        async def transaction(session):
+            patient_id = await resolve_device_patient(db, actor, user_id, session=session, fence=True)
+            return await self._insert_device(patient_id, device_data, session=session)
+        return await run_transaction(db, transaction, error_code="DEVICE_TRANSACTION_UNAVAILABLE",
+                                     error_message="设备绑定事务未能确认，请核查状态后重试")
+
+    async def _insert_device(self, user_id: str, device_data: Dict, *, session):
+        """绑定新设备到已存在的患者；账号角色不能替代患者实体。"""
+        db = await self._database()
+        patient = await LegacyPatientRepository(db).get(user_id, session=session)
+        if not patient or patient.get("is_active", True) is not True:
+            return {"error": "设备只能绑定有效的患者档案"}
+        user_id = str(patient["_id"])
         
         # 验证设备类型和固件版本
         if "device_type" in device_data and device_data["device_type"] not in [d.value for d in DeviceType]:
@@ -76,25 +101,37 @@ class DeviceService:
             "connection_type": device_data.get("connection_type"),
             "firmware_version": device_data.get("firmware_version"),
             "settings": device_data.get("settings", {}),
-            "last_connected": datetime.utcnow(),
+            "last_connected": None,
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
         
-        result = await db.devices.insert_one(device)
+        result = await db.devices.insert_one(device, session=session)
         device["_id"] = str(result.inserted_id)
         return device
     
-    async def unbind_device(self, user_id: str, device_id: str) -> bool:
+    async def unbind_device(self, user_id: str, device_id: str, *, actor=None) -> bool:
         """解绑用户设备；畸形 ID 视为设备不存在，返回 False"""
         if not ObjectId.is_valid(device_id):
             return False
-        db = await get_db()
-        result = await db.devices.update_one(
-            {"_id": ObjectId(device_id), "patient_id": user_id},
-            {"$set": {"status": "deleted", "updated_at": datetime.utcnow()}}
-        )
-        return result.modified_count > 0
+        db = await self._database()
+        from fastapi import HTTPException
+        from app.core.device_access import ensure_device_access
+        from app.db.transactions import run_transaction
+        if actor is None:
+            raise HTTPException(403, detail="设备解绑需要已认证操作者")
+        async def transaction(session):
+            device = await self.get_device(device_id, session=session)
+            if not device or str(device.get("patient_id")) != str(user_id):
+                return False
+            await ensure_device_access(db, device, actor, DEVICE_READ_ROLES,
+                                       write=True, session=session, fence=True)
+            result = await db.devices.update_one(
+                {"_id": ObjectId(device_id), "patient_id": device["patient_id"]},
+                {"$set": {"status": "deleted", "updated_at": datetime.utcnow()}}, session=session)
+            return result.modified_count > 0
+        return await run_transaction(db, transaction, error_code="DEVICE_TRANSACTION_UNAVAILABLE",
+                                     error_message="设备解绑事务未能确认，请核查状态后重试")
     
     async def get_device_data(
         self, 
@@ -105,7 +142,7 @@ class DeviceService:
         limit: int = 100
     ) -> List[Dict]:
         """获取设备数据"""
-        db = await get_db()
+        db = await self._database()
         query = {"device_id": device_id}
         
         if start_date:
@@ -138,23 +175,41 @@ class DeviceService:
 
         return {"success": False, "message": "设备数据源未接入，无法同步真实采集数据"}
 
-    async def record_manual_reading(self, device_id: str, data_type: str, value: str, unit: str, measured_at: datetime) -> Dict:
-        """Store a reading a person typed. It is not a device upload and does not change battery or connection time."""
-        db = await get_db()
-        document = {
-            "_id": ObjectId(),
-            "device_id": device_id,
-            "timestamp": measured_at,
-            "data_type": data_type,
-            "value": value,
-            "unit": unit,
-            "metadata": {"source": "手工登记"},
-            "created_at": datetime.utcnow(),
-        }
-        await db.device_data.insert_one(document)
-        document["id"] = str(document.pop("_id"))
-        return document
-    
+    async def _device_mutation(self, device_id, actor, roles, callback):
+        from fastapi import HTTPException
+        from app.core.device_access import ensure_device_access
+        from app.db.transactions import run_transaction
+        if actor is None:
+            raise HTTPException(403, detail="设备写操作需要已认证操作者")
+        db = await self._database()
+        async def transaction(session):
+            device = await self.get_device(device_id, session=session)
+            if not device or device.get("status") == "deleted":
+                raise HTTPException(404, detail="设备不存在或已解绑")
+            await ensure_device_access(db, device, actor, roles, write=True, session=session, fence=True)
+            fence = device.get("_device_write_fence", 0)
+            if type(fence) is not int or fence < 0:
+                raise HTTPException(503, detail="设备写入并发状态无效")
+            changed = await db.devices.update_one(
+                {"_id": ObjectId(device_id), "patient_id": device.get("patient_id"), "status": device.get("status")},
+                {"$inc": {"_device_write_fence": 1}}, session=session)
+            if changed.matched_count != 1:
+                raise HTTPException(409, detail="设备归属或状态已变化，请重新加载")
+            return await callback(db, device, session)
+        return await run_transaction(db, transaction, error_code="DEVICE_TRANSACTION_UNAVAILABLE",
+                                     error_message="设备写入事务未能确认，请核查状态后重试")
+
+    async def record_manual_reading(self, device_id: str, data_type: str, value: str, unit: str, measured_at: datetime, *, actor=None) -> Dict:
+        """Persist explicitly manual provenance under the current patient/device authority."""
+        async def persist(db, device, session):
+            document = {"_id": ObjectId(), "device_id": device_id, "timestamp": measured_at,
+                        "data_type": data_type, "value": value, "unit": unit,
+                        "metadata": {"source": "手工登记", "recorded_by": str(actor.id)}, "created_at": datetime.utcnow()}
+            await db.device_data.insert_one(document, session=session)
+            document["id"] = str(document.pop("_id"))
+            return document
+        return await self._device_mutation(device_id, actor, DEVICE_READ_ROLES, persist)
+
     async def get_device_status(self, device_id: str) -> Dict:
         """获取设备状态
 
@@ -188,29 +243,18 @@ class DeviceService:
                 "last_sync_time": device.get("last_connected")
             }
     
-    async def configure_device(self, device_id: str, config: Dict) -> Dict:
-        """配置设备"""
-        device = await self.get_device(device_id)
-        if not device:
-            return {"success": False, "message": "设备不存在"}
-        
-        # 更新设备配置
-        db = await get_db()
-        update_data = {
-            "settings": {**device.get("settings", {}), **config},
-            "updated_at": datetime.utcnow()
-        }
-        
-        result = await db.devices.update_one(
-            {"_id": ObjectId(device_id)},
-            {"$set": update_data}
-        )
-        
-        if result.modified_count > 0:
+    async def configure_device(self, device_id: str, config: Dict, *, actor=None) -> Dict:
+        """Merge configuration using a transaction protected by current ownership."""
+        async def persist(db, device, session):
+            settings = device.get("settings") or {}
+            if not isinstance(settings, dict):
+                from fastapi import HTTPException
+                raise HTTPException(409, detail="历史设备配置结构无效，请核实")
+            await db.devices.update_one({"_id": ObjectId(device_id)}, {"$set": {
+                "settings": {**settings, **config}, "updated_at": datetime.utcnow()}}, session=session)
             return {"success": True, "message": "设备配置已更新"}
-        else:
-            return {"success": False, "message": "设备配置更新失败"}
-    
+        return await self._device_mutation(device_id, actor, DEVICE_MUTATE_ROLES, persist)
+
     async def get_supported_data_types(self, device_type: Optional[str] = None) -> Dict:
         """
         获取支持的数据类型
@@ -249,7 +293,7 @@ class DeviceService:
         返回:
         - 修复历史记录列表
         """
-        db = await get_db()
+        db = await self._database()
         query = {}
         if device_id:
             query["device_id"] = device_id
@@ -275,7 +319,7 @@ class DeviceService:
         返回:
         - 设备列表
         """
-        db = await get_db()
+        db = await self._database()
         devices = await db.devices.find(
             {"device_type": device_type, "status": {"$ne": "deleted"}}
         ).to_list(None)
@@ -306,7 +350,7 @@ class DeviceService:
             return {"success": False, "message": "设备不存在"}
             
         # 更新固件版本
-        db = await get_db()
+        db = await self._database()
         result = await db.devices.update_one(
             {"_id": ObjectId(device_id)},
             {"$set": {
@@ -322,4 +366,4 @@ class DeviceService:
             return {"success": False, "message": "设备固件更新失败"}
 
 
-device_service = DeviceService() 
+device_service = DeviceService()

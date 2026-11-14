@@ -17,12 +17,22 @@ import math
 from bson import ObjectId
 
 from ..db.mongodb import get_db
-from ..services.device_service import device_service
+from ..services.device_service import DeviceService, device_service
 
 
 class DeviceAnalysisService:
     """设备数据分析服务"""
     
+    def __init__(self, db=None):
+        self.db = db
+
+    async def _database(self):
+        return self.db if self.db is not None else await get_db()
+
+    @property
+    def devices(self):
+        return DeviceService(self.db) if self.db is not None else device_service
+
     # 异常检测阈值配置
     # 可以根据不同设备类型和数据类型进行调整
     DEFAULT_THRESHOLDS = {
@@ -70,7 +80,7 @@ class DeviceAnalysisService:
         """
         # 获取设备数据
         start_date = datetime.utcnow() - timedelta(days=days)
-        data = await device_service.get_device_data(
+        data = await self.devices.get_device_data(
             device_id,
             start_date=start_date,
             data_type=data_type,
@@ -253,7 +263,7 @@ class DeviceAnalysisService:
         """
         # 获取设备数据
         start_date = datetime.utcnow() - timedelta(days=days)
-        data = await device_service.get_device_data(
+        data = await self.devices.get_device_data(
             device_id,
             start_date=start_date,
             data_type=data_type,
@@ -468,7 +478,7 @@ class DeviceAnalysisService:
         返回:
         - 设备状态列表，包含状态异常的设备信息
         """
-        db = await get_db()
+        db = await self._database()
         
         # 构建查询条件
         query = {}
@@ -491,7 +501,7 @@ class DeviceAnalysisService:
             device["_id"] = str(device["_id"])
             
             # 获取设备状态
-            status = await device_service.get_device_status(device["_id"])
+            status = await self.devices.get_device_status(device["_id"])
             
             # 计算设备状态得分
             status_score = self._calculate_device_status_score(device, status)
@@ -737,7 +747,7 @@ class DeviceAnalysisService:
                     })
         elif patient_id:
             # 获取患者所有设备
-            db = await get_db()
+            db = await self._database()
             devices = await db.devices.find({"patient_id": patient_id, "status": {"$ne": "deleted"}}).to_list(None)
             
             # 检查每个设备的数据异常
@@ -829,7 +839,7 @@ class DeviceAnalysisService:
         """
         # 获取设备数据
         start_date = datetime.utcnow() - timedelta(days=days)
-        data = await device_service.get_device_data(
+        data = await self.devices.get_device_data(
             device_id,
             start_date=start_date,
             data_type=data_type,

@@ -68,6 +68,9 @@ class FakeCursor:
     def __init__(self, docs):
         self.docs = docs
 
+    async def to_list(self, length=None):
+        return list(self.docs if length is None else self.docs[:length])
+
     def __aiter__(self):
         return self._iterate()
 
@@ -89,7 +92,7 @@ class FakeCollection:
                 return dict(doc)
         return None
 
-    def find(self, filter_, projection=None):
+    def find(self, filter_, projection=None, **kwargs):
         if self.find_one_error is not None:
             raise self.find_one_error
         return FakeCursor([doc for doc in self.docs.values() if _match(doc, filter_)])

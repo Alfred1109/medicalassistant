@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """设备维修记录路由契约测试（缺陷 A / 缺陷 B 收敛）。
 
 device_repair_router 此前以 dict.get("roles", []) 访问认证用户，
@@ -53,17 +54,42 @@ def make_repair_log():
     }
 
 
+class IdCursor:
+    def __init__(self, documents):
+        self.documents = documents
+
+    def __aiter__(self):
+        self.iterator = iter(self.documents)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            raise StopAsyncIteration
+
+    async def to_list(self, length=None):
+        return self.documents
+
+
 class DeviceRepairRouterContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.operator = make_operator()
         # 路由内以模块属性引用 get_db，直接替换模块属性打桩
         self.db = MagicMock()
+        patient = {"_id": "repair-patient", "role": "patient", "practitioners": [OPERATOR_ID],
+                   "health_managers": [OPERATOR_ID]}
+        self.db.users.find_one = AsyncMock(return_value=patient)
+        self.db.users.find = MagicMock(return_value=IdCursor([patient]))
+        self.db.devices.find_one = AsyncMock(return_value={"_id": ObjectId(DEVICE_ID), "patient_id": "repair-patient"})
+        self.db.devices.find = MagicMock(return_value=IdCursor([{"_id": ObjectId(DEVICE_ID)}]))
         self.get_db_patch = patch.object(
             device_repair_router, "get_db", AsyncMock(return_value=self.db))
         self.get_db_patch.start()
 
         # 认证链的查库走 UserService 打桩，返回真实 UserResponse
         # （锁定 user 形态契约，而非 dict）
+        identity_find_from_lookup(self.db.users)
         app.dependency_overrides[get_database] = self._fake_database
         self.get_user_mock = AsyncMock(return_value=self.operator)
         self.lookup = patch.object(UserService, "get_user_by_id",
@@ -71,9 +97,8 @@ class DeviceRepairRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 
-    @staticmethod
-    async def _fake_database():
-        yield MagicMock()
+    async def _fake_database(self):
+        yield self.db
 
     async def asyncTearDown(self):
         await self.client.aclose()

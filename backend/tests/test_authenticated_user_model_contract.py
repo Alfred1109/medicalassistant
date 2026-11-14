@@ -49,7 +49,7 @@ class AuthenticatedUserModelContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_report_creation_uses_authenticated_actor_and_existing_role_guard(self):
         body = dict(name="Report", reportId="existing-report", frequency="daily",
                     recipients=["recipient@example.com"], format="pdf", createdBy="forged")
-        with patch("app.api.routers.report_scheduler_router.report_scheduler_service.create_schedule",
+        with patch("app.api.routers.report_scheduler_router.ReportSchedulerService.create_schedule",
                    new=AsyncMock(return_value="schedule-id")) as domain:
             self.assertEqual((await self.client.post("/api/report-schedules", json=body)).status_code, 200)
             self.assertEqual(domain.call_args.args[0]["createdBy"], self.user.id)
@@ -58,9 +58,9 @@ class AuthenticatedUserModelContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(domain.await_count, 1)
 
     async def test_report_owner_guard_rejects_another_actor(self):
-        with patch("app.api.routers.report_scheduler_router.report_scheduler_service.get_schedule",
+        with patch("app.api.routers.report_scheduler_router.ReportSchedulerService.get_schedule",
                    new=AsyncMock(return_value={"createdBy": str(ObjectId())})), patch(
-                   "app.api.routers.report_scheduler_router.report_scheduler_service.update_schedule",
+                   "app.api.routers.report_scheduler_router.ReportSchedulerService.update_schedule",
                    new=AsyncMock()) as domain:
             self.assertEqual((await self.client.put("/api/report-schedules/existing", json={"name": "forged"})).status_code, 403)
             domain.assert_not_awaited()

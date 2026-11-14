@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """健康档案路由契约测试（WP0 路由层修复，2026-11-07）。
 
 覆盖三类路由层缺陷修复后的契约：
@@ -87,6 +88,7 @@ class HealthRecordRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.followup_service = AsyncMock()
         patient_db = MagicMock()
         patient_db.users.find_one = AsyncMock(return_value={"_id": ObjectId(PATIENT_ID), "role": "patient", "practitioners": [CREATOR_ID]})
+        identity_find_from_lookup(patient_db.users)
         cursor = MagicMock()
         cursor.__aiter__.return_value = [{"_id": ObjectId(PATIENT_ID)}]
         patient_db.users.find.return_value = cursor

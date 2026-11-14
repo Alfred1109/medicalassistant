@@ -11,7 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ...db.mongodb import get_database
-from ...core.patient_access import ensure_patient_access
+from ...core.dependencies import get_device_service
+from ...core.device_access import device_patient_scope, ensure_device_access, resolve_device_patient
 from ...services.device_service import (
     device_service,
     DEVICE_READ_ROLES,
@@ -20,20 +21,11 @@ from ...services.device_service import (
 from ...core.auth import get_current_active_user
 
 
-def _is_device_owner(device: Dict, user_id: str) -> bool:
-    """判断当前用户是否为设备属主。
-
-    device_service.get_device 返回原始文档，patient_id 可能以 ObjectId
-    形态存储，统一转 str 后比较。
-    """
-    return str(device.get("patient_id")) == str(user_id)
-
-
-async def _get_device_or_404(device_id: str) -> Dict:
+async def _get_device_or_404(device_id: str, device_api) -> Dict:
     """获取设备或抛 404：畸形 ID 与不存在的设备语义一致（404）。"""
     if not ObjectId.is_valid(device_id):
         raise HTTPException(status_code=404, detail="设备不存在")
-    device = await device_service.get_device(device_id)
+    device = await device_api.get_device(device_id)
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
     return device
@@ -57,15 +49,7 @@ async def _ensure_device_access(
       非归属医护 → 403 PATIENT_NOT_ASSIGNED）；
     - 设备文档缺失 patient_id 的畸形数据按 404 处置（不暴露存在性）。
     """
-    if current_user.role == "admin" or _is_device_owner(device, current_user.id):
-        return
-    patient_id = device.get("patient_id")
-    if not patient_id:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    if current_user.role not in roles:
-        raise HTTPException(status_code=403, detail=detail)
-    await ensure_patient_access(db, str(patient_id),
-                                str(current_user.id), current_user.role)
+    await ensure_device_access(db, device, current_user, roles)
 
 
 def _to_device_response(device: Any) -> Any:
@@ -96,7 +80,7 @@ class DeviceBase(BaseModel):
 
 
 class DeviceCreate(DeviceBase):
-    pass
+    patient_id: Optional[str] = Field(None, description="设备所属患者；医护和管理员必须明确选择")
 
 
 class DeviceResponse(DeviceBase):
@@ -158,15 +142,20 @@ class DeviceConfigResponse(BaseModel):
 # API路由定义
 @router.get("/", response_model=List[DeviceResponse])
 async def get_user_devices(
-    current_user: Any = Depends(get_current_active_user)
+    patient_id: Optional[str] = None,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """获取当前用户绑定的设备列表"""
-    # 无需对象级归属校验：查询对象即操作者本人（按 current_user.id 过滤），
-    # 不存在跨患者访问面。
-    if getattr(current_user, "role", None) == "admin":
-        devices = await device_service.list_registered_devices()
+    # 列表与对象读取共用患者范围，医护只见已分配患者。
+    scope = await device_patient_scope(db, current_user, patient_id)
+    if scope is None:
+        devices = await device_api.list_registered_devices()
+    elif current_user.role == "patient" or patient_id is not None:
+        devices = await device_api.get_user_devices(scope[0])
     else:
-        devices = await device_service.get_user_devices(current_user.id)
+        devices = await device_api.get_patients_devices(scope)
     return [_to_device_response(device) for device in devices]
 
 
@@ -175,10 +164,11 @@ async def get_device(
     device_id: str,
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """获取设备详情"""
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
-    device = await _get_device_or_404(device_id)
+    device = await _get_device_or_404(device_id, device_api)
     await _ensure_device_access(device, current_user, db, list(DEVICE_READ_ROLES))
     return _to_device_response(device)
 
@@ -186,29 +176,32 @@ async def get_device(
 @router.post("/bind", response_model=DeviceResponse)
 async def bind_device(
     device: DeviceCreate,
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
-    """绑定新设备到当前用户"""
-    # 无需对象级归属校验：设备绑定目标即操作者本人（current_user.id），
-    # 创建路径不触及他人对象。
-    result = await device_service.bind_device(current_user.id, device.dict())
+    """为已授权患者登记设备，患者本人只能选择自己。"""
+    patient_id = await resolve_device_patient(db, current_user, device.patient_id)
+    result = await device_api.bind_device(patient_id, device.model_dump(exclude={"patient_id"}), actor=current_user)
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(400, detail=result["error"])
     return _to_device_response(result)
 
 
 @router.delete("/{device_id}/unbind")
 async def unbind_device(
     device_id: str,
-    current_user: Any = Depends(get_current_active_user)
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """解绑用户设备"""
-    device = await _get_device_or_404(device_id)
+    device = await _get_device_or_404(device_id, device_api)
 
     # 无需医患归属校验：解绑属变更操作且仅限属主本人或管理员，
     # 授权规则本身即对象级（非属主医护一律排除，无归属关系可回旋）。
-    if not _is_device_owner(device, current_user.id) and current_user.role not in ["admin"]:
-        raise HTTPException(status_code=403, detail="无权解绑此设备")
-
-    result = await device_service.unbind_device(current_user.id, device_id)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES, write=True)
+    result = await device_api.unbind_device(str(device["patient_id"]), device_id, actor=current_user)
     if result:
         return {"message": "设备已解绑"}
     else:
@@ -224,13 +217,14 @@ async def get_device_data(
     limit: int = Query(100, ge=1, le=1000),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """获取设备数据"""
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
-    device = await _get_device_or_404(device_id)
-    await _ensure_device_access(device, current_user, db, list(DEVICE_READ_ROLES))
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES)
 
-    data = await device_service.get_device_data(
+    data = await device_api.get_device_data(
         device_id,
         start_date=start_date,
         end_date=end_date,
@@ -245,6 +239,7 @@ async def sync_device_data(
     device_id: str,
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """
     同步设备数据
@@ -255,10 +250,10 @@ async def sync_device_data(
     503"设备数据源未接入"，不写入任何数据、不更新 last_connected。
     """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验（沿用只读角色语义）
-    device = await _get_device_or_404(device_id)
-    await _ensure_device_access(device, current_user, db, list(DEVICE_READ_ROLES))
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES, write=True)
 
-    result = await device_service.sync_device_data(device_id)
+    result = await device_api.sync_device_data(device_id)
     # 数据源未接入：如实 503，绝不返回随机数据伪装同步成功
     if not result.get("success"):
         raise HTTPException(status_code=503, detail=result.get("message", "设备数据源未接入"))
@@ -279,12 +274,13 @@ async def record_reading(
     payload: ManualReading,
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """Save a value a person entered. The record is marked 手工登记 and does not update battery or last connection."""
-    device = await _get_device_or_404(device_id)
-    await _ensure_device_access(device, current_user, db, list(DEVICE_READ_ROLES))
-    return await device_service.record_manual_reading(
-        device_id, payload.data_type, payload.value, payload.unit, payload.measured_at)
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES, write=True)
+    return await device_api.record_manual_reading(
+        device_id, payload.data_type, payload.value, payload.unit, payload.measured_at, actor=current_user)
 
 
 @router.get("/{device_id}/status", response_model=DeviceStatusResponse)
@@ -292,6 +288,7 @@ async def get_device_status(
     device_id: str,
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """获取设备状态
 
@@ -299,10 +296,10 @@ async def get_device_status(
     无真实上报路径，响应中如实为 null（不再随机生成）。
     """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
-    device = await _get_device_or_404(device_id)
+    device = await _get_device_or_404(device_id, device_api)
     await _ensure_device_access(device, current_user, db, list(DEVICE_READ_ROLES))
 
-    status = await device_service.get_device_status(device_id)
+    status = await device_api.get_device_status(device_id)
     return status
 
 
@@ -312,13 +309,14 @@ async def configure_device(
     config: DeviceConfigUpdate,
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
 ):
     """配置设备"""
     # AUTH01 对象级授权（变更守卫）：配置属变更操作，健康管理师只读不可
     # 变更（缺陷 B 统一）；属主患者可配置自己名下设备；非属主医生须与
     # 设备所属患者存在归属关系（ensure_patient_access）。
-    device = await _get_device_or_404(device_id)
-    await _ensure_device_access(device, current_user, db, list(DEVICE_MUTATE_ROLES))
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_MUTATE_ROLES, write=True)
 
-    result = await device_service.configure_device(device_id, config.dict(exclude_unset=True))
+    result = await device_api.configure_device(device_id, config.dict(exclude_unset=True), actor=current_user)
     return result

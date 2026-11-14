@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """Role-specific patient assignment follows the actual relationship writer."""
 import unittest
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ class PatientAssignmentTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(role=role):
                 patient = {"_id": ObjectId(patient_id), "role": "patient", field: [ObjectId(actor_id)]}
                 db = SimpleNamespace(users=SimpleNamespace(find_one=AsyncMock(return_value=patient)))
+                identity_find_from_lookup(db.users)
                 self.assertIs(await ensure_patient_access(db, patient_id, actor_id, role), patient)
                 query = assigned_patient_query(actor_id, role)
                 self.assertEqual(set(query), {"role", field})
@@ -32,6 +34,7 @@ class PatientAssignmentTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(role=role):
                 db = SimpleNamespace(users=SimpleNamespace(find_one=AsyncMock(
                     return_value={"_id": "patient", "role": "patient", wrong_field: ["actor"]})))
+                identity_find_from_lookup(db.users)
                 with self.assertRaises(PatientAccessError):
                     await ensure_patient_access(db, "patient", "actor", role)
 
@@ -41,6 +44,7 @@ class PatientAssignmentTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(role=role):
                 with self.assertRaises(PatientAccessError):
                     assigned_patient_query("actor", role)
+                identity_find_from_lookup(db.users)
                 with self.assertRaises(PatientAccessError):
                     await ensure_patient_access(db, "patient", "actor", role)
         self.assertEqual(await ensure_patient_access(db, "patient", "actor", "admin"), {})

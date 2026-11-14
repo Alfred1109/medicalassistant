@@ -107,31 +107,36 @@ class FakeCursor:
 
 
 class FakeCollection:
+    async def create_index(self, keys, **options):
+        return options.get("name", "test-index")
+
     def __init__(self):
         self.docs = {}
 
     def insert(self, doc):
         self.docs[doc["_id"]] = dict(doc)
 
-    async def find_one(self, query):
+    async def find_one(self, query, **options):
         for doc in self.docs.values():
             if _match(doc, query):
                 return dict(doc)
         return None
 
-    def find(self, query=None):
+    def find(self, query=None, projection=None, **options):
         return FakeCursor([d for d in self.docs.values() if _match(d, query or {})])
 
-    async def insert_one(self, doc):
+    async def insert_one(self, doc, **options):
         doc = dict(doc)
         doc.setdefault("_id", ObjectId())
         self.docs[doc["_id"]] = doc
         return MagicMock(inserted_id=doc["_id"])
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, **options):
         matched = [d for d in self.docs.values() if _match(d, query)]
         for doc in matched:
             doc.update(update.get("$set", {}))
+            for key, amount in update.get("$inc", {}).items():
+                doc[key] = doc.get(key, 0) + amount
         return MagicMock(matched_count=len(matched), modified_count=len(matched))
 
     async def count_documents(self, query):
@@ -141,6 +146,9 @@ class FakeCollection:
 class FakeDatabase:
     def __init__(self):
         self._collections = {}
+        from test_device_router_contract import TransactionSession
+        self.client = MagicMock()
+        self.client.start_session = AsyncMock(return_value=TransactionSession())
 
     def __getattr__(self, name):
         if name.startswith("_"):

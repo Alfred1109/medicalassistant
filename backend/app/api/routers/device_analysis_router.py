@@ -16,7 +16,8 @@ from pydantic import BaseModel, Field
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ...db.mongodb import get_database
-from ...core.patient_access import ensure_patient_access
+from ...core.dependencies import get_device_service, get_device_analysis_service
+from ...core.device_access import ensure_device_access, resolve_device_patient
 from ...services.device_service import device_service, DEVICE_READ_ROLES
 from ...services.device_analysis_service import device_analysis_service
 from ...core.auth import get_current_active_user
@@ -24,17 +25,8 @@ from ...core.auth import get_current_active_user
 router = APIRouter(prefix="/device-analysis", tags=["device-analysis"])
 
 
-def _is_device_owner(device: Dict, user_id: str) -> bool:
-    """判断当前用户是否为设备属主。
-
-    device_service.get_device 返回原始文档，patient_id 未做规范化，
-    历史数据中可能以 ObjectId 存储，统一转 str 后比较。
-    """
-    return str(device.get("patient_id")) == str(user_id)
-
-
 async def _check_device_access(device_id: str, current_user: Any,
-                               db: AsyncIOMotorDatabase) -> Dict:
+                               db: AsyncIOMotorDatabase, device_api) -> Dict:
     """AUTH01 对象级授权（按 device_id 寻址，与 device_router 同一语义）。
 
     畸形 ID 与不存在的设备均 404（不暴露存在性）；随后分层：
@@ -50,19 +42,11 @@ async def _check_device_access(device_id: str, current_user: Any,
     if not ObjectId.is_valid(device_id):
         raise HTTPException(status_code=404, detail="设备不存在")
 
-    device = await device_service.get_device(device_id)
+    device = await device_api.get_device(device_id)
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
 
-    if current_user.role == "admin" or _is_device_owner(device, current_user.id):
-        return device
-    patient_id = device.get("patient_id")
-    if not patient_id:
-        raise HTTPException(status_code=404, detail="设备不存在")
-    if current_user.role not in DEVICE_READ_ROLES:
-        raise HTTPException(status_code=403, detail="无权访问此设备数据")
-    await ensure_patient_access(db, str(patient_id),
-                                str(current_user.id), current_user.role)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES)
     return device
 
 
@@ -78,12 +62,9 @@ async def _check_patient_data_access(patient_id: str, current_user: Any,
       非归属医护 → 403 PATIENT_NOT_ASSIGNED）；
     - 其余角色（含患者查他人）一律 403，不泄露患者存在性。
     """
-    if current_user.role == "admin" or str(current_user.id) == str(patient_id):
+    if current_user.role == "admin":
         return
-    if current_user.role not in DEVICE_READ_ROLES:
-        raise HTTPException(status_code=403, detail="无权访问此患者数据")
-    await ensure_patient_access(db, patient_id,
-                                str(current_user.id), current_user.role)
+    await resolve_device_patient(db, current_user, patient_id)
 
 
 # 数据模型
@@ -178,6 +159,8 @@ async def detect_data_anomalies(
     method: str = Query("z_score", regex="^(z_score|range|iqr)$"),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    analysis_api: Any = Depends(get_device_analysis_service),
 ):
     """
     检测设备数据异常
@@ -189,10 +172,10 @@ async def detect_data_anomalies(
     - method: 检测方法，支持z_score、range、iqr
     """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
-    await _check_device_access(device_id, current_user, db)
+    await _check_device_access(device_id, current_user, db, device_api)
 
     # 检测异常
-    anomalies = await device_analysis_service.detect_data_anomalies(
+    anomalies = await analysis_api.detect_data_anomalies(
         device_id=device_id,
         data_type=data_type,
         days=days,
@@ -210,6 +193,8 @@ async def analyze_data_trend(
     interval: str = Query("day", regex="^(hour|day|week|month)$"),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    analysis_api: Any = Depends(get_device_analysis_service),
 ):
     """
     分析设备数据趋势
@@ -221,10 +206,10 @@ async def analyze_data_trend(
     - interval: 数据聚合间隔，支持hour、day、week、month
     """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
-    await _check_device_access(device_id, current_user, db)
+    await _check_device_access(device_id, current_user, db, device_api)
 
     # 分析趋势
-    trend = await device_analysis_service.analyze_data_trend(
+    trend = await analysis_api.analyze_data_trend(
         device_id=device_id,
         data_type=data_type,
         days=days,
@@ -240,6 +225,8 @@ async def monitor_device_status(
     hours: int = Query(24, ge=1, le=168),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    analysis_api: Any = Depends(get_device_analysis_service),
 ):
     """
     监测设备状态
@@ -249,10 +236,10 @@ async def monitor_device_status(
     - hours: 监测最近多少小时内的设备状态（默认24小时）
     """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
-    await _check_device_access(device_id, current_user, db)
+    await _check_device_access(device_id, current_user, db, device_api)
 
     # 监测状态
-    statuses = await device_analysis_service.monitor_device_status(
+    statuses = await analysis_api.monitor_device_status(
         device_id=device_id,
         hours=hours
     )
@@ -266,6 +253,8 @@ async def monitor_patient_devices(
     hours: int = Query(24, ge=1, le=168),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    analysis_api: Any = Depends(get_device_analysis_service),
 ):
     """
     监测患者所有设备状态
@@ -278,7 +267,7 @@ async def monitor_patient_devices(
     await _check_patient_data_access(patient_id, current_user, db)
     
     # 监测状态
-    statuses = await device_analysis_service.monitor_device_status(
+    statuses = await analysis_api.monitor_device_status(
         patient_id=patient_id,
         hours=hours
     )
@@ -292,6 +281,8 @@ async def get_device_alerts(
     severity: str = Query("medium", regex="^(high|medium|low)$"),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    analysis_api: Any = Depends(get_device_analysis_service),
 ):
     """
     获取设备预警信息
@@ -301,10 +292,10 @@ async def get_device_alerts(
     - severity: 预警级别阈值，只返回大于等于该级别的预警
     """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
-    await _check_device_access(device_id, current_user, db)
+    await _check_device_access(device_id, current_user, db, device_api)
 
     # 获取预警
-    alerts = await device_analysis_service.generate_device_alerts(
+    alerts = await analysis_api.generate_device_alerts(
         device_id=device_id,
         severity_threshold=severity
     )
@@ -318,6 +309,8 @@ async def get_patient_alerts(
     severity: str = Query("medium", regex="^(high|medium|low)$"),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    analysis_api: Any = Depends(get_device_analysis_service),
 ):
     """
     获取患者所有设备的预警信息
@@ -330,7 +323,7 @@ async def get_patient_alerts(
     await _check_patient_data_access(patient_id, current_user, db)
     
     # 获取预警
-    alerts = await device_analysis_service.generate_device_alerts(
+    alerts = await analysis_api.generate_device_alerts(
         patient_id=patient_id,
         severity_threshold=severity
     )
@@ -349,13 +342,15 @@ async def predict_device_data_advanced(
     interval: str = Query("day", description="数据聚合间隔: hour, day, week, month"),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    analysis_api: Any = Depends(get_device_analysis_service),
 ):
     """
     高级数据预测分析
     支持多种预测算法和置信区间计算
     """
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
-    await _check_device_access(device_id, current_user, db)
+    await _check_device_access(device_id, current_user, db, device_api)
 
     # 检查预测方法是否有效
     valid_methods = ["linear", "arima", "prophet", "ensemble"]
@@ -368,7 +363,7 @@ async def predict_device_data_advanced(
         raise HTTPException(status_code=400, detail=f"无效的时间间隔。有效值: {', '.join(valid_intervals)}")
         
     # 进行预测分析
-    result = await device_analysis_service.predict_data_advanced(
+    result = await analysis_api.predict_data_advanced(
         device_id=device_id,
         data_type=data_type,
         days=days,
