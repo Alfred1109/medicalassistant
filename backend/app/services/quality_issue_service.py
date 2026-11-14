@@ -13,6 +13,7 @@ from app.core.exceptions import AppBaseException
 from app.db.transactions import run_transaction
 from app.core.patient_access import assigned_patient_query, patient_assignment_field
 from app.core.patient_identity import identity_key, load_identity_groups
+from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
 from app.services.followup_service import FollowupService
 from app.services.rehabilitation_service import RehabilitationService
 
@@ -75,6 +76,8 @@ class QualityIssueService:
         return documents[0] if len(documents) == 1 else None
 
     async def _fence(self, document, session):
+        # TODO(栅栏载体改造): 并发栅栏仍直接写 users._access_fence，第一波段
+        # 保持不动；切 canonical 患者域时需随载体一起迁移。
         value = document.get("_access_fence", 0)
         if type(value) is not int or value < 0:
             raise fail("QUALITY_ACCESS_FENCE_INVALID", "账号并发状态异常", 503)
@@ -92,8 +95,11 @@ class QualityIssueService:
 
     async def _patient(self, patient_id, actor, session=None, *, write=False, fence=False):
         account = await self._actor(actor, session, write=write)
-        patient = await self._account(patient_id, session)
-        if not patient or patient.get("role") != "patient" or patient.get("is_active") is not True:
+        # Patient existence and identity disambiguation come only from the
+        # legacy patient adapter; visible-ID collisions surface as the
+        # adapter's LegacyPatientIdentityError instead of a 404.
+        patient = await LegacyPatientRepository(self.db).get(patient_id, session=session)
+        if not patient or patient.get("is_active") is not True:
             raise fail("QUALITY_PATIENT_UNAVAILABLE", "患者档案不可用", 404)
         if actor.role != "admin":
             values = patient.get(patient_assignment_field(actor.role))
@@ -240,25 +246,14 @@ class QualityIssueService:
         else:
             patient_scope = ({"role": "patient"} if actor.role == "admin" else
                              assigned_patient_query(str(actor.id), actor.role))
-            patients = await self.db.users.find({**patient_scope, "is_active": True}, {"_id": 1}).to_list(length=None)
-            candidate_ids = {str(item["_id"]) for item in patients}
-            groups = await load_identity_groups(self.db, candidate_ids,
-                projection={"role": 1, "is_active": 1, "practitioners": 1, "health_managers": 1})
-            identifiers = []
-            for identifier in candidate_ids:
-                # ObjectId and string account keys can have the same visible
-                # value. Resolve them in one batch, never an N+1 patient loop.
-                matches = groups.get(identity_key(identifier), [])
-                if len(matches) != 1:
-                    raise fail("QUALITY_PATIENT_IDENTITY_AMBIGUOUS", "患者身份无法唯一核实，请联系管理员核查", 503)
-                patient = matches[0]
-                if patient.get("role") != "patient" or patient.get("is_active") is not True:
-                    continue
-                if actor.role != "admin":
-                    assignments = patient.get(patient_assignment_field(actor.role))
-                    if not isinstance(assignments, list) or str(actor.id) not in {str(value) for value in assignments}:
-                        continue
-                identifiers.append(identifier)
+            # Scope, role/assignment filtering and same-visible-value identity
+            # disambiguation all live in the legacy patient adapter: one
+            # candidate read plus one identity batch, never an N+1 patient loop.
+            try:
+                identifiers = await LegacyPatientRepository(self.db).assigned_ids(
+                    {**patient_scope, "is_active": True})
+            except LegacyPatientIdentityError:
+                raise fail("QUALITY_PATIENT_IDENTITY_AMBIGUOUS", "患者身份无法唯一核实，请联系管理员核查", 503) from None
             query["patient_id"] = {"$in": identifiers}
         if status:
             query["status"] = status

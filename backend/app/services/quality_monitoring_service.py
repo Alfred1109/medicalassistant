@@ -9,6 +9,7 @@ from app.core.exceptions import AppBaseException
 from app.core.followup_access import followup_patient_scope
 from app.core.patient_access import ensure_patient_access
 from app.core.patient_identity import identity_key, load_identity_groups
+from app.patients.legacy import LegacyPatientIdentityError
 from app.schemas.quality_monitoring import (
     FollowupProcessSummary, PlanProcessSummary, ProcessWindow,
     QualityProcessOverview, QualityProcessPage,
@@ -83,7 +84,13 @@ class QualityMonitoringService:
             raise _error("QUALITY_ACCOUNT_UNAVAILABLE", "当前账号身份不可唯一核实或已停用", 403)
         if await self.db.patient_domain_state.find_one({"_id": "clinical-patients-v1"}):
             raise _error("QUALITY_PATIENT_DOMAIN_UNSUPPORTED", "当前患者域尚未接入质控患者范围", 503)
-        values = await followup_patient_scope(self.db, actor)
+        # The shared scope helper reads through the legacy patient adapter; its
+        # ambiguity failure is restated here so this domain keeps one contract
+        # code for unverifiable patient scope.
+        try:
+            values = await followup_patient_scope(self.db, actor)
+        except LegacyPatientIdentityError:
+            raise _error("QUALITY_PATIENT_SCOPE_UNVERIFIED", "患者身份存在歧义，请先核实范围", 503) from None
         if values is not None:
             field = "practitioners" if actor.role == "doctor" else "health_managers"
             grouped = await load_identity_groups(self.db, values,

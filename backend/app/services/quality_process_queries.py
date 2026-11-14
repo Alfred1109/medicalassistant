@@ -5,6 +5,11 @@ FOLLOWUP_STATUSES = ("pending_schedule", "scheduled", "awaiting_fill", "in_revie
 PLAN_STATUSES = ("draft", "active", "completed", "cancelled", "canceled", "archived")
 PUBLICATION_STATES = ("published", "unpublished", "withdrawn", "stopped", "invalid_reference")
 
+# TODO(切 canonical): 患者引用校验发生在聚合管道内，无法走 LegacyPatientRepository，
+# 集合名集中在此；切换患者域时仅需替换该常量，$lookup 双键语义与
+# _qc_patient_reference 判定口径保持不变。
+PATIENT_USERS_COLLECTION = "users"
+
 
 def _nonempty_string(value):
     return {"$and": [{"$eq": [{"$type": value}, "string"]},
@@ -70,7 +75,7 @@ def _publication_stages(versions_collection):
 def _patient_reference_stages():
     return [
         {"$set": {"_qc_patient_oid": {"$convert": {"input": "$patient_id", "to": "objectId", "onError": None, "onNull": None}}}},
-        {"$lookup": {"from": "users", "let": {"raw": "$patient_id", "oid": "$_qc_patient_oid"}, "pipeline": [
+        {"$lookup": {"from": PATIENT_USERS_COLLECTION, "let": {"raw": "$patient_id", "oid": "$_qc_patient_oid"}, "pipeline": [
             {"$match": {"role": "patient", "$expr": {"$or": [
                 {"$eq": ["$_id", "$$raw"]}, {"$and": [{"$ne": ["$$oid", None]}, {"$eq": ["$_id", "$$oid"]}]}
             ]}}}, {"$project": {"_id": 1, "is_active": 1}}], "as": "_qc_patient"}},
