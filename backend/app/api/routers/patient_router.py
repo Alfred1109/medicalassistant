@@ -6,6 +6,7 @@ from app.core.dependencies import (
     get_current_user, get_database, get_health_record_service, get_device_service,
 )
 from app.core.patient_access import PatientAccessError, ensure_patient_access, ensure_self_patient_access
+from app.core.exceptions import AppBaseException
 from app.core.device_access import device_patient_scope, resolve_device_patient
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from app.services.dashboard_service import DashboardService
@@ -49,6 +50,8 @@ async def _resolve_scoped_patient_id(db: AsyncIOMotorDatabase, current_user, pat
     if not patient_id:
         # Preserve the legacy optional-filter behavior for medical/admin callers;
         # their account ID is not resolved as a clinical self-patient identity.
+        # TODO(患者档案第二波段): 该"未指定即回落操作者账号 ID"的语义在 canonical
+        # 域需改经 patient_account_links 账号链接解析，不得假定账号 ID 即患者 ID。
         return uid
     await ensure_patient_access(db, patient_id, uid, current_user.role)
     return patient_id
@@ -485,6 +488,10 @@ async def get_patient_statistics(
             },
         }
     except HTTPException:
+        raise
+    except AppBaseException:
+        # 患者读取适配器/共享授权内核的业务异常（如 PATIENT_IDENTITY_AMBIGUOUS/503、
+        # PATIENT_NOT_FOUND/404）保留全局处理器语义，不降级为 500
         raise
     except Exception as e:
         print(f"获取患者统计数据时出错: {str(e)}")

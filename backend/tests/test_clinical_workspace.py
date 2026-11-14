@@ -13,7 +13,9 @@ from app.clinical.workspace import (
     evaluate_indicators, extract_measurements, guide_material, list_shares, portrait, recorded_plan_sources,
     request_share, retire_indicator, review_report, withdraw_share,
 )
+from app.core.patient_access import PatientAccessError
 from app.integrations.forms.sync_runs import list_runs, load_failed_import, record_run, summarize_runs
+from app.patients.legacy import LegacyPatientIdentityError
 
 
 class Collection:
@@ -118,6 +120,36 @@ class ClinicalWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["followups"][2]["void"])
         self.assertTrue(result["plans"][0]["void"])
         self.assertFalse(result["plans"][0]["published"])
+
+    async def test_patient_reads_own_portrait_through_shared_self_resolution(self):
+        """患者本人画像走共享 self 解析助手：显式请求本人 ID 可读取。"""
+        db = Database()
+        patient_id = ObjectId()
+        db.users.docs.append({"_id": patient_id, "role": "patient", "name": "本人",
+                              "practitioners": []})
+        result = await portrait(db, SimpleNamespace(id=patient_id, role="patient"), str(patient_id))
+        self.assertEqual(result["patient"]["id"], str(patient_id))
+        self.assertEqual(result["patient"]["name"], "本人")
+
+    async def test_patient_requesting_other_patient_is_rejected(self):
+        """患者显式请求他人 ID：共享解析助手拒绝（403/PATIENT_NOT_ASSIGNED）。"""
+        db = Database()
+        db.users.docs.append({"_id": ObjectId(), "role": "patient", "name": "别人"})
+        with self.assertRaises(PatientAccessError) as caught:
+            await portrait(db, SimpleNamespace(id=ObjectId(), role="patient"),
+                           str(db.users.docs[0]["_id"]))
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(caught.exception.error_code, "PATIENT_NOT_ASSIGNED")
+
+    async def test_patient_self_identity_ambiguity_stays_503(self):
+        """患者本人标识存在 ObjectId/字符串双文档：适配器歧义防护 503 透传，不降级。"""
+        db = Database()
+        patient_id = ObjectId()
+        db.users.docs.append({"_id": patient_id, "role": "patient", "name": "甲"})
+        db.users.docs.append({"_id": str(patient_id), "role": "patient", "name": "乙"})
+        with self.assertRaises(LegacyPatientIdentityError) as caught:
+            await portrait(db, SimpleNamespace(id=patient_id, role="patient"), str(patient_id))
+        self.assertEqual(caught.exception.error_code, "PATIENT_IDENTITY_AMBIGUOUS")
 
     async def test_different_source_project_is_rejected(self):
         db = Database()

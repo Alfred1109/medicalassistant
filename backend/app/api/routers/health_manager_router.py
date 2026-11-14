@@ -3,6 +3,7 @@ from typing import List, Optional
 from app.schemas.user import UserResponse
 from app.schemas.followup import FollowUpRecordCreate, FollowUpRecordResponse
 from app.core.dependencies import get_current_user, get_followup_service, get_database
+from app.core.exceptions import AppBaseException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.db.crud_services import PatientCRUD
 from app.models.user import Patient
@@ -25,6 +26,10 @@ async def get_manager_patients(
     try:
         return await PatientCRUD(db, Patient).find_assigned_patients(
             str(current_user.id), current_user.role)
+    except AppBaseException:
+        # 适配器的患者标识歧义（PATIENT_IDENTITY_AMBIGUOUS/503）等业务异常
+        # 保留全局处理器语义，不降级为 500（与 doctor_router 同一修法）
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail="获取患者列表失败，请稍后重试") from exc
 

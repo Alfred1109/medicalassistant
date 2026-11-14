@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import HTTPException
 
-from app.core.patient_access import ensure_patient_access, load_patient_doc
+from app.core.patient_access import (
+    ensure_patient_access, load_patient_doc, resolve_self_patient_id)
 
 CLINICAL_ROLES = {"admin", "doctor", "health_manager"}
 REPORT_TYPES = {"application/pdf", "image/jpeg", "image/png"}
@@ -43,9 +44,13 @@ async def _actor(db, actor, *, session=None):
 
 async def _patient_for(db, actor, patient_id, *, session=None):
     if actor.role == "patient":
-        if str(actor.id) != str(patient_id):
-            raise HTTPException(403, detail={"code": "PATIENT_NOT_ASSIGNED"})
-        return await load_patient_doc(db, patient_id, **({"session": session} if session is not None else {}))
+        # 患者本人走共享 self 解析助手（仅显式同文档请求，与域模式无关，
+        # 不匹配 → PatientAccessError 403/PATIENT_NOT_ASSIGNED，语义与原
+        # 字面比较一致）。canonical 的账号链接核验留给第二波段；这里不使用
+        # ensure_self_patient_access，避免在 canonical 域引入链接解析的
+        # 行为变化（第一波段要求 legacy 行为等价）。
+        identifier = resolve_self_patient_id(actor, patient_id)
+        return await load_patient_doc(db, identifier, **({"session": session} if session is not None else {}))
     if actor.role not in CLINICAL_ROLES:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
     if actor.role == "admin":
@@ -466,6 +471,8 @@ async def list_reports(db, actor, patient_id):
 
 async def _fence_report_access(db, actor, patient_id, session):
     """Reuse clinical scope policy, then serialize with local authorization writes."""
+    # TODO(患者档案第二波段): 栅栏载体仍是 legacy users 文档（report_access_revision
+    # 计数与归属字段快照比较），canonical 域需改为临床患者文档/账号链接的栅栏载体。
     patient = await _patient_for(db, actor, patient_id, session=session)
     viewer = await _actor(db, actor, session=session)
     if (not viewer or viewer.get("role") != actor.role or viewer.get("is_active", True) is False):

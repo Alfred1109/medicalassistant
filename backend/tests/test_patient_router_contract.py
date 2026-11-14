@@ -49,8 +49,11 @@ def _match(doc, filter_):
 class FakeCollection:
     def __init__(self):
         self.docs = {}
+        self.count_error = None
 
     async def count_documents(self, filter_):
+        if self.count_error is not None:
+            raise self.count_error
         return sum(1 for doc in self.docs.values() if _match(doc, filter_))
 
     def insert(self, doc):
@@ -130,6 +133,17 @@ class PatientStatisticsContractTests(unittest.IsolatedAsyncioTestCase):
         self._setup(FakeDatabase(), other)
         response = await self._client.get("/api/patients/statistics")
         self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_app_exception_not_swallowed_into_500(self):
+        """AppBaseException 透传全局处理器语义（503/PATIENT_IDENTITY_AMBIGUOUS），
+        不得被 except Exception 吞成 500。"""
+        from app.patients.legacy import LegacyPatientIdentityError
+        db = FakeDatabase()
+        db.rehab_plans.count_error = LegacyPatientIdentityError()
+        self._setup(db)
+        response = await self._client.get("/api/patients/statistics")
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"], "PATIENT_IDENTITY_AMBIGUOUS")
 
 
 if __name__ == "__main__":
