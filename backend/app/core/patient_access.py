@@ -49,6 +49,28 @@ async def patient_domain_mode(db, *, session=None) -> str:
         raise _domain_state_unavailable("PATIENT_DOMAIN_STATE_READ_FAILED") from error
 
 
+def is_domain_state_unavailable(error: PatientAccessError) -> bool:
+    """消费方 catch-all 降级前的分流判据：canonical 二次状态读取异常
+    （域状态不可用 503）必须透传，绝不能与归属失败（403）混同。"""
+    return error.error_code == "PATIENT_DOMAIN_STATE_UNAVAILABLE"
+
+
+async def _canonical_patient_read(operation):
+    """canonical 对象读取的异常包装（与 patient_domain_mode 同款 fail-closed）。
+
+    canonical 对象访问链路里存在二次状态读取（require_canonical），其
+    PatientDomainError 与传输层 PyMongoError 若裸逃逸会成为 500；统一
+    转 PatientAccessError 503 PATIENT_DOMAIN_STATE_UNAVAILABLE，语义与
+    域模式读取失败一致。operation 自带 session 绑定。
+    """
+    try:
+        return await operation()
+    except PatientDomainError as error:
+        raise _domain_state_unavailable(error.code) from None
+    except PyMongoError as error:
+        raise _domain_state_unavailable("PATIENT_DOMAIN_STATE_READ_FAILED") from error
+
+
 def resolve_self_patient_id(actor, patient_id=None) -> str:
     """Resolve only the active legacy domain's explicit same-document identity.
 
@@ -70,7 +92,8 @@ async def ensure_self_patient_access(db, actor, patient_id=None, *, session=None
     """
     identifier = resolve_self_patient_id(actor, patient_id)
     if await patient_domain_mode(db, session=session) == "canonical":
-        patient = await ClinicalPatientRepository(db).resolve_self(identifier, session=session)
+        patient = await _canonical_patient_read(
+            lambda: ClinicalPatientRepository(db).resolve_self(identifier, session=session))
         if patient is None:
             raise PatientAccessError("无权访问该患者的数据")
         return str(patient["patient_id"])
@@ -156,7 +179,8 @@ async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str, *, session
     停用患者对所有对象级访问路径恒放行。
     """
     if await patient_domain_mode(db, session=session) == "canonical":
-        doc = await ClinicalPatientRepository(db).get(patient_id, session=session)
+        doc = await _canonical_patient_read(
+            lambda: ClinicalPatientRepository(db).get(patient_id, session=session))
         if doc is not None and doc.get("status") != "active":
             doc = None
     else:

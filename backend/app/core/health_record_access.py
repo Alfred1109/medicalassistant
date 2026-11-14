@@ -1,7 +1,10 @@
 """健康档案入口的患者范围授权。"""
 from fastapi import HTTPException
 
-from app.core.patient_access import PatientAccessError, ensure_patient_access, ensure_self_patient_access
+from app.core.patient_access import (
+    PatientAccessError, ensure_patient_access, ensure_self_patient_access,
+    is_domain_state_unavailable,
+)
 
 
 async def ensure_health_record_patient_access(db, patient_id, actor):
@@ -9,7 +12,11 @@ async def ensure_health_record_patient_access(db, patient_id, actor):
     if actor.role == "patient":
         try:
             await ensure_self_patient_access(db, actor, patient_id)
-        except PatientAccessError:
+        except PatientAccessError as error:
+            # 域状态不可用（canonical 二次状态读取失败）按 503 透传，
+            # 不与归属失败 403 混同（T50 缺陷 2）。
+            if is_domain_state_unavailable(error):
+                raise
             raise HTTPException(status_code=403, detail="无权访问该患者的健康档案") from None
         return
     if actor.role not in {"doctor", "health_manager", "admin"}:

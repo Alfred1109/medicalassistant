@@ -217,7 +217,11 @@ class FeedbackReplicaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.rehab_execution_events.count_documents({}), 0)
 
     async def test_canonical_domain_never_falls_back_to_same_id_account(self):
-        await self.db.patient_domain_state.insert_one({"_id": "clinical-patients-v1", "mode": "canonical"})
+        # 对齐 T38（followup/publications/quality 夹具修法）：状态文档必须带
+        # schema_version=1；缺版本时 domain_mode fail-closed 503
+        # PATIENT_DOMAIN_STATE_UNAVAILABLE，本用例将得到错误信号而非门闩 503。
+        await self.db.patient_domain_state.insert_one(
+            {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         with self.assertRaises(AppBaseException) as unavailable:
             await self.submit()
         self.assertEqual(unavailable.exception.error_code, "REHAB_PATIENT_DOMAIN_UNSUPPORTED")

@@ -5,7 +5,10 @@ from app.schemas.health_record import HealthRecordResponse
 from app.core.dependencies import (
     get_current_user, get_database, get_health_record_service, get_device_service,
 )
-from app.core.patient_access import PatientAccessError, ensure_patient_access, ensure_self_patient_access
+from app.core.patient_access import (
+    PatientAccessError, ensure_patient_access, ensure_self_patient_access,
+    is_domain_state_unavailable,
+)
 from app.core.exceptions import AppBaseException
 from app.core.device_access import device_patient_scope, resolve_device_patient
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -43,7 +46,11 @@ async def _resolve_scoped_patient_id(db: AsyncIOMotorDatabase, current_user, pat
     if current_user.role == "patient":
         try:
             return await ensure_self_patient_access(db, current_user, patient_id or None)
-        except PatientAccessError:
+        except PatientAccessError as error:
+            # 域状态不可用（canonical 二次状态读取失败）按 503 透传，
+            # 不与归属失败 403 混同（T50 缺陷 2）。
+            if is_domain_state_unavailable(error):
+                raise
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问其他患者的数据") from None
     if current_user.role not in _PATIENT_SCOPED_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")

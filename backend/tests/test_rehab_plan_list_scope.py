@@ -11,8 +11,10 @@ from jose import jwt
 
 from app.core.config import settings
 from app.core.dependencies import get_rehabilitation_service
+from app.core.patient_access import PatientAccessError
 from app.db.mongodb import get_database
 from app.main import app
+from app.patients.repository import SCHEMA_VERSION, STATE_ID
 from app.schemas.user import UserResponse
 from app.services.rehabilitation_service import RehabilitationService
 from app.services.user_service import UserService
@@ -191,3 +193,78 @@ class RehabPlanListScopeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PatientAccessError):
             await self.service.list_rehab_plans(actor_id=DOCTOR, actor_role="unknown")
         self.assertEqual(self.database.rehab_plans.queries, [])
+
+
+CANONICAL_STATE = {"_id": STATE_ID, "mode": "canonical", "schema_version": SCHEMA_VERSION}
+
+
+class CanonicalScopeDatabase:
+    """canonical 域 fake：状态文档 + clinical_patients；users 仅作为「不再被
+    范围查询触碰」的对照集合。属性访问语义与 motor 一致即可满足
+    RehabilitationService 与 patient_access 内核（无 db[...] 用法）。"""
+
+    def __init__(self, clinical, plans, users=()):
+        self.patient_domain_state = Collection([dict(CANONICAL_STATE)])
+        self.clinical_patients = Collection(clinical)
+        self.rehab_plans = Collection(plans)
+        self.users = Collection(list(users))
+        self.exercises = self.rehab_assessments = self.agents = self.audit_logs = None
+
+    def __getitem__(self, name):
+        return getattr(self, name)
+
+
+class CanonicalMedicalScopeTests(unittest.IsolatedAsyncioTestCase):
+    """T50 缺陷 1：canonical 医护康复计划列表走内核 assigned_scope_ids，
+    查询执行于 clinical_patients——修复前 canonical 查询形状被交给 users
+    执行，医护列表恒空且带 patient_id 时假 403（与 bd9c417 的
+    followup/device 修法一致）。"""
+
+    def setUp(self):
+        self.database = CanonicalScopeDatabase(
+            clinical=[
+                {"_id": ObjectId(PATIENT_A), "patient_id": PATIENT_A, "status": "active",
+                 "practitioners": [DOCTOR]},
+                {"_id": ObjectId(PATIENT_B), "patient_id": PATIENT_B, "status": "active",
+                 "health_managers": [MANAGER]},
+                {"_id": ObjectId(PATIENT_C), "patient_id": PATIENT_C, "status": "active",
+                 "practitioners": ["other-doctor"]},
+            ],
+            plans=[
+                {"_id": ObjectId(), "patient_id": PATIENT_A, "name": "A1"},
+                {"_id": ObjectId(), "patient_id": PATIENT_C, "name": "C"},
+                {"_id": ObjectId(), "patient_id": PATIENT_A, "name": "A2"},
+            ])
+        self.service = RehabilitationService(self.database)
+
+    def canonical_scope_query(self, identifier, field):
+        candidates = [identifier, ObjectId(identifier)] if ObjectId.is_valid(identifier) else [identifier]
+        return {"status": "active", field: {"$in": candidates}}
+
+    async def test_canonical_medical_list_is_not_silently_empty(self):
+        plans = await self.service.list_rehab_plans(actor_id=DOCTOR, actor_role="doctor")
+        self.assertEqual(sorted(row["name"] for row in plans), ["A1", "A2"])
+        # 范围查询执行于 clinical_patients（canonical 形状），users 零触碰
+        self.assertEqual(self.database.clinical_patients.queries[0],
+                         self.canonical_scope_query(DOCTOR, "practitioners"))
+        self.assertEqual(self.database.users.queries, [])
+        self.assertEqual(self.database.rehab_plans.queries[-1],
+                         {"patient_id": {"$in": [PATIENT_A]}})
+
+    async def test_canonical_explicit_filter_has_no_fake_403(self):
+        # 已分配患者：200 真数据（修复前假 403）；未分配患者：真 403
+        plans = await self.service.list_rehab_plans(PATIENT_A, actor_id=DOCTOR, actor_role="doctor")
+        self.assertEqual(sorted(row["name"] for row in plans), ["A1", "A2"])
+        with self.assertRaises(PatientAccessError) as denied:
+            await self.service.list_rehab_plans(PATIENT_C, actor_id=DOCTOR, actor_role="doctor")
+        self.assertEqual(denied.exception.status_code, 403)
+
+    async def test_canonical_health_manager_scope_and_empty_scope_stay_scoped(self):
+        plans = await self.service.list_rehab_plans(actor_id=MANAGER, actor_role="health_manager")
+        self.assertEqual(plans, [])  # B 无计划：范围正确返回而非退化为全局
+        self.assertEqual(self.database.rehab_plans.queries[-1],
+                         {"patient_id": {"$in": [PATIENT_B]}})
+        outsider = str(ObjectId())
+        self.assertEqual(await self.service.list_rehab_plans(actor_id=outsider,
+                                                             actor_role="doctor"), [])
+        self.assertEqual(self.database.rehab_plans.queries[-1], {"patient_id": {"$in": []}})

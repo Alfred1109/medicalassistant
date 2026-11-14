@@ -11,7 +11,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.core.exceptions import AppBaseException
 from app.db.transactions import run_transaction
-from app.core.patient_access import assigned_scope_query, patient_assignment_field, patient_domain_mode
+from app.core.patient_access import assigned_scope_ids, patient_assignment_field, patient_domain_mode
 from app.core.patient_identity import identity_key, load_identity_groups
 from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
 from app.services.followup_service import FollowupService
@@ -248,14 +248,19 @@ class QualityIssueService:
             await self._patient(patient_id, actor)
             query["patient_id"] = patient_id
         else:
-            patient_scope = ({"role": "patient"} if actor.role == "admin" else
-                             await assigned_scope_query(self.db, str(actor.id), actor.role))
             # Scope, role/assignment filtering and same-visible-value identity
             # disambiguation all live in the legacy patient adapter: one
             # candidate read plus one identity batch, never an N+1 patient loop.
+            # T50 缺陷 1 同型迁移：构造+执行改走内核 assigned_scope_ids（legacy
+            # 落 users 且 is_active 精化语义逐字保留），防止门闩移除后 canonical
+            # 查询形状被交给 users 执行。admin 无归属角色字段，保持原全量分支。
             try:
-                identifiers = await LegacyPatientRepository(self.db).assigned_ids(
-                    {**patient_scope, "is_active": True})
+                identifiers = (
+                    await assigned_scope_ids(self.db, str(actor.id), actor.role,
+                                             extra_query={"is_active": True})
+                    if actor.role != "admin" else
+                    await LegacyPatientRepository(self.db).assigned_ids(
+                        {"role": "patient", "is_active": True}))
             except LegacyPatientIdentityError:
                 raise fail("QUALITY_PATIENT_IDENTITY_AMBIGUOUS", "患者身份无法唯一核实，请联系管理员核查", 503) from None
             query["patient_id"] = {"$in": identifiers}

@@ -2,7 +2,8 @@
 from fastapi import HTTPException
 
 from app.core.patient_access import (
-    PatientAccessError, assigned_scope_ids, ensure_patient_access, ensure_self_patient_access,
+    PatientAccessError, assigned_scope_ids, ensure_patient_access,
+    ensure_self_patient_access, is_domain_state_unavailable,
 )
 
 
@@ -12,7 +13,11 @@ async def ensure_followup_patient_access(db, patient_id, actor, *, write=False):
     if actor.role == "patient":
         try:
             await ensure_self_patient_access(db, actor, patient_id)
-        except PatientAccessError:
+        except PatientAccessError as error:
+            # 域状态不可用（canonical 二次状态读取失败）按 503 透传，
+            # 不与归属失败 403 混同（T50 缺陷 2）。
+            if is_domain_state_unavailable(error):
+                raise
             raise HTTPException(status_code=403, detail="无权访问该患者的随访记录") from None
         return
     if actor.role not in {"doctor", "health_manager", "admin"}:

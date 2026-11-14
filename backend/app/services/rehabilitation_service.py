@@ -11,8 +11,7 @@ from pymongo.write_concern import WriteConcern
 from copy import deepcopy
 from app.core.config import settings
 from app.core.exceptions import AppBaseException, ExternalServiceException
-from app.core.patient_access import assigned_scope_query, PatientAccessError
-from app.patients.legacy import LegacyPatientRepository
+from app.core.patient_access import assigned_scope_ids, PatientAccessError
 import numpy as np
 
 from app.schemas.rehabilitation import (
@@ -208,8 +207,11 @@ class RehabilitationService:
             if patient_id:
                 filter_dict["patient_id"] = patient_id
         elif actor_role in {"doctor", "health_manager"}:
-            patient_ids = await LegacyPatientRepository(self.db).assigned_ids(
-                await assigned_scope_query(self.db, str(actor_id), actor_role))
+            # 构造+执行一体的域感知范围解析：legacy 执行于 users（歧义防护
+            # 不变），canonical 执行于 clinical_patients——不再把 canonical
+            # 查询形状交给 users 执行（那会让医护列表恒空、带 patient_id 时
+            # 假 403，见 T50 缺陷 1，与 bd9c417 的 followup/device 修法一致）。
+            patient_ids = await assigned_scope_ids(self.db, str(actor_id), actor_role)
             if patient_id and str(patient_id) not in patient_ids:
                 raise PatientAccessError("无权访问该患者的康复方案")
             # An empty authorized scope must stay empty, never become find({}).

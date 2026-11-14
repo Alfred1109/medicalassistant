@@ -73,6 +73,23 @@
   `patient_access.py:100`）、`devices.patient_id` 索引
   （`backend/app/db/indexes.py:52-56` `device_patient_query`）。
 - **门闩移除条件：** 本波无既有 503 门闩（门闩集中在写路径域）。
+- **决策项（T50 对抗审查登记，波次 1 启用前必须业务确认）：** 停用患者对
+  医护的可见性口径。当前实现是**统一 404**：`load_patient_doc` 的
+  canonical 分支把 `status != "active"` 一律按不存在处理（404
+  `PATIENT_NOT_FOUND`），经 `ensure_patient_access` 与各域对象级访问路径
+  生效；而 legacy 域中部分消费方的现状是「被分配医护仍可读停用患者
+  （is_active=False）」。因此 canonical 的统一 404 是**收紧而非对齐**。
+  波次 1 启用前需业务确认：「统一 404」（现状实现，见
+  `backend/app/core/patient_access.py` canonical 分支）还是「消费方级
+  status 策略」（如随访/健康档案允许被分配医护继续读停用患者）。确认
+  结论回写本节后方可置 canonical。
+- **待办登记（T50 对抗审查，随 T44 落地后补齐）：**
+  `backend/app/integrations/forms/service.py` 的 `_verify_patient_assignment`
+  catch-all 把一切 `PatientAccessError` 降级为集成侧 403
+  `PATIENT_NOT_ASSIGNED`，域状态不可用 503
+  `PATIENT_DOMAIN_STATE_UNAVAILABLE` 被吞并（T50 缺陷 2 的第四处同型点）。
+  该文件域是并行任务 T44 的在途改动，本任务不修；T44 合入后按缺陷 2 同款
+  `error_code` 分流修法补齐（503 透传、其余保持原语义）。
 - **验证清单：**
   1. 双模式合同测试：同名患者列表 / 本人访问 / 医护范围 / 姓名搜索在
      legacy 与 canonical 结果一致（患者集合与字段差异除外）。
@@ -80,6 +97,10 @@
   3. fail-closed：状态文档缺失/未知版本/读取失败 → 503 且不回退 legacy。
   4. 全量回归（对照本轮基线 687 passed / 262 skipped，
      `docs/architecture-convergence.md:38`）。
+  5. canonical 写路径冒烟（T50 对抗审查「观察」，栅栏载体拆分前的已知
+     限制）：置 canonical 后，workspace 报告审核写入与 device fence 写
+     路径必须逐项冒烟——两条写路径的并发栅栏仍落在 `users` 载体（§3），
+     canonical 下账号与患者文档拆开，启用前须实测并发撤权不假报成功。
 - **回滚方式：** 域开关回拨 legacy。读取面无写入残留，回拨即恢复。
 
 ### 波次 2：康复发布与人工质控写路径（含栅栏载体拆分首落地）

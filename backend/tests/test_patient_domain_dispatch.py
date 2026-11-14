@@ -12,8 +12,12 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 from bson import ObjectId
+from fastapi import HTTPException
 from pymongo.errors import PyMongoError
 
+from app.api.routers.patient_router import _resolve_scoped_patient_id
+from app.core.followup_access import ensure_followup_patient_access
+from app.core.health_record_access import ensure_health_record_patient_access
 from app.core.patient_access import (
     PatientAccessError, assigned_scope_ids, assigned_scope_query, ensure_patient_access,
     ensure_self_patient_access, load_patient_doc, patient_domain_mode)
@@ -99,6 +103,24 @@ class BrokenCollection(FakeCollection):
 
     async def find_one(self, query, *args, **kwargs):
         raise PyMongoError("synthetic state read failure")
+
+
+class FlipFlopStateCollection(FakeCollection):
+    """两次状态读取之间状态文档被变更：首次 canonical、其后显式 legacy。
+
+    用于证明 canonical 对象访问链路的二次状态读取（require_canonical）
+    异常不再裸逃逸为 500，而是与域模式读取同款 fail-closed 503（T50 缺陷 5）。
+    """
+
+    def __init__(self):
+        super().__init__([dict(CANONICAL_STATE)])
+        self.reads = 0
+
+    async def find_one(self, query, *args, **kwargs):
+        self.reads += 1
+        if self.reads > 1:
+            return {"_id": STATE_ID, "mode": "legacy", "schema_version": SCHEMA_VERSION}
+        return await super().find_one(query, *args, **kwargs)
 
 
 class FakeDatabase:
@@ -399,6 +421,106 @@ class CanonicalDispatchTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PatientAccessError) as denied:
             await ensure_patient_access(db, PATIENT_ID, str(DOCTOR_ID), "doctor")
         self.assertEqual(denied.exception.status_code, 404)
+
+
+class CanonicalSecondaryReadFailureTests(unittest.IsolatedAsyncioTestCase):
+    """T50 缺陷 5：canonical 对象访问的二次状态读取异常转 503，不裸逃逸 500。
+
+    load_patient_doc / ensure_self_patient_access 的 canonical 分支经
+    repository.get / resolve_self 时会再次执行 require_canonical（可能与
+    域模式读取竞态）或遇到传输层 PyMongoError；两者都必须包装成与
+    patient_domain_mode 同款的 PatientAccessError 503
+    PATIENT_DOMAIN_STATE_UNAVAILABLE。
+    """
+
+    async def test_load_patient_doc_wraps_canonical_state_race(self):
+        db = FakeDatabase(state_collection=FlipFlopStateCollection(),
+                          clinical=FakeCollection([clinical_patient(PATIENT_ID)]))
+        with self.assertRaises(PatientAccessError) as rejected:
+            await load_patient_doc(db, PATIENT_ID)
+        self.assertEqual(rejected.exception.status_code, 503)
+        self.assertEqual(rejected.exception.error_code, "PATIENT_DOMAIN_STATE_UNAVAILABLE")
+        self.assertEqual(rejected.exception.details.get("reason"), "PATIENT_DOMAIN_NOT_MIGRATED")
+
+    async def test_load_patient_doc_wraps_canonical_transport_failure(self):
+        db = canonical_db(clinical=BrokenCollection())
+        with self.assertRaises(PatientAccessError) as rejected:
+            await load_patient_doc(db, PATIENT_ID)
+        self.assertEqual(rejected.exception.status_code, 503)
+        self.assertEqual(rejected.exception.error_code, "PATIENT_DOMAIN_STATE_UNAVAILABLE")
+        self.assertEqual(rejected.exception.details.get("reason"), "PATIENT_DOMAIN_STATE_READ_FAILED")
+
+    async def test_self_access_wraps_canonical_transport_failure(self):
+        patient_actor = type("Actor", (), {"id": PATIENT_ID, "role": "patient"})()
+        db = canonical_db(clinical=[clinical_patient(PATIENT_ID)],
+                          links=BrokenCollection(),
+                          users=[legacy_user(PATIENT_ID)])
+        with self.assertRaises(PatientAccessError) as rejected:
+            await ensure_self_patient_access(db, patient_actor)
+        self.assertEqual(rejected.exception.status_code, 503)
+        self.assertEqual(rejected.exception.error_code, "PATIENT_DOMAIN_STATE_UNAVAILABLE")
+        self.assertEqual(rejected.exception.details.get("reason"), "PATIENT_DOMAIN_STATE_READ_FAILED")
+
+
+class DomainStateUnavailablePassthroughTests(unittest.IsolatedAsyncioTestCase):
+    """T50 缺陷 2：域状态不可用 503 必须穿透消费方 catch-all，不降级为 403。
+
+    三处 `except PatientAccessError → HTTPException 403`（随访、健康档案、
+    患者 router 的本人语义分支）按 error_code 分流：域状态不可用透传，
+    归属失败保持原 403 语义。
+    """
+
+    def patient(self, identifier=PATIENT_ID):
+        return type("Actor", (), {"id": identifier, "role": "patient"})()
+
+    def broken_state_db(self):
+        return FakeDatabase(state_collection=BrokenCollection(),
+                            users=FakeCollection([legacy_user(PATIENT_ID)]))
+
+    async def assert_unavailable_passthrough(self, operation):
+        with self.assertRaises(PatientAccessError) as rejected:
+            await operation()
+        self.assertEqual(rejected.exception.status_code, 503)
+        self.assertEqual(rejected.exception.error_code, "PATIENT_DOMAIN_STATE_UNAVAILABLE")
+        # 透传的是 AppBaseException 503，而不是 HTTPException 403 降级
+        self.assertNotIsInstance(rejected.exception, HTTPException)
+
+    async def test_followup_patient_branch_passes_domain_unavailable_through(self):
+        await self.assert_unavailable_passthrough(
+            lambda: ensure_followup_patient_access(self.broken_state_db(), PATIENT_ID,
+                                                   self.patient()))
+
+    async def test_health_record_patient_branch_passes_domain_unavailable_through(self):
+        await self.assert_unavailable_passthrough(
+            lambda: ensure_health_record_patient_access(self.broken_state_db(), PATIENT_ID,
+                                                        self.patient()))
+
+    async def test_patient_router_self_branch_passes_domain_unavailable_through(self):
+        await self.assert_unavailable_passthrough(
+            lambda: _resolve_scoped_patient_id(self.broken_state_db(), self.patient(), None))
+
+    async def test_patient_router_explicit_other_patient_keeps_403(self):
+        db = self.broken_state_db()
+        with self.assertRaises(HTTPException) as denied:
+            await _resolve_scoped_patient_id(db, self.patient(), str(ObjectId()))
+        self.assertEqual(denied.exception.status_code, 403)
+
+    async def test_legacy_forbidden_still_degrades_to_403(self):
+        # 域状态正常（legacy）时，三处 catch-all 的原 403 语义逐字不变：
+        # 患者账号显式请求他人患者 ID（显式拒绝先于域模式读取）
+        db = FakeDatabase(users=FakeCollection([legacy_user(PATIENT_ID)]))
+        other_id = str(ObjectId())
+        with self.assertRaises(HTTPException) as followup_denied:
+            await ensure_followup_patient_access(db, other_id, self.patient())
+        self.assertEqual(followup_denied.exception.status_code, 403)
+        with self.assertRaises(HTTPException) as record_denied:
+            await ensure_health_record_patient_access(db, other_id, self.patient())
+        self.assertEqual(record_denied.exception.status_code, 403)
+        with self.assertRaises(HTTPException) as router_denied:
+            await _resolve_scoped_patient_id(db, self.patient(), other_id)
+        self.assertEqual(router_denied.exception.status_code, 403)
+        # 本人访问不受影响
+        self.assertEqual(await _resolve_scoped_patient_id(db, self.patient(), None), PATIENT_ID)
 
 
 class CanonicalNameSearchTests(unittest.IsolatedAsyncioTestCase):

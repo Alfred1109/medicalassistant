@@ -3,7 +3,7 @@ import asyncio
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from bson import ObjectId
@@ -37,6 +37,55 @@ class QualityIssueSchemaTests(unittest.TestCase):
             ConfirmQualityIssue(request_id="request-one", expected_version=True, note="checked")
 
 
+class AggregateCursor:
+    async def to_list(self, length=None):
+        return [{"items": [], "count": [{"total": 0}]}]
+
+
+class FakeScopeDatabase:
+    """最小 fake：QualityIssueService 构造走 db[ISSUES]/db[OPERATIONS]，list 只触 issues。"""
+
+    def __init__(self):
+        self.quality_issues = SimpleNamespace(aggregate=lambda pipeline: AggregateCursor())
+        self.quality_issue_operations = SimpleNamespace()
+
+    def __getitem__(self, name):
+        return getattr(self, name)
+
+
+class QualityListScopeDispatchTests(unittest.IsolatedAsyncioTestCase):
+    """T50 缺陷 1（质控同型迁移）：list 非 admin 范围解析必须走内核
+    assigned_scope_ids（legacy 分支保留 is_active 精化），admin 保持原
+    LegacyPatientRepository 全量分支。当前 canonical 被域门闩挡住，此锁定
+    防止门闩移除后 canonical 查询形状被交给 users 执行。"""
+
+    async def test_non_admin_scope_resolution_goes_through_kernel(self):
+        scope = AsyncMock(return_value=[str(ObjectId())])
+        with patch.object(QualityIssueService, "_actor",
+                          new=AsyncMock(return_value=SimpleNamespace(_id="account"))), \
+             patch("app.services.quality_issue_service.assigned_scope_ids", new=scope):
+            service = QualityIssueService(FakeScopeDatabase())
+            result = await service.list(SimpleNamespace(id="account", role="doctor"), limit=20)
+        self.assertEqual(result["total"], 0)
+        scope.assert_awaited_once()
+        args, kwargs = scope.await_args
+        self.assertEqual(args[1:], ("account", "doctor"))
+        self.assertEqual(kwargs, {"extra_query": {"is_active": True}})
+
+    async def test_admin_scope_keeps_legacy_full_patient_branch(self):
+        with patch.object(QualityIssueService, "_actor",
+                          new=AsyncMock(return_value=SimpleNamespace(_id="account"))), \
+             patch("app.services.quality_issue_service.assigned_scope_ids") as kernel, \
+             patch("app.services.quality_issue_service.LegacyPatientRepository") as adapter:
+            adapter.return_value.assigned_ids = AsyncMock(return_value=[])
+            service = QualityIssueService(FakeScopeDatabase())
+            result = await service.list(SimpleNamespace(id="account", role="admin"), limit=20)
+        self.assertEqual(result["total"], 0)
+        adapter.return_value.assigned_ids.assert_awaited_once_with(
+            {"role": "patient", "is_active": True})
+        kernel.assert_not_awaited()
+
+
 @unittest.skipUnless(URI, "set REHAB_TEST_QUALITY_ISSUE_MONGO_URI to an isolated replica set")
 class QualityIssueMongoTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -55,6 +104,12 @@ class QualityIssueMongoTests(unittest.IsolatedAsyncioTestCase):
             {"_id": self.admin, "role": "admin", "is_active": True},
         ])
         await self.db.rehab_plans.insert_one({"_id": self.plan, "patient_id": str(self.patient), "status": "active"})
+        # outsider 医护名下患者也需要自己的合法 rehab 来源：create 的
+        # _source 校验要求 source 文档 patient_id 与 payload.patient_id 一致
+        # （QUALITY_SOURCE_MISMATCH 404），否则该用例在 create 阶段即失败。
+        self.other_plan = ObjectId()
+        await self.db.rehab_plans.insert_one({"_id": self.other_plan,
+            "patient_id": str(self.other_patient), "status": "active"})
         await self.db["followup_records"].insert_one({"_id": self.followup, "patient_id": str(self.patient), "status": "scheduled"})
         self.actor = SimpleNamespace(id=str(self.doctor), role="doctor")
         self.svc = QualityIssueService(self.db)
@@ -79,7 +134,8 @@ class QualityIssueMongoTests(unittest.IsolatedAsyncioTestCase):
             [str(self.other_patient)])
         mine = await self.issue()
         theirs = await self.svc.create(
-            self.create_payload(patient_id=str(self.other_patient)), outsider)
+            self.create_payload(patient_id=str(self.other_patient),
+                                source_id=str(self.other_plan)), outsider)
         result = await self.svc.list(self.actor, limit=100)
         self.assertEqual(result["total"], 1)
         self.assertEqual([item["id"] for item in result["items"]], [mine["id"]])
