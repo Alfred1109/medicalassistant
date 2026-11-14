@@ -205,6 +205,9 @@ class FailClosedStateTests(unittest.IsolatedAsyncioTestCase):
         users = FakeCollection([legacy_user(PATIENT_ID)])
         for state in ({"_id": STATE_ID, "mode": "migrating", "schema_version": SCHEMA_VERSION},
                       {"_id": STATE_ID, "mode": "canonical", "schema_version": SCHEMA_VERSION + 1},
+                      # 显式 legacy 但版本不符/缺失：同样 fail-closed，绝不猜域
+                      {"_id": STATE_ID, "mode": "legacy", "schema_version": SCHEMA_VERSION + 1},
+                      {"_id": STATE_ID, "mode": "legacy"},
                       {"_id": STATE_ID, "mode": "unknown-mode", "schema_version": SCHEMA_VERSION}):
             with self.subTest(state=state["mode"]):
                 db = FakeDatabase(state=state, users=FakeCollection(users.documents))
@@ -212,6 +215,70 @@ class FailClosedStateTests(unittest.IsolatedAsyncioTestCase):
                     await load_patient_doc(db, PATIENT_ID)
                 self.assertEqual(rejected.exception.status_code, 503)
                 self.assertEqual(rejected.exception.error_code, "PATIENT_DOMAIN_STATE_UNAVAILABLE")
+
+
+class ExplicitLegacyStateTests(unittest.IsolatedAsyncioTestCase):
+    """显式 `{mode: "legacy"}` 状态（回拨 SOP 载体）：与无文档 legacy 行为完全一致。
+
+    差别仅在状态可审计、回拨不会静默降级；canonical 仓库写路径
+    （require_canonical）在该状态下保持 fail-closed 拒绝。
+    """
+
+    def explicit_legacy_db(self, **kwargs):
+        return FakeDatabase(state={"_id": STATE_ID, "mode": "legacy",
+                                   "schema_version": SCHEMA_VERSION,
+                                   "reviewer": "rollback-reviewer",
+                                   "evidence_reference": "change-ticket-42",
+                                   "operation": "canonical_domain_rollback"}, **kwargs)
+
+    async def test_explicit_legacy_state_keeps_every_legacy_entry_point(self):
+        db = self.explicit_legacy_db(users=FakeCollection([
+            legacy_user(PATIENT_ID, practitioners=[DOCTOR_ID])]))
+        self.assertEqual(await patient_domain_mode(db), "legacy")
+        patient = await load_patient_doc(db, PATIENT_ID)
+        self.assertEqual(str(patient["_id"]), PATIENT_ID)
+        self.assertEqual(await ensure_patient_access(db, PATIENT_ID, str(DOCTOR_ID), "doctor"),
+                         patient)
+        # 患者自取不再要求 verified 链接：与无文档 legacy 完全一致
+        self.assertEqual(await ensure_self_patient_access(
+            db, type("Actor", (), {"id": PATIENT_ID, "role": "patient"})()), PATIENT_ID)
+        self.assertEqual(await assigned_scope_query(db, str(DOCTOR_ID), "doctor"),
+                         {"role": "patient",
+                          "practitioners": {"$in": [str(DOCTOR_ID), DOCTOR_ID]}})
+        scope = await assigned_scope_ids(db, str(DOCTOR_ID), "doctor")
+        self.assertEqual(scope, [PATIENT_ID])  # 范围执行仍落在 users
+
+    async def test_canonical_repository_paths_refuse_without_half_state(self):
+        """回拨后 canonical 读写路径（require_canonical）fail-closed，不产生半状态。"""
+        db = self.explicit_legacy_db(
+            clinical=FakeCollection([clinical_patient(PATIENT_ID)]),
+            links=FakeCollection([verified_link(PATIENT_ID)]))
+        repo = ClinicalPatientRepository(db)
+        for operation in (lambda: repo.get(PATIENT_ID),
+                          lambda: repo.list_assigned(str(DOCTOR_ID), "doctor"),
+                          lambda: repo.resolve_self(PATIENT_ID),
+                          lambda: repo.create_from_source(
+                              {"origin": "https://source.example",
+                               "system": "form-platform-11344", "environment": "production",
+                               "patient_id": 1},
+                              reviewer="reviewer", evidence_reference="evidence")):
+            with self.subTest(operation=operation):
+                with self.assertRaises(PatientDomainError) as refused:
+                    await operation()
+                self.assertEqual(refused.exception.code, "PATIENT_DOMAIN_NOT_MIGRATED")
+        # fail-closed 拒绝不产生写入：clinical/links/状态文档原样保留
+        self.assertEqual(len(db.clinical_patients.documents), 1)
+        self.assertEqual(len(db.patient_account_links.documents), 1)
+        self.assertEqual(db.patient_domain_state.documents[0]["mode"], "legacy")
+
+    async def test_legacy_version_mismatch_still_fails_closed(self):
+        db = FakeDatabase(state={"_id": STATE_ID, "mode": "legacy",
+                                 "schema_version": SCHEMA_VERSION + 1},
+                          users=FakeCollection([legacy_user(PATIENT_ID)]))
+        with self.assertRaises(PatientAccessError) as rejected:
+            await load_patient_doc(db, PATIENT_ID)
+        self.assertEqual(rejected.exception.status_code, 503)
+        self.assertEqual(rejected.exception.error_code, "PATIENT_DOMAIN_STATE_UNAVAILABLE")
 
 
 class CanonicalDispatchTests(unittest.IsolatedAsyncioTestCase):

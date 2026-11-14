@@ -39,7 +39,16 @@ async def domain_mode(db, *, session=None):
     """Read the durable domain switch; an unknown observed state fails closed.
 
     No state document means the legacy users-backed domain is still the active
-    default. Any other observed state (migrating, a different schema version or
+    default. An explicit `{mode: "legacy", schema_version: SCHEMA_VERSION}`
+    state is the audited rollback carrier required by the cutover SOP: it
+    resolves to the same legacy domain with identical business behavior — the
+    only difference is that the switch stays observable, auditable and
+    reversible without deleting the document (deleting it would silently
+    degrade and leave no failure signal). Canonical repository access
+    (`require_canonical`) keeps refusing under an explicit legacy state, so a
+    rollback never produces a half-migrated write path.
+
+    Any other observed state (migrating, a different schema version or
     an unrecognized mode) is rejected: callers must never guess a domain, and
     transport-level read failures must surface to the caller instead of being
     mistaken for a legacy deployment.
@@ -57,8 +66,12 @@ async def domain_mode(db, *, session=None):
         state = await state_collection.find_one({"_id": STATE_ID}, session=session)
     if state is None:
         return "legacy"
-    if state.get("mode") == "canonical" and state.get("schema_version") == SCHEMA_VERSION:
+    if state.get("schema_version") != SCHEMA_VERSION:
+        raise PatientDomainError("PATIENT_DOMAIN_STATE_UNAVAILABLE")
+    if state.get("mode") == "canonical":
         return "canonical"
+    if state.get("mode") == "legacy":
+        return "legacy"
     raise PatientDomainError("PATIENT_DOMAIN_STATE_UNAVAILABLE")
 
 

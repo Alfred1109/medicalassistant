@@ -17,6 +17,7 @@ import os
 import tempfile
 import unittest
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -508,8 +509,9 @@ class PatientDomainE2EDrillTests(unittest.IsolatedAsyncioTestCase):
         # 患者文档，患者自取不再需要 verified 链接）。这不是 fail-closed：
         # 意外删除状态文档会静默降级。回拨 SOP（docs/patient-domain-cutover-plan.md
         # 回拨口径章节，缺口 3 收口）明确：回拨必须以显式域开关状态变更执行，
-        # 禁止以删文档当开关；本用例固化「删文档=静默回 legacy」的现行语义，
-        # 作为该风险的存在性证据。
+        # 禁止以删文档当开关。T35 后 SOP 的显式载体（mode:"legacy" 合法状态）
+        # 已落地，见 test_explicit_legacy_rollback_sop_and_recutover；本用例
+        # 继续固化「删文档=静默回 legacy」的现行语义，作为该风险的存在性证据。
         await self.db[STATE].delete_one({"_id": STATE_ID})
         self.assertEqual(await patient_domain_mode(self.db), "legacy")
         legacy_doc = await load_patient_doc(self.db, patient_id)
@@ -526,6 +528,74 @@ class PatientDomainE2EDrillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await load_patient_doc(self.db, patient_id))["patient_id"],
                          patient_id)
         self.assertNotIn("role", await load_patient_doc(self.db, patient_id))
+
+    # ---- 场景 8：显式 legacy 回拨 SOP（T35 载体）：迁移→canonical→显式回拨
+    # legacy→legacy 语义回归→canonical 写路径 fail-closed→显式切回 canonical----
+
+    async def test_explicit_legacy_rollback_sop_and_recutover(self):
+        await self.seed_users(self.seed_documents())
+        await self.migrate()
+        patient_id = str(self.patient_oid)
+        doctor_actor = actor(DOCTOR, "doctor")
+        patient_actor = actor(patient_id, "patient")
+
+        # -- 显式回拨（SOP 口径 1）：状态文档保留，mode 显式改回 legacy，
+        #    留痕（复核人 + 变更依据），禁止删文档当开关。审计字段风格对齐
+        #    canonical 写入（reviewer/evidence/时间/操作名）。--
+        now = datetime.now(timezone.utc)
+        await self.db[STATE].update_one({"_id": STATE_ID}, {"$set": {
+            "mode": "legacy", "rollback_reviewer": "rollback-reviewer",
+            "rollback_evidence_reference": "change-ticket-42",
+            "rolled_back_at": now,
+            "rollback_operation": "canonical_domain_rollback"}})
+        state = await self.db[STATE].find_one({"_id": STATE_ID})
+        self.assertEqual(state["mode"], "legacy")  # 状态文档仍在，可审计
+        self.assertEqual(state["schema_version"], 1)
+        self.assertEqual(state["migrated_count"], 2)  # 迁移档案保留
+        self.assertEqual(await patient_domain_mode(self.db), "legacy")
+
+        # -- 内核按 legacy 语义读取：患者自取不再要求 verified 链接 --
+        legacy_doc = await load_patient_doc(self.db, patient_id)
+        self.assertEqual(legacy_doc["_id"], self.patient_oid)  # users 重新充当患者文档
+        self.assertEqual(await ensure_self_patient_access(self.db, patient_actor),
+                         patient_id)
+        # legacy 医护范围重新按 users 关系解析（canonical 链接不再被消费）
+        self.assertEqual(await followup_patient_scope(self.db, doctor_actor),
+                         [patient_id, self.patient_str])
+        self.assertEqual(await ensure_patient_access(self.db, patient_id,
+                                                     DOCTOR, "doctor"),
+                         legacy_doc)
+
+        # -- canonical 写路径 fail-closed（require_canonical），不产生半状态 --
+        with self.assertRaises(PatientDomainError) as refused:
+            await self.repo.get(patient_id)
+        self.assertEqual(refused.exception.code, "PATIENT_DOMAIN_NOT_MIGRATED")
+        with self.assertRaises(PatientDomainError) as scope_refused:
+            await self.repo.list_assigned(DOCTOR, "doctor")
+        self.assertEqual(scope_refused.exception.code, "PATIENT_DOMAIN_NOT_MIGRATED")
+        # canonical 三集合与状态文档原样保留（回拨不写坏数据）
+        self.assertEqual(await self.domain_counts(),
+                         {"patients": 2, "links": 2, "state": 1})
+        # 迁移工具联动：显式 legacy 下 rerun 拒绝行动（状态文档存在且
+        # mode != canonical → PATIENT_DOMAIN_STATE_CONFLICT），重新切换
+        # canonical 需人工复核处置状态文档，工具绝不静默覆写。
+        with self.assertRaises(PatientDomainError) as conflict:
+            await inspect_migration(self.db)
+        self.assertEqual(conflict.exception.code, "PATIENT_DOMAIN_STATE_CONFLICT")
+
+        # -- 再显式切回 canonical：一切恢复（演练可逆）--
+        await self.db[STATE].update_one({"_id": STATE_ID}, {"$unset": {
+            "rollback_reviewer": "", "rollback_evidence_reference": "",
+            "rolled_back_at": "", "rollback_operation": ""}, "$set": {"mode": "canonical"}})
+        self.assertEqual(await patient_domain_mode(self.db), "canonical")
+        clinical_doc = await load_patient_doc(self.db, patient_id)
+        self.assertEqual(clinical_doc["patient_id"], patient_id)
+        self.assertNotIn("role", clinical_doc)  # 重新读 clinical_patients
+        self.assertEqual(await ensure_self_patient_access(self.db, patient_actor),
+                         patient_id)  # verified 链接语义恢复
+        self.assertEqual(set(await followup_patient_scope(self.db, doctor_actor)),
+                         {patient_id, self.patient_str})
+        self.assertEqual((await self.repo.get(patient_id))["patient_id"], patient_id)
 
 
 if __name__ == "__main__":

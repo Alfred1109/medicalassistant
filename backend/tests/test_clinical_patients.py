@@ -17,7 +17,8 @@ from pydantic import ValidationError
 
 from app.patients.migration import inspect_migration, migrate_legacy_patients, project_legacy_patient
 from app.patients.repository import (ClinicalPatientRepository, PatientDomainError,
-                                     PATIENTS, STATE, STATE_ID, assigned_query, source_key)
+                                     PATIENTS, SCHEMA_VERSION, STATE, STATE_ID,
+                                     assigned_query, domain_mode, source_key)
 from app.patients.schemas import SourcePatientIdentity, patient_response
 
 
@@ -231,9 +232,29 @@ class ClinicalPatientMongoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_or_changed_mode_refuses_reads(self):
         await self.migrate()
-        await self.db[STATE].update_one({"_id": STATE_ID}, {"$set": {"mode": "legacy"}})
+        # 显式 legacy（回拨 SOP 载体）：mode 显式改回 legacy 且版本匹配后，
+        # 域开关合法返回 legacy，但仓库 canonical 读写路径（require_canonical）
+        # 保持 fail-closed，不产生任何半状态写入。
+        await self.db[STATE].update_one({"_id": STATE_ID}, {"$set": {
+            "mode": "legacy", "rollback_reviewer": "rollback-reviewer",
+            "rollback_evidence_reference": "change-ticket-42"}})
+        self.assertEqual(await domain_mode(self.db), "legacy")
         with self.assertRaises(PatientDomainError):
             await self.repo.get(str(self.patient_id))
+        with self.assertRaises(PatientDomainError):
+            await self.repo.list_assigned(str(self.doctor_id), "doctor")
+        self.assertEqual(await self.db[PATIENTS].count_documents({}), 1)
+        # 显式 legacy 但版本不符：域读取本身 fail-closed
+        await self.db[STATE].update_one({"_id": STATE_ID},
+                                        {"$set": {"schema_version": SCHEMA_VERSION + 1}})
+        with self.assertRaises(PatientDomainError):
+            await domain_mode(self.db)
+        await self.db[STATE].update_one({"_id": STATE_ID},
+                                        {"$set": {"schema_version": SCHEMA_VERSION}})
+        # 显式 legacy 下迁移工具拒绝行动（状态文档存在且 mode != canonical）
+        with self.assertRaises(PatientDomainError):
+            await self.migrate()
+        # 状态文档被删除：仓库路径同样拒绝（canonical 数据残留不再是可迁移基线）
         await self.db[STATE].delete_one({"_id": STATE_ID})
         with self.assertRaises(PatientDomainError):
             await self.repo.list_assigned(str(self.doctor_id), "doctor")

@@ -116,6 +116,19 @@ The authorization kernel `app/core/patient_access.py` reads the durable
   `ensure_self_patient_access`, `assigned_patient_query`) keeps its existing
   legacy semantics, including the 503 ambiguity latch. Legacy-mode behavior is
   unchanged; business consumers still drive legacy queries directly.
+- An explicit `{mode: "legacy", schema_version: <SCHEMA_VERSION>}` state
+  document — the audited rollback carrier required by the cutover SOP — is the
+  second legal legacy form. It dispatches to exactly the same legacy behavior
+  as a missing document; the only difference is that the switch stays
+  observable and auditable (record who/when/why on the document, aligned with
+  the canonical state's audit style) and rollback never silently degrades by
+  deleting the singleton. Under an explicit legacy state the canonical
+  repository paths (`require_canonical`: `get`, `list_assigned`,
+  `resolve_self`, `create_from_source`, ...) keep refusing with
+  `PATIENT_DOMAIN_NOT_MIGRATED`, so a rollback never produces a half-migrated
+  write path; re-running the migration tool also refuses
+  (`PATIENT_DOMAIN_STATE_CONFLICT`) until the state is reconciled by a
+  reviewed manual procedure.
 - `mode == "canonical"` with the matching `schema_version` routes object loads
   and assignment checks to `ClinicalPatientRepository` (clinical_patients) and
   self resolution through `repo.resolve_self` (verified `patient_account_links`
@@ -125,10 +138,15 @@ The authorization kernel `app/core/patient_access.py` reads the durable
   medical-role validation errors are identical in both modes. The canonical
   branch never reads `users.is_active` as a patient status — clinical
   availability is the clinical document's `status` field.
-- Anything else fails closed: a missing/unrecognized state document variant
-  (`migrating`, wrong schema version, unknown mode) or a transport-level read
-  failure raises `PatientAccessError` with HTTP 503
-  (`PATIENT_DOMAIN_STATE_UNAVAILABLE`) instead of falling back to legacy.
+- Anything else fails closed: an unrecognized state document variant
+  (`migrating`, an explicit legacy state with a wrong/missing schema version,
+  unknown mode) or a transport-level read failure raises `PatientAccessError`
+  with HTTP 503 (`PATIENT_DOMAIN_STATE_UNAVAILABLE`) instead of falling back
+  to legacy.
+
+The three legal observations of the switch are therefore: no document (implicit
+legacy), an explicit matching legacy document (audited rollback carrier), and a
+matching canonical document.
 
 In-memory test doubles that model the switch declare `patient_domain_state`
 explicitly (see `tests/patient_identity_fake.legacy_domain_state`); a real Mongo

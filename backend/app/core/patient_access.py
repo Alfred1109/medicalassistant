@@ -2,8 +2,10 @@
 
 域模式分派：读取 patients/repository.py 的 patient_domain_state 单例
 （clinical-patients-v1）。无状态文档时按现状默认走 legacy（users）路径；
-canonical 模式走 ClinicalPatientRepository + patient_account_links。模式
-读取失败或观察到未知状态一律 fail-closed（拒绝请求），绝不静默回退 legacy。
+显式 `{mode: "legacy"}`（回拨 SOP 载体）与无文档 legacy 行为完全一致，
+走同一条 legacy 分支；canonical 模式走 ClinicalPatientRepository +
+patient_account_links。模式读取失败或观察到未知状态一律 fail-closed
+（拒绝请求），绝不静默回退 legacy。
 """
 from typing import Any, Dict, Optional
 
@@ -37,7 +39,8 @@ def _domain_state_unavailable(reason: str) -> PatientAccessError:
 
 
 async def patient_domain_mode(db, *, session=None) -> str:
-    """读取域开关；仅 `legacy`（无状态文档）与 `canonical` 是合法观察结果。"""
+    """读取域开关；`legacy`（无状态文档或显式 legacy 载体）与 `canonical`
+    是合法观察结果，显式 legacy 与无文档 legacy 行为完全一致。"""
     try:
         return await read_domain_mode(db, session=session)
     except PatientDomainError as error:
