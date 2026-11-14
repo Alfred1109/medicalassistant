@@ -12,7 +12,9 @@ from pymongo.errors import DuplicateKeyError
 from pydantic import ValidationError
 
 from app.core.exceptions import AppBaseException
+from app.core.patient_access import patient_assignment_field
 from app.db.transactions import run_transaction
+from app.patients.legacy import LegacyPatientRepository
 from app.schemas.rehab_publication import PublicationContent, PublicationItem
 
 WORKFLOW = "patient_publication"
@@ -100,6 +102,9 @@ class RehabPublicationService:
             raise error("REHAB_PATIENT_DOMAIN_UNSUPPORTED", "当前患者档案尚未接入康复账号解析", 503)
 
     async def _account(self, identifier, session):
+        # 账号层（legacy：账号与患者实体同集合）仍按字面读取认证主体自身；
+        # 患者实体校验不经过此处（见 _authorize），canonical 波段需拆分
+        # 账号对象与患者对象后再收敛。
         keys = [str(identifier)]
         if ObjectId.is_valid(str(identifier)):
             keys.append(ObjectId(str(identifier)))
@@ -107,6 +112,10 @@ class RehabPublicationService:
         return rows[0] if len(rows) == 1 else None
 
     async def _access_fence(self, document, session):
+        # TODO(patient-domain): 并发围栏仍以 users 账号文档为载体（_id 定位 +
+        # _access_fence 计数）。canonical 波段拆分账号/患者对象后，栅栏载体需
+        # 随之迁移到独立账号对象或专用围栏集合，不能沿用患者文档。
+
         value = document.get("_access_fence", 0)
         if type(value) is not int or value < 0:
             raise error("REHAB_ACCESS_FENCE_INVALID", "账号并发状态异常", 503)
@@ -117,15 +126,18 @@ class RehabPublicationService:
         account = await self._account(str(actor.id), session)
         if not account or account.get("is_active") is not True or account.get("role") != actor.role:
             raise error("REHAB_ACCOUNT_UNAVAILABLE", "当前账号不可用", 403)
-        patient = await self._account(str(plan.get("patient_id", "")), session)
-        if not patient or patient.get("is_active") is not True or patient.get("role") != "patient":
+        # 患者实体存在性校验走患者读取适配器：获得 ObjectId/string 双字面兼容
+        # 与歧义防护（标识对应多个实体时抛 503，而非静默取单条）。适配器返回
+        # 的即为 legacy users 患者文档（role=patient 由适配器保证），其上的
+        # is_active 与归属字段读取与原实现语义等价。
+        patient = await LegacyPatientRepository(self.db).get(str(plan.get("patient_id", "")), session=session)
+        if not patient or patient.get("is_active") is not True:
             raise error("REHAB_PATIENT_UNAVAILABLE", "患者档案不可用", 404)
         if actor.role == "patient":
             if write or str(patient["_id"]) != str(account["_id"]):
                 raise error("REHAB_PATIENT_FORBIDDEN", "无权访问该患者的康复方案", 403)
         elif actor.role in {"doctor", "health_manager"}:
-            field = "practitioners" if actor.role == "doctor" else "health_managers"
-            assigned = patient.get(field)
+            assigned = patient.get(patient_assignment_field(actor.role))
             if not isinstance(assigned, list) or str(account["_id"]) not in {str(value) for value in assigned}:
                 raise error("REHAB_PATIENT_NOT_ASSIGNED", "当前未分配管理该患者", 403)
         elif actor.role != "admin" or write:
@@ -300,6 +312,9 @@ class RehabPublicationService:
         async def read(session):
             if actor.role != "patient":
                 raise error("REHAB_PATIENT_REQUIRED", "需要患者本人账号", 403)
+            # TODO(patient-domain): legacy 同文档假设——此处把 str(actor.id)
+            # 同时当作账号 ID 与 plan.patient_id（患者实体 ID）使用。canonical
+            # 波段必须改经 resolve_self 解析账号到患者实体的链接，不能沿用该假设。
             await self._authorize({"patient_id": str(actor.id)}, actor, session)
             query = {"patient_id": str(actor.id), "published_version_id": {"$type": "string"},
                      "status": {"$nin": ["cancelled", "canceled", "archived"]}}

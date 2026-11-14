@@ -88,6 +88,10 @@ async def ensure_feedback_indexes(db):
 
 class RehabFeedbackService:
     def __init__(self, db):
+        # 患者资料读取（存在性/可用性/医护归属）不在此处直查 users，统一委托
+        # RehabPublicationService._authorize（经患者读取适配器）。本服务其余
+        # 读取均以 plan.patient_id 为域内身份锚点（见 _identity_query 注释），
+        # 账号层假设保留至 canonical 波段收敛。
         self.db = db
         self.events = db.rehab_execution_events
         self.publication = RehabPublicationService(db)
@@ -101,6 +105,9 @@ class RehabFeedbackService:
         return plan
 
     def _identity_query(self, plan):
+        # TODO(patient-domain): legacy 同文档假设——plan.patient_id 被同时当作
+        # 患者实体 ID 与患者账号 ID（recorded_by 身份锚点）。canonical 波段必须
+        # 先经 resolve_self 把账号解析到患者实体，再以实体 ID 落事件身份字段。
         # The current publication domain is legacy account-backed patients.
         # Authorization below refuses the canonical domain; do not infer links.
         patient_account = str(ObjectId(plan["patient_id"])) if ObjectId.is_valid(plan["patient_id"]) else plan["patient_id"]

@@ -231,6 +231,31 @@ class PublicationMongoTests(unittest.IsolatedAsyncioTestCase):
             await self.svc.patient_detail(self.plan, self.patient)
         self.assertEqual(caught.exception.status_code, 403)
 
+    async def test_ambiguous_patient_identity_fails_authorization_with_503(self):
+        # 患者读取适配器的歧义防护：ObjectId 与其字符串字面各自成文档时，
+        # 授权不得静默取单条，必须 503 阻断（患者不存在场景仍保持 404）。
+        await self.published()
+        await self.db.users.insert_one({"_id": str(self.patient_id), "role": "patient",
+            "is_active": True, "practitioners": [str(self.doctor_id)]})
+        with self.assertRaises(AppBaseException) as caught:
+            await self.svc.patient_detail(self.plan, self.doctor)
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.error_code, "PATIENT_IDENTITY_AMBIGUOUS")
+        self.assertEqual(await self.db.rehab_plan_versions.count_documents({"status": "published"}), 1)
+        # 账号层（认证主体自身）的歧义保持既有语义：同字面双文档视为账号不可用。
+        with self.assertRaises(AppBaseException) as account_denied:
+            await self.svc.patient_detail(self.plan, self.patient)
+        self.assertEqual(account_denied.exception.status_code, 403)
+        self.assertEqual(account_denied.exception.error_code, "REHAB_ACCOUNT_UNAVAILABLE")
+
+    async def test_plan_pointing_to_missing_patient_stays_unavailable_with_404(self):
+        await self.published()
+        await self.db.rehab_plans.update_one({"_id": self.plan_id}, {"$set": {"patient_id": str(ObjectId())}})
+        with self.assertRaises(AppBaseException) as caught:
+            await self.svc.patient_detail(self.plan, self.doctor)
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertEqual(caught.exception.error_code, "REHAB_PATIENT_UNAVAILABLE")
+
     async def test_withdraw_cancel_archive_preserve_history_and_never_resurrect(self):
         for action in ("withdraw", "cancel", "archive"):
             await self.db.rehab_plans.update_one({"_id": self.plan_id}, {"$set": {"status": "active"}})
