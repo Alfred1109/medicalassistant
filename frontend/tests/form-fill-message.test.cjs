@@ -69,3 +69,30 @@ test('launch posts credential to exact iframe and removes temporary form', () =>
   assert.equal(frame.src, 'https://forms.example/integration/resume/session-1');
   for (const action of ['http://forms.example/integration/embed/session-1', 'https://forms.example/integration/embed/other', 'https://forms.example/integration/embed/session-1?token=leak']) assert.throws(() => submitFillLaunch({ ...launch, action }, frame));
 });
+
+test('resume is a verbatim redirect: no re-POST, and the address never carries parameters', () => {
+  // 源端硬契约 2（恢复后回传 response_id）：恢复地址必须保持纯路径，
+  // response_id 由源端 /resume/<sid> 的服务端重定向写入填报页隐藏域并随
+  // 提交回传。前端只做原样导航——不得改写、裁剪或附加任何参数，也绝不
+  // 在 resume 模式重新 POST 一次性凭证（源端对已嵌入会话会 409）。
+  let submissions = 0;
+  const document = { body: { appendChild() { submissions += 1; } }, createElement(tag) {
+    if (tag === 'input') return {};
+    return { appendChild() {}, submit() { submissions += 1; }, remove() {} };
+  } };
+  const { submitFillLaunch } = fixture(document);
+  const frame = { name: 'unique-frame' };
+  const resumeUrl = 'https://forms.example/integration/resume/session-1';
+  submitFillLaunch({ mode: 'resume', url: resumeUrl, sessionUuid: 'session-1' }, frame);
+  assert.equal(frame.src, resumeUrl);
+  assert.equal(submissions, 0);
+  for (const url of [
+    `${resumeUrl}?response_id=42`,
+    `${resumeUrl}?response_id=42&visit_code=V1`,
+    `${resumeUrl}#response-42`,
+  ]) {
+    assert.throws(() => submitFillLaunch({ mode: 'resume', url, sessionUuid: 'session-1' }, frame));
+  }
+  assert.equal(frame.src, resumeUrl);
+  assert.equal(submissions, 0);
+});

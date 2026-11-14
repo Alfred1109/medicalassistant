@@ -35,6 +35,26 @@ class LaunchResponseTests(unittest.TestCase):
         self.assertNotIn("token", result)
         self.assertNotIn("action", result)
 
+    def test_resume_address_must_be_bare_path_source_redirect_carries_response_id(self):
+        """恢复页契约：response_id 由源端 /resume/<sid> 的服务端重定向携带回
+        填报页（隐藏域随提交回传），恢复地址本身必须是不带任何参数的纯路径；
+        任何试图把 response_id（或其他参数）挂到恢复地址上的响应都不可信。"""
+        plain = dict(self.body, mode="resume",
+                     url="https://form.example/integration/resume/synthetic-session")
+        result = service._validated_launch_response(plain, self.task, "https://form.example")
+        self.assertEqual(result["mode"], "resume")
+        self.assertNotIn("token", result)
+        mutations = [
+            {"url": "https://form.example/integration/resume/synthetic-session?response_id=42"},
+            {"url": "https://form.example/integration/resume/synthetic-session?response_id=42&other=1"},
+            {"url": "https://form.example/integration/resume/synthetic-session#response-42"},
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(service.FormIntegrationError) as raised:
+                    service._validated_launch_response(dict(plain, **mutation), self.task, "https://form.example")
+                self.assertEqual(raised.exception.error_code, "FORM_PLATFORM_INVALID_LAUNCH")
+
     def test_other_origin_path_session_or_expired_response_rejected_without_secret(self):
         mutations = [
             {"action": "https://foreign.example/integration/embed/synthetic-session"},

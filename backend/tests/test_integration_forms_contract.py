@@ -770,6 +770,38 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["detail"]["error"], "RESPONSE_MISMATCH")
         self.assertEqual(self.visit_doc(visit_id)["status"], "awaiting_fill")
 
+    async def test_confirm_rejects_visit_code_changed_after_creation(self):
+        # 源端硬契约 1：访视标识全程一致。任务创建时会话 visit_code 已随远端
+        # 会话固定（fs.visit_code），节点/任务/答卷三方在确认时必须仍一致；
+        # 节点访视标识中途被改 → 拒绝确认，任务不落 confirmed、节点不回写。
+        visit_id = self.make_visit(visit_code="V1")
+        created = await self.client.post(
+            "/api/integrations/forms/fill-tasks",
+            json=self.payload(followup_visit_id=visit_id), headers=self.auth())
+        task_id = created.json()["id"]
+        self.assertEqual(created.json()["visitCode"], "V1")
+
+        # 中途被改：节点访视标识在草稿/提交期间被改成另一个访视
+        self.visit_doc(visit_id)["visit_code"] = "V2"
+        self.remote.session_body["status"] = "submitted"
+        self.remote.session_body["response_id"] = RESPONSE_ID
+        # 远端答卷仍带会话创建时的 V1（源端 fs.visit_code 固定，不受本地改动影响）
+        self.remote.response_body["visit_code"] = "V1"
+
+        response = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["error"], "RESPONSE_MISMATCH")
+        self.assertEqual(response.json()["detail"]["details"]["node_visit_code"], "V2")
+
+        # 任务未落 confirmed、节点未被回写
+        task = await self.fetch_task(task_id)
+        self.assertNotEqual(task.json()["status"], "confirmed")
+        self.assertIsNone(task.json()["confirmation"])
+        node = self.visit_doc(visit_id)
+        self.assertEqual(node["status"], "awaiting_fill")
+        self.assertIsNone(node.get("effective_response"))
+
     async def test_confirm_rejects_terminal_visit(self):
         visit_id = self.make_visit()
         created = await self.client.post(
