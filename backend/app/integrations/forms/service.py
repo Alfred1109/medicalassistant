@@ -10,7 +10,10 @@
 
 from typing import Any, Dict, Optional
 from copy import deepcopy
+from datetime import datetime, timezone
 import os
+import re
+from urllib.parse import urlsplit
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
@@ -214,9 +217,8 @@ def _extract_remote_refs(payload: Dict[str, Any]) -> Dict[str, Any]:
         "center_id": payload.get("remote_center_id"),
         "subject_id": payload.get("remote_subject_id"),
         "questionnaire_id": payload.get("remote_questionnaire_id"),
-        "remote_operator_user_id": payload.get("remote_operator_user_id"),
     }
-    missing = [key for key, value in refs.items() if not isinstance(value, int) or isinstance(value, bool)]
+    missing = [key for key, value in refs.items() if type(value) is not int or value <= 0]
     if missing:
         raise FormIntegrationError(
             "远端引用字段必须为整数：" + ", ".join(missing),
@@ -224,10 +226,100 @@ def _extract_remote_refs(payload: Dict[str, Any]) -> Dict[str, Any]:
     return refs
 
 
+async def _reviewed_fill_context(db, client, patient_id, refs, payload):
+    """Resolve selectors against reviewed records and current source facts."""
+    from fastapi import HTTPException
+    from . import catalog_service
+
+    if (not isinstance(refs, dict) or any(type(refs.get(k)) is not int or refs[k] <= 0 for k in
+            ("project_id", "center_id", "subject_id", "questionnaire_id"))):
+        raise FormIntegrationError("远端选择器无效", error_code="INVALID_REMOTE_REFS", status_code=422)
+
+    binding_id, purpose = payload.get("form_binding_id"), payload.get("form_purpose")
+    if (not isinstance(binding_id, str) or not ObjectId.is_valid(binding_id) or not isinstance(purpose, str)
+            or purpose not in {"initial_assessment", "followup", "reassessment"}):
+        raise FormIntegrationError("请选择已确认的表单用途绑定", error_code="REVIEWED_FORM_REQUIRED", status_code=422)
+    link = await db.external_patient_links.find_one({"local_patient_id": patient_id, "status": "verified"})
+    binding = await db.external_form_bindings.find_one({"_id": ObjectId(binding_id), "status": "active"})
+    if not link or not binding:
+        raise FormIntegrationError("患者关联或表单绑定未核实或已撤销", error_code="REVIEWED_CONTEXT_REQUIRED", status_code=409)
+    try:
+        origin = client.source_origin
+        parsed = urlsplit(origin)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
+                or parsed.password or parsed.path or parsed.query or parsed.fragment):
+            raise ValueError("invalid origin")
+    except (AttributeError, ValueError, TypeError, FormPlatformError):
+        raise FormIntegrationError("来源配置不可用", error_code="SOURCE_CONFIGURATION_INVALID", status_code=503) from None
+    if (link.get("source_origin") != origin or binding.get("source_origin") != origin
+            or binding.get("purpose") != purpose):
+        raise FormIntegrationError("来源或表单用途与审核记录不一致", error_code="REVIEWED_CONTEXT_MISMATCH", status_code=409)
+    for reviewed in (link, binding):
+        if (not isinstance(reviewed.get("verified_by"), str) or not reviewed["verified_by"].strip()
+                or not isinstance(reviewed.get("verified_at"), datetime)
+                or not isinstance(reviewed.get("evidence_reference"), str) or not reviewed["evidence_reference"].strip()):
+            raise FormIntegrationError("审核记录缺少核实证据", error_code="REVIEWED_CONTEXT_REQUIRED", status_code=409)
+    contexts = link.get("references", [link.get("reference")])
+    if (not isinstance(contexts, list) or not contexts or not isinstance(binding.get("version_ref"), dict)
+            or any(type(binding.get(k)) is not int or binding[k] <= 0 for k in ("project_id", "form_id", "version"))):
+        raise FormIntegrationError("审核记录结构无效", error_code="REVIEWED_CONTEXT_INVALID", status_code=409)
+    selected = [r for r in contexts if isinstance(r, dict) and all(
+        r.get(k) == refs[k] for k in ("project_id", "center_id", "subject_id"))]
+    if len(selected) != 1 or binding.get("project_id") != refs["project_id"] or binding.get("form_id") != refs["questionnaire_id"]:
+        raise FormIntegrationError("远端选择不属于已审核的患者和表单", error_code="REVIEWED_CONTEXT_MISMATCH", status_code=409)
+    reference = selected[0]
+    if (any(type(reference.get(k)) is not int or reference[k] <= 0 for k in
+            ("project_id", "center_id", "subject_id", "patient_id", "patient_archive_id"))
+            or reference.get("source") not in ({"system": "form-platform-11344", "environment": "pilot"},
+                                               {"system": "form-platform-11344", "environment": "production"})
+            or (reference["source"]["environment"] == "production" and parsed.scheme != "https")):
+        raise FormIntegrationError("审核来源引用无效", error_code="REVIEWED_CONTEXT_INVALID", status_code=409)
+    try:
+        current_patient = await catalog_service.patient_reference(client, reference["project_id"], reference["center_id"], reference["subject_id"])
+        current_form = await catalog_service.form_version(client, binding["project_id"], binding["form_id"], version=binding["version"])
+    except HTTPException as exc:
+        raise FormIntegrationError("来源患者或表单当前状态无法核实", error_code="SOURCE_CONTEXT_UNAVAILABLE", status_code=exc.status_code) from exc
+    if (current_patient != reference or current_form["source"] != reference.get("source")
+            or binding.get("source") != reference.get("source")
+            or current_form["version"] != binding.get("version_ref")):
+        raise FormIntegrationError("来源患者或表单版本已变化，请重新核实", error_code="SOURCE_CONTEXT_CHANGED", status_code=409)
+    resolved = {k: reference[k] for k in ("project_id", "center_id", "subject_id")}
+    resolved.update(questionnaire_id=binding["form_id"])
+    return resolved, link, binding, reference
+
+
+async def _lock_reviewed_fill_context(db, session, link, binding):
+    # Snapshot reads alone do not conflict with concurrent authorization removal.
+    for collection, snapshot, fields in (
+        (db.external_patient_links, link, ("local_patient_id", "status", "source_origin", "reference", "references", "verified_at", "verified_by", "evidence_reference", "source_key")),
+        (db.external_form_bindings, binding, ("status", "source_origin", "project_id", "form_id", "version", "version_ref", "purpose", "verified_at", "verified_by", "evidence_reference", "source", "binding_key")),
+    ):
+        query = {"_id": snapshot["_id"], **{k: snapshot.get(k) for k in fields}}
+        result = await collection.update_one(query, {"$inc": {"fill_use_revision": 1}}, session=session)
+        if result.matched_count != 1:
+            raise FormIntegrationError("审核关联已变化，未创建填报任务", error_code="REVIEWED_CONTEXT_CHANGED", status_code=409)
+
+
 async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
-                           operator: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """创建填报任务：校验患者归属 → 远端建会话 → 落库任务（含一次性 embed_url 透传）。"""
+                           operator: Any, payload: Dict[str, Any], *, delegation=None) -> Dict[str, Any]:
+    """校验患者和审核上下文，创建并保存远端会话引用。"""
     require_fill_enabled()
+    from app.integrations.identity.service import FillDelegation, OidcFailure, OidcUnavailable
+    if "remote_operator_user_id" in payload:
+        raise FormIntegrationError("填报操作人由统一登录身份确定", error_code="OPERATOR_OVERRIDE_FORBIDDEN", status_code=422)
+    try:
+        source_origin = client.source_origin
+    except FormPlatformError:
+        raise FormIntegrationError("来源配置不可用", error_code="SOURCE_CONFIGURATION_INVALID", status_code=503) from None
+    if (not isinstance(delegation, FillDelegation) or delegation.actor_id != str(operator.id)
+            or delegation.role != operator.role or delegation.client.settings.issuer != source_origin):
+        raise FormIntegrationError("缺少有效的来源身份委托", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403)
+    try:
+        await delegation.revalidate()
+    except OidcUnavailable:
+        raise FormIntegrationError("身份源暂不可用", error_code="SOURCE_IDENTITY_UNAVAILABLE", status_code=503) from None
+    except OidcFailure:
+        raise FormIntegrationError("来源身份已失效", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403) from None
     operator_id = str(operator.id)
     operator_role = operator.role
     if operator_role not in OPERATOR_ROLES:
@@ -255,6 +347,8 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
                          "task_patient_id": patient_id})
 
     refs = _extract_remote_refs(payload)
+    refs, reviewed_link, reviewed_binding, reviewed_reference = await _reviewed_fill_context(
+        db, client, patient_id, refs, payload)
     allowed_origin = (payload.get("allowed_origin") or "").strip().rstrip("/")
     if not allowed_origin:
         raise FormIntegrationError("allowed_origin 必填（发起嵌入页面的来源）",
@@ -279,17 +373,23 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
     )
     task.doc["_id"] = ObjectId()
     task.doc["mutation_version"] = 0
+    task.doc["reviewed_context"] = {"patient_link_id": reviewed_link["_id"],
+        "form_binding_id": reviewed_binding["_id"], "reference": deepcopy(reviewed_reference),
+        "version_ref": deepcopy(reviewed_binding["version_ref"]), "purpose": reviewed_binding["purpose"]}
 
     remote_payload = {
-        "operator_user_id": refs["remote_operator_user_id"],
         "project_id": refs["project_id"],
         "center_id": refs["center_id"],
         "subject_id": refs["subject_id"],
         "questionnaire_id": refs["questionnaire_id"],
         "allowed_origin": allowed_origin,
+        "questionnaire_version_ref": {
+            key: reviewed_binding["version_ref"][key]
+            for key in ("form_id", "family_id", "version", "definition_sha256")
+        },
     }
-    if payload.get("visit_code"):
-        remote_payload["visit_code"] = payload["visit_code"]
+    if visit_code:
+        remote_payload["visit_code"] = visit_code
     if payload.get("visit_name"):
         remote_payload["visit_name"] = payload["visit_name"]
     if payload.get("ma_task_ref"):
@@ -299,25 +399,44 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
 
     await _require_transaction_topology(db)
     try:
-        session_body = await client.create_fill_session(remote_payload)
+        session_body = await client.create_fill_session(remote_payload, source_access_token=delegation.token)
     except FormPlatformError as exc:
         mapped = _map_remote_error(exc, "创建填报会话失败")
         raise mapped from exc
 
-    token = session_body.get("embed_token")
-    task.record_remote_session(session_body, models.hash_embed_token(token) if token else None)
-    if not task.doc["session"]["session_uuid"] or not token:
+    task.record_remote_session(session_body)
+    if (not isinstance(task.doc["session"]["session_uuid"], str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task.doc["session"]["session_uuid"])):
         # 远端响应缺关键材料：不落一条看似成功的任务
-        invalid_response = FormIntegrationError("表单平台返回的会话缺少 embed_url/embed_token",
+        invalid_response = FormIntegrationError("表单平台未返回有效会话引用",
                                                 error_code="FORM_PLATFORM_INVALID_RESPONSE", status_code=502)
         if task.doc["session"]["session_uuid"]:
             await _recover_failed_creation(db, client, task, invalid_response)
         raise invalid_response
 
+    actual_operator = session_body.get("operator_user_id")
+    if type(actual_operator) is not int or actual_operator <= 0:
+        await _recover_failed_creation(db, client, task, FormIntegrationError(
+            "源端未返回有效操作人", error_code="FORM_PLATFORM_INVALID_RESPONSE", status_code=502))
+    task.doc["operator"]["remote_user_id"] = actual_operator
+    task.doc["remote_refs"]["remote_operator_user_id"] = actual_operator
+    task.doc["identity_context"] = {"issuer": delegation.record["issuer"], "subject": delegation.record["subject"],
+        "session_hash": delegation.record["_id"], "binding_revision": delegation.record["binding_revision"]}
+    try:
+        await delegation.revalidate()
+    except (OidcFailure, OidcUnavailable):
+        await _recover_failed_creation(db, client, task, FormIntegrationError(
+            "来源身份在创建期间失效", error_code="SOURCE_IDENTITY_CHANGED", status_code=403))
+
     from app.db.transactions import run_followup_transaction
     from app.services.followup_service import followup_version_filter, followup_conflict
 
     async def persist_task(session):
+        try:
+            await delegation.lock(db, session)
+        except OidcFailure:
+            raise FormIntegrationError("来源身份在提交期间失效", error_code="SOURCE_IDENTITY_CHANGED", status_code=403) from None
+        await _lock_reviewed_fill_context(db, session, reviewed_link, reviewed_binding)
         if followup_visit_id:
             from app.models.health_record import FollowUpRecord
             visit = await db[FollowUpRecord.collection_name].find_one(
@@ -341,10 +460,7 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
     except Exception as exc:
         recovered = await _recover_failed_creation(db, client, task, exc)
         task = models.FollowUpFillTask(recovered)
-    body = models.serialize_task(task.doc)
-    # 一次性透传：明文令牌只在创建响应出现，不写日志不落库
-    body["embedToken"] = token
-    return body
+    return models.serialize_task(task.doc)
 
 
 async def get_fill_task(db: AsyncIOMotorDatabase, task_id: str,
@@ -371,6 +487,155 @@ async def get_fill_task(db: AsyncIOMotorDatabase, task_id: str,
     return doc
 
 
+async def require_task_reviewed_context(db, task, *, session=None):
+    """Authorize a new action using the exact reviewed records used at creation."""
+    context = task.get("reviewed_context")
+    if not isinstance(context, dict):
+        raise FormIntegrationError("旧任务缺少审核上下文，请重新核实并发起任务",
+                                   error_code="TASK_REVIEW_REQUIRED", status_code=409)
+    link_id, binding_id = context.get("patient_link_id"), context.get("form_binding_id")
+    if not all(ObjectId.is_valid(str(value)) for value in (link_id, binding_id)):
+        raise FormIntegrationError("任务审核上下文无效", error_code="TASK_REVIEW_REQUIRED", status_code=409)
+    options = {"session": session} if session is not None else {}
+    link = await db.external_patient_links.find_one({"_id": ObjectId(str(link_id)),
+        "local_patient_id": task.get("patient_id"), "status": "verified"}, **options)
+    binding = await db.external_form_bindings.find_one({"_id": ObjectId(str(binding_id)),
+        "status": "active"}, **options)
+    reference = context.get("reference")
+    refs = task.get("remote_refs") or {}
+    references = link.get("references", [link.get("reference")]) if link else None
+    if (not link or not binding or not isinstance(reference, dict) or not isinstance(refs, dict)
+            or not isinstance(references, list) or reference not in references
+            or not isinstance(context.get("version_ref"), dict)
+            or not isinstance(context.get("purpose"), str)
+            or context["purpose"] not in {"initial_assessment", "followup", "reassessment"}
+            or link.get("source_origin") != binding.get("source_origin")
+            or not link.get("source_origin")
+            or binding.get("source") != reference.get("source")
+            or binding.get("version_ref") != context.get("version_ref")
+            or binding.get("purpose") != context.get("purpose")
+            or binding.get("form_id") != refs.get("questionnaire_id")
+            or binding.get("project_id") != refs.get("project_id")
+            or any(reference.get(key) != refs.get(key) for key in ("project_id", "center_id", "subject_id"))):
+        raise FormIntegrationError("患者关联或问卷审核已变化，请重新核实并发起任务",
+                                   error_code="TASK_REVIEW_REVOKED", status_code=409)
+    for reviewed in (link, binding):
+        if (not isinstance(reviewed.get("verified_by"), str) or not reviewed["verified_by"].strip()
+                or not isinstance(reviewed.get("verified_at"), datetime)
+                or not isinstance(reviewed.get("evidence_reference"), str)
+                or not reviewed["evidence_reference"].strip()):
+            raise FormIntegrationError("审核证据不完整，请重新核实",
+                                       error_code="TASK_REVIEW_REQUIRED", status_code=409)
+    if session is not None:
+        await _lock_reviewed_fill_context(db, session, link, binding)
+    return link, binding
+
+
+def _validated_launch_response(body, task, source_origin):
+    """Reduce launch data to the exact source action for this session."""
+    invalid = FormIntegrationError(
+        "表单平台启动响应无效，请重新获取任务状态",
+        error_code="FORM_PLATFORM_INVALID_LAUNCH", status_code=502)
+    sid = models.active_session(task).get("session_uuid")
+    if (not isinstance(body, dict) or not isinstance(sid, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid)
+            or body.get("session_uuid") != sid):
+        raise invalid
+    mode = body.get("mode")
+    field = "action" if mode == "launch" else "url" if mode == "resume" else None
+    address = body.get(field) if field else None
+    if not isinstance(address, str) or any(ord(char) <= 32 for char in address):
+        raise invalid
+    try:
+        parsed = urlsplit(address)
+        origin = f"{parsed.scheme}://{parsed.netloc.lower()}"
+        expected_path = f"/integration/{'embed' if mode == 'launch' else 'resume'}/{sid}"
+        if (origin != source_origin or parsed.scheme != "https" or parsed.username
+                or parsed.password or parsed.path != expected_path or parsed.query or parsed.fragment):
+            raise invalid
+        expiry = body.get("expires_at")
+        if not isinstance(expiry, str):
+            raise invalid
+        expires_at = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+        if expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc):
+            raise invalid
+    except (TypeError, ValueError):
+        raise invalid from None
+    result = {"taskId": str(task["_id"]), "mode": mode, field: address,
+              "sessionUuid": sid, "expiresAt": expiry, "allowedOrigin": task.get("allowed_origin")}
+    if mode == "launch":
+        token = body.get("token")
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,512}", token):
+            raise invalid
+        result["token"] = token
+    return result
+
+
+async def launch_fill_task(db, client, task_id, operator, *, delegation):
+    """Authorize a short-lived source launch without persisting its credentials."""
+    from app.db.transactions import run_followup_transaction
+    from app.core.patient_access import assigned_patient_query
+    from app.integrations.identity.service import FillDelegation, OidcFailure, OidcUnavailable
+
+    require_fill_enabled()
+    doc = await get_fill_task(db, task_id, operator)
+    try:
+        source_origin = client.source_origin
+    except FormPlatformError:
+        raise FormIntegrationError("来源配置不可用", error_code="SOURCE_CONFIGURATION_INVALID", status_code=503) from None
+    if (not isinstance(delegation, FillDelegation) or delegation.actor_id != str(operator.id)
+            or delegation.role != operator.role or delegation.client.settings.issuer != source_origin):
+        raise FormIntegrationError("请重新登录后继续填写", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403)
+    sid = models.active_session(doc).get("session_uuid")
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid):
+        raise FormIntegrationError("任务会话引用无效，请重新核实", error_code="TASK_SESSION_INVALID", status_code=409)
+    identity = doc.get("identity_context")
+    if (not isinstance(identity, dict) or (doc.get("operator") or {}).get("user_id") != str(operator.id)
+            or any(identity.get(key) != delegation.record.get(key)
+                   for key in ("issuer", "subject", "binding_revision"))):
+        raise FormIntegrationError("任务登录委托已变化，请重新核实并发起任务",
+                                   error_code="TASK_IDENTITY_CHANGED", status_code=409)
+
+    async def authorize(session):
+        current = await db[models.COLLECTION_NAME].find_one({"_id": doc["_id"]}, session=session)
+        if (not current or current.get("status") not in {models.TASK_STATUS_SESSION_CREATED, models.TASK_STATUS_WAITING_FILL}
+                or current.get("identity_context") != identity
+                or models.active_session(current).get("session_uuid") != models.active_session(doc).get("session_uuid")):
+            raise FormIntegrationError("任务状态已变化，请重新获取任务",
+                                       error_code="TASK_CONFLICT", status_code=409)
+        try:
+            await delegation.lock(db, session)
+        except OidcFailure:
+            raise FormIntegrationError("登录委托已失效", error_code="SOURCE_IDENTITY_CHANGED", status_code=403) from None
+        await require_task_reviewed_context(db, current, session=session)
+        patient_id = current.get("patient_id")
+        query = {"_id": ObjectId(patient_id) if ObjectId.is_valid(str(patient_id)) else patient_id, "role": "patient"}
+        if operator.role != "admin":
+            query.update(assigned_patient_query(str(operator.id), operator.role))
+        assigned = await db.users.update_one(query, {"$inc": {"fill_use_revision": 1}}, session=session)
+        if assigned.matched_count != 1:
+            raise FormIntegrationError("患者管理关系已变化", error_code="PATIENT_NOT_ASSIGNED", status_code=403)
+        await _write_task(db, current, {"updated_at": models.utcnow()}, session=session)
+        return current
+
+    try:
+        await delegation.revalidate()
+        await run_followup_transaction(db, authorize)
+        body = await client.launch_fill_session(models.active_session(doc)["session_uuid"], source_access_token=delegation.token)
+        result = _validated_launch_response(body, doc, source_origin)
+        await delegation.revalidate()
+        await run_followup_transaction(db, authorize)
+    except OidcUnavailable:
+        raise FormIntegrationError("身份源暂不可用", error_code="SOURCE_IDENTITY_UNAVAILABLE", status_code=503) from None
+    except OidcFailure:
+        raise FormIntegrationError("登录委托已失效", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403) from None
+    except FormPlatformError as exc:
+        status = exc.status_code if exc.status_code in {400, 403, 404, 409, 410, 422, 429} else 502
+        raise FormIntegrationError("表单平台暂时无法启动该任务，请重新核实状态",
+                                   error_code="FORM_PLATFORM_LAUNCH_REJECTED", status_code=status) from None
+    return result
+
+
 async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
                             task_id: str, operator: Any) -> Dict[str, Any]:
     """向远端核实会话与答卷真实状态；只有远端确认提交才转 confirmed。"""
@@ -380,6 +645,7 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
 
     if task.status == models.TASK_STATUS_CONFIRMED:
         return doc
+    await require_task_reviewed_context(db, doc)
     if task.status in (models.TASK_STATUS_CANCELLED, models.TASK_STATUS_FAILED):
         raise FormIntegrationError(f"任务已处于终态 {task.status}，不能确认",
                                    error_code="TASK_TERMINAL", status_code=409)
@@ -481,6 +747,7 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
             raise FormIntegrationError("填报任务不存在", error_code="TASK_NOT_FOUND", status_code=404)
         if current.get("status") == models.TASK_STATUS_CONFIRMED:
             return current
+        await require_task_reviewed_context(db, current, session=session)
         if current.get("status") in (models.TASK_STATUS_CANCELLED, models.TASK_STATUS_FAILED):
             raise FormIntegrationError("任务已关闭，不能确认", error_code="TASK_TERMINAL", status_code=409)
         if models.active_session(current).get("session_uuid") != session_uuid:
@@ -525,10 +792,8 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
         }, session=session)
         return await db[models.COLLECTION_NAME].find_one({"_id": doc["_id"]}, **options)
 
-    if followup_visit_id:
-        from app.db.transactions import run_followup_transaction
-        return await run_followup_transaction(db, persist_confirmation)
-    return await persist_confirmation()
+    from app.db.transactions import run_followup_transaction
+    return await run_followup_transaction(db, persist_confirmation)
 
 
 async def list_fill_tasks(db: AsyncIOMotorDatabase, operator: Any,

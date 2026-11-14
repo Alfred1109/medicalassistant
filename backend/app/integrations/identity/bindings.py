@@ -1,5 +1,6 @@
 """Privileged maintenance operation after human account verification, never by name."""
 from datetime import datetime
+import secrets
 from urllib.parse import urlsplit
 
 from bson import ObjectId
@@ -45,25 +46,31 @@ async def manage_binding(db, *, issuer, subject, actor_id, reviewer, evidence_re
     now = datetime.utcnow()
     audit = dict(action=action, reviewer=reviewer.strip(), evidence_reference=evidence_reference.strip(), at=now,
                  approved_role=actor["role"])
+    revision = secrets.token_hex(32)
+    audit["authorization_revision"] = revision
     if action == "bind":
         # Atomic one-document state+audit. _id and issuer_actor_unique enforce races.
         await db.oidc_principal_bindings.insert_one(dict(
             _id=key, issuer=issuer, subject=subject, actor_id=actor_id, enabled=True,
             verified_by=reviewer.strip(), verified_at=now,
             approved_role=actor["role"],
+            authorization_revision=revision,
             evidence_reference=evidence_reference.strip(), audit=[audit]))
     elif action == "disable":
         updated = await db.oidc_principal_bindings.update_one(
-            {"_id": key, "issuer": issuer, "subject": subject, "actor_id": actor_id, "enabled": True},
-            {"$set": {"enabled": False, "disabled_at": now}, "$push": {"audit": audit}})
+            {"_id": key, "issuer": issuer, "subject": subject, "actor_id": actor_id, "enabled": True,
+             "authorization_revision": existing.get("authorization_revision")},
+            {"$set": {"enabled": False, "disabled_at": now, "authorization_revision": revision}, "$push": {"audit": audit}})
         if updated.modified_count != 1:
             raise ValueError("Binding changed concurrently; no operation applied")
     else:
         updated = await db.oidc_principal_bindings.update_one(
             {"_id": key, "issuer": issuer, "subject": subject, "actor_id": actor_id,
-             "enabled": True, "approved_role": existing.get("approved_role")},
+             "enabled": True, "approved_role": existing.get("approved_role"),
+             "authorization_revision": existing.get("authorization_revision")},
             {"$set": {"approved_role": actor["role"], "verified_by": reviewer.strip(),
-                      "verified_at": now, "evidence_reference": evidence_reference.strip()}, "$push": {"audit": audit}})
+                      "verified_at": now, "evidence_reference": evidence_reference.strip(),
+                      "authorization_revision": revision}, "$push": {"audit": audit}})
         if updated.modified_count != 1:
             raise ValueError("Binding changed concurrently; no operation applied")
     return result

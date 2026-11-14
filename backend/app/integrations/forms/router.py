@@ -5,7 +5,7 @@
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.auth import get_current_active_user
@@ -14,7 +14,13 @@ from .client import FormPlatformClient, FormPlatformError
 from . import service
 from .service import FormIntegrationError
 
-router = APIRouter(prefix="/integrations/forms", tags=["form-integration"])
+def private_response(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+
+
+router = APIRouter(prefix="/integrations/forms", tags=["form-integration"],
+                   dependencies=[Depends(private_response)])
 
 
 def get_form_platform_client() -> FormPlatformClient:
@@ -32,7 +38,7 @@ def _form_error_response(exc: FormIntegrationError) -> HTTPException:
         "error": exc.error_code,
         "message": exc.message,
         "details": exc.details,
-    })
+    }, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
 def require_fill_entry_enabled() -> None:
@@ -42,17 +48,34 @@ def require_fill_entry_enabled() -> None:
         raise _form_error_response(exc) from exc
 
 
+async def current_fill_delegation(request, db, current_user):
+    from app.integrations.identity.access import unified_authentication, SESSION_COOKIE
+    from app.integrations.identity.config import oidc_settings
+    from app.integrations.identity.service import OidcClient, OidcFailure, OidcUnavailable
+
+    if not unified_authentication():
+        raise FormIntegrationError("填报需要统一身份登录", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403)
+    try:
+        return await OidcClient(db, oidc_settings).fill_delegation(request.cookies.get(SESSION_COOKIE), current_user)
+    except OidcUnavailable:
+        raise FormIntegrationError("身份源暂不可用", error_code="SOURCE_IDENTITY_UNAVAILABLE", status_code=503) from None
+    except OidcFailure:
+        raise FormIntegrationError("请重新登录后发起填报", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403) from None
+
+
 @router.post("/fill-tasks")
 async def create_fill_task(
+    request: Request,
     payload: Dict[str, Any],
     current_user: Any = Depends(get_current_active_user),
     _fill_enabled: None = Depends(require_fill_entry_enabled),
     db: AsyncIOMotorDatabase = Depends(get_database),
     client: FormPlatformClient = Depends(get_form_platform_client),
 ):
-    """为患者创建嵌入填报任务（校验患者归属；embed_token 只在本响应出现一次）。"""
+    """创建已核实患者与问卷的填报任务引用。"""
     try:
-        return await service.create_fill_task(db, client, current_user, payload)
+        delegation = await current_fill_delegation(request, db, current_user)
+        return await service.create_fill_task(db, client, current_user, payload, delegation=delegation)
     except FormIntegrationError as exc:
         raise _form_error_response(exc) from exc
 
@@ -83,24 +106,26 @@ async def get_fill_task(
 
 
 @router.get("/fill-tasks/{task_id}/embed-url")
-async def get_embed_url(
+async def get_embed_url(task_id: str, current_user: Any = Depends(get_current_active_user)):
+    raise HTTPException(410, detail={"error": "LEGACY_EMBED_URL_RETIRED",
+        "message": "请使用任务的继续填写入口"},
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+@router.post("/fill-tasks/{task_id}/launch")
+async def launch_fill_task(
     task_id: str,
+    request: Request,
     current_user: Any = Depends(get_current_active_user),
     _fill_enabled: None = Depends(require_fill_entry_enabled),
     db: AsyncIOMotorDatabase = Depends(get_database),
+    client: FormPlatformClient = Depends(get_form_platform_client),
 ):
-    """返回嵌入 URL（明文 embed_token 不可再取；令牌过期需重新创建任务）。"""
     try:
-        doc = await service.get_fill_task(db, task_id, current_user)
+        delegation = await current_fill_delegation(request, db, current_user)
+        return await service.launch_fill_task(db, client, task_id, current_user, delegation=delegation)
     except FormIntegrationError as exc:
         raise _form_error_response(exc) from exc
-    if doc.get("status") not in (service.models.TASK_STATUS_SESSION_CREATED,
-                                 service.models.TASK_STATUS_WAITING_FILL):
-        raise HTTPException(status_code=409, detail={
-            "error": "EMBED_URL_NOT_AVAILABLE",
-            "message": f"任务状态为 {doc.get('status')}，嵌入链接不可用；请重新创建填报任务",
-        })
-    return service.models.serialize_embed_url(doc)
 
 
 @router.post("/fill-tasks/{task_id}/confirm")

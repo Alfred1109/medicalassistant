@@ -10,11 +10,13 @@
 
 浏览器只接收随机 `__Host-` Secure/HttpOnly/SameSite=Lax 会话 Cookie，敏感响应 no-store、no-referrer。源 access token 经独立 Fernet 密钥加密保存在服务端，用于每次调用固定 `/oidc/introspect`；不保存 ID/刷新令牌，也不把令牌返回浏览器。每次检查 source issuer、client、subject、有效期和 active；源停用/改密/退出由源的凭据版本判定为失效后，本地销毁旧会话。源网络失败返回 503，不能按旧缓存或 JWT 放行。
 
-应用会话默认最长一小时，并受源 access token 实际有效期约束；ID Token 仍只承担初始短期身份验证。会话到期重新认证，无刷新令牌。HTTP 每个请求在线核验，WebSocket 在握手、每条入站及出站消息前核验，空闲连接每五秒复核（网络超时另最多五秒）；同时检查会话成员。当前所谓流式接口为逐请求轮询，无长时间 HTTP 流。
+应用会话有效期取 OIDC 配置、运营会话时限和源 access token 实际有效期的最短值，限制同时写入服务器会话及浏览器 Cookie；运营时限读取失败不创建新会话。ID Token 仍只承担初始短期身份验证。会话到期重新认证，无刷新令牌。HTTP 每个请求在线核验，WebSocket 在握手、每条入站及出站消息前核验，空闲连接每五秒复核（网络超时另最多五秒）；同时检查会话成员。当前所谓流式接口为逐请求轮询，无长时间 HTTP 流。
 
 统一模式所有写方法都需精确 Origin 和 `X-CSRF-Token`，该值由可读 `__Host-rehab_csrf` Cookie 获取，并与服务器会话哈希比对。非同源 Origin 的读请求也拒绝。`POST /api/auth/logout` 销毁本地会话，不宣称源全局退出。`GET /api/auth/config` 提供模式和受控登录 URL；`GET /api/auth/session` 对已核实绑定返回原业务 user，对未绑定用户仅返回身份及 pending_binding，不授业务访问。
 
 管理员须独立核实源永久 subject 和现有 Mongo actor_id。维护命令默认只读：
+
+绑定带有审核版本，身份会话保存登录时的版本。绑定首次建立、角色复核或停用后，先前会话不能获得新授权，须重新认证。历史会话若缺少版本则失效；历史绑定若缺少版本，须由管理员核实相同 issuer、subject、actor 和当前角色后执行下述 `review-role --apply`，然后用户重新登录。先以不带 `--apply` 的命令检查；不要批量猜测绑定或自动补发版本。此为上线兼容要求，本地代码变更没有修改现有数据库。
 
 ```bash
 DEBUG=false backend/.venv/bin/python backend/scripts/manage_oidc_bindings.py bind \
@@ -27,5 +29,7 @@ DEBUG=false backend/.venv/bin/python backend/scripts/manage_oidc_bindings.py bin
 审阅一致后加 `--apply`。命令写入身份映射、已复核的原角色快照及同文档审计，不创建账号、不复制密码、不变更角色。`disable` 使用相同参数及 `--apply` 停用精确绑定；已有记录不能被 bind 覆盖或复活，同一源下一个业务 actor 不能被多个 subject 占用。若原角色发生变化，该会话失效；管理员用 `review-role` 显式重新核实当前角色，用户重新认证后才生效，旧会话不会复活。核实证据仅存引用，不能在命令参数或数据库里放身份证照片等材料。本轮未提供管理界面，特权维护工具不是普通用户接口。
 
 权限归属按本轮用户决定：身份统一到 113.44，康复权限继续由本系统管理；它不是跨系统集中临床授权。现有患者归属和管理员原有范围仍按原规则执行。上线前须独立核实所绑定旧角色及数据范围，不把任何源研究管理员自动映射为康复管理员。
+
+填报身份委托要求源端私有 `OIDC_CLIENTS_FILE` 中，为该 OIDC 客户端显式配置 `integration_client_id`，其值为同一康复系统所用的源端集成客户端 ID；源端检查一对一关系，不凭两个 ID 相同推断配对。康复侧只从当前统一登录的服务器会话取得源令牌并经 HTTPS 传递；源端解析操作人，拒绝请求自带操作人 ID，令牌不明文保存到填报会话。缺少配对或源端结构迁移时拒绝填报。旧填报会话缺少身份委托材料时不能继续使用；上线迁移须先备份、隔离演练并核对旧任务处置。本地实现不代表已经配置或部署 113.44。
 
 隔离测试：`DEBUG=false REHAB_TEST_OIDC_MONGO_URI=mongodb://127.0.0.1:<隔离端口> PYTHONPATH=backend backend/.venv/bin/python -m pytest backend/tests/test_oidc_client.py`。仅接受显式本机 URI，各测试创建并清理独立数据库；测试真实 Mongo 一次性消费、JOSE 与 Cookie 路由，身份提供方 HTTP 使用注入 MockTransport，不修改系统或生产 TLS 策略。两端真实 provider/RP 和真实浏览器联调仍需另外验收。

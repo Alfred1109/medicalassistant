@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -76,15 +77,12 @@ async def callback(request: Request, client=Depends(oidc_client)):
         sid, csrf, seconds = await client.callback(request.query_params["state"],
             request.query_params["code"], request.cookies.get(TRANSACTION_COOKIE))
         try:
-            from app.operations.runtime import record_login_notice, session_timeout_minutes
-            from app.core.config import settings as runtime_settings
-            limit = await session_timeout_minutes(client.db, runtime_settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-            seconds = min(int(seconds), limit * 60)
+            from app.operations.runtime import record_login_notice
             result = await client.session(sid)
             if result and result.get("actor_id"):
                 await record_login_notice(client.db, result["actor_id"])
         except Exception:
-            pass
+            logging.warning("OIDC 登录通知未能记录")
         old_sid = request.cookies.get(SESSION_COOKIE)
         if old_sid:
             from .service import digest

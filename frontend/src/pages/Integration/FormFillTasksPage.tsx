@@ -277,7 +277,7 @@ const FormFillTasksPage: React.FC = () => {
       />
 
       <Typography sx={{ mt: 2 }} variant="caption" color="text.secondary">
-        嵌入链接为一次性令牌：关闭或过期后需重新创建任务；“待审阅（已核实）”表示后端已向
+        返回填报页面可继续同一任务的草稿；“待审阅（已核实）”表示后端已向
         113.44 核实答卷真实提交。
       </Typography>
     </Box>

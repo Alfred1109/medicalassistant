@@ -83,14 +83,15 @@ class FormPlatformClient:
 
     async def _request(self, method: str, path: str,
                        json_body: Optional[Dict[str, Any]] = None,
-                       params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       params: Optional[Dict[str, Any]] = None,
+                       extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=self._timeout,
                                          transport=self._transport,
                                          verify=self._verify_tls) as client:
                 response = await client.request(
                     method, f"{self._base_url}{path}",
-                    json=json_body, params=params, headers=self._auth_headers(),
+                    json=json_body, params=params, headers={**self._auth_headers(), **(extra_headers or {})},
                 )
         except httpx.HTTPError as exc:
             # httpx.HTTPError 覆盖 TransportError 与无效请求构造；均属"无法完成调用"
@@ -134,8 +135,14 @@ class FormPlatformClient:
             return body["message"]
         return None
 
-    async def create_fill_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return await self._request("POST", "/integration/v1/fill-sessions", payload)
+    async def create_fill_session(self, payload: Dict[str, Any], *, source_access_token: str) -> Dict[str, Any]:
+        return await self._request("POST", "/integration/v1/fill-sessions", payload, extra_headers={"X-Source-Access-Token": source_access_token})
+
+    async def launch_fill_session(self, session_uuid: str, *, source_access_token: str) -> Dict[str, Any]:
+        return await self._request(
+            "POST", f"/integration/v1/fill-sessions/{session_uuid}/launch",
+            extra_headers={"X-Source-Access-Token": source_access_token},
+        )
 
     async def get_fill_session(self, session_uuid: str) -> Dict[str, Any]:
         return await self._request("GET", f"/integration/v1/fill-sessions/{session_uuid}")

@@ -8,8 +8,9 @@
 import json
 import os
 import unittest
+from contextlib import ExitStack
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -32,6 +33,23 @@ OPERATOR_ID = "507f1f77bcf86cd799439011"
 PATIENT_ID = str(ObjectId())
 SESSION_UUID = "sess-0001"
 RESPONSE_ID = 42
+FORM_BINDING_ID = str(ObjectId())
+
+
+def synthetic_delegation(operator=None):
+    from app.integrations.identity.service import FillDelegation
+    actor = operator or make_operator()
+    return FillDelegation(client=SimpleNamespace(settings=SimpleNamespace(issuer="https://form.example")), sid="synthetic-session", token="synthetic-source-access-token", record={"_id":"synthetic-session-hash", "issuer":"https://form.example", "subject":"synthetic-subject", "binding_revision":"a"*64}, actor_id=str(actor.id), role=actor.role)
+
+
+def reviewed_documents(patient_id=PATIENT_ID):
+    source = dict(system="form-platform-11344", environment="pilot")
+    reference = dict(source=source, project_id=1, center_id=2, subject_id=3, patient_id=9, patient_archive_id=10)
+    version = dict(form_id=4, family_id=4, version=1, version_state="current", definition_sha256="a"*64, crf_code=None, crf_version=None)
+    review = dict(verified_by="synthetic-reviewer", verified_at=datetime.now(timezone.utc), evidence_reference="synthetic-review")
+    link = dict(_id=ObjectId(), local_patient_id=patient_id, source_origin="https://form.example", status="verified", reference=reference, references=[reference], **review)
+    binding = dict(_id=ObjectId(FORM_BINDING_ID), source_origin="https://form.example", source=source, status="active", project_id=1, form_id=4, version=1, version_ref=version, purpose="followup", **review)
+    return link, binding
 
 
 def make_operator(role="doctor", user_id=OPERATOR_ID):
@@ -86,6 +104,11 @@ class FakeCursor:
         self._limit = n
         return self
 
+    async def to_list(self, length=None):
+        end = None if self._limit is None else self._skip + self._limit
+        rows = self._docs[self._skip:end]
+        return list(rows if length is None else rows[:length])
+
     def __aiter__(self):
         end = None if self._limit is None else self._skip + self._limit
         self._iter = iter(self._docs[self._skip:end])
@@ -114,17 +137,17 @@ class FakeTaskCollection:
         return SimpleNamespace(inserted_id=_id)
 
     async def find_one(self, query, **kwargs):
-        doc = self.docs.get(query["_id"])
+        doc = next((d for d in self.docs.values() if _doc_matches(d, query)), None)
         return deepcopy(doc) if doc and _doc_matches(doc, query) else None
 
-    def find(self, query):
+    def find(self, query, projection=None, **kwargs):
         return FakeCursor([d for d in self.docs.values() if _doc_matches(d, query)])
 
     async def count_documents(self, query):
         return len([d for d in self.docs.values() if _doc_matches(d, query)])
 
     async def update_one(self, query, update, **kwargs):
-        doc = self.docs.get(query["_id"])
+        doc = next((d for d in self.docs.values() if _doc_matches(d, query)), None)
         matched = bool(doc and _doc_matches(doc, query))
         if matched:
             for key, value in update.get("$set", {}).items():
@@ -168,9 +191,15 @@ def make_database(patient_doc):
     collection = FakeTaskCollection()
     visits = FakeVisitCollection()
     recovery_events = FakeTaskCollection()
+    links, bindings = FakeTaskCollection(), FakeTaskCollection()
+    link, binding = reviewed_documents()
+    links.docs[link["_id"]] = link
+    bindings.docs[binding["_id"]] = binding
+    database.external_patient_links = links
+    database.external_form_bindings = bindings
     users = MagicMock()
     users.find_one = AsyncMock(return_value=patient_doc)
-    users.find = lambda query, projection=None: FakeCursor(
+    users.find = lambda query, projection=None, **kwargs: FakeCursor(
         [patient_doc] if patient_doc and _doc_matches(patient_doc, query) else [])
     database.users = users
     database.command = AsyncMock(return_value={"setName": "test_rs", "logicalSessionTimeoutMinutes": 30})
@@ -187,7 +216,8 @@ def make_database(patient_doc):
     database.__getitem__.side_effect = getitem
     database.client = FakeTransactionClient({task_models.COLLECTION_NAME: collection,
                                              "followup_records": visits,
-                                             "integration_recovery_events": recovery_events})
+                                             "integration_recovery_events": recovery_events,
+                                             "external_patient_links": links, "external_form_bindings": bindings})
     return database, collection, visits
 
 
@@ -196,12 +226,13 @@ class FakeRemote:
 
     def __init__(self):
         self.requests = []
+        self.catalog_requests = []
         self.session_body = {
             "session_uuid": SESSION_UUID, "status": "created",
             "embed_url": f"https://form.example/integration/embed/fs_demo",
             "embed_token": "fs_demo_token_value",
             "expires_at": "2026-11-07T12:00:00Z",
-            "response_id": None,
+            "response_id": None, "operator_user_id": 7,
         }
         self.response_body = {
             "response_id": RESPONSE_ID, "status": "submitted",
@@ -212,11 +243,18 @@ class FakeRemote:
         }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
+        is_catalog = request.url.path.endswith("/patient-reference") or request.url.path.endswith("/definition")
+        (self.catalog_requests if is_catalog else self.requests).append(request)
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer pilot-client.pilot-secret"):
             return httpx.Response(401, json={"code": "invalid_client"})
         path = request.url.path
+        link, binding = reviewed_documents()
+        if path == "/integration/v1/projects/1/centers/2/subjects/3/patient-reference":
+            return httpx.Response(200, json=link["reference"])
+        if path == "/integration/v1/forms/4/definition":
+            return httpx.Response(200, json={"source": binding["source"], "version": binding["version_ref"],
+                "form": {"form_id":4,"project_id":1,"title":"Synthetic form","status":"active","current_version":binding["version_ref"]}})
         if path == "/integration/v1/fill-sessions" and request.method == "POST":
             return httpx.Response(201, json=self.session_body)
         if path == f"/integration/v1/fill-sessions/{SESSION_UUID}" and request.method == "GET":
@@ -244,10 +282,20 @@ def make_remote_client(remote):
 
 class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        fill_feature = patch.dict(os.environ, {"FORM_PLATFORM_FILL_ENABLED": "true"})
-        fill_feature.start()
-        self.addCleanup(fill_feature.stop)
+        self.fixture_patches = ExitStack()
+        self.addCleanup(self.fixture_patches.close)
+        self.fixture_patches.enter_context(patch.dict(os.environ, {"FORM_PLATFORM_FILL_ENABLED": "true"}))
         self.operator = make_operator()
+        async def fixture_csrf(middleware, request, call_next):
+            return await call_next(request)
+        for target, kwargs in (
+            ("app.integrations.identity.access.IdentityCsrfMiddleware.dispatch", {"new": fixture_csrf}),
+            ("app.integrations.identity.access.unified_authentication", {"return_value": True}),
+            ("app.integrations.identity.service.OidcClient.fill_delegation", {"new": AsyncMock(side_effect=lambda sid, actor: synthetic_delegation(actor))}),
+            ("app.integrations.identity.service.FillDelegation.revalidate", {"new": AsyncMock()}),
+            ("app.integrations.identity.service.FillDelegation.lock", {"new": AsyncMock()}),
+        ):
+            self.fixture_patches.enter_context(patch(target, **kwargs))
         self.patient_doc = make_patient_doc()
         self.remote = FakeRemote()
         self.database, self.collection, self.visit_collection = make_database(self.patient_doc)
@@ -256,18 +304,28 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
             yield self.database
 
         self.remote_client = make_remote_client(self.remote)
+        from app.core.auth import get_current_active_user
+        from fastapi import Request, HTTPException
+        async def fixture_actor(request: Request):
+            if not request.headers.get("Authorization"):
+                raise HTTPException(401)
+            return self.get_user_mock.return_value
+        app.dependency_overrides[get_current_active_user] = fixture_actor
         app.dependency_overrides[get_database] = fake_database
         app.dependency_overrides[get_form_platform_client] = lambda: self.remote_client
         # get_current_user 内部通过 UserService 查库；按 test_auth_contract 的模式打桩
         self.get_user_mock = AsyncMock(return_value=self.operator)
         self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
         self.lookup.start()
+        app.middleware_stack = None
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 
     async def asyncTearDown(self):
         await self.client.aclose()
         self.lookup.stop()
+        self.fixture_patches.close()
         app.dependency_overrides.clear()
+        app.middleware_stack = None
 
     def auth(self, user=None):
         from jose import jwt
@@ -282,11 +340,11 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
     def payload(self, **overrides):
         body = {
             "patient_id": PATIENT_ID,
+            "form_binding_id": FORM_BINDING_ID, "form_purpose": "followup",
             "remote_project_id": 1,
             "remote_center_id": 2,
             "remote_subject_id": 3,
             "remote_questionnaire_id": 4,
-            "remote_operator_user_id": 7,
             "allowed_origin": ORIGIN,
             "visit_code": "V1",
             "ma_task_ref": "ma-task-0001",
@@ -330,27 +388,32 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["detail"]["error"], "OPERATOR_ROLE_NOT_ALLOWED")
 
-    async def test_create_success_returns_embed_token_once_and_stores_hash(self):
+    async def test_create_returns_reference_without_persisting_remote_credentials(self):
         response = await self.client.post("/api/integrations/forms/fill-tasks",
                                           json=self.payload(), headers=self.auth())
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         self.assertEqual(body["status"], "session_created")
-        self.assertEqual(body["embedToken"], "fs_demo_token_value")
+        _, reviewed_binding = reviewed_documents()
+        outbound = json.loads(self.remote.requests[-1].content)
+        self.assertEqual(outbound["questionnaire_version_ref"], {
+            key: reviewed_binding["version_ref"][key]
+            for key in ("form_id", "family_id", "version", "definition_sha256")
+        })
+        self.assertNotIn("embedToken", body)
         task_id = body["id"]
 
         stored = list(self.collection.docs.values())[0]
-        # 明文令牌不落库；只存哈希
-        self.assertNotIn("fs_demo_token_value", json.dumps(stored, default=str))
-        self.assertEqual(stored["session"]["embed_token_hash"],
-                         task_models.hash_embed_token("fs_demo_token_value"))
-
-        # embed-url 可取（不含明文令牌）
-        embed = await self.client.get(f"/api/integrations/forms/fill-tasks/{task_id}/embed-url",
-                                      headers=self.auth())
-        self.assertEqual(embed.status_code, 200)
-        self.assertEqual(embed.json()["embedUrl"], self.remote.session_body["embed_url"])
-        self.assertNotIn("embedToken", embed.json())
+        for document in (stored, body):
+            serialized = json.dumps(document, default=str)
+            self.assertNotIn("fs_demo_token_value", serialized)
+            self.assertNotIn("https://form.example/integration/embed/fs_demo", serialized)
+        for session in [stored["session"], *stored["fill_sessions"]]:
+            self.assertNotIn("embed_token_hash", session)
+            self.assertNotIn("embed_url", session)
+        retired = await self.client.get(f"/api/integrations/forms/fill-tasks/{task_id}/embed-url", headers=self.auth())
+        self.assertEqual(retired.status_code, 410)
+        self.assertEqual(retired.json()["detail"]["error"], "LEGACY_EMBED_URL_RETIRED")
 
         # 再次创建的新任务不能复用旧令牌语义（这里只验证远端请求带凭证）
         self.assertTrue(self.remote.requests[0].headers["Authorization"]
@@ -366,7 +429,7 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post("/api/integrations/forms/fill-tasks",
                                           json=self.payload(), headers=self.auth())
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["detail"]["error"], "FORM_PLATFORM_AUTH_REJECTED")
+        self.assertEqual(response.json()["detail"]["error"], "SOURCE_CONTEXT_UNAVAILABLE")
         # 远端失败不落任务
         self.assertEqual(len(self.collection.docs), 0)
 
@@ -379,7 +442,7 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post("/api/integrations/forms/fill-tasks",
                                           json=self.payload(), headers=self.auth())
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["detail"]["error"], "FORM_PLATFORM_UNAVAILABLE")
+        self.assertEqual(response.json()["detail"]["error"], "SOURCE_CONTEXT_UNAVAILABLE")
         self.assertEqual(len(self.collection.docs), 0)
 
     async def test_get_task_forbidden_for_unrelated_operator(self):
@@ -499,7 +562,7 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         task_id = created.json()["id"]
         self.patient_doc["practitioners"] = []
         self.remote.requests.clear()
-        for method, suffix in (("get", ""), ("get", "/embed-url"),
+        for method, suffix in (("get", ""), ("post", "/launch"),
                                ("post", "/confirm"), ("post", "/cancel")):
             with self.subTest(method=method, suffix=suffix):
                 response = await getattr(self.client, method)(
@@ -549,11 +612,26 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["followupVisitId"], visit_id)
         self.assertEqual(body["visitCode"], "V1")
 
+        # The source creates its response in the received visit context. Verify
+        # the outbound payload, not only the local task's inherited field.
+        remote_payload = json.loads(self.remote.requests[-1].content)
+        self.assertEqual(remote_payload["visit_code"], "V1")
+
         stored = list(self.collection.docs.values())[0]
         self.assertEqual(stored["followup_visit_id"], visit_id)
         # 节点反向索引 fill_task_ids 追加任务 ID
         node = self.visit_doc(visit_id)
         self.assertEqual([str(t) for t in node["fill_task_ids"]], [body["id"]])
+
+        self.remote.session_body.update(status="submitted", response_id=RESPONSE_ID)
+        self.remote.response_body["visit_code"] = remote_payload["visit_code"]
+        confirmed = await self.client.post(
+            f"/api/integrations/forms/fill-tasks/{body['id']}/confirm", headers=self.auth())
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertEqual(confirmed.json()["status"], "confirmed")
+        node = self.visit_doc(visit_id)
+        self.assertEqual(node["status"], "in_review")
+        self.assertEqual(node["effective_response"]["visit_code"], "V1")
 
     async def test_create_rejects_missing_or_malformed_visit(self):
         missing = await self.client.post(
@@ -845,8 +923,8 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.visit_doc(visit_id)["status"], "canceled")
         self.assertNotEqual(self.collection.docs[ObjectId(task_id)]["status"], "confirmed")
 
-    async def test_legacy_single_session_doc_confirm_compatibility(self):
-        # 存量文档形状：只有旧单 session 字段、无 fill_sessions，确认路径照常工作
+    async def test_reviewed_single_session_doc_confirm_compatibility(self):
+        # 单 session 存储形状保留兼容，新操作仍要求完整审核上下文。
         legacy = {
             "_id": ObjectId(),
             "patient_id": PATIENT_ID,
@@ -858,10 +936,17 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
             "status": "submitted",
             "session": {"session_uuid": SESSION_UUID, "embed_token_hash": "legacy-hash",
                         "embed_url": "https://form.example/integration/embed/fs_demo",
-                        "response_id": None, "expires_at": None},
+                        "response_id": None, "operator_user_id": 7, "expires_at": None},
             "confirmation": None, "last_error": None,
             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
             "confirmed_at": None,
+        }
+        link = next(iter(self.database.external_patient_links.docs.values()))
+        binding = next(iter(self.database.external_form_bindings.docs.values()))
+        legacy["reviewed_context"] = {
+            "patient_link_id": link["_id"], "form_binding_id": binding["_id"],
+            "reference": link["reference"], "version_ref": binding["version_ref"],
+            "purpose": binding["purpose"],
         }
         self.collection.docs[legacy["_id"]] = legacy
         self.remote.session_body["status"] = "submitted"
@@ -883,6 +968,21 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task_models.active_session(stored)["session_uuid"], SESSION_UUID)
         array_only = {"session": {}, "fill_sessions": [{"session_uuid": "sess-new"}]}
         self.assertEqual(task_models.active_session(array_only)["session_uuid"], "sess-new")
+
+    async def test_task_without_reviewed_context_remains_readable_but_cannot_confirm(self):
+        created = await self.client.post("/api/integrations/forms/fill-tasks",
+                                         json=self.payload(), headers=self.auth())
+        self.assertEqual(created.status_code, 200, created.text)
+        task_id = created.json()["id"]
+        self.collection.docs[ObjectId(task_id)].pop("reviewed_context")
+        self.remote.session_body.update(status="submitted", response_id=RESPONSE_ID)
+        self.assertEqual((await self.fetch_task(task_id)).status_code, 200)
+        confirmed = await self.client.post(f"/api/integrations/forms/fill-tasks/{task_id}/confirm", headers=self.auth())
+        self.assertEqual(confirmed.status_code, 409, confirmed.text)
+        self.assertEqual(confirmed.json()["detail"]["error"], "TASK_REVIEW_REQUIRED")
+        self.assertNotEqual(self.collection.docs[ObjectId(task_id)]["status"], "confirmed")
+        cancelled = await self.client.post(f"/api/integrations/forms/fill-tasks/{task_id}/cancel", headers=self.auth())
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
 
 
 if __name__ == "__main__":

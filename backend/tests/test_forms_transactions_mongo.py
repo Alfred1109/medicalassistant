@@ -1,10 +1,11 @@
 """Real Mongo replica-set verification; only uses a fresh synthetic database."""
 import asyncio
+import json
 import os
 import unittest
 from datetime import datetime, timedelta
 from uuid import uuid4
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
@@ -16,7 +17,7 @@ from app.schemas.followup import (
     CancelFollowUpRequest, CompleteFollowUpRequest, ReviewFollowUpRequest)
 from app.services.followup_service import FollowupService
 from app.integrations.forms import service, models
-from test_integration_forms_contract import FakeRemote, make_remote_client, make_operator, OPERATOR_ID, PATIENT_ID
+from test_integration_forms_contract import FakeRemote, make_remote_client, make_operator, OPERATOR_ID, PATIENT_ID, FORM_BINDING_ID, reviewed_documents, synthetic_delegation
 
 
 @unittest.skipUnless(os.environ.get("REHAB_TEST_MONGO_URI"), "isolated replica-set URI not supplied")
@@ -45,12 +46,26 @@ class FormsMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
         self.remote = FakeRemote()
         self.remote_client = make_remote_client(self.remote)
         self.operator = make_operator()
+        for name in ("revalidate", "lock"):
+            fixture_patch = patch("app.integrations.identity.service.FillDelegation." + name, new=AsyncMock())
+            fixture_patch.start(); self.addCleanup(fixture_patch.stop)
+        link, binding = reviewed_documents(self.patient_id)
+        await self.db.external_patient_links.insert_one(link)
+        await self.db.external_form_bindings.insert_one(binding)
         self.task = await service.create_fill_task(self.db, self.remote_client, self.operator, {
             "patient_id": self.patient_id, "followup_visit_id": self.visit_id,
+            "form_binding_id": FORM_BINDING_ID, "form_purpose": "followup",
             "remote_project_id": 1, "remote_center_id": 2, "remote_subject_id": 3,
-            "remote_questionnaire_id": 4, "remote_operator_user_id": 7,
-            "allowed_origin": "https://rehab.example", "visit_code": "V1"})
+            "remote_questionnaire_id": 4,
+            "allowed_origin": "https://rehab.example"}, delegation=synthetic_delegation(self.operator))
         self.task_id = self.task["id"]
+        remote_payload = json.loads(self.remote.requests[-1].content)
+        self.assertEqual(remote_payload["visit_code"], "V1")
+        self.assertEqual(remote_payload["questionnaire_version_ref"], {
+            key: binding["version_ref"][key]
+            for key in ("form_id", "family_id", "version", "definition_sha256")
+        })
+        self.remote.response_body["visit_code"] = remote_payload["visit_code"]
         self.remote.session_body.update(status="submitted", response_id=42)
 
     async def asyncTearDown(self):
@@ -186,16 +201,20 @@ class FormsStandaloneRejectionTests(unittest.IsolatedAsyncioTestCase):
         remote = FakeRemote()
         remote_client = make_remote_client(remote)
         try:
+            link, binding = reviewed_documents(PATIENT_ID)
+            await db.external_patient_links.insert_one(link)
+            await db.external_form_bindings.insert_one(binding)
             with self.assertRaises(service.FormIntegrationError) as raised:
                 await service.create_fill_task(db, remote_client, make_operator(role="admin"), {
                     "patient_id": PATIENT_ID,
+                    "form_binding_id": FORM_BINDING_ID, "form_purpose": "followup",
                     "remote_project_id": 1, "remote_center_id": 2, "remote_subject_id": 3,
-                    "remote_questionnaire_id": 4, "remote_operator_user_id": 7,
-                    "allowed_origin": "https://rehab.example"})
+                    "remote_questionnaire_id": 4,
+                    "allowed_origin": "https://rehab.example"}, delegation=synthetic_delegation(make_operator(role="admin")))
             self.assertEqual(raised.exception.status_code, 503)
             self.assertEqual(raised.exception.error_code, "FOLLOWUP_TRANSACTION_UNAVAILABLE")
             self.assertEqual(remote.requests, [])
-            self.assertEqual(await db.list_collection_names(), [])
+            self.assertEqual(await db[models.COLLECTION_NAME].count_documents({}), 0)
         finally:
             await client.drop_database(db.name)
             client.close()

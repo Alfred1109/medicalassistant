@@ -90,12 +90,10 @@ class FollowUpFillTask:
             # FU01 S4：关联随访节点（正式外键；ma_task_ref 保留为远端自由引用兼容透传）
             "followup_visit_id": followup_visit_id,
             "status": TASK_STATUS_SESSION_CREATED,
-            # 远端会话引用：session_uuid 唯一标识；embed_token 只存哈希（明文一次下发不落库）
+            # 只保存非敏感会话引用，启动材料仅在启动响应中透传。
             # `session` 为最新会话镜像（旧字段优先兼容读取），`fill_sessions` 为多会话正典
             "session": {
                 "session_uuid": None,
-                "embed_token_hash": None,
-                "embed_url": None,
                 "response_id": None,
                 "expires_at": None,
             },
@@ -126,14 +124,11 @@ class FollowUpFillTask:
         self.doc["status"] = status
         self.doc["updated_at"] = utcnow()
 
-    def record_remote_session(self, session_body: Dict[str, Any],
-                              embed_token_hash: Optional[str]) -> None:
+    def record_remote_session(self, session_body: Dict[str, Any]) -> None:
         entry = {
             "session_uuid": session_body.get("session_uuid"),
-            "embed_url": session_body.get("embed_url"),
             "response_id": session_body.get("response_id"),
             "expires_at": session_body.get("expires_at"),
-            "embed_token_hash": embed_token_hash,
             "confirmation": None,
         }
         sessions = self.doc.get("fill_sessions")
@@ -143,7 +138,7 @@ class FollowUpFillTask:
         sessions.append(entry)
         # 旧单会话字段镜像（兼容读取：旧字段优先）
         self.doc["session"] = {k: entry[k] for k in (
-            "session_uuid", "embed_token_hash", "embed_url", "response_id", "expires_at")}
+            "session_uuid", "response_id", "expires_at")}
         self.doc["updated_at"] = utcnow()
 
     def record_error(self, message: str) -> None:
@@ -172,7 +167,7 @@ IntegrationFillTask = FollowUpFillTask
 
 
 def hash_embed_token(token: str) -> str:
-    """嵌入令牌只保存哈希；明文仅在创建响应中透传一次，不写日志不落库。"""
+    """计算令牌哈希；旧协议 URL 仍可能包含明文凭证。"""
     import hashlib
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -207,15 +202,4 @@ def serialize_task(doc: Dict[str, Any]) -> Dict[str, Any]:
         "createdAt": doc.get("created_at").isoformat() + "Z" if doc.get("created_at") else None,
         "updatedAt": doc.get("updated_at").isoformat() + "Z" if doc.get("updated_at") else None,
         "confirmedAt": doc.get("confirmed_at").isoformat() + "Z" if doc.get("confirmed_at") else None,
-    }
-
-
-def serialize_embed_url(doc: Dict[str, Any]) -> Dict[str, Any]:
-    session = active_session(doc)
-    return {
-        "taskId": str(doc["_id"]) if doc.get("_id") is not None else None,
-        "embedUrl": session.get("embed_url"),
-        "sessionUuid": session.get("session_uuid"),
-        "expiresAt": session.get("expires_at"),
-        "allowedOrigin": doc.get("allowed_origin"),
     }

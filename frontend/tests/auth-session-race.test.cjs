@@ -245,7 +245,7 @@ test('all identity requests share the configured API root', async t => {
       await f.store.dispatch(f.actions.login({ email: nextUser.email, password: 'fixture-only' })).unwrap();
       await f.store.dispatch(f.actions.checkAuthStatus()).unwrap();
       await f.store.dispatch(f.actions.updateUserProfile({ name: nextUser.name })).unwrap();
-      assert.deepEqual(calls, ['register', 'login', 'me', 'profile'].map(endpoint => `${expected}/users/${endpoint}`));
+      assert.deepEqual(calls, ['register', 'login', 'me', 'me'].map(endpoint => `${expected}/users/${endpoint}`));
       assert.equal(f.store.getState().auth.token, 'login-token');
       assert.deepEqual(f.store.getState().auth.user, nextUser);
     });

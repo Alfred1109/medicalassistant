@@ -58,16 +58,15 @@ export interface CreateFillTaskPayload {
   remoteCenterId: number;
   remoteSubjectId: number;
   remoteQuestionnaireId: number;
-  remoteOperatorUserId: number;
+  formBindingId: string;
+  formPurpose: 'initial_assessment' | 'followup' | 'reassessment';
   allowedOrigin: string;
   visitCode?: string;
   visitName?: string;
   maTaskRef?: string;
 }
 
-export interface CreateFillTaskResult extends FillTask {
-  embedToken: string;
-}
+export type CreateFillTaskResult = FillTask;
 
 export interface EmbedUrlResult {
   taskId: string;
@@ -76,6 +75,40 @@ export interface EmbedUrlResult {
   expiresAt: string | null;
   allowedOrigin: string;
 }
+
+export type FillTaskLaunch = {
+  taskId: string;
+  sessionUuid: string;
+  expiresAt: string;
+  allowedOrigin: string;
+} & ({ mode: 'launch'; action: string; token: string } | { mode: 'resume'; url: string });
+
+/** Submit a one-use credential without putting it in browser navigation URLs. */
+export const submitFillLaunch = (launch: FillTaskLaunch, frame: HTMLIFrameElement): void => {
+  const destination = launch.mode === 'launch' ? launch.action : launch.url;
+  const url = new URL(destination);
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
+      || !launch.sessionUuid || !frame.name) throw new Error('填报入口无效');
+  const expectedPath = `/integration/${launch.mode === 'launch' ? 'embed' : 'resume'}/${encodeURIComponent(launch.sessionUuid)}`;
+  if (url.pathname !== expectedPath) throw new Error('填报会话不匹配');
+  if (launch.mode === 'resume') {
+    frame.src = url.href;
+    return;
+  }
+  if (typeof launch.token !== 'string' || !launch.token) throw new Error('填报凭证无效');
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = url.href;
+  form.target = frame.name;
+  form.hidden = true;
+  const input = document.createElement('input');
+  input.type = 'hidden';
+  input.name = 'token';
+  input.value = launch.token;
+  form.appendChild(input);
+  document.body.appendChild(form);
+  try { form.submit(); } finally { input.value = ''; form.remove(); }
+};
 
 export interface FillTaskListPage {
   status: string;
@@ -131,7 +164,8 @@ const buildCreatePayload = (payload: CreateFillTaskPayload): Record<string, unkn
   remote_center_id: payload.remoteCenterId,
   remote_subject_id: payload.remoteSubjectId,
   remote_questionnaire_id: payload.remoteQuestionnaireId,
-  remote_operator_user_id: payload.remoteOperatorUserId,
+  form_binding_id: payload.formBindingId,
+  form_purpose: payload.formPurpose,
   allowed_origin: payload.allowedOrigin,
   ...(payload.visitCode ? { visit_code: payload.visitCode } : {}),
   ...(payload.visitName ? { visit_name: payload.visitName } : {}),
@@ -189,10 +223,8 @@ export const formIntegrationService = {
     return apiClient.get<FillTask>(`/integrations/forms/fill-tasks/${taskId}`);
   },
 
-  async getEmbedUrl(taskId: string): Promise<EmbedUrlResult> {
-    return apiClient.get<EmbedUrlResult>(
-      `/integrations/forms/fill-tasks/${taskId}/embed-url`,
-    );
+  async launchFillTask(taskId: string): Promise<FillTaskLaunch> {
+    return apiClient.post<FillTaskLaunch>(`/integrations/forms/fill-tasks/${encodeURIComponent(taskId)}/launch`);
   },
 
   async confirmFillTask(taskId: string): Promise<FillTask> {

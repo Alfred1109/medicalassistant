@@ -4,6 +4,7 @@ In explicit unified mode, reviewed bindings retain the application's existing
 role and object scope. Source account state is checked online for each request;
 identity-only trials in legacy mode cannot authenticate clinical dependencies.
 """
+from dataclasses import dataclass, field
 import hashlib
 import math
 import secrets
@@ -23,6 +24,41 @@ from joserfc.jws import JWSRegistry
 
 def digest(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def binding_revision(binding):
+    """Only explicitly versioned reviews can authorize a newly authenticated session."""
+    value = binding.get("authorization_revision") if binding else None
+    return value if isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value) else None
+
+
+@dataclass(frozen=True, repr=False)
+class FillDelegation:
+    client: object = field(repr=False)
+    sid: str = field(repr=False)
+    token: str = field(repr=False)
+    record: dict = field(repr=False)
+    actor_id: str
+    role: str
+
+    async def revalidate(self):
+        record, actor = await self.client.actor_for_session(self.sid)
+        if (record is None or actor is None or str(actor['_id']) != self.actor_id
+                or actor['role'] != self.role
+                or record.get('binding_revision') != self.record.get('binding_revision')):
+            raise OidcFailure()
+
+    async def lock(self, db, session):
+        binding_id = digest(self.record['issuer'] + "\0" + self.record['subject'])
+        checks = (
+            (db.oidc_application_sessions, {'_id': self.record['_id'], 'binding_revision': self.record['binding_revision'], 'expires_at': {'$gt': datetime.utcnow()}}),
+            (db.oidc_principal_bindings, {'_id': binding_id, 'enabled': True, 'actor_id': self.actor_id, 'approved_role': self.role, 'authorization_revision': self.record['binding_revision']}),
+            (db.users, {'_id': ObjectId(self.actor_id), 'is_active': True, 'role': self.role}),
+        )
+        for collection, query in checks:
+            result = await collection.update_one(query, {'$inc': {'fill_use_revision': 1}}, session=session)
+            if result.matched_count != 1:
+                raise OidcFailure()
 
 
 class OidcFailure(Exception):
@@ -135,13 +171,24 @@ class OidcClient:
         if (isinstance(source_lifetime, bool) or not isinstance(source_lifetime, (int, float))
                 or not math.isfinite(source_lifetime) or source_lifetime <= 0):
             raise OidcFailure()
+        from app.operations.runtime import session_timeout_minutes
+        from app.core.config import settings as runtime_settings
+        # The administrative lifetime is an authentication constraint, not just
+        # a browser cookie preference. Read it before creating a server session;
+        # an unavailable policy store must not silently issue a longer session.
+        policy_seconds = 60 * await session_timeout_minutes(
+            self.db, runtime_settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         # ID-token expiry bounds the initial assertion, not a session that is
         # independently checked against the source on every protected request.
-        expiry = time.time() + min(source_lifetime, self.settings.session_seconds)
+        expiry = time.time() + min(source_lifetime, self.settings.session_seconds, policy_seconds)
         if expiry <= time.time():
             raise OidcFailure()
+        binding = await self.db.oidc_principal_bindings.find_one({
+            "_id": digest(claims["iss"] + "\0" + claims["sub"]),
+            "issuer": claims["iss"], "subject": claims["sub"]})
         await self.db.oidc_application_sessions.insert_one({
             "_id": digest(sid), "issuer": claims["iss"], "subject": claims["sub"],
+            "binding_revision": binding_revision(binding),
             "csrf_hash": digest(csrf), "expires_at": datetime.utcfromtimestamp(expiry),
             "source_token_encrypted": Fernet(self.settings.session_encryption_key.get_secret_value().encode("ascii")).encrypt(token["access_token"].encode()).decode("ascii")})
         # ID tokens are discarded; delegated access token is encrypted for live status checks.
@@ -180,10 +227,22 @@ class OidcClient:
         record = await self.load_session(sid)
         if record is None:
             return None, None
+        if "binding_revision" not in record:
+            # Historical cookies have no proof of the authorization reviewed at
+            # authentication time. They must authenticate again, never upgrade.
+            await self.db.oidc_application_sessions.delete_one({"_id": record["_id"]})
+            return None, None
         # Review metadata is mandatory. Matching names/emails never create mappings.
         binding = await self.db.oidc_principal_bindings.find_one({
             "_id": digest(record["issuer"] + "\0" + record["subject"]),
             "issuer": record["issuer"], "subject": record["subject"]})
+        if binding and (binding_revision(binding) is None
+                        or record["binding_revision"] != binding_revision(binding)):
+            await self.db.oidc_application_sessions.delete_one({"_id": record["_id"]})
+            return None, None
+        if not binding and record["binding_revision"] is not None:
+            await self.db.oidc_application_sessions.delete_one({"_id": record["_id"]})
+            return None, None
         actor = None
         if (binding and binding.get("enabled") is True
                 and isinstance(binding.get("verified_by"), str) and binding["verified_by"]
@@ -199,7 +258,23 @@ class OidcClient:
             # later reactivation/review must not revive its old cookie.
             await self.db.oidc_application_sessions.delete_one({"_id": record["_id"]})
             return None, None
+        if actor and not await self.db.oidc_principal_bindings.find_one({
+                "_id": binding["_id"], "enabled": True,
+                "authorization_revision": record["binding_revision"]}):
+            # A review concurrent with actor lookup cannot authorize the old cookie.
+            await self.db.oidc_application_sessions.delete_one({"_id": record["_id"]})
+            return None, None
         return record, actor
+
+    async def fill_delegation(self, sid, actor):
+        record, current = await self.actor_for_session(sid)
+        if (record is None or current is None or str(current['_id']) != str(actor.id) or current['role'] != actor.role):
+            raise OidcFailure()
+        try:
+            token = Fernet(self.settings.session_encryption_key.get_secret_value().encode('ascii')).decrypt(record['source_token_encrypted'].encode('ascii')).decode('utf-8')
+        except Exception:
+            raise OidcUnavailable() from None
+        return FillDelegation(self, sid, token, record, str(current['_id']), current['role'])
 
     async def session(self, sid):
         record, actor = await self.actor_for_session(sid)

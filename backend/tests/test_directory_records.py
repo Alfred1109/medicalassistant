@@ -20,7 +20,7 @@ class Collection:
 
     async def find_one(self, query):
         for doc in self.docs:
-            if all(doc.get(key) == value for key, value in query.items()):
+            if all((doc.get(key) in value["$in"] if isinstance(value, dict) and "$in" in value else doc.get(key) == value) for key, value in query.items()):
                 return doc
         return None
 
@@ -34,14 +34,17 @@ class Collection:
                 return Result(1)
         return Result(0)
 
-    def find(self, query):
-        return _Cursor([doc for doc in self.docs if all(doc.get(key) == value for key, value in query.items())])
+    def find(self, query, projection=None, **kwargs):
+        return _Cursor([doc for doc in self.docs if all((doc.get(key) in value["$in"] if isinstance(value, dict) and "$in" in value else doc.get(key) == value) for key, value in query.items())])
 
 
 class _Cursor:
     def __init__(self, rows):
         self.rows = rows
         self._index = 0
+
+    async def to_list(self, length=None):
+        return list(self.rows if length is None else self.rows[:length])
 
     def __aiter__(self):
         return self

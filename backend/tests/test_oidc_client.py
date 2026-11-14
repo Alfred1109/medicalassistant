@@ -140,12 +140,12 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
             app.dependency_overrides.update(previous)
 
     async def bound_session(self, role="doctor"):
-        sid, csrf, _ = await self.service.callback(*(await self.begin()))
         actor_id = ObjectId()
         await self.db.users.insert_one(dict(_id=actor_id, name="Reviewed actor", email="reviewed@example.com",
             role=role, is_active=True, created_at=datetime.utcnow(), updated_at=datetime.utcnow()))
         await manage_binding(self.db, issuer=self.config.issuer, subject="opaque-stable-subject",
             actor_id=str(actor_id), reviewer="administrator", evidence_reference="review/789", apply=True, approved_role=role)
+        sid, csrf, _ = await self.service.callback(*(await self.begin()))
         return sid, csrf, actor_id
 
     async def test_success_creates_identity_only_session_without_tokens(self):
@@ -153,7 +153,7 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(expiry, 0)
         self.assertGreater(expiry, 3500)
         stored = await self.db.oidc_application_sessions.find_one({"_id": digest(sid)})
-        self.assertEqual(set(stored), {"_id", "issuer", "subject", "csrf_hash", "expires_at", "source_token_encrypted"})
+        self.assertEqual(set(stored), {"_id", "issuer", "subject", "csrf_hash", "expires_at", "source_token_encrypted", "binding_revision"})
         self.assertNotIn("source-token-never-stored", repr(stored))
         self.assertNotIn(sid, repr(stored))
         result = await self.service.session(sid)
@@ -173,6 +173,50 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
         await self.db.oidc_login_transactions.update_one({"_id": digest(state)}, {"$set": {"expires_at": datetime.utcnow() - timedelta(seconds=1)}})
         with self.assertRaises(OidcFailure):
             await self.service.callback(state, code, browser)
+
+    async def test_operations_lifetime_bounds_server_session_and_cookie(self):
+        await self.db.system_settings.insert_one({"_id": "system", "session_timeout_minutes": 15})
+        before = datetime.utcnow()
+        state, code, secret = await self.begin()
+        with self.unified_application() as app:
+            async with httpx.AsyncClient(app=app, base_url="https://care.test",
+                    cookies={"__Host-rehab_oidc": secret}) as browser:
+                response = await browser.get("/api/auth/oidc/callback", params={"state": state, "code": code})
+                self.assertEqual(response.status_code, 303)
+                sid = browser.cookies.get("__Host-rehab_session")
+                self.assertIsNotNone(sid)
+                stored = await self.db.oidc_application_sessions.find_one({"_id": digest(sid)})
+                server_seconds = (stored["expires_at"] - before).total_seconds()
+                self.assertGreater(server_seconds, 890)
+                self.assertLess(server_seconds, 905)
+                from http.cookies import SimpleCookie
+                issued = SimpleCookie()
+                for value in response.headers.get_list("set-cookie"):
+                    issued.load(value)
+                cookie_seconds = int(issued["__Host-rehab_session"]["max-age"])
+                self.assertLessEqual(cookie_seconds, 900)
+                self.assertLess(abs(server_seconds - cookie_seconds), 5)
+
+    async def test_operations_lifetime_does_not_extend_shorter_oidc_limit(self):
+        await self.db.system_settings.insert_one({"_id": "system", "session_timeout_minutes": 15})
+        self.config.session_seconds = 60
+        before = datetime.utcnow()
+        sid, _, seconds = await self.service.callback(*(await self.begin()))
+        stored = await self.db.oidc_application_sessions.find_one({"_id": digest(sid)})
+        self.assertLessEqual(seconds, 60)
+        self.assertLess((stored["expires_at"] - before).total_seconds(), 65)
+
+    async def test_unavailable_operations_policy_creates_no_session_or_cookie(self):
+        state, code, secret = await self.begin()
+        with self.unified_application() as app, patch(
+                "app.operations.runtime.session_timeout_minutes", new=AsyncMock(side_effect=RuntimeError("policy unavailable"))):
+            async with httpx.AsyncClient(app=app, base_url="https://care.test",
+                    cookies={"__Host-rehab_oidc": secret}) as browser:
+                response = await browser.get("/api/auth/oidc/callback", params={"state": state, "code": code})
+                self.assertIn("OIDC_VALIDATION_FAILED", response.headers["location"])
+                self.assertIsNone(browser.cookies.get("__Host-rehab_session"))
+                self.assertIsNone(browser.cookies.get("__Host-rehab_csrf"))
+        self.assertEqual(await self.db.oidc_application_sessions.count_documents({}), 0)
 
     async def test_concurrent_callbacks_exchange_exactly_once(self):
         args = await self.begin()
@@ -207,21 +251,110 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(OidcFailure):
                     await self.service.start()
 
+    async def test_fill_delegation_is_server_only_and_actor_bound(self):
+        sid, _, actor_id = await self.bound_session()
+        actor = SimpleNamespace(id=str(actor_id), role='doctor')
+        delegation = await self.service.fill_delegation(sid, actor)
+        self.assertEqual(delegation.token, 'source-token-never-stored')
+        self.assertNotIn(delegation.token, repr(delegation))
+        with self.assertRaises(OidcFailure):
+            await self.service.fill_delegation(sid, SimpleNamespace(id=str(ObjectId()), role='doctor'))
+        self.source_active = False
+        with self.assertRaises(OidcFailure):
+            await delegation.revalidate()
+
+    async def test_fill_delegation_locks_require_live_session_binding_and_actor(self):
+        sid, _, actor_id = await self.bound_session()
+        delegation = await self.service.fill_delegation(sid, SimpleNamespace(id=str(actor_id), role='doctor'))
+        # None uses real Mongo conditional writes without requiring a transaction
+        # here; transaction races are exercised in fill-task tests.
+        await delegation.lock(self.db, None)
+        await self.db.oidc_application_sessions.delete_one({'_id': digest(sid)})
+        with self.assertRaises(OidcFailure):
+            await delegation.lock(self.db, None)
+
     async def test_binding_is_explicit_reviewed_and_never_inherits_roles(self):
-        sid, _, _ = await self.service.callback(*(await self.begin()))
+        pending_sid, _, _ = await self.service.callback(*(await self.begin()))
         actor_id = ObjectId()
         await self.db.users.insert_one({"_id": actor_id, "is_active": True, "role": "admin", "permissions": ["*"]})
         binding = dict(_id=digest(self.config.issuer + "\0opaque-stable-subject"), issuer=self.config.issuer,
                        subject="opaque-stable-subject", actor_id=str(actor_id), enabled=True)
         await self.db.oidc_principal_bindings.insert_one(binding)
-        self.assertIsNone((await self.service.session(sid))["actor_id"])
-        await self.db.oidc_principal_bindings.update_one({"_id": binding["_id"]}, {"$set": {"verified_by": "reviewer", "verified_at": datetime.utcnow(), "evidence_reference": "review/123", "approved_role": "admin"}})
+        self.assertIsNone(await self.service.session(pending_sid))
+        sid, _, _ = await self.service.callback(*(await self.begin()))
+        self.assertIsNone(await self.service.session(sid))
+        await manage_binding(self.db, issuer=self.config.issuer, subject="opaque-stable-subject",
+            actor_id=str(actor_id), reviewer="reviewer", evidence_reference="review/123",
+            approved_role="admin", action="review-role", apply=True)
+        sid, _, _ = await self.service.callback(*(await self.begin()))
         result = await self.service.session(sid)
         self.assertEqual(result["actor_id"], str(actor_id))
         self.assertEqual(result["clinical_permissions"], [])
         self.assertNotIn("role", result)
         await self.db.users.update_one({"_id": actor_id}, {"$set": {"is_active": False}})
         self.assertIsNone(await self.service.session(sid))
+
+    async def test_role_review_invalidates_unobserved_old_sessions(self):
+        sid, _, actor_id = await self.bound_session()
+        original = await self.db.oidc_principal_bindings.find_one({})
+        await self.db.users.update_one({"_id": actor_id}, {"$set": {"role": "admin"}})
+        await manage_binding(self.db, issuer=self.config.issuer, subject="opaque-stable-subject",
+            actor_id=str(actor_id), reviewer="reviewer", evidence_reference="review/new-role",
+            approved_role="admin", action="review-role", apply=True)
+        updated = await self.db.oidc_principal_bindings.find_one({})
+        self.assertNotEqual(original["authorization_revision"], updated["authorization_revision"])
+        self.assertIsNone(await self.service.session(sid))
+        fresh_sid, _, _ = await self.service.callback(*(await self.begin()))
+        self.assertEqual((await self.service.session(fresh_sid))["actor_id"], str(actor_id))
+
+    async def test_historical_session_and_first_binding_require_reauthentication(self):
+        sid, _, actor_id = await self.bound_session()
+        await self.db.oidc_application_sessions.update_one({"_id": digest(sid)}, {"$unset": {"binding_revision": ""}})
+        self.assertIsNone(await self.service.session(sid))
+        await self.db.oidc_principal_bindings.delete_many({})
+        pending_sid, _, _ = await self.service.callback(*(await self.begin()))
+        self.assertEqual((await self.service.session(pending_sid))["identity_state"], "pending_binding")
+        await manage_binding(self.db, issuer=self.config.issuer, subject="opaque-stable-subject",
+            actor_id=str(actor_id), reviewer="reviewer", evidence_reference="review/first",
+            approved_role="doctor", apply=True)
+        self.assertIsNone(await self.service.session(pending_sid))
+
+    async def test_disable_and_concurrent_review_reject_old_authorization(self):
+        sid, _, actor_id = await self.bound_session()
+        collection = self.db.oidc_principal_bindings
+        original_update = collection.update_one
+        async def concurrent_update(_collection, query, update, *args, **kwargs):
+            await original_update({"_id": query["_id"]}, {"$set": {"authorization_revision": "f" * 64}})
+            return await original_update(query, update, *args, **kwargs)
+        with patch.object(type(collection), "update_one", new=concurrent_update):
+            with self.assertRaisesRegex(ValueError, "changed concurrently"):
+                await manage_binding(self.db, issuer=self.config.issuer, subject="opaque-stable-subject",
+                    actor_id=str(actor_id), reviewer="reviewer", evidence_reference="review/concurrent",
+                    approved_role="doctor", action="review-role", apply=True)
+        self.assertIsNone(await self.service.session(sid))
+        sid, _, _ = await self.service.callback(*(await self.begin()))
+        await manage_binding(self.db, issuer=self.config.issuer, subject="opaque-stable-subject",
+            actor_id=str(actor_id), reviewer="reviewer", evidence_reference="review/disable",
+            action="disable", apply=True)
+        self.assertIsNone(await self.service.session(sid))
+
+    async def test_review_during_actor_lookup_rejects_the_old_session(self):
+        sid, _, actor_id = await self.bound_session()
+        collection_type = type(self.db.users)
+        original_find = collection_type.find_one
+        reviewed = False
+        async def find_with_review(collection, query, *args, **kwargs):
+            nonlocal reviewed
+            result = await original_find(collection, query, *args, **kwargs)
+            if collection.name == "users" and not reviewed:
+                reviewed = True
+                await manage_binding(self.db, issuer=self.config.issuer, subject="opaque-stable-subject",
+                    actor_id=str(actor_id), reviewer="reviewer", evidence_reference="review/during-request",
+                    approved_role="doctor", action="review-role", apply=True)
+            return result
+        with patch.object(collection_type, "find_one", new=find_with_review):
+            self.assertIsNone(await self.service.session(sid))
+        self.assertTrue(reviewed)
 
     async def test_logout_requires_matching_server_csrf(self):
         sid, _, _ = await self.service.callback(*(await self.begin()))

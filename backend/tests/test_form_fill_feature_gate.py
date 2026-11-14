@@ -19,7 +19,7 @@ class FormFillFeatureGateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.env.stop()
         await self.fixture.asyncTearDown()
-        self.fixture.doCleanups()
+        # Its explicit ExitStack closes in asyncTearDown, including for nested use.
 
     async def test_default_disabled_with_valid_read_only_client_has_no_side_effects(self):
         f = self.fixture
@@ -61,7 +61,7 @@ class FormFillFeatureGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabling_launch_keeps_task_reads_and_cancellation_available(self):
         f = self.fixture
         task_id = await self.create_enabled()
-        launch = await f.client.get(f"/api/integrations/forms/fill-tasks/{task_id}/embed-url", headers=f.auth())
+        launch = await f.client.post(f"/api/integrations/forms/fill-tasks/{task_id}/launch", headers=f.auth())
         self.assertEqual(launch.status_code, 503)
         self.assertEqual(launch.json()["detail"]["error"], "FORM_FILL_DISABLED")
         self.assertNotIn("embedUrl", launch.json())
@@ -81,10 +81,10 @@ class FormFillFeatureGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
         self.assertEqual(confirmed.json()["status"], "confirmed")
 
-    async def test_explicit_test_opt_in_retains_existing_launch_contract(self):
+    async def test_legacy_embed_url_is_retired_even_with_explicit_opt_in(self):
         f = self.fixture
         task_id = await self.create_enabled()
         with patch.dict(os.environ, {"FORM_PLATFORM_FILL_ENABLED": "true"}):
             response = await f.client.get(f"/api/integrations/forms/fill-tasks/{task_id}/embed-url", headers=f.auth())
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["embedUrl"], f.remote.session_body["embed_url"])
+        self.assertEqual(response.status_code, 410, response.text)
+        self.assertEqual(response.json()["detail"]["error"], "LEGACY_EMBED_URL_RETIRED")
