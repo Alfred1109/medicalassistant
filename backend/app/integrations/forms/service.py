@@ -20,7 +20,8 @@ from bson import ObjectId
 from pymongo.errors import PyMongoError
 
 from app.core.exceptions import AppBaseException
-from app.core.patient_access import PatientAccessError, ensure_patient_access
+from app.core.patient_access import PatientAccessError, assigned_patient_query, ensure_patient_access
+from app.patients.legacy import LegacyPatientRepository
 from . import models
 from .client import (
     AuthorizationRejected,
@@ -574,7 +575,6 @@ def _validated_launch_response(body, task, source_origin):
 async def launch_fill_task(db, client, task_id, operator, *, delegation):
     """Authorize a short-lived source launch without persisting its credentials."""
     from app.db.transactions import run_followup_transaction
-    from app.core.patient_access import assigned_patient_query
     from app.integrations.identity.service import FillDelegation, OidcFailure, OidcUnavailable
 
     require_fill_enabled()
@@ -609,6 +609,9 @@ async def launch_fill_task(db, client, task_id, operator, *, delegation):
             raise FormIntegrationError("登录委托已失效", error_code="SOURCE_IDENTITY_CHANGED", status_code=403) from None
         await require_task_reviewed_context(db, current, session=session)
         patient_id = current.get("patient_id")
+        # 并发栅栏：fill_use_revision 直写在 users 账号文档上（同事务内 $inc 计数），
+        # 第一波段保持不动。待栅栏载体改造（canonical 波段拆分账号/患者对象后）
+        # 再将计数迁移到患者域对象；归属条件已复用 assigned_patient_query 共享范围。
         query = {"_id": ObjectId(patient_id) if ObjectId.is_valid(str(patient_id)) else patient_id, "role": "patient"}
         if operator.role != "admin":
             query.update(assigned_patient_query(str(operator.id), operator.role))
@@ -816,11 +819,11 @@ async def list_fill_tasks(db: AsyncIOMotorDatabase, operator: Any,
         await _verify_patient_assignment(db, patient_id, str(operator.id), operator.role)
         query["patient_id"] = patient_id
     elif operator.role != "admin":
-        actor_ids = [str(operator.id)]
-        if ObjectId.is_valid(str(operator.id)):
-            actor_ids.append(ObjectId(str(operator.id)))
-        cursor = db.users.find({"role": "patient", "practitioners": {"$in": actor_ids}}, {"_id": 1})
-        query["patient_id"] = {"$in": [str(patient["_id"]) async for patient in cursor]}
+        # 患者范围经共享读取适配器解析（角色化归属字段 + ObjectId/string 双字面
+        # 兼容 + 多实体歧义防护），与上方显式 patient_id 分支的 ensure_patient_access
+        # 同源（AUTH01 共享实现），不再直查 users 集合。
+        query["patient_id"] = {"$in": await LegacyPatientRepository(db).assigned_ids(
+            assigned_patient_query(str(operator.id), operator.role))}
 
     total = await db[models.COLLECTION_NAME].count_documents(query)
     cursor = (db[models.COLLECTION_NAME].find(query)

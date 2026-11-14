@@ -15,6 +15,7 @@ from pymongo import ASCENDING
 from pymongo.errors import DuplicateKeyError
 
 from app.db.mongodb import get_database
+from app.patients.legacy import LegacyPatientRepository
 from .client import FormPlatformError
 from .catalog_router import get_catalog_client, require_catalog_admin
 
@@ -94,9 +95,12 @@ async def bind_reviewed_patient(db, client, actor, payload: PatientLinkRequest):
     if not ObjectId.is_valid(payload.local_patient_id):
         raise HTTPException(422, detail={"code": "INVALID_PATIENT_ID"})
     local_patient_id = str(ObjectId(payload.local_patient_id))
-    patient = await db.users.find_one({"_id": ObjectId(local_patient_id),
-                                       "role": "patient", "is_active": True}, {"_id": 1})
-    if not patient:
+    # 患者存在性校验经共享读取适配器（LegacyPatientRepository.get）：ObjectId/string
+    # 双字面兼容 + 多实体歧义防护；患者域仍以 legacy users 承载，local_patient_id
+    # 继续存 legacy users ID（迁移保留原 _id，值不变）。
+    patient = await LegacyPatientRepository(db).get(local_patient_id)
+    # 适配器只判 role=patient；账号活跃性在此显式判定（无效/停用患者一律拒绝建立 link）。
+    if not patient or patient.get("is_active") is not True:
         raise HTTPException(404, detail={"code": "ACTIVE_PATIENT_NOT_FOUND"})
     try:
         remote = await client.get_patient_reference(payload.project_id, payload.center_id, payload.subject_id)

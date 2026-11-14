@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from patient_identity_fake import legacy_domain_state
+
 import httpx
 from bson import ObjectId
 from unittest.mock import patch
@@ -186,8 +188,8 @@ class FakeVisitCollection:
         return SimpleNamespace(modified_count=1, matched_count=1)
 
 
-def make_database(patient_doc):
-    database = MagicMock()
+def make_database(patient_doc, patient_docs=None):
+    database = legacy_domain_state(MagicMock())
     collection = FakeTaskCollection()
     visits = FakeVisitCollection()
     recovery_events = FakeTaskCollection()
@@ -199,8 +201,12 @@ def make_database(patient_doc):
     database.external_form_bindings = bindings
     users = MagicMock()
     users.find_one = AsyncMock(return_value=patient_doc)
+    # 患者文档集合经共享读取适配器访问（LegacyPatientRepository）；列表可变，
+    # 供用例注入额外患者文档（歧义/角色化归属场景）。
+    if patient_docs is None:
+        patient_docs = [patient_doc] if patient_doc else []
     users.find = lambda query, projection=None, **kwargs: FakeCursor(
-        [patient_doc] if patient_doc and _doc_matches(patient_doc, query) else [])
+        [doc for doc in patient_docs if doc and _doc_matches(doc, query)])
     database.users = users
     database.command = AsyncMock(return_value={"setName": "test_rs", "logicalSessionTimeoutMinutes": 30})
 
@@ -297,8 +303,10 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.fixture_patches.enter_context(patch(target, **kwargs))
         self.patient_doc = make_patient_doc()
+        self.patient_docs = [self.patient_doc]
         self.remote = FakeRemote()
-        self.database, self.collection, self.visit_collection = make_database(self.patient_doc)
+        self.database, self.collection, self.visit_collection = make_database(
+            self.patient_doc, self.patient_docs)
 
         async def fake_database():
             yield self.database
@@ -555,6 +563,47 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         admin_view = await self.client.get("/api/integrations/forms/fill-tasks",
                                            headers=self.auth(user=admin))
         self.assertEqual(admin_view.json()["total"], 1)
+
+    async def test_list_patient_scope_follows_role_specific_assignment_field(self):
+        """列表患者范围与显式 patient_id 分支同源：health_manager 走 health_managers 归属。"""
+        def seed_task(patient_id):
+            task_id = ObjectId()
+            now = datetime.utcnow()
+            self.collection.docs[task_id] = {
+                "_id": task_id, "patient_id": patient_id, "status": "session_created",
+                "operator": {"user_id": OPERATOR_ID, "role": "health_manager"},
+                "remote_refs": {}, "session": {}, "fill_sessions": [],
+                "created_at": now, "updated_at": now}
+            return patient_id
+
+        practitioner_patient = str(ObjectId())
+        manager_patient = str(ObjectId())
+        self.patient_docs.append({"_id": ObjectId(practitioner_patient), "role": "patient",
+                                  "name": "仅医生归属患者", "practitioners": [OPERATOR_ID]})
+        self.patient_docs.append({"_id": ObjectId(manager_patient), "role": "patient",
+                                  "name": "健康管理归属患者", "health_managers": [OPERATOR_ID]})
+        seed_task(practitioner_patient)
+        seed_task(manager_patient)
+        manager = make_operator(role="health_manager")
+        response = await self.client.get("/api/integrations/forms/fill-tasks",
+                                         headers=self.auth(user=manager))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual({item["patientId"] for item in response.json()["items"]}, {manager_patient})
+
+        # 显式 patient_id 分支同样按角色化归属字段判定，practitioners 归属对 health_manager 不可见
+        explicit = await self.client.get("/api/integrations/forms/fill-tasks",
+            params={"patient_id": practitioner_patient}, headers=self.auth(user=manager))
+        self.assertEqual(explicit.status_code, 403)
+        self.assertEqual(explicit.json()["detail"]["error"], "PATIENT_NOT_ASSIGNED")
+
+    async def test_list_rejects_ambiguous_patient_identity_without_silent_merge(self):
+        """患者范围解析遇到同标识双字面文档时拒绝合并，不静默选择其一。"""
+        self.patient_docs.append({"_id": PATIENT_ID, "role": "patient",
+                                  "name": "重复患者", "practitioners": [OPERATOR_ID]})
+        response = await self.client.get("/api/integrations/forms/fill-tasks", headers=self.auth())
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"], "PATIENT_IDENTITY_AMBIGUOUS")
 
     async def test_patient_assignment_revocation_blocks_all_task_access_before_remote_calls(self):
         created = await self.client.post("/api/integrations/forms/fill-tasks",
