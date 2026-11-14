@@ -574,3 +574,28 @@ M1中的API05可先通过契约测试客户端验证初始化、并发变更与�
 - 新填报会话不持久化启动凭证或 URL；受控 POST 启动、短期凭证单次消费与原 Cookie 同答卷恢复已在本地接通。源端保存草稿时将真实答卷 ID 与会话同事务绑定，恢复时使用该 ID；旧链接入口关闭。历史数据尚未盘点或脱敏，源端需要演练结构迁移。
 - 隔离双应用真实协议测试覆盖一次消费、实际草稿及内容恢复、无 Cookie 拒绝及康复库无启动凭证；独立 SQLite 并发测试验证双消费和双首次保存各仅一次成功。真实 Chromium 使用实际前端、合成 API 和临时 TLS 验证刷新恢复及失败保留页面，不代表真实问卷后端的浏览器全链路验收。康复后端常规回归 666 passed / 239 skipped；前端 100 passed、构建通过（chunk 警告）。
 - 本节更新前文对新会话凭证和草稿恢复未实现的状态。仍需处理历史 URL 盘点及安全迁移、创建超时幂等对账、跨平台完整授权代际以及正式 HTTPS/浏览器环境验收；在这些条件闭合前填报保持默认关闭。详见 [凭证契约](./embed-credential-contract-gap.md)。
+
+## 15. 患者档案架构批次（2026-11-14 续）
+
+核对基准：本仓库 `86956ab`。上一批遗留的八个主题提交（统一事务边界、患者旧域读取适配器、通信消息幂等、报告版本绑定、填报审核前置、质控共用患者范围、AI 调用线程隔离、业务数据导出标识）已在[架构收敛工作记录](./architecture-convergence.md)「本轮执行与证据」条目记录；本节续记其后的患者档案架构批次。以下均为本地实现与隔离环境验证，不代表生产切换、迁移执行或业务验收。
+
+### 授权内核域分派与第一波段读取收敛
+
+- 授权内核 `backend/app/core/patient_access.py` 的患者加载、对象访问、本人解析与医护范围查询按持久化 `patient_domain_state` 单例（`clinical-patients-v1`）分派 legacy/canonical：无状态文档保持既有 legacy 语义；`mode=canonical` 时患者对象加载走 `ClinicalPatientRepository`，本人解析必须经 verified `patient_account_links`（`repo.resolve_self`），不假设账号 ID 即患者 ID，canonical 范围查询自带 `status=active`；状态文档缺失、迁移中、未知版本或读取失败一律 fail-closed 返回 503（`PATIENT_DOMAIN_STATE_UNAVAILABLE`），不回退 legacy。新增 17 个域分派测试，既有 fake 测试钉定 legacy 域语义。
+- 第一波段把以下读取收敛到共享 legacy 适配器（双字面兼容 + 歧义 fail-closed 防护，响应形状不变并以测试锁定）：医护患者列表与医生统计、质控患者存在性/归属/范围读取、通信通知提醒收件人解析（会话成员与审计操作人保持账号身份）、表单集成外部患者链接校验与任务范围、临床工作台本人解析与健康管理师/患者路由（标识歧义 503 不再降级 500）、康复发布授权患者校验、管理端患者列表。
+- 随访、设备、质控与康复列表的医护范围查询接入域感知 `assigned_scope_query`；legacy 下返回形状与原路径等价断言锁定，栅栏写与 503 门闩保持不动。
+- 保留待第二波段收敛：账号层读取与账号/患者同文档身份假设 33 处（已盘点标注）、各域并发栅栏写、统计/报告/过程质控的患者集合聚合常量（已集中为模块常量，切换时各改一处）、`people_import` 写 `users` 与 `data_export`。
+
+### 历史数据盘点与迁移演练（工具与方案）
+
+- 只读盘点工具 `backend/scripts/patient_reference_audit.py`：按集合统计患者引用缺失/双形态/悬空/歧义，判定口径与运行时适配器 identity_key 同构；只读不写（写调用即失败断言）、缺省仅允许 localhost、分批游标处理大集合。两次扩展：第一代 `follow_ups` 缺 `patient_id` 记 `legacy_missing` 豁免口径并与 `followup_records` 两代并列对照；`patientmanager.daily_records`（点号集合名）的 `user_id` 口径与 string `_id` 历史文档计数。详见[盘点工具说明](./patient-reference-audit.md)。
+- 隔离真实副本集迁移演练 12+2 场景：正常迁移保留原 `_id` 并逐账号写 `legacy_same_document` 链接、同 key 歧义 fail-closed、幂等 noop、注入失败整体回滚、缺失字段显式缺省、standalone 拒绝；数据质量硬闸 4 类（`is_active` null、字符串时间、null 关系数组、非字符串 name）拦截坏数据；noop 重跑重算 legacy 基线指纹、漂移 fail-closed 报 `LEGACY_BASELINE_DRIFTED`，晚到患者上报 `latecomer_ids` 不自动补迁。演练仅在隔离库进行，迁移未在真实库执行。
+- 新增账号/患者双载体并发栅栏基础模块（`account_fences` 独立集合 + `clinical_patients` 栅栏字段，同一事务内双载体复核）：纯新增未接线，现有 `users` 文档上的五类栅栏保持不动。
+- 新增两份方案草案：[患者域第二波段切换方案](./patient-domain-cutover-plan.md)（前置门槛 G1—G5、波次 0—6、栅栏载体拆分、`people_import` 7 项决策点、风险清单）与[历史患者数据迁移与核实方案](./patient-data-remediation-plan.md)（盘点/核实/归一/缺失处置/执行手册，12 项业务决策清单）。均未经真实库验证。
+
+### 测试基线与边界
+
+- 本轮复跑基线：后端全量回归 `DEBUG=false` **767 passed / 277 skipped**（跳过含副本集门控条件用例）；前端 Node 测试 **102 passed**、严格构建通过（仍有 chunk 体积警告），与上一批持平。
+- 边界：canonical 域仍未启用（无生产切换，迁移 CLI cutover 保持禁用）；legacy 503 歧义门闩仍在；迁移语义下 `users` 只读，新增模块未改变现有业务路径。
+- 开放决策（均须业务确认后推进）：历史数据核实与处置 12 项（[迁移与核实方案](./patient-data-remediation-plan.md) §7，含歧义组裁定、悬空引用处置、双形态归一、归属漏配修复方式）；第二波段 `people_import` → `create_from_source` 7 项（[切换方案](./patient-domain-cutover-plan.md) §4，含 `external_patient_links` 命名空间混指）；晚到患者的具体处置流程未实现。
+- 计划按任务与证据更新，不使用完成百分比。患者档案切换本身由第二波段方案管辖，本批次完成不构成迁移、切换或业务验收完成的宣称。
