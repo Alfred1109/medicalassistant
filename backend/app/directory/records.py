@@ -3,8 +3,16 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from fastapi import HTTPException
+from pymongo.errors import DuplicateKeyError
 
 from app.core.patient_access import ensure_patient_access, load_patient_doc
+
+# 标签业务唯一键 (name, category) 的唯一索引名。索引不进应用启动路径
+# （app/db/indexes.py 不登记）：须先经 scripts/label_uniqueness_audit.py
+# 盘点清零历史重复，再在维护窗口手工建索引，实施顺序见
+# docs/tag-uniqueness-plan.md。索引缺位时本模块行为与历史一致
+# （先查重友好拒绝），建索引后由 11000 兜底查重-插入竞态。
+TAG_UNIQUE_INDEX_NAME = "uniq_tag_name_category"
 
 
 def _now():
@@ -33,7 +41,12 @@ async def create_tag(db, name, category, color):
     if await db.tags.find_one({"name": name, "category": category}):
         raise HTTPException(409, detail={"code": "TAG_EXISTS"})
     document = {"_id": ObjectId(), "name": name, "category": category, "color": (color or "")[:20], "created_at": _now()}
-    await db.tags.insert_one(document)
+    try:
+        await db.tags.insert_one(document)
+    except DuplicateKeyError:
+        # 唯一索引（TAG_UNIQUE_INDEX_NAME）兜底查重-插入竞态：并发重复
+        # 一律转换为既有 TAG_EXISTS 语义（409），错误码与响应不变。
+        raise HTTPException(409, detail={"code": "TAG_EXISTS"}) from None
     return _tag(document)
 
 
