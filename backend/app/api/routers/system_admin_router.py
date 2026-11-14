@@ -5,6 +5,9 @@ from app.schemas.user import (
     UserResponse, DoctorCreate, PatientCreate, HealthManagerCreate,
 )
 from app.core.auth import get_current_user
+from app.core.exceptions import AppBaseException
+from app.core.patient_identity import load_identity_groups
+from app.patients.legacy import LegacyPatientIdentityError
 from app.services.user_service import UserService
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import get_database
@@ -55,6 +58,9 @@ async def get_doctors(
         )
     except HTTPException:
         raise
+    except AppBaseException:
+        # 业务异常（含适配器 503）保留全局处理器语义，不降级为 500
+        raise
     except Exception as e:
         logger.error(f"获取医生列表失败: {e}", exc_info=True)
         raise HTTPException(
@@ -80,12 +86,29 @@ async def create_doctor(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except HTTPException:
         raise
+    except AppBaseException:
+        raise
     except Exception as e:
         logger.error(f"创建医生账号失败: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"创建医生账号失败: {e}"
         )
+
+
+async def _list_patients_page_unambiguous(db: AsyncIOMotorDatabase, skip: int, limit: int) -> list:
+    """管理端患者列表页读取：按页取 role=patient 文档后做标识歧义防护。
+
+    管理端列表为全量患者（非归属范围），LegacyPatientRepository 无对应
+    方法；此处用适配器同源的 load_identity_groups 口径对页内患者做
+    同 identity key 多文档分组，歧义时上抛 LegacyPatientIdentityError
+    （PATIENT_IDENTITY_AMBIGUOUS/503），不静默择一。
+    """
+    docs = await db.users.find({"role": "patient"}).skip(skip).limit(limit).to_list(length=limit)
+    groups = await load_identity_groups(db, [doc["_id"] for doc in docs])
+    if any(len(entries) > 1 for entries in groups.values()):
+        raise LegacyPatientIdentityError()
+    return docs
 
 
 # 患者管理
@@ -100,7 +123,10 @@ async def get_patients(
     await _require_admin(current_user)
 
     try:
-        docs = await db.users.find({"role": "patient"}).skip(skip).limit(limit).to_list(length=limit)
+        docs = await _list_patients_page_unambiguous(db, skip, limit)
+    except AppBaseException:
+        # 患者标识歧义（LegacyPatientIdentityError/503）保留全局处理器语义，不降级为 500
+        raise
     except Exception as e:
         logger.error(f"查询患者列表失败: {e}", exc_info=True)
         raise HTTPException(
@@ -140,7 +166,12 @@ async def get_patients(
 
 
 async def _resolve_user_names(db: AsyncIOMotorDatabase, user_ids: List[str]) -> dict:
-    """按 ID 批量解析用户姓名，非法/不存在 ID 静默跳过（不阻断列表返回）"""
+    """按 ID 批量解析用户姓名，非法/不存在 ID 静默跳过（不阻断列表返回）。
+
+    账号层展示辅助：输入是患者文档 practitioners 里的主治医生账号 ID
+    （ ObjectId 字面），不是患者标识，无需适配器双字面兼容；
+    查询失败降级为姓名留空（页面展示列），不做 503/500 中断。
+    """
     valid_ids = [ObjectId(uid) for uid in user_ids if ObjectId.is_valid(uid)]
     if not valid_ids:
         return {}
@@ -168,6 +199,8 @@ async def create_patient(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except HTTPException:
         raise
+    except AppBaseException:
+        raise
     except Exception as e:
         logger.error(f"创建患者账号失败: {e}", exc_info=True)
         raise HTTPException(
@@ -189,6 +222,8 @@ async def get_health_managers(
 
     try:
         docs = await db.users.find({"role": "health_manager"}).skip(skip).limit(limit).to_list(length=limit)
+    except AppBaseException:
+        raise
     except Exception as e:
         logger.error(f"查询健康管理师列表失败: {e}", exc_info=True)
         raise HTTPException(
@@ -230,6 +265,8 @@ async def create_health_manager(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except HTTPException:
+        raise
+    except AppBaseException:
         raise
     except Exception as e:
         logger.error(f"创建健康管理师账号失败: {e}", exc_info=True)
@@ -276,6 +313,8 @@ async def get_organizations(
 
     try:
         docs = await db.organizations.find({}).to_list(length=1000)
+    except AppBaseException:
+        raise
     except Exception as e:
         logger.error(f"查询组织机构列表失败: {e}", exc_info=True)
         raise HTTPException(
@@ -318,6 +357,8 @@ async def create_organization(
     }
     try:
         result = await db.organizations.insert_one(doc)
+    except AppBaseException:
+        raise
     except Exception as e:
         logger.error(f"创建组织机构失败: {e}", exc_info=True)
         raise HTTPException(

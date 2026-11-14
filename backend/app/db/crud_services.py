@@ -93,15 +93,12 @@ class DoctorCRUD(PractitionerCRUD):
 
 class PatientCRUD(CRUDBase[Patient]):
     """患者CRUD服务"""
-    
-    async def find_by_doctors(self, doctor_id: str, skip: int = 0, limit: int = 100) -> List[Patient]:
-        """查找某医生的患者"""
-        return await self.find({"practitioners": doctor_id, "role": "patient"}, skip, limit)
-    
-    async def find_by_health_manager(self, health_manager_id: str, skip: int = 0, limit: int = 100) -> List[Patient]:
-        """查找某健康管理师的患者"""
-        return await self.find({"health_managers": health_manager_id, "role": "patient"}, skip, limit)
-    
+
+    # 归属患者查询统一走 find_assigned_patients（与对象授权同源，
+    # 经 LegacyPatientRepository 获得标识歧义防护）；早先绕过授权
+    # 口径的 find_by_doctors/find_by_health_manager 已确认零调用方，
+    # 随患者读取收敛一并删除（T18）。
+
     async def _get_patient_data(self, patient_doc: dict) -> dict:
         """从患者文档提取前端需要的数据"""
         if not patient_doc:

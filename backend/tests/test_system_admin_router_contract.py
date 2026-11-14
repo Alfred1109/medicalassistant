@@ -96,7 +96,8 @@ class FakeCollection:
     def __init__(self):
         self.docs = {}
 
-    def find(self, filter_=None):
+    def find(self, filter_=None, projection=None, **kwargs):
+        # 兼容 patient_identity.load_identity_groups 的 find(filter, projection, session=...) 调用
         return FakeCursor(list(self.docs.values()), filter_ or {})
 
     async def find_one(self, filter_):
@@ -221,6 +222,52 @@ class SystemAdminRouterContractTests(unittest.IsolatedAsyncioTestCase):
         inactive = next(r for r in rows if r["name"] == "患者丁")
         self.assertEqual(inactive["status"], "停用")
         self.assertEqual(inactive["doctor_assigned"], "")
+
+    async def test_patients_response_shape_locked(self):
+        """响应字段集合锁死：前端 PatientManagement 消费结构不变（T18 收敛后仍保持）。"""
+        db = FakeDatabase()
+        db.users.insert({
+            "_id": ObjectId("651000000000000000000004"),
+            "name": "患者戊", "email": "p3@example.com", "role": "patient",
+        })
+        self._setup(db)
+        response = await self._client.get("/api/admin/patients")
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = response.json()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(set(rows[0].keys()), {
+            "id", "name", "age", "gender", "contact_number", "email",
+            "address", "diagnosis", "doctor_assigned",
+            "treatment_plan", "admission_date", "status",
+        })
+
+    async def test_patients_pagination_skip_limit(self):
+        """分页语义保持不变：skip 跳过、limit 截断页内文档。"""
+        db = FakeDatabase()
+        for i in range(3):
+            db.users.insert({
+                "_id": ObjectId(f"65100000000000000000001{i}"),
+                "name": f"患者{i}", "role": "patient",
+            })
+        self._setup(db)
+        response = await self._client.get("/api/admin/patients", params={"skip": 1, "limit": 1})
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = response.json()
+        self.assertEqual([r["name"] for r in rows], ["患者1"])
+
+    async def test_patients_ambiguous_identity_returns_503(self):
+        """同一患者标识 ObjectId/字符串双文档：load_identity_groups 口径
+        上抛 LegacyPatientIdentityError（PATIENT_IDENTITY_AMBIGUOUS/503），
+        不得被 except Exception 降级为 500。"""
+        db = FakeDatabase()
+        db.users.insert({"_id": ObjectId("651000000000000000000005"), "role": "patient",
+                         "name": "患者A"})
+        db.users.insert({"_id": "651000000000000000000005", "role": "patient",
+                         "name": "患者B"})
+        self._setup(db)
+        response = await self._client.get("/api/admin/patients")
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"], "PATIENT_IDENTITY_AMBIGUOUS")
 
     async def test_patients_non_admin_forbidden(self):
         self._setup(FakeDatabase(), _make_user("doctor", "doc@example.com"))
