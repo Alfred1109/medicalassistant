@@ -1,3 +1,4 @@
+from patient_identity_fake import identity_find_from_lookup
 """Missing provider credentials must not become clinical or streaming success."""
 import unittest
 from datetime import datetime, timedelta
@@ -120,6 +121,8 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
         patient_db = MagicMock()
         patient_db.users.find_one = AsyncMock(return_value={
             "_id": "synthetic", "role": "patient", "practitioners": [SYNTHETIC_OPERATOR_ID]})
+
+        identity_find_from_lookup(patient_db.users)
 
         async def fake_database():
             yield patient_db

@@ -10,6 +10,7 @@ import requests
 from app.core.config import settings
 from app.core.exceptions import ExternalServiceException
 from app.core.llm import LLMConfigurationError, require_llm_api_key
+from app.core.llm_transport import complete_text
 from app.schemas.agent import AgentCreate, AgentUpdate, AgentQuery
 
 class AgentService:
@@ -105,19 +106,12 @@ class AgentService:
             return None
         
         try:
-            from openai import OpenAI
             
             # 获取用户查询文本
             user_query = query_data.get("query", "")
             
             # 从代理配置获取系统提示词
             system_prompt = agent.get("system_prompt", "你是一个医疗康复助手，可以帮助患者回答康复相关的问题。")
-            
-            # 初始化OpenAI客户端
-            client = OpenAI(
-                base_url=settings.LLM_API_BASE_URL,
-                api_key=require_llm_api_key(),
-            )
             
             # 准备消息
             messages = [
@@ -126,7 +120,7 @@ class AgentService:
             ]
             
             # 调用API
-            completion = client.chat.completions.create(
+            completion = await complete_text(
                 model=settings.LLM_API_MODEL,
                 messages=messages,
                 temperature=0.7,
@@ -434,15 +428,6 @@ class AgentService:
         require_llm_api_key()
         # 使用华为云方舟平台API
         try:
-            from openai import OpenAI
-            
-            # 初始化OpenAI客户端
-            client = OpenAI(
-                # 华为云方舟平台API地址
-                base_url=settings.LLM_API_BASE_URL,
-                # 使用API密钥
-                api_key=require_llm_api_key(),
-            )
             
             # 准备系统提示和用户提示
             messages = [
@@ -451,7 +436,7 @@ class AgentService:
             ]
             
             # 调用API
-            completion = client.chat.completions.create(
+            completion = await complete_text(
                 model=settings.LLM_API_MODEL,  # 使用配置的模型
                 messages=messages,
                 temperature=0.7,  # 控制创造性与精确性的平衡
