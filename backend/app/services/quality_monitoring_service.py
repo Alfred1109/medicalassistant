@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from app.core.exceptions import AppBaseException
 from app.core.followup_access import followup_patient_scope
-from app.core.patient_access import ensure_patient_access
+from app.core.patient_access import ensure_patient_access, patient_domain_mode
 from app.core.patient_identity import identity_key, load_identity_groups
 from app.patients.legacy import LegacyPatientIdentityError
 from app.schemas.quality_monitoring import (
@@ -82,7 +82,11 @@ class QualityMonitoringService:
         if (len(matches) != 1 or matches[0].get("role") != actor.role
                 or matches[0].get("is_active") is not True):
             raise _error("QUALITY_ACCOUNT_UNAVAILABLE", "当前账号身份不可唯一核实或已停用", 403)
-        if await self.db.patient_domain_state.find_one({"_id": "clinical-patients-v1"}):
+        # 域门闩按显式开关判定（canonical 才拒绝）：显式 legacy 状态文档
+        # {mode:"legacy"} 是回拨 SOP 载体，行为必须与无文档 legacy 完全一致，
+        # 不得误伤 503。canonical 模式下本域尚未迁移，仍 fail-closed；
+        # 状态读取失败/未知状态时 patient_domain_mode 自然传播 503。
+        if await patient_domain_mode(self.db) == "canonical":
             raise _error("QUALITY_PATIENT_DOMAIN_UNSUPPORTED", "当前患者域尚未接入质控患者范围", 503)
         # The shared scope helper reads through the legacy patient adapter; its
         # ambiguity failure is restated here so this domain keeps one contract

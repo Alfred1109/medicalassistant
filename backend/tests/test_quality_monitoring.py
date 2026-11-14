@@ -336,7 +336,8 @@ class QualityMongoTests(unittest.IsolatedAsyncioTestCase):
             self.actor.role = role
             self.assertEqual((await self.get()).status_code, 403)
         self.actor.role = "doctor"
-        await self.db.patient_domain_state.insert_one({"_id": "clinical-patients-v1", "mode": "canonical"})
+        await self.db.patient_domain_state.insert_one(
+            {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         response = await self.get()
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["code"], "QUALITY_PATIENT_DOMAIN_UNSUPPORTED")

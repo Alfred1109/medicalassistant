@@ -143,7 +143,8 @@ class ReminderReplicaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.service.dispatch_one(str(self.followup)))["generated"], 1)
 
     async def test_canonical_domain_stops_dispatch_without_users_fallback(self):
-        await self.db.patient_domain_state.insert_one({"_id": "clinical-patients-v1", "mode": "canonical"})
+        await self.db.patient_domain_state.insert_one(
+            {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         with self.assertRaises(AppBaseException) as caught:
             await self.service.scan()
         self.assertEqual(caught.exception.error_code, "REMINDER_PATIENT_DOMAIN_UNSUPPORTED")

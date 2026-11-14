@@ -366,7 +366,8 @@ class PublicationMongoTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AppBaseException) as caught:
             await self.svc.publish(self.plan, self.doctor, self.publish_request(draft))
         self.assertEqual(caught.exception.error_code, "REHAB_ITEMS_REQUIRED")
-        await self.db.patient_domain_state.insert_one({"_id": "clinical-patients-v1", "mode": "canonical"})
+        await self.db.patient_domain_state.insert_one(
+            {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         with self.assertRaises(AppBaseException) as caught:
             await self.svc.patient_list(self.patient)
         self.assertEqual(caught.exception.error_code, "REHAB_PATIENT_DOMAIN_UNSUPPORTED")

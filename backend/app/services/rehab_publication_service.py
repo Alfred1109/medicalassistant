@@ -12,7 +12,7 @@ from pymongo.errors import DuplicateKeyError
 from pydantic import ValidationError
 
 from app.core.exceptions import AppBaseException
-from app.core.patient_access import patient_assignment_field
+from app.core.patient_access import patient_assignment_field, patient_domain_mode
 from app.db.transactions import run_transaction
 from app.patients.legacy import LegacyPatientRepository
 from app.schemas.rehab_publication import PublicationContent, PublicationItem
@@ -98,7 +98,11 @@ class RehabPublicationService:
                                      name="rehab_version_item_unique")
 
     async def _legacy(self, session):
-        if await self.db.patient_domain_state.find_one({"_id": "clinical-patients-v1"}, session=session):
+        # 域门闩按显式开关判定（canonical 才拒绝）：显式 legacy 状态文档
+        # {mode:"legacy"} 是回拨 SOP 载体，行为必须与无文档 legacy 完全一致，
+        # 不得误伤 503。canonical 模式下本域尚未迁移，仍 fail-closed；
+        # 状态读取失败/未知状态时 patient_domain_mode 自然传播 503。
+        if await patient_domain_mode(self.db, session=session) == "canonical":
             raise error("REHAB_PATIENT_DOMAIN_UNSUPPORTED", "当前患者档案尚未接入康复账号解析", 503)
 
     async def _account(self, identifier, session):

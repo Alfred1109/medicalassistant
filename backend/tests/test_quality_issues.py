@@ -254,7 +254,8 @@ class QualityIssueMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.svc.list(self.actor, status="closed"))["total"], 0)
 
     async def test_canonical_domain_and_inactive_account_do_not_fall_back(self):
-        await self.db.patient_domain_state.insert_one({"_id": "clinical-patients-v1", "mode": "canonical"})
+        await self.db.patient_domain_state.insert_one(
+            {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         with self.assertRaises(AppBaseException) as caught:
             await self.issue()
         self.assertEqual(caught.exception.error_code, "QUALITY_PATIENT_DOMAIN_UNSUPPORTED")

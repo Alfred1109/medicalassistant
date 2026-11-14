@@ -11,7 +11,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.core.exceptions import AppBaseException
 from app.db.transactions import run_transaction
-from app.core.patient_access import assigned_scope_query, patient_assignment_field
+from app.core.patient_access import assigned_scope_query, patient_assignment_field, patient_domain_mode
 from app.core.patient_identity import identity_key, load_identity_groups
 from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
 from app.services.followup_service import FollowupService
@@ -89,7 +89,11 @@ class QualityIssueService:
         account = await self._account(actor.id, session)
         if not account or account.get("role") != actor.role or account.get("is_active") is not True:
             raise fail("QUALITY_ACCOUNT_UNAVAILABLE", "当前账号不可用", 403)
-        if await self.db.patient_domain_state.find_one({"_id": "clinical-patients-v1"}, session=session):
+        # 域门闩按显式开关判定（canonical 才拒绝）：显式 legacy 状态文档
+        # {mode:"legacy"} 是回拨 SOP 载体，行为必须与无文档 legacy 完全一致，
+        # 不得误伤 503。canonical 模式下本域尚未迁移，仍 fail-closed；
+        # 状态读取失败/未知状态时 patient_domain_mode 自然传播 503。
+        if await patient_domain_mode(self.db, session=session) == "canonical":
             raise fail("QUALITY_PATIENT_DOMAIN_UNSUPPORTED", "当前患者档案尚未接入质控授权", 503)
         return account
 

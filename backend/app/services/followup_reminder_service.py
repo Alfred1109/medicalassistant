@@ -12,6 +12,7 @@ from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import AppBaseException
+from app.core.patient_access import patient_domain_mode
 from app.db.transactions import run_followup_transaction
 from app.patients.legacy import LegacyPatientRepository
 from app.services.followup_service import FollowupService
@@ -113,9 +114,11 @@ class FollowupReminderService:
             planned = as_utc(record.get("scheduled_date"))
             if not planned or planned > now + timedelta(hours=24):
                 return {"outcome": "not_due", "notifications": []}
-            # Canonical patients cannot be mapped back to accounts by ID.
-            mode = await self.db.patient_domain_state.find_one({"_id": "clinical-patients-v1"}, session=session)
-            if mode is not None:
+            # 域门闩按显式开关判定（canonical 才拒绝）：显式 legacy 状态文档
+            # {mode:"legacy"} 是回拨 SOP 载体，行为必须与无文档 legacy 完全一致，
+            # 不得误伤 503。canonical 患者无法按 ID 映射回账号，仍 fail-closed；
+            # 状态读取失败/未知状态时 patient_domain_mode 自然传播 503。
+            if await patient_domain_mode(self.db, session=session) == "canonical":
                 raise AppBaseException("当前患者域尚未接入提醒账号解析", status_code=503,
                                        error_code="REMINDER_PATIENT_DOMAIN_UNSUPPORTED")
             slots, accounts = await self._recipients(record, session)
@@ -176,7 +179,8 @@ class FollowupReminderService:
 
     async def scan(self):
         now = as_utc(self.clock())
-        if await self.db.patient_domain_state.find_one({"_id": "clinical-patients-v1"}):
+        # 同 dispatch_one：显式 legacy 与无文档 legacy 行为一致，不得误伤。
+        if await patient_domain_mode(self.db) == "canonical":
             raise AppBaseException("当前患者域尚未接入提醒账号解析", status_code=503,
                                    error_code="REMINDER_PATIENT_DOMAIN_UNSUPPORTED")
         count = 0
