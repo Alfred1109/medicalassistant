@@ -10,9 +10,10 @@
   领取修复后应恰好一次），以及领取后崩溃的"跳过一次"语义。
 - 报告调度 report_scheduler_service：只写结论不写用例——
   ReportSchedulerService.start() 全仓库无任何调用方（routers 仅按请求实例化
-  做 CRUD），_scheduler_loop 为死代码，当前不存在后台报告调度循环。
-  （T37 建议：该死代码若未来启用，必须先加与备份调度同款的原子领取，
-  否则会原样复刻 D1 缺陷。）
+  做 CRUD），_scheduler_loop 为死代码（T53 兼容分析后已删除该调度路径，
+  见 docs/t53-dead-code-disposal-report-scheduler.md），当前不存在后台报告
+  调度循环。（T37 建议：若未来恢复调度，必须先加与备份调度同款的原子领取，
+  否则会原样复刻 D1 缺陷——该要求已作为警示注释固化在服务模块头。）
 
 门控：REHAB_TEST_SCHEDULER_URI（mongodb://127.0.0.1:<port>/...?replicaSet=<name>），
 未显式提供时回退沿用 REHAB_TEST_PATIENT_MIGRATION_URI（同一本机副本集惯例），

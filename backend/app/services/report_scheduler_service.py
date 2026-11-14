@@ -1,10 +1,27 @@
 """
 报表调度服务
 处理报表的自动生成和分发
+
+T53 死代码处置（兼容分析结论，详见 docs/t53-dead-code-disposal-report-scheduler.md）：
+自仓库引入（dac0330，2025-05-10）起 start()/_scheduler_loop()/stop() 就没有任何
+调用方——main.py 不启动它，路由只按请求实例化 ReportSchedulerService 做 CRUD
+（report_scheduler_router.get_report_scheduler_service），部署脚本/文档也无引用，
+属引入即死的调度路径。且 _scheduler_loop 是 fire-then-update：create_task 后立即
+_update_next_run_time，无原子领取，启用即复刻 T34 发现的 D1 缺陷（多进程重复
+执行）。据此删除 start()/stop()/_scheduler_loop() 三件套及其派生状态
+（is_running/_scheduler_task）。
+
+报表生成与发送的执行链（_process_schedule → _generate_report → _export_report /
+_send_report_email）与 nextRunTime 计算保留：它们被领域收敛文档引用
+（orphan-read TODO 登记于 _get_rehabilitation_stats，患者集合名登记于
+PATIENTS_COLLECTION_NAME，见 docs/patient-domain-cutover-plan.md），且属待业务
+决策的潜在复用件。但它们当前没有任何调度入口（死代码）——未来若要恢复后台
+报表调度，必须先参照 T37 备份调度的 find_one_and_update 原子领取重写扫描领取
+逻辑（filter 含到点条件、领取成功者才执行），再接入应用启动，否则会原样复刻
+D1 重复执行缺陷。禁止单独恢复 _scheduler_loop。
 """
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
-import asyncio
 import logging
 from bson import ObjectId
 import smtplib
@@ -15,7 +32,6 @@ import tempfile
 import os
 
 from ..db.mongodb import get_db
-from ..services.device_analysis_service import device_analysis_service
 from ..core.config import settings
 
 # 患者域唯一集合名（legacy 模式：患者统一存于 users 集合，按 role 区分）。
@@ -27,71 +43,24 @@ PATIENTS_COLLECTION_NAME = "users"
 logger = logging.getLogger(__name__)
 
 class ReportSchedulerService:
-    """报表调度服务，负责管理报表的自动生成和分发"""
-    
+    """报表调度服务：按请求实例化承载报表调度计划的 CRUD。
+
+    当前不存在后台调度循环（T53 已删除引入即死的 start/_scheduler_loop/stop，
+    见模块头注释）；本类实例只服务路由层的 CRUD 请求。
+    """
+
     def __init__(self, db=None):
         """初始化报表调度服务"""
         self.db = db
-        self.is_running = False
-        self._scheduler_task = None
 
     async def _database(self):
         """Use the request database when injected; retain standalone lifecycle support."""
         if self.db is None:
             self.db = await get_db()
         return self.db
-    
-    async def start(self):
-        """启动调度服务"""
-        if self.is_running:
-            return
-        
-        await self._database()
-        self.is_running = True
-        self._scheduler_task = asyncio.create_task(self._scheduler_loop())
-        logger.info("报表调度服务已启动")
-    
-    async def stop(self):
-        """停止调度服务"""
-        if not self.is_running:
-            return
-        
-        self.is_running = False
-        if self._scheduler_task:
-            self._scheduler_task.cancel()
-            try:
-                await self._scheduler_task
-            except asyncio.CancelledError:
-                pass
-            self._scheduler_task = None
-        
-        logger.info("报表调度服务已停止")
-    
-    async def _scheduler_loop(self):
-        """调度循环，检查并执行到期的报表任务"""
-        while self.is_running:
-            try:
-                now = datetime.utcnow()
-                
-                # 查找需要执行的任务
-                query = {
-                    "enabled": True,
-                    "nextRunTime": {"$lte": now}
-                }
-                
-                async for schedule in self.db.report_schedules.find(query):
-                    # 创建单独的任务执行报表生成和发送
-                    asyncio.create_task(self._process_schedule(schedule))
-                    
-                    # 更新下次执行时间
-                    await self._update_next_run_time(schedule)
-                
-                # 每分钟检查一次
-                await asyncio.sleep(60)
-            except Exception as e:
-                logger.error(f"调度循环发生错误: {str(e)}")
-                await asyncio.sleep(60)  # 发生错误时也等待一分钟后继续
-    
+
+    # 当前无调度入口（T53 死代码处置，见模块头注释）：以下执行链仅在「先按
+    # T37 同款原子领取重写扫描逻辑」之后才允许被调度路径调用。
     async def _process_schedule(self, schedule: Dict[str, Any]):
         """处理单个调度任务"""
         schedule_id = str(schedule["_id"])

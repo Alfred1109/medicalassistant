@@ -60,7 +60,9 @@ class ReportSchedulerDependencyTests(unittest.IsolatedAsyncioTestCase):
         return result.json()["id"]
 
     async def test_request_database_supports_crud_without_global_scheduler(self):
-        before = (report_scheduler_service.db, report_scheduler_service.is_running, report_scheduler_service._scheduler_task)
+        # T53 后无 start/is_running/_scheduler_task：断言单例从未被 CRUD 触碰
+        # （全局 get_db 打桩在 asyncSetUp，一旦被调用立即 AssertionError）
+        self.assertIsNone(report_scheduler_service.db)
         key = await self.create()
         read = await self.http.get("/report-schedules/" + key)
         self.assertEqual(read.status_code, 200, read.text)
@@ -70,8 +72,7 @@ class ReportSchedulerDependencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.http.get("/report-schedules/" + key)).json()["name"], "changed")
         self.assertEqual((await self.http.delete("/report-schedules/" + key)).status_code, 200)
         self.assertEqual((await self.http.get("/report-schedules/" + key)).status_code, 404)
-        self.assertEqual((report_scheduler_service.db, report_scheduler_service.is_running,
-                          report_scheduler_service._scheduler_task), before)
+        self.assertIsNone(report_scheduler_service.db)
 
     async def test_another_request_database_and_actor_do_not_inherit_state(self):
         key = await self.create()

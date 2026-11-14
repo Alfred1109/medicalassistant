@@ -13,6 +13,8 @@ from app.operations.data_export import EXPORT_COLLECTIONS, data_export_bytes
 from app.operations.runtime import BackupSchedule, build_backup, public_settings
 
 from bson import ObjectId
+from pymongo.errors import PyMongoError
+from app.patients.repository import SCHEMA_VERSION, STATE as DOMAIN_STATE, STATE_ID, PatientDomainError
 from app.operations.data_export import EXPORT_COLLECTIONS, data_export_bytes
 from app.operations.runtime import BackupSchedule, build_backup, public_settings
 
@@ -44,6 +46,60 @@ class Database:
 
     def __getitem__(self, name):
         return Collection(self.rows.get(name, []))
+
+
+class DomainStateCollection:
+    """patient_domain_state 集合的最小假件（T53 域感知 manifest 断言用）。"""
+
+    def __init__(self, doc=None, error=None):
+        self.doc = doc
+        self.error = error
+
+    async def find_one(self, query):
+        if self.error is not None:
+            raise self.error
+        return deepcopy(self.doc)
+
+
+class DomainDatabase(Database):
+    def __init__(self, rows=None, settings=None, state_doc=None, state_error=None):
+        super().__init__(rows, settings)
+        self.patient_domain_state = DomainStateCollection(state_doc, state_error)
+
+
+class PatientDomainModeManifestTests(unittest.IsolatedAsyncioTestCase):
+    """T53（B4）：导出 manifest 记录患者域模式（legacy / canonical / unknown）。
+
+    域状态读取失败必须 fail-safe 标注 unknown，绝不阻断导出本体。
+    """
+
+    async def manifest(self, db):
+        return json.loads(await data_export_bytes(db))["manifest"]
+
+    async def test_database_without_state_document_reports_legacy(self):
+        manifest = await self.manifest(Database({"users": [{"role": "patient"}]}))
+        self.assertEqual(manifest["patient_domain_mode"], "legacy")
+
+    async def test_canonical_state_is_recorded_without_changing_scope(self):
+        db = DomainDatabase(state_doc={"_id": STATE_ID, "mode": "canonical",
+                                       "schema_version": SCHEMA_VERSION})
+        manifest = await self.manifest(db)
+        self.assertEqual(manifest["patient_domain_mode"], "canonical")
+        # 感知不改清单：canonical 的集合波次调整属患者域后续工作，scope 保持
+        # legacy 全量形态（以 manifest 的 limitations 说明为准解读）
+        self.assertEqual(manifest["collection_scope"], list(EXPORT_COLLECTIONS))
+
+    async def test_broken_domain_state_reports_unknown_without_blocking_export(self):
+        db = DomainDatabase(rows={"users": [{"role": "patient"}]},
+                            state_error=PatientDomainError("PATIENT_DOMAIN_STATE_UNAVAILABLE"))
+        value = json.loads(await data_export_bytes(db))
+        self.assertEqual(value["manifest"]["patient_domain_mode"], "unknown")
+        self.assertEqual(value["collections"]["users"]["count"], 1)
+
+    async def test_transport_failure_reports_unknown(self):
+        db = DomainDatabase(state_error=PyMongoError("connection reset"))
+        manifest = await self.manifest(db)
+        self.assertEqual(manifest["patient_domain_mode"], "unknown")
 
 
 class BusinessExportTests(unittest.IsolatedAsyncioTestCase):

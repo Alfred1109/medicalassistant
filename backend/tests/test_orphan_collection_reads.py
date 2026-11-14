@@ -220,7 +220,7 @@ class ReportSchedulerOrphanReadTests(unittest.IsolatedAsyncioTestCase):
 
     def _service(self, db):
         service = ReportSchedulerService()
-        service.db = db  # 绕过 start()，直接注入打桩库
+        service.db = db  # 直接注入打桩库（T53 后已无 start() 生命周期）
         return service
 
     async def test_empty_sessions_return_empty_list(self):
