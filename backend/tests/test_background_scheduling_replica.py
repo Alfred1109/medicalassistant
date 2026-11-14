@@ -6,18 +6,20 @@
   两个进程（两条独立 Mongo 连接）同时扫描同一到期窗口时投递是否重复、
   扫描中断后的续扫位置、同一 due 窗口重复扫描（含时钟回拨）的幂等性。
 - 备份调度 backup_schedule（app/operations/runtime.py BackupSchedule.run_if_due）：
-  main.py 启动的应用内循环。验证两个进程同时到点时的导出执行次数，
-  按现实现如实断言（发现记录见下）。
+  main.py 启动的应用内循环。验证两个进程同时到点时的导出执行次数（T37 原子
+  领取修复后应恰好一次），以及领取后崩溃的"跳过一次"语义。
 - 报告调度 report_scheduler_service：只写结论不写用例——
   ReportSchedulerService.start() 全仓库无任何调用方（routers 仅按请求实例化
   做 CRUD），_scheduler_loop 为死代码，当前不存在后台报告调度循环。
+  （T37 建议：该死代码若未来启用，必须先加与备份调度同款的原子领取，
+  否则会原样复刻 D1 缺陷。）
 
 门控：REHAB_TEST_SCHEDULER_URI（mongodb://127.0.0.1:<port>/...?replicaSet=<name>），
 未显式提供时回退沿用 REHAB_TEST_PATIENT_MIGRATION_URI（同一本机副本集惯例），
 两者都缺省时全部跳过。每个用例使用独立临时库（uuid 后缀）并在 teardown drop，
 只触碰 URI 指向实例上自己创建的库。
 
-发现记录（2026-11-14，T34 验证结论，实现未改）：
+发现记录（2026-11-14，T34 验证结论；备份调度缺陷已由 T37 修复）：
 - 提醒扫描多进程安全：投递去重不依赖单 worker 假设，而是依赖 ledger 集合
   以 reminder_key 为不可变 _id 的唯一约束 + 副本集事务（dispatch_one 的
   DuplicateKeyError 重试路径）。两进程并发扫描同一到期记录时，输家事务
@@ -28,20 +30,19 @@
   记录永不补投（代码注释明示该取舍，场景 3 实测）。
 - 提醒扫描同窗口重复扫描/时钟回拨幂等：ledger persisted 键覆盖整个
   (followup, scheduled_date, slot) 事件，回拨后的窗口内重扫零新增（场景 4）。
-- 备份调度多进程缺陷（未修，按任务约定"按现实现断言，如实记录"）：
-  BackupSchedule.run_if_due 是 check-then-act——先读 last_scheduled_export_at
-  判断到点，写文件后再无条件 $set 更新时间戳，没有原子领取。两进程同时
-  到点时都会通过到点判断、都执行全量导出（backup_bytes 各调用一次）并各
-  更新一次时间戳。后果：重复导出 I/O；文件名含秒级时间戳，同秒并发互相
-  覆盖（静默丢一份），跨秒则留下两份含患者数据的敏感导出文件。最小修复
-  建议（T34 记录，不改实现）：把到点判断改为 find_one_and_update 条件领取
-  （filter: {_id: "system", last_scheduled_export_at <= cutoff}，
-  update: $set last_scheduled_export_at = now），领取成功者才执行导出；
-  领取在导出前完成，进程在导出后崩溃最多留下已领取标记（下轮跳过一次，
-  无重复导出），与现状崩溃窗口（导出已做、标记未写、下轮重复导出）相比
-  更安全。
-- 备份调度部署建议：现状依赖单 worker 部署假设（多 worker 必重复导出）；
-  提醒扫描多 worker 已安全（但每进程仍各跑一遍空扫，浪费可接受）。
+- 备份调度多进程缺陷（T34 发现，T37 修复）：BackupSchedule.run_if_due 原为
+  check-then-act——先读 last_scheduled_export_at 判断到点，写文件后再无条件
+  $set 更新时间戳，没有原子领取。两进程同时到点时都会通过到点判断、都执行
+  全量导出（backup_bytes 各调用一次）并各更新一次时间戳。后果：重复导出
+  I/O；文件名含秒级时间戳，同秒并发互相覆盖（静默丢一份），跨秒则留下两份
+  含患者数据的敏感导出文件。T37 按 T34 建议修复：到点判断后用
+  find_one_and_update 条件领取（filter 含到点条件 + legacy last_backup_at
+  回退，update: $set last_scheduled_export_at = now，upsert 保持首次初始化），
+  领取成功者才执行导出；领取在导出前完成，进程在导出后崩溃最多留下已领取
+  标记（下轮跳过一次，无重复导出），与原崩溃窗口（导出已做、标记未写、
+  下轮重复导出）相比更安全——宁可漏一次，也不重复落敏感文件。
+- 备份调度部署建议：T37 原子领取后多 worker 部署安全（场景 2 实测恰好一次
+  导出）；提醒扫描多 worker 已安全（但每进程仍各跑一遍空扫，浪费可接受）。
 """
 import asyncio
 import os
@@ -130,12 +131,21 @@ class BackgroundSchedulingReplicaTests(unittest.IsolatedAsyncioTestCase):
         # 输家路径收敛后不残留 failed 历史或异常 fence 状态
         self.assertEqual(await self.db_a[DELIVERIES].count_documents({"status": "failed"}), 0)
 
-    # ---- 场景 2：双进程备份调度同时到点（按现实现断言，如实记录） ----
+    # ---- 场景 2：双进程备份调度同时到点（T37 原子领取后恰好一次导出） ----
 
-    async def test_two_process_backup_schedule_duplicate_export_recorded(self):
+    async def _seed_due_schedule(self):
         await self.db_a.system_settings.insert_one({
             "_id": "system", "backup_frequency": "hourly",
             "last_scheduled_export_at": self.now - timedelta(hours=2)})
+
+    def _fake_runtime_root(self):
+        root = os.path.join("/tmp", "rehab-t37-" + uuid4().hex)
+        os.makedirs(os.path.join(root, "app", "operations"), exist_ok=True)
+        return root, os.path.join(root, "app", "operations", "runtime.py")
+
+    async def test_two_process_backup_schedule_exports_exactly_once(self):
+        await self._seed_due_schedule()
+        seeded = self.now - timedelta(hours=2)
         calls = []
         original = operations_runtime.backup_bytes
 
@@ -143,33 +153,105 @@ class BackgroundSchedulingReplicaTests(unittest.IsolatedAsyncioTestCase):
             calls.append(db.client)
             return await original(db)
 
-        root = self.workdir = os.path.join("/tmp", "rehab-t34-" + uuid4().hex)
-        os.makedirs(os.path.join(root, "app", "operations"), exist_ok=True)
-        fake_file = os.path.join(root, "app", "operations", "runtime.py")
-        with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
-             patch.object(operations_runtime, "__file__", fake_file):
-            # 两进程同时到点：check-then-act 无原子领取，双方都通过到点判断
-            await asyncio.gather(operations_runtime.BackupSchedule().run_if_due(self.db_a),
-                                 operations_runtime.BackupSchedule().run_if_due(self.db_b))
+        root, fake_file = self._fake_runtime_root()
         try:
+            with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
+                 patch.object(operations_runtime, "__file__", fake_file):
+                # 两进程同时到点：原子领取只有一个赢家，输家立即返回不执行导出
+                await asyncio.gather(operations_runtime.BackupSchedule().run_if_due(self.db_a),
+                                     operations_runtime.BackupSchedule().run_if_due(self.db_b))
             folder = os.path.join(root, "data", "backups")
             files = os.listdir(folder)
-            # 缺陷实测：两个进程都执行了全量导出（backup_bytes 各一次），
-            # 时间戳都被无条件 $set。文件名秒级时间戳——同秒并发互相覆盖
-            # （1 个文件），跨秒则留下两份重复敏感导出（2 个文件）。
-            self.assertEqual(len(calls), 2)
-            self.assertIn(len(files), (1, 2), files)
+            # 敏感导出文件恰好一份（不再同秒互相覆盖/跨秒留两份）
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(files), 1, files)
             settings = await self.db_a.system_settings.find_one({"_id": "system"})
-            self.assertGreaterEqual(
-                (settings["last_scheduled_export_at"] - self.now).total_seconds(), 0)
+            self.assertGreater(settings["last_scheduled_export_at"], seeded)
+            # 领取标记已推进：窗口内任何一方再跑都不再导出
+            with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
+                 patch.object(operations_runtime, "__file__", fake_file):
+                await asyncio.gather(operations_runtime.BackupSchedule().run_if_due(self.db_a),
+                                     operations_runtime.BackupSchedule().run_if_due(self.db_b))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(os.listdir(folder)), 1)
         finally:
             import shutil
             shutil.rmtree(root, ignore_errors=True)
-        # 领取标记（last_scheduled_export_at）已推进：随后到点前再跑不再导出
-        with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
-             patch.object(operations_runtime, "__file__", fake_file):
-            await operations_runtime.BackupSchedule().run_if_due(self.db_a)
-        self.assertEqual(len(calls), 2)
+
+    async def test_claim_then_crash_skips_next_round_instead_of_reexporting(self):
+        # 崩溃语义取舍（T37）：领取先于导出——领取成功后导出崩溃，留下已推进
+        # 的领取时间戳，下一轮跳过一次（宁可漏一次，也不重复落敏感文件）。
+        await self._seed_due_schedule()
+        seeded = self.now - timedelta(hours=2)
+        calls = []
+        original = operations_runtime.backup_bytes
+
+        async def crashing_backup_bytes(db):
+            calls.append(db.client)
+            raise RuntimeError("simulated crash after claim, before file written")
+
+        root, fake_file = self._fake_runtime_root()
+        try:
+            with patch.object(operations_runtime, "backup_bytes", crashing_backup_bytes), \
+                 patch.object(operations_runtime, "__file__", fake_file):
+                with self.assertRaises(RuntimeError):
+                    await operations_runtime.BackupSchedule().run_if_due(self.db_a)
+            folder = os.path.join(root, "data", "backups")
+            self.assertEqual(os.listdir(folder), [])
+            settings = await self.db_a.system_settings.find_one({"_id": "system"})
+            self.assertGreater(settings["last_scheduled_export_at"], seeded)
+            # 下一轮（同一窗口内）：到点判断被已推进的领取时间戳拦下——跳过
+            # 一次，不重复执行全量导出
+            async def counting_backup_bytes(db):
+                calls.append(db.client)
+                return await original(db)
+
+            with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
+                 patch.object(operations_runtime, "__file__", fake_file):
+                await asyncio.gather(operations_runtime.BackupSchedule().run_if_due(self.db_a),
+                                     operations_runtime.BackupSchedule().run_if_due(self.db_b))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(os.listdir(folder), [])
+            # 时间推进过窗口后调度恢复正常
+            await self.db_a.system_settings.update_one(
+                {"_id": "system"},
+                {"$set": {"last_scheduled_export_at": self.now - timedelta(hours=2)}})
+            with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
+                 patch.object(operations_runtime, "__file__", fake_file):
+                await operations_runtime.BackupSchedule().run_if_due(self.db_a)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(os.listdir(folder)), 1)
+        finally:
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+
+    async def test_backup_schedule_legacy_timestamp_still_gates_and_claims(self):
+        # 单 worker 行为回归：无 last_scheduled_export_at 的 legacy 行按
+        # last_backup_at 到点判定，领取时间戳写入 last_scheduled_export_at
+        await self.db_a.system_settings.insert_one({
+            "_id": "system", "backup_frequency": "hourly",
+            "last_backup_at": self.now - timedelta(hours=2)})
+        calls = []
+        original = operations_runtime.backup_bytes
+
+        async def counting_backup_bytes(db):
+            calls.append(db.client)
+            return await original(db)
+
+        root, fake_file = self._fake_runtime_root()
+        try:
+            with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
+                 patch.object(operations_runtime, "__file__", fake_file):
+                await operations_runtime.BackupSchedule().run_if_due(self.db_a)
+            self.assertEqual(len(calls), 1)
+            settings = await self.db_a.system_settings.find_one({"_id": "system"})
+            self.assertGreater(settings["last_scheduled_export_at"],
+                               self.now - timedelta(hours=2))
+            self.assertEqual(settings["last_backup_at"],
+                             self.now - timedelta(hours=2))
+        finally:
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
 
     # ---- 场景 3：扫描中断后的续扫位置 ----
 
