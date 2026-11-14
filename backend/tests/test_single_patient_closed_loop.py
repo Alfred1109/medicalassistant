@@ -5,7 +5,10 @@
 - SinglePatientClosedLoopLocalTests：纯 ASGI/测试客户端 + 内存假件，默认套件
   运行，不需要 Mongo/浏览器/真实源端。康复端全链路走真实代码；源端集成 API
   以 httpx.MockTransport 模拟（沿用 test_integration_forms_contract 的假远端），
-  浏览器填报环节只覆盖康复端启动半程（launch 凭证校验）。
+  浏览器填报环节只覆盖康复端启动半程（launch 凭证校验）。发布/反馈域
+  （T32 缺口 4）同样在本类覆盖：副本集探针、事务、聚合均在假件层注入，
+  服务零改动（ClosedLoopTransactionClient.admin / FakeTransactionClient /
+  ClosedLoopCollection.aggregate）。
 - SinglePatientClosedLoopSourceTests：继承 test_oidc_fill_interop 的隔离双应用
   夹具（真实源端进程 + 自签 TLS + 单节点副本集 Mongo + 真实 OIDC 登录/consent），
   以 REHAB_TEST_CLOSED_LOOP=1 显式开启；无该变量时整体 skip，不占默认套件。
@@ -20,10 +23,12 @@
 
 import json
 import os
+import tempfile
 import unittest
 from contextlib import ExitStack
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -48,7 +53,36 @@ from app.services.user_service import UserService
 
 
 def _matches(doc, query):
-    return contract._doc_matches(doc, query)
+    """contract._doc_matches 的闭环扩展：补 $nin/$type（patient_list 门控用）。
+
+    $in/$ne/点路径语义逐字沿用 contract._doc_matches；不含已知运算符的
+    dict 值维持「不约束」的原行为，保证既有闭环步骤零变化。
+    """
+    for key, value in query.items():
+        current = doc
+        for part in key.split("."):
+            if not isinstance(current, dict) or part not in current:
+                current = None
+                break
+            current = current[part]
+        if isinstance(value, dict):
+            if "$in" in value and not (any(item in value["$in"] for item in current)
+                                       if isinstance(current, list) else current in value["$in"]):
+                return False
+            if "$ne" in value and current == value["$ne"]:
+                return False
+            if "$nin" in value and current in value["$nin"]:
+                return False
+            if "$type" in value and (value["$type"] != "string" or not isinstance(current, str)):
+                return False
+            continue
+        if current != value:
+            return False
+    return True
+
+
+class _UnsupportedPipeline(Exception):
+    """假件未建模的聚合管道阶段：整体回退为空结果（与旧假件行为一致）。"""
 
 
 def _apply_update(doc, update):
@@ -76,12 +110,21 @@ class ClosedLoopCursor:
         self._skip = 0
         self._limit = None
 
+    @staticmethod
+    def _sort_key(field):
+        # 假值（如 position=0）不再并入「缺失」桶：既有闭环无此混排场景，
+        # 新增发布/反馈步骤的数值排序依赖真实值。
+        def key(doc):
+            value = doc.get(field)
+            return (value is None, value if value is not None else "")
+        return key
+
     def sort(self, spec, direction=1):
         if isinstance(spec, list):
             for field, order in reversed(spec):
-                self._docs.sort(key=lambda d: d.get(field) or "", reverse=order < 0)
+                self._docs.sort(key=self._sort_key(field), reverse=order < 0)
         else:
-            self._docs.sort(key=lambda d: d.get(spec) or "", reverse=direction < 0)
+            self._docs.sort(key=self._sort_key(spec), reverse=direction < 0)
         return self
 
     def skip(self, n):
@@ -114,6 +157,7 @@ class ClosedLoopCollection:
 
     def __init__(self):
         self.docs = {}
+        self.indexes = {}
 
     async def insert_one(self, doc, *args, **kwargs):
         doc = deepcopy(dict(doc))
@@ -126,14 +170,22 @@ class ClosedLoopCollection:
         return SimpleNamespace(inserted_id=_id)
 
     async def find_one(self, query, *args, **kwargs):
-        for doc in self.docs.values():
-            if _matches(doc, query or {}):
-                return deepcopy(doc)
-        return None
+        cursor = self.find(query, *args, **kwargs)
+        if kwargs.get("sort"):
+            cursor.sort(kwargs["sort"])
+        rows = await cursor.to_list(1)
+        return rows[0] if rows else None
 
     def find(self, query=None, projection=None, **kwargs):
         return ClosedLoopCursor(
             [deepcopy(d) for d in self.docs.values() if _matches(d, query or {})])
+
+    async def insert_many(self, docs, *args, **kwargs):
+        inserted_ids = []
+        for doc in docs:
+            result = await self.insert_one(doc, *args, **kwargs)
+            inserted_ids.append(result.inserted_id)
+        return SimpleNamespace(inserted_ids=inserted_ids)
 
     async def update_one(self, query, update, **kwargs):
         for doc in self.docs.values():
@@ -159,10 +211,73 @@ class ClosedLoopCollection:
         return SimpleNamespace(deleted_count=len(removed))
 
     def aggregate(self, pipeline, **kwargs):
-        return ClosedLoopCursor([])
+        """最小聚合执行器：$match/$sort/$facet($skip/$limit/$count)。
 
-    async def create_index(self, *args, **kwargs):
-        return "synthetic-index"
+        覆盖反馈列表（$facet 分页/计数）所需形状；未建模的阶段回退为空
+        结果，与旧假件行为一致（quality_process_snapshot 等仍得到 {}）。
+        """
+        try:
+            rows = [deepcopy(doc) for doc in self.docs.values()]
+            for stage in pipeline:
+                if "$match" in stage:
+                    rows = [doc for doc in rows if _matches(doc, stage["$match"])]
+                elif "$sort" in stage:
+                    for field, order in reversed(list(stage["$sort"].items())):
+                        rows.sort(key=ClosedLoopCursor._sort_key(field), reverse=order < 0)
+                elif "$facet" in stage:
+                    rows = [self._facet(rows, stage["$facet"])]
+                else:
+                    raise _UnsupportedPipeline(stage)
+            return ClosedLoopCursor(rows)
+        except _UnsupportedPipeline:
+            return ClosedLoopCursor([])
+
+    @staticmethod
+    def _facet(rows, facets):
+        result = {}
+        for name, sub_pipeline in facets.items():
+            items = rows
+            for stage in sub_pipeline:
+                if "$skip" in stage:
+                    items = items[stage["$skip"]:]
+                elif "$limit" in stage:
+                    items = items[:stage["$limit"]]
+                elif "$count" in stage:
+                    items = [{"total": len(items)}] if items else []
+                else:
+                    raise _UnsupportedPipeline(stage)
+            result[name] = items
+        return result
+
+    async def create_index(self, keys, *args, **kwargs):
+        # 记录索引规格：ensure_feedback_indexes 的 index_information 复核需要。
+        if isinstance(keys, str):
+            keys = [(keys, 1)]
+        spec = {"key": [tuple(pair) for pair in keys]}
+        if kwargs.get("unique"):
+            spec["unique"] = True
+        for flag in ("sparse", "partialFilterExpression"):
+            if kwargs.get(flag):
+                spec[flag] = kwargs[flag]
+        name = kwargs.get("name") or "_".join(
+            f"{field}_{direction}" for field, direction in spec["key"])
+        self.indexes[name] = spec
+        return name
+
+    async def index_information(self):
+        return {name: dict(spec) for name, spec in self.indexes.items()}
+
+
+class ClosedLoopTransactionClient(FakeTransactionClient):
+    """事务假件 + 副本集探针载体：ensure_storage 的 hello/setName 探测注入点。
+
+    hello=None（或无 setName）时探针 fail-closed，事务会话仍可用，便于在
+    无 Mongo 载体下覆盖「副本集门控」两条分支。
+    """
+
+    def __init__(self, database, hello=None):
+        super().__init__(database)
+        self.admin = SimpleNamespace(command=AsyncMock(return_value=dict(hello or {})))
 
 
 class ClosedLoopDatabase:
@@ -170,14 +285,14 @@ class ClosedLoopDatabase:
 
     def __init__(self):
         self._collections = {}
-        self.command = AsyncMock(return_value={
-            "setName": "closed_loop_rs", "logicalSessionTimeoutMinutes": 30})
+        self.hello = {"setName": "closed_loop_rs", "logicalSessionTimeoutMinutes": 30}
+        self.command = AsyncMock(return_value=self.hello)
 
     @property
     def client(self):
-        # FakeTransactionClient 持有的是活动 dict 引用：事务期间新建的集合
-        # 也会进入快照/回滚范围。
-        return FakeTransactionClient(self._collections)
+        # ClosedLoopTransactionClient 持有的是活动 dict 引用：事务期间新建的
+        # 集合也会进入快照/回滚范围。
+        return ClosedLoopTransactionClient(self._collections, hello=self.hello)
 
     def __getitem__(self, name):
         return self._collections.setdefault(name, ClosedLoopCollection())
@@ -388,6 +503,137 @@ class SinglePatientClosedLoopLocalTests(unittest.IsolatedAsyncioTestCase):
             payload, followup_visit_id=node3.json()["id"]), headers=self.auth())
         self.assertEqual(blocked_again.status_code, 409, blocked_again.text)
         self.assertEqual(blocked_again.json()["detail"]["error"], "REVIEWED_CONTEXT_REQUIRED")
+
+    async def test_rehab_publication_feedback_local_closed_loop(self):
+        """T32 缺口 4：发布/反馈域在无 Mongo 载体下的闭环。
+
+        副本集探针、事务、聚合均在假件层注入（服务零改动）：探针经
+        ClosedLoopTransactionClient.admin、事务经 FakeTransactionClient、
+        聚合经 ClosedLoopCollection.aggregate。步骤：副本集门控负例 →
+        发布草稿 → 草稿读回 → 发布版本 → 患者可见 → 媒体上传 → 反馈事件
+        （幂等重放/媒体占用冲突）→ 医生聚合列表 → 撤回 → 患者不可见且
+        反馈历史仍锚定已冻结版本。
+        """
+        db = self.database
+        from app.core.exceptions import AppBaseException
+        from app.schemas.rehab_feedback import PatientFeedbackCreate
+        from app.services.rehab_feedback_service import RehabFeedbackService
+        from app.services.rehab_publication_service import RehabPublicationService
+
+        # 步骤 0（副本集门控负例）：hello 探针无 setName → 发布域 fail-closed
+        gated = ClosedLoopDatabase()
+        gated.hello = {}
+        with self.assertRaises(AppBaseException) as gated_error:
+            await RehabPublicationService(gated).ensure_storage()
+        self.assertEqual(gated_error.exception.error_code, "REHAB_TRANSACTIONS_REQUIRED")
+
+        # 医护账号（_authorize 的账号层载体）+ 待发布方案（含不得外泄字段）
+        await db.users.insert_one(
+            {"_id": ObjectId(contract.OPERATOR_ID), "role": "doctor", "is_active": True})
+        plan_id = ObjectId()
+        await db.rehab_plans.insert_one({"_id": plan_id, "patient_id": contract.PATIENT_ID,
+            "status": "active", "content_revision": 0, "notes": "internal note",
+            "metadata": {"private": "do not leak"}, "exercises": []})
+        plan = str(plan_id)
+
+        # 步骤 A：发布草稿（HTTP PUT + 事务假件快照/回滚载体 + 存储探针正例）
+        saved = await self.client.put(
+            f"/api/rehabilitation/publications/plans/{plan}/draft", json={
+                "request_id": uuid4().hex,
+                "content": {"name": "闭环康复方案", "description": "审阅后的方案内容",
+                            "goal": "阶段目标", "start_date": "2026-11-20T08:00:00+08:00"},
+                "items": [{"intervention_type": "exercise", "name": "闭环训练",
+                           "schedule": {"sets": 2}},
+                          {"intervention_type": "diet", "name": "闭环饮食",
+                           "diet_fields": {"food_restrictions": ["低盐"]}}]},
+            headers=self.auth())
+        self.assertEqual(saved.status_code, 200, saved.text)
+        draft = saved.json()["draft"]
+        self.assertEqual(draft["revision"], 0)
+        self.assertEqual([item["intervention_type"] for item in draft["items"]],
+                         ["exercise", "diet"])
+        self.assertNotIn("internal note", saved.text)
+
+        # 步骤 B：草稿读回（读事务）→ 确认发布为不可变患者可见版本
+        state = await self.client.get(
+            f"/api/rehabilitation/publications/plans/{plan}/draft", headers=self.auth())
+        self.assertEqual(state.status_code, 200, state.text)
+        self.assertEqual(state.json()["draft"]["id"], draft["id"])
+        published = await self.client.post(
+            f"/api/rehabilitation/publications/plans/{plan}/publish", json={
+                "request_id": uuid4().hex, "draft_id": draft["id"],
+                "expected_draft_revision": draft["revision"],
+                "expected_publication_id": None, "confirmed": True,
+                "confirmation_note": "闭环演练发布确认"}, headers=self.auth())
+        self.assertEqual(published.status_code, 200, published.text)
+        shown = published.json()
+        version_id = shown["version_id"]
+        item_id = shown["items"][0]["item_id"]
+        self.assertEqual(shown["publication_revision"], 1)
+        self.assertNotIn("internal note", published.text)
+        self.assertNotIn("do not leak", published.text)
+
+        # 步骤 C：患者可见（详情 + 列表；列表门控依赖假件的 $type/$nin 匹配）
+        patient = SimpleNamespace(id=contract.PATIENT_ID, role="patient")
+        publication = RehabPublicationService(db)
+        detail = await publication.patient_detail(plan, patient)
+        self.assertEqual(detail["version_id"], version_id)
+        self.assertEqual(detail["items"], shown["items"])
+        listed = await publication.patient_list(patient)
+        self.assertEqual(listed["total"], 1)
+        self.assertEqual(listed["items"][0]["version_id"], version_id)
+
+        # 步骤 D：媒体上传 → 反馈事件（附件领取）→ 幂等重放 → 媒体占用冲突
+        feedback = RehabFeedbackService(db)
+        with tempfile.TemporaryDirectory() as media_dir:
+            with patch("app.services.rehab_feedback_service.MEDIA_DIR", Path(media_dir)):
+                stored = await feedback.save_media(
+                    plan, patient, b"closed-loop-media", "image/png", "闭环训练照片")
+                media_id = stored["id"]
+                request = PatientFeedbackCreate(
+                    event_id=uuid4(), version_id=version_id,
+                    prescription_item_id=item_id, execution_status="completed",
+                    feelings="闭环演练的患者执行反馈",
+                    performed_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+                    media_ids=[media_id])
+                submitted = await feedback.submit(plan, request, patient)
+                self.assertTrue(submitted.created)
+                self.assertEqual(submitted.feedback.attachments[0].id, media_id)
+                replayed = await feedback.submit(plan, request, patient)
+                self.assertFalse(replayed.created)
+                self.assertEqual(replayed.feedback.id, submitted.feedback.id)
+                path, content_type = await feedback.open_media(plan, media_id, patient)
+                self.assertEqual(content_type, "image/png")
+                self.assertTrue(Path(path).is_file())
+                with self.assertRaises(AppBaseException) as media_conflict:
+                    await feedback.submit(
+                        plan, request.model_copy(update={"event_id": uuid4()}), patient)
+                self.assertEqual(media_conflict.exception.error_code,
+                                 "REHAB_FEEDBACK_MEDIA_USED")
+
+        # 步骤 E：医生反馈列表（聚合管道 $match/$sort/$facet 假件执行）与筛选
+        doctor = SimpleNamespace(id=contract.OPERATOR_ID, role="doctor")
+        seen = await feedback.list(plan, doctor)
+        self.assertEqual(seen.total, 1)
+        self.assertEqual(seen.items[0].version_id, version_id)
+        self.assertEqual(seen.items[0].attachments[0].id, media_id)
+        self.assertEqual(
+            (await feedback.list(plan, doctor, version_id=str(ObjectId()))).total, 0)
+
+        # 步骤 F：撤回 → 患者不可见、列表清空，反馈历史仍锚定已冻结版本
+        withdrawn = await self.client.post(
+            f"/api/rehabilitation/publications/plans/{plan}/withdraw", json={
+                "request_id": uuid4().hex, "expected_publication_id": version_id,
+                "action": "withdraw", "reason": "闭环演练撤回"}, headers=self.auth())
+        self.assertEqual(withdrawn.status_code, 200, withdrawn.text)
+        self.assertEqual(withdrawn.json()["status"], "withdrawn")
+        with self.assertRaises(AppBaseException) as hidden:
+            await publication.patient_detail(plan, patient)
+        self.assertEqual(hidden.exception.error_code, "REHAB_PUBLICATION_NOT_FOUND")
+        self.assertEqual((await publication.patient_list(patient))["total"], 0)
+        history = await feedback.list(plan, patient)
+        self.assertEqual(history.total, 1)
+        self.assertEqual(history.items[0].version_id, version_id)
 
     def auth(self):
         token = jwt_encode()
