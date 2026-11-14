@@ -394,3 +394,79 @@ D-1、D-2、D-5、D-9）：
 4. 切换本身（域开关、波次推进）由 `docs/patient-domain-cutover-plan.md`
    管辖；本方案只覆盖 G1/G2 门槛的数据侧工作。本方案完成不构成任何
    迁移完成、切换完成或业务验收完成的宣称。
+
+---
+
+## 9. 首轮盘点记录（2026-11-15，T49）
+
+> 本节为首轮实证记录。执行环境：本机开发 MongoDB 容器
+> `rehabman-mongodb-mongo-1`（mongo:7.0.16，副本集 `rehab_rs`，
+> 地址掩码记为 `mongodb://127.0.0.1:<37021>/?replicaSet=…`，回环闸门内）。
+> 全程只读：仅执行 `list_database_names` / `count_documents` / 盘点脚本的
+> `find` 游标读取，未对任何数据库执行写操作。
+
+### 9.1 开发库识别结论
+
+实例上共 30 个数据库，分类如下：
+
+| 类别 | 库名 | 集合规模 |
+|---|---|---|
+| 系统库 | `admin` / `config` / `local` | 例行（oplog 约 44 万条） |
+| **唯一业务候选** | `medicalassistant_demo_20261109_review` | users 5、followup_records 2、medical_timelines 2、audit_logs 7、demo_seed_manifest 1 |
+| 测试残留（27 个） | `rehab_comm_revocation_<hex>` ×13、`rehab_dbg2_<hex>` ×5、`rehab_dbg6_<hex>` ×6、`rehab_dbg_mw_<hex>` ×2 | 均为 2 users + 1~6 集合的 pytest 临时库，不在盘点范围 |
+
+关键事实：
+
+- **默认开发库不存在**。应用配置的库名（`app/core/config.py:97` 缺省
+  `rehab_assistant`，`deploy/mongodb/README.md:17` 约定的 `rehabman_dev`）
+  在该实例上均无数据——`list_database_names` 未列出两者。即：本机开发实例
+  （2026-11-14 23:44 启动的新容器）**从未被应用启动或 seed 过**，历史患者
+  数据尚未在本机落库。
+- 唯一业务候选库 `medicalassistant_demo_20261109_review` 为 2026-11-09 经
+  `app.tools.seed_demo` 初始化的**合成演示库**（`demo_seed_manifest` 标记
+  `synthetic_only: true`，5 个账号全部 is_active，患者 2 名）。
+- 27 个 `rehab_*` 临时库为通信撤权 / 调试类 pytest 残留（与
+  `docs/backup-restore-plan.md` 及 `deploy/mongodb/README.md:40` 描述的
+  测试库形态一致），按 §2.1 范围排除，未盘点。
+
+### 9.2 盘点关键数字（medicalassistant_demo_20261109_review）
+
+`patient_reference_audit.py`（JSON 存 `/tmp/patient_ref_audit_demo_20261115.json`，
+生成时间 2026-11-14T16:02:44Z）：
+
+- 16 个业务集合中仅 2 个非空：`followup_records` 2 文档、
+  `medical_timelines` 2 文档；两者 patient_id 均为字符串形态（STR 2）、
+  missing/null/悬空/歧义全 0。
+- `follow_ups`（第一代）与 `patientmanager.daily_records` 均为空集合，
+  legacy_missing 0、string _id 历史文档 0。
+- `users` 患者 2 名：is_active 全 true；同 identity key 多文档组 **0 组**；
+  归属字段 `practitioners` 1 条（字符串形态，命中 role=doctor，无悬空/歧义）、
+  `health_managers` 0 条。
+
+`label_uniqueness_audit.py`（JSON 存 `/tmp/label_uniqueness_audit_demo_20261115.json`）：
+`tags` 集合 0 文档，重复键组 0；`health_records.tags` / `organizations.tags`
+软引用条目均为 0，悬空名 0。
+
+### 9.3 G1 初判（仅本机开发库，不代表生产）
+
+按 §2.3 建议门槛逐项对照，该库所有指标均为 0，**字面上达到 G1**。
+但此结论**不具备 G1 证据效力**，理由：
+
+1. 盘点对象是合成种子库（2 患者、4 份业务文档），历史数据形态
+   （第一代 `follow_ups`、string `_id`、双形态引用、歧义组等）完全没有
+   被'exercised'——门槛「通过」是数据量为零的平凡结果，不是核实通过的
+   结果。
+2. 真正承载开发数据的库（`rehabman_dev` / `rehab_assistant`）在本机不存在；
+   §8.2 声明的「首次真实库盘点完成后修订门槛」的前提（真实历史数据）
+   尚未出现。
+3. 生产/权威账号环境按 `docs/isolated-demo-accounts.md:39` 在 113.44 一侧，
+   本机盘点对其无代表性。
+
+**下一步建议**：G1 实证需先在本机开发实例以真实历史数据完成一次
+导入/恢复（或对权威环境库在授权窗口按 D-12 执行盘点），再复跑本节流程。
+
+### 9.4 脚本修复清单
+
+两个盘点脚本在本次执行中无异常，未发现需要修复的 bug；
+`tests/test_patient_reference_audit.py` + `tests/test_label_uniqueness_audit.py`
+26 个用例（内存假件、无库接触）全部通过。无代码改动。
