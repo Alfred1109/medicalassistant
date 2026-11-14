@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Alert, Box, Button, MenuItem, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
 import { useSelector } from 'react-redux';
 import httpClient from '../../services/httpClient';
+import { patientDomainErrorCopy } from '../../services/patientErrors';
 import type { RootState } from '../../store';
 
 interface Portrait {
@@ -75,7 +76,7 @@ export default function ClinicalWorkbench() {
     httpClient.get(path).then(({ data }) => {
       const rows = Array.isArray(data) ? data : [];
       setPatients(rows.map((row: { id?: string; _id?: string; name?: string }) => ({ id: String(row.id || row._id), name: row.name || '未命名患者' })));
-    }).catch(() => setError('患者名单没有加载出来。'));
+    }).catch(error => setError(patientDomainErrorCopy(error) ?? '患者名单没有加载出来。'));
   }, [actor]);
 
   const load = async (id: string) => {
@@ -99,9 +100,9 @@ export default function ClinicalWorkbench() {
       setVoiceEvents(voiceResult.data.events || []);
       setShares(shareResult.data.requests || []);
       setIndicators(indicatorResult.data);
-    } catch {
+    } catch (error) {
       setPortrait(null);
-      setError('这份资料没有打开。如果患者属于另一个来源项目，需要 113.44 的共享授权。');
+      setError(patientDomainErrorCopy(error) ?? '这份资料没有打开。如果患者属于另一个来源项目，需要 113.44 的共享授权。');
     }
   };
 

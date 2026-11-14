@@ -3,6 +3,7 @@ import { Alert, Box, Button, CircularProgress, MenuItem, Stack, TextField, Typog
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
+import { patientDomainErrorCopy } from '../../services/patientErrors';
 import DeviceBinding from '../Patient/DeviceBinding';
 
 type PatientChoice = { id: string; name: string };
@@ -31,8 +32,8 @@ const PatientDevices: React.FC = () => {
         throw new Error('患者名单无效');
       }
       setPatients(data.map(patient => ({ id: patient.id, name: patient.name || '未命名患者' })));
-    }).catch(() => {
-      if (generation.current === request) setError('授权患者名单没有加载成功，请重试。');
+    }).catch(error => {
+      if (generation.current === request) setError(patientDomainErrorCopy(error) ?? '授权患者名单没有加载成功，请重试。');
     }).finally(() => {
       if (generation.current === request) setLoading(false);
     });

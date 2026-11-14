@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { AxiosResponse, AxiosError } from 'axios';
+import { patientDomainErrorCopy } from '../services/patientErrors';
 
 /**
  * 通用API调用Hook，用于管理API调用的加载状态、数据和错误
@@ -30,9 +31,12 @@ export function useApi<T, P extends any[]>(
         return response.data;
       } catch (err) {
         const axiosError = err as AxiosError;
+        // 患者域错误（如 503 PATIENT_IDENTITY_AMBIGUOUS）使用统一提示文案
+        const patientCopy = patientDomainErrorCopy(err);
         // 错误响应体结构由后端决定，这里收窄为常见的 { message } 形式
         const responseData = axiosError.response?.data as { message?: string } | undefined;
         const errorMessage =
+          patientCopy ||
           responseData?.message ||
           axiosError.message ||
           '发生未知错误';

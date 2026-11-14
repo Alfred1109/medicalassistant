@@ -4,6 +4,7 @@ import { useSelector } from 'react-redux';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { RootState } from '../../store';
 import { rehabPublications, type PatientRehabAttachment, type PatientRehabFeedback, type PublishedRehabPlan, type RehabInterventionType } from '../../services/rehabPublications';
+import { patientDomainErrorCopy } from '../../services/patientErrors';
 
 const categories: Record<RehabInterventionType, string> = {
   diet: '饮食', exercise: '运动', medication: '用药', psychology: '心理',
@@ -211,7 +212,7 @@ function PatientPlanListForActor() {
       const lastPage = Math.max(0, Math.ceil(data.total / limit) - 1);
       if (page > lastPage) { setPage(lastPage); return; }
       setItems(data.items); setTotal(data.total);
-    }).catch(() => { if (!controller.signal.aborted) setError('无法加载康复方案，请重试。'); })
+    }).catch(error => { if (!controller.signal.aborted) setError(patientDomainErrorCopy(error) ?? '无法加载康复方案，请重试。'); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [page, reload]);

@@ -1,4 +1,5 @@
 import type { QualityFactPage, QualityFilters, QualityOverview, QualitySource } from '../types/quality';
+import { patientDomainErrorCopy } from '../services/patientErrors';
 
 export const issueStatusLabels = { open: '待确认', in_progress: '整改中', pending_review: '待复核', closed: '已关闭' } as const;
 export const publicationLabels: Record<string, string> = { published: '发布引用及基本结构已核对', unpublished: '尚未发布', withdrawn: '已撤回', stopped: '已取消或归档', invalid_reference: '发布引用或基本结构异常' };
@@ -27,6 +28,9 @@ export function qualityFilters(patientId: string, startDate: string, endDate: st
   return result;
 }
 export function qualityError(error: unknown, fallback: string): string {
+  // 患者域错误（如 503 QUALITY_PATIENT_SCOPE_UNVERIFIED）优先使用统一提示文案
+  const patientCopy = patientDomainErrorCopy(error);
+  if (patientCopy) return patientCopy;
   const response = (error as {response?: {status?: number; data?: {detail?: unknown; message?: string}}})?.response;
   if (response?.status === 409) return '记录已变化或本次请求发生冲突，请重新加载核对后再操作。';
   if (response?.status === 403) return '当前账号无权查看或处理这些记录。';

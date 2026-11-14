@@ -27,6 +27,7 @@ import { zhCN } from 'date-fns/locale';
 import { format } from 'date-fns';
 import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
+import { patientDomainErrorCopy } from '../../services/patientErrors';
 import type { Patient } from '../../types/patient.types';
 
 // 导入组件
@@ -41,8 +42,12 @@ import { followUpTypes, getFollowUpStatusInfo, manualEntryText } from '../../con
 import { canReEvaluateFollowUp, canReviewFollowUp } from '../../utils/followupReview';
 import { useFollowUpWorkbench } from '../../hooks/useFollowUpWorkbench';
 
-// 从 axios 错误中提取可读信息
+// 从 axios 错误中提取可读信息；患者域错误（如 503 PATIENT_IDENTITY_AMBIGUOUS）使用统一提示文案
 const getApiErrorMessage = (err: unknown, fallback: string): string => {
+  const patientCopy = patientDomainErrorCopy(err);
+  if (patientCopy) {
+    return patientCopy;
+  }
   const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   if (typeof detail === 'string' && detail) {
     return detail;

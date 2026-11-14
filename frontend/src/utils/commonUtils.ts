@@ -1,3 +1,5 @@
+import { patientDomainErrorCopy } from '../services/patientErrors';
+
 /**
  * 格式化数值为百分比显示
  * @param value 小数值(0-1)
@@ -57,7 +59,13 @@ export const delay = (ms: number): Promise<void> => {
  */
 export const handleError = (error: any, defaultMessage = '操作失败，请稍后重试'): string => {
   console.error('Error:', error);
-  
+
+  // 患者域错误（如 503 PATIENT_IDENTITY_AMBIGUOUS）使用统一提示文案
+  const patientCopy = patientDomainErrorCopy(error);
+  if (patientCopy) {
+    return patientCopy;
+  }
+
   if (error?.response?.data?.message) {
     return error.response.data.message;
   }

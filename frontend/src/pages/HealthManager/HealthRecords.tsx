@@ -39,6 +39,7 @@ import {
 import { Search as SearchIcon, Add as AddIcon, ArrowBack as ArrowBackIcon, Edit as EditIcon, Delete as DeleteIcon, Visibility as VisibilityIcon } from '@mui/icons-material';
 import { useSelector } from 'react-redux';
 import { apiService } from '../../services/api';
+import { patientDomainErrorCopy } from '../../services/patientErrors';
 import type { RootState } from '../../store/types';
 
 // 随访类型选项（对应后端 FollowUpType 枚举）
@@ -170,33 +171,33 @@ const HealthRecords: React.FC = () => {
       
       setLoading(false);
     } catch (err: any) {
-      setError(err.response?.data?.detail || '获取健康档案失败');
+      setError(patientDomainErrorCopy(err) || err.response?.data?.detail || '获取健康档案失败');
       setLoading(false);
-      showSnackbar('获取健康档案失败', 'error');
+      showSnackbar(patientDomainErrorCopy(err) || '获取健康档案失败', 'error');
     }
   };
-  
+
   // 获取随访记录
   const fetchFollowUps = async () => {
     if (!patientId) return;
-    
+
     try {
       const response = await apiService.getFollowUps(patientId, {});
       setFollowUps(response.data);
     } catch (err: any) {
-      showSnackbar('获取随访记录失败', 'error');
+      showSnackbar(patientDomainErrorCopy(err) || '获取随访记录失败', 'error');
     }
   };
-  
+
   // 获取健康数据
   const fetchHealthData = async () => {
     if (!patientId) return;
-    
+
     try {
       const response = await apiService.getHealthData(patientId, {});
       setHealthData(response.data);
     } catch (err: any) {
-      showSnackbar('获取健康数据失败', 'error');
+      showSnackbar(patientDomainErrorCopy(err) || '获取健康数据失败', 'error');
     }
   };
   

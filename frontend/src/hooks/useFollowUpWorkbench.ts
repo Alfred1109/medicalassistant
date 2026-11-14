@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiService } from '../services/api';
+import { patientDomainErrorCopy } from '../services/patientErrors';
 import type { FollowUpFilters, FollowUpWorkbenchPage, FollowUpWorkbenchQuery } from '../types/followup';
 import { buildFollowUpWorkbenchQuery } from '../utils/followupWorkbench';
 
@@ -38,8 +39,12 @@ export function useFollowUpWorkbench(identity: string, patientId: string, filter
     }).catch(error => {
       if (controller.signal.aborted || generation.current !== current) return;
       const response = error?.response;
+      // 患者域错误（如 503 PATIENT_IDENTITY_AMBIGUOUS）优先使用统一提示文案
+      const patientCopy = patientDomainErrorCopy(error);
       const detail = response?.data?.detail;
-      setState({ ...empty, loading: false, error: typeof detail === 'string' ? detail : error instanceof Error && !response ? error.message : '加载随访记录失败，请重试' });
+      const message = typeof detail === 'string' ? detail
+        : error instanceof Error && !response ? error.message : null;
+      setState({ ...empty, loading: false, error: patientCopy || message || '加载随访记录失败，请重试' });
     });
     return () => { generation.current++; controller.abort(); };
   // queryKey contains the complete normalized filter and paging contract.

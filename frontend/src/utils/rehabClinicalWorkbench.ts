@@ -1,4 +1,5 @@
 import type { ClinicalPlan, DraftContent, DraftItem } from '../services/rehabClinicalWorkbench';
+import { patientDomainErrorCopy } from '../services/patientErrors';
 
 export const interventionLabels = { diet: '饮食', exercise: '运动', medication: '用药', psychology: '心理' } as const;
 export type FormContent = { name: string; description: string; goal: string; start_date: string;
@@ -41,6 +42,9 @@ export function operationId(): string {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 export function workbenchError(error: unknown, fallback: string): string {
+  // 患者域错误（如 503 REHAB_PATIENT_DOMAIN_UNSUPPORTED）优先使用统一提示文案
+  const patientCopy = patientDomainErrorCopy(error);
+  if (patientCopy) return patientCopy;
   const response = (error as { response?: { status?: number; data?: { detail?: unknown; message?: string } } })?.response;
   if (response?.status === 409) return '方案已更新或本次操作发生冲突。请重新加载核对后再操作。';
   if (response?.status === 403) return '当前已无权管理该患者的方案。';

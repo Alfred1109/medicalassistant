@@ -45,6 +45,7 @@ import { Link } from 'react-router-dom';
 import DeviceDataDisplay from '../../components/Device/DeviceDataDisplay';
 import DeviceConnectionTest from '../../components/Device/DeviceConnectionTest';
 import { deviceService, Device, DeviceCreatePayload, DeviceStatus } from '../../services/deviceService';
+import { patientDomainErrorCopy } from '../../services/patientErrors';
 
 // 绑定表单状态接口
 interface BindFormState {
@@ -88,9 +89,9 @@ function TabPanel(props: TabPanelProps) {
   );
 }
 
-// 提取后端返回的错误消息
+// 提取后端返回的错误消息；患者域错误（如 503 PATIENT_IDENTITY_AMBIGUOUS）使用统一提示文案
 const getApiErrorMessage = (err: any, fallback: string): string => {
-  return err?.response?.data?.detail || err?.message || fallback;
+  return patientDomainErrorCopy(err) || err?.response?.data?.detail || err?.message || fallback;
 };
 
 // 时间格式化

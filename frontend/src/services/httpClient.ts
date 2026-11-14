@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { API_BASE_URL, STORAGE_KEYS } from '../config/constants';
 import { assertSameOrigin, csrfHeaders, getAuthConfig, loginPageUrl } from './authSession';
+import { applyPatientDomainErrorCopy } from './patientErrors';
 
 // Response and data-only API adapters share one authentication boundary.
 const httpClient = axios.create({
@@ -77,6 +78,9 @@ httpClient.interceptors.request.use(async (config) => {
 httpClient.interceptors.response.use(
   (response) => response,
   async (error) => {
+    // 患者域错误（503 PATIENT_IDENTITY_AMBIGUOUS 等）改写为明确的用户提示，
+    // 避免各页面把 503 显示成通用的 "Request failed with status code 503"。
+    applyPatientDomainErrorCopy(error);
     const authentication = await getAuthConfig().catch(() => null);
     if (authentication?.mode === 'oidc') {
       if (error.response?.status === 401 && !/\/auth\//.test(error.config?.url || '')) {
