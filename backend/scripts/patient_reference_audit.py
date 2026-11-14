@@ -37,6 +37,19 @@ MONGODB_URL）环境变量提供；缺省只允许连接 localhost / 127.0.0.1 /
     dangling_examples   悬空样本（默认最多 20 条）：{"key", "value", "form"}
     ambiguous_examples  歧义样本：{"key", "user_ids"}（users 各文档 _id 字符串）
     examples_truncated  样本是否被截断
+  仅部分集合出现的字段：
+    legacy_missing      仅 follow_ups：第一代形状「缺失」（missing+null）计数。
+                        第一代造数文档缺 patient_id 属历史既定
+                        （scripts/migrate_legacy_collections.py 映射表
+                        「不映射项：patient_id」），不计入异常悬空口径。
+    string_id_documents 仅 patientmanager.daily_records：_id 为字符串形态的
+                        历史文档计数（router 以 object:/string: 前缀双形态
+                        兼容读取，见 app/api/routers/patient_router.py）。
+  legacy_followups      follow_ups（第一代）与 followup_records（第二代）的
+                        患者引用口径并列对照段：
+    note                口径说明（第一代缺 patient_id 属历史既定）
+    first_generation    {"collection": "follow_ups", ...follow_ups 统计段}
+    second_generation   {"collection": "followup_records", ...对应统计段}
   users_patients        患者账号文档（users role:"patient"）盘点
     total_patients      患者账号文档总数
     is_active           {"true" / "false" / "missing" / "other"} 分布
@@ -91,6 +104,17 @@ PATIENT_REFERENCES = (
     ("quality_issues", "patient_id"),
     ("external_patient_links", "local_patient_id"),
 )
+
+# 特定集合的附加盘点口径（键与 PATIENT_REFERENCES 的集合名对应）：
+# - follow_ups：第一代造数形状缺 patient_id 属历史既定（不映射项，见
+#   scripts/migrate_legacy_collections.py 映射表），单独计 legacy_missing；
+# - patientmanager.daily_records：集合存在 string _id 的历史文档
+#   （router 以 object:/string: 前缀双形态兼容读取），单独计
+#   string_id_documents。
+REFERENCE_AUDIT_OPTIONS = {
+    "follow_ups": {"legacy_missing": True},
+    "patientmanager.daily_records": {"track_string_ids": True},
+}
 
 PATIENT_ROLE = "patient"
 ATTRIBUTION_FIELDS = ("practitioners", "health_managers")
@@ -184,17 +208,29 @@ def resolve_key(value, stats, index, max_examples):
 
 
 async def audit_reference_collection(db, collection_name, field, index,
-                                     batch_size, max_examples):
+                                     batch_size, max_examples, *,
+                                     legacy_missing=False,
+                                     track_string_ids=False):
     stats = new_reference_stats(field)
+    if legacy_missing:
+        stats["legacy_missing"] = 0
+    if track_string_ids:
+        stats["string_id_documents"] = 0
     cursor = db[collection_name].find({}, None)
     async for doc in iter_batches(cursor, batch_size):
         stats["total_documents"] += 1
+        if track_string_ids and isinstance(doc.get("_id"), str):
+            stats["string_id_documents"] += 1
         if field not in doc:
             stats["missing"] += 1
+            if legacy_missing:
+                stats["legacy_missing"] += 1
             continue
         value = doc[field]
         if value is None:
             stats["null"] += 1
+            if legacy_missing:
+                stats["legacy_missing"] += 1
             continue
         form = classify_form(value)
         stats[f"{form}_form"] += 1
@@ -305,24 +341,56 @@ async def audit_database(db, *, batch_size=BATCH_SIZE_DEFAULT,
     index = await build_users_index(db, batch_size)
     collections = {}
     for collection_name, field in reference_targets:
+        options = REFERENCE_AUDIT_OPTIONS.get(collection_name, {})
         collections[collection_name] = await audit_reference_collection(
-            db, collection_name, field, index, batch_size, max_examples)
+            db, collection_name, field, index, batch_size, max_examples,
+            **options)
     for stats in collections.values():
         _trim_examples(stats, max_examples)
     users_patients = await audit_user_patients(
         db, index, batch_size, max_examples)
+    legacy_followups = build_legacy_followups_section(collections)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "database": getattr(db, "name", "<unknown>"),
         "batch_size": batch_size,
         "collections": collections,
+        "legacy_followups": legacy_followups,
         "users_patients": users_patients,
         "notes": [
             "悬空/歧义判定与 app/core/patient_identity.load_identity_groups 同口径："
             "identity_key 归组、无 role 过滤、ObjectId 与 canonical string 同键。",
             "missing=字段不存在；null=字段为 None；两者合计即「缺失」。",
+            "follow_ups 第一代形状缺 patient_id 属历史既定（不映射项，"
+            "见 scripts/migrate_legacy_collections.py），计入其 legacy_missing，"
+            "详见 legacy_followups 段。",
             "本报告仅为事实盘点，不产出迁移或修复决策。",
         ],
+    }
+
+
+def build_legacy_followups_section(collections):
+    """follow_ups（第一代）与 followup_records（第二代）患者引用口径并列。
+
+    第一代缺 patient_id 是历史既定（FU01 D-4 已决策归档只读；迁移脚本映射表
+    「不映射项：patient_id」），记入 legacy_missing 而不作为异常悬空上报；
+    悬空/歧义仍只统计 patient_id 有值的文档。统计段直接引用 collections
+    中的对应 dict，保证与逐集合输出一致、不产生第二份独立计数。
+    """
+    first = collections.get("follow_ups")
+    second = collections.get("followup_records")
+    if first is None or second is None:
+        return None
+    return {
+        "note": (
+            "follow_ups 为第一代遗留集合（FU01 D-4 决策归档只读、冻结写入）。"
+            "第一代造数形状文档缺 patient_id 属历史既定"
+            "（scripts/migrate_legacy_collections.py 字段级映射表"
+            "「不映射项：patient_id」），计入 legacy_missing（missing+null），"
+            "不作为异常悬空上报；dangling/ambiguous 仅统计 patient_id 有值"
+            "且 key 无法唯一命中的文档。"),
+        "first_generation": {"collection": "follow_ups", **first},
+        "second_generation": {"collection": "followup_records", **second},
     }
 
 
@@ -337,6 +405,20 @@ def render_summary(report):
             f"{stats['missing'] + stats['null']:>7}"
             f"{stats['objectid_form']:>7}{stats['string_form']:>7}"
             f"{stats['dangling']:>7}{stats['ambiguous']:>7}")
+    daily = report["collections"].get("patientmanager.daily_records")
+    if daily and "string_id_documents" in daily:
+        lines.append(
+            f"patientmanager.daily_records string _id 历史文档: "
+            f"{daily['string_id_documents']}")
+    legacy = report["legacy_followups"]
+    if legacy:
+        first, second = legacy["first_generation"], legacy["second_generation"]
+        lines.append(
+            f"follow_ups(一代) legacy_missing {first['legacy_missing']} / "
+            f"followup_records(二代) missing {second['missing'] + second['null']}"
+            f"；悬空 {first['dangling']}/{second['dangling']}，"
+            f"歧义 {first['ambiguous']}/{second['ambiguous']}（一代/二代）"
+            "——一代缺 patient_id 属历史既定")
     users = report["users_patients"]
     lines.append(f"users 患者: {users['total_patients']} (is_active: {users['is_active']})")
     lines.append(f"同 identity key 多文档组: {len(users['duplicate_identity_groups'])} 组")

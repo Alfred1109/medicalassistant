@@ -34,14 +34,14 @@ MONGODB_AUDIT_URI="mongodb://localhost:27017" \
 
 | 集合 | 字段 | 备注 |
 | --- | --- | --- |
-| followup_records | patient_id | |
-| follow_ups | patient_id | 第一代遗留集合（归档只读保留）；第一代形状文档缺 patient_id 是已知历史形态（见 `scripts/migrate_legacy_collections.py` 头注释），本集合仅作对照 |
+| followup_records | patient_id | 第二代随访集合 |
+| follow_ups | patient_id | 第一代遗留集合（FU01 D-4 决策归档只读、冻结写入）；第一代造数形状文档缺 patient_id 属历史既定（`scripts/migrate_legacy_collections.py` 映射表「不映射项：patient_id」），单独计 `legacy_missing`，详见下方「legacy_followups 对照段」 |
 | health_records / health_data / medical_timelines | patient_id | |
 | rehab_plans / rehab_plan_versions / rehab_prescription_items / rehab_execution_events / rehab_progress | patient_id | |
 | patient_feedback_media | patient_id | |
 | devices | patient_id | 历史非患者绑定为 null |
 | integration_fill_tasks | patient_id | |
-| patientmanager.daily_records | user_id | 注意：真实集合名是带点号的字面量 `patientmanager.daily_records`（`app/api/routers/patient_router.py:92`） |
+| patientmanager.daily_records | user_id | 注意：真实集合名是带点号的字面量 `patientmanager.daily_records`（`app/api/routers/patient_router.py` 的 `DAILY_RECORDS_COLLECTION`）；新写入用 `str(current_user.id)`；集合存在 string `_id` 的历史文档，router 以 `object:`/`string:` 前缀双形态兼容读取，单独计 `string_id_documents` |
 | quality_issues | patient_id | |
 | external_patient_links | local_patient_id | 新写入路径会归一为 canonical string（`app/integrations/forms/patient_links.py:97`），历史数据仍可能双形态 |
 
@@ -67,6 +67,38 @@ MONGODB_AUDIT_URI="mongodb://localhost:27017" \
 - **医护归属字段**：条目同样按 identity key 对全部 `users` 判悬空/歧义，
   另给出命中文档的 role 分布（`resolved_roles`，如 `{"doctor": n}`）。
 
+## 部分集合的附加字段
+
+默认字段之外，只有两个集合带附加计数字段（其余集合不出现该键，便于
+机读方按字段有无区分口径）：
+
+- **`legacy_missing`（仅 `follow_ups`）**：第一代形状「缺失」（`missing` +
+  `null`）计数。第一代造数文档缺 `patient_id` 是迁移脚本映射表明示的
+  「不映射项」（无对应来源），属历史既定而非异常，因此不计入悬空口径；
+  悬空/歧义仍只统计 `patient_id` 有值且 key 无法唯一命中的文档。
+- **`string_id_documents`（仅 `patientmanager.daily_records`）**：`_id` 为
+  字符串形态的历史文档计数。router 对记录 ID 采用 `object:`/`string:`
+  前缀双形态兼容读取，string `_id` 是已知历史形态，不是脏数据。
+
+## legacy_followups 对照段
+
+顶层 `legacy_followups` 段把两代随访集合的患者引用口径并列输出，便于
+直接对照第一代遗留集合与第二代业务集合的悬空/歧义规模：
+
+```json
+"legacy_followups": {
+  "note": "……第一代缺 patient_id 属历史既定……",
+  "first_generation":  { "collection": "follow_ups",        "...同 collections 段字段": 0, "legacy_missing": 0 },
+  "second_generation": { "collection": "followup_records",  "...同 collections 段字段": 0 }
+}
+```
+
+- `first_generation` / `second_generation` 是 `collections` 中对应统计段的
+  原样引用（附 `collection` 名称键），数字与逐集合段完全一致，不产生
+  第二份独立计数。
+- 解读规则：第一代 `missing`/`null`/`legacy_missing` 属预期，不需治理；
+  两代的 `dangling`/`ambiguous` 才是需要人工核实的部分。
+
 ## 如何解读结果
 
 - `dangling > 0`：存在指向不存在患者的引用。迁移前须核实是脏数据、已删账号
@@ -76,8 +108,9 @@ MONGODB_AUDIT_URI="mongodb://localhost:27017" \
   key 与 `_id` 清单逐组人工核实，是歧义治理的直接输入。
 - 双形态计数只反映写入历史；`identity_key` 已使两种形态运行时等价，形态
   本身不是故障，但同名两份（ambiguous）是。
-- `missing`/`null` 集中在 `follow_ups`（第一代形状，已知且已决策归档只读）
-  属预期；若出现在 `followup_records` 等业务集合则须单独核实。
+- `missing`/`null` 集中在 `follow_ups`（已计入其 `legacy_missing`，属历史
+  既定，见 `legacy_followups` 对照段）；若出现在 `followup_records` 等业务
+  集合则须单独核实。
 - 大集合用 `--batch-size` 分批游标处理，内存不随集合大小线性膨胀；样本
   （`*_examples`）按 key 去重并默认截断在 20 条，`examples_truncated` 标记
   是否截断。
@@ -94,7 +127,9 @@ MONGODB_AUDIT_URI="mongodb://localhost:27017" \
 `backend/tests/test_patient_reference_audit.py`（内存打桩集合，不依赖真实
 MongoDB）覆盖：双形态归并计数、悬空、歧义、缺失/null、空集合与不存在集合、
 分批边界（25 条 / batch=10）、users 患者 is_active 分布与同 key 组清单、
-医护归属字段悬空、只读保证（写调用即失败）、主机闸门。
+医护归属字段悬空、只读保证（写调用即失败）、主机闸门、follow_ups 第一代
+缺 patient_id 的 `legacy_missing` 与 `legacy_followups` 对照段、
+`patientmanager.daily_records` 的 string `_id` 计数与 `user_id` 双形态/悬空。
 
 ```bash
 DEBUG=false .venv/bin/python -m pytest tests/test_patient_reference_audit.py -q

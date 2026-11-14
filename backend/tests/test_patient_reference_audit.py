@@ -8,7 +8,11 @@
 - 大集合分批：batch_size 边界下每条文档恰好被处理一次；
 - users 患者：is_active 分布、同 key 多文档组清单、医护归属字段双形态/悬空/歧义；
 - 工具只读：打桩集合收到任何写调用（insert/update/delete）立即失败；
-- 主机闸门：缺省拒绝非 localhost 连接串。
+- 主机闸门：缺省拒绝非 localhost 连接串；
+- follow_ups 第一代缺 patient_id 计入 legacy_missing（历史既定），
+  与 followup_records 口径在 legacy_followups 段并列输出；
+- patientmanager.daily_records 的 string _id 历史文档计数
+  （string_id_documents）与 user_id 悬空/双形态。
 
 运行：DEBUG=false .venv/bin/python -m pytest tests/test_patient_reference_audit.py -q
 """
@@ -172,6 +176,83 @@ class PatientReferenceAuditTest(unittest.TestCase):
         self.assertEqual(daily["total_documents"], 1)
         self.assertEqual(daily["string_form"], 1)
         self.assertEqual(daily["dangling"], 0)
+
+    def test_follow_ups_legacy_missing_and_comparison(self):
+        db = FakeDatabase({
+            "users": FakeCollection(users_docs()),
+            "follow_ups": FakeCollection([
+                # 第一代造数形状：title/doctor_id，缺 patient_id —— 历史既定
+                {"_id": ObjectId(), "title": "随访", "doctor_id": ObjectId(OID2)},
+                {"_id": ObjectId()},
+                # patient_id 有值但悬空：不属于历史既定，仍计悬空
+                {"_id": ObjectId(), "patient_id": NO_REF},
+            ]),
+            "followup_records": FakeCollection([
+                {"_id": ObjectId(), "patient_id": OID3},
+            ]),
+        })
+        report = run_audit({"users": db._collections["users"],
+                            "follow_ups": db._collections["follow_ups"],
+                            "followup_records":
+                                db._collections["followup_records"]})
+        fu = report["collections"]["follow_ups"]
+        self.assertEqual(fu["missing"], 2)
+        self.assertEqual(fu["legacy_missing"], 2)
+        self.assertEqual(fu["dangling"], 1)
+        self.assertEqual(fu["ambiguous"], 0)
+        legacy = report["legacy_followups"]
+        self.assertIsNotNone(legacy)
+        self.assertEqual(legacy["first_generation"]["collection"], "follow_ups")
+        self.assertEqual(legacy["first_generation"]["legacy_missing"], 2)
+        self.assertEqual(legacy["second_generation"]["collection"],
+                         "followup_records")
+        self.assertEqual(legacy["second_generation"]["total_documents"], 1)
+        # 第一代缺 patient_id 不计入悬空口径：悬空只统计有值文档
+        self.assertEqual(legacy["first_generation"]["dangling"], 1)
+        self.assertIn("历史既定", legacy["note"])
+
+    def test_follow_ups_missing_not_reported_as_dangling(self):
+        # 同一形状复验：missing 与 dangling 互不混计
+        db = FakeDatabase({
+            "users": FakeCollection(users_docs()),
+            "follow_ups": FakeCollection([
+                {"_id": ObjectId()},  # 第一代形状，缺 patient_id
+            ]),
+        })
+        report = run_audit({"users": db._collections["users"],
+                            "follow_ups": db._collections["follow_ups"]})
+        fu = report["collections"]["follow_ups"]
+        self.assertEqual(fu["missing"], 1)
+        self.assertEqual(fu["legacy_missing"], 1)
+        self.assertEqual(fu["dangling"], 0)
+
+    def test_daily_records_string_ids_and_user_id_forms(self):
+        db = FakeDatabase({
+            "users": FakeCollection(users_docs()),
+            "patientmanager.daily_records": FakeCollection([
+                {"_id": "legacy-string-id", "user_id": OID3},          # string _id 历史
+                {"_id": "legacy-string-id-2", "user_id": NO_REF},      # string _id 且悬空
+                {"_id": ObjectId(), "user_id": ObjectId(OID3)},        # object _id 双形态
+                {"_id": ObjectId()},                                   # 缺 user_id
+            ]),
+        })
+        report = run_audit({"users": db._collections["users"],
+                            "patientmanager.daily_records":
+                                db._collections["patientmanager.daily_records"]})
+        daily = report["collections"]["patientmanager.daily_records"]
+        self.assertEqual(daily["total_documents"], 4)
+        self.assertEqual(daily["string_id_documents"], 2)
+        self.assertEqual(daily["missing"], 1)
+        self.assertEqual(daily["objectid_form"], 1)
+        # OID3 与 NO_REF 两个 user_id 均为 24 位 hex 字符串形态
+        self.assertEqual(daily["string_form"], 2)
+        self.assertEqual(daily["dangling"], 1)
+        self.assertEqual(daily["ambiguous"], 0)
+        # string _id 计数仅出现在 daily_records，不污染其他集合字段
+        self.assertNotIn("string_id_documents",
+                         report["collections"]["devices"])
+        self.assertNotIn("legacy_missing",
+                         report["collections"]["patientmanager.daily_records"])
 
     def test_empty_and_absent_collections(self):
         report = run_audit({
