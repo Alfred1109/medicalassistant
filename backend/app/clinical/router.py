@@ -32,6 +32,7 @@ class GuidanceRequest(BaseModel):
 
 
 class FindingRequest(BaseModel):
+    expected_version: int = Field(ge=0, strict=True)
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     label: str = Field(min_length=1, max_length=80)
     value: str = Field(min_length=1, max_length=120)
@@ -60,6 +61,7 @@ class VoiceEventRequest(BaseModel):
 
 
 class ReviewRequest(BaseModel):
+    expected_version: int = Field(ge=0, strict=True)
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     accepted: bool
     note: str = Field(min_length=1, max_length=2000)
@@ -184,14 +186,14 @@ async def upload_report(patient_id: str, response: Response, report_date: str = 
 async def report_review(report_id: str, payload: ReviewRequest, response: Response,
                         actor=Depends(get_current_active_user), db=Depends(get_database)):
     _file(response)
-    return await workspace.review_report(db, actor, report_id, accepted=payload.accepted, note=payload.note)
+    return await workspace.review_report(db, actor, report_id, accepted=payload.accepted, note=payload.note, expected_version=payload.expected_version)
 
 
 @router.post("/reports/{report_id}/findings", status_code=201)
 async def report_finding(report_id: str, payload: FindingRequest, response: Response,
                          actor=Depends(get_current_active_user), db=Depends(get_database)):
     _file(response)
-    return await workspace.add_finding(db, actor, report_id, payload.label, payload.value, payload.unit)
+    return await workspace.add_finding(db, actor, report_id, payload.label, payload.value, payload.unit, expected_version=payload.expected_version)
 
 
 @router.get("/reports/{report_id}/content")

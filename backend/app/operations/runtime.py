@@ -1,19 +1,12 @@
-"""Admin settings that change a real local behavior, plus a secret-stripped backup."""
-import json
+"""Admin settings and a bounded export that retains patient information."""
 import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from fastapi.responses import Response
+from .data_export import EXPORT_COLLECTIONS as BACKUP_COLLECTIONS, data_export_bytes
 
 LOG_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
-BACKUP_COLLECTIONS = (
-    "users", "organizations", "tags", "system_settings", "user_preferences",
-    "consent_templates", "consent_documents", "followup_records", "rehab_plans",
-    "exercises", "notifications", "audit_logs",
-)
-SECRET_KEYS = {"password", "password_hash", "hashed_password", "refresh_tokens", "avatar_bytes",
-               "access_token", "secret", "api_key"}
 
 
 def _now():
@@ -31,6 +24,8 @@ def public_settings(row):
         "log_level": row.get("log_level") or "info",
         "login_notifications": row.get("login_notifications", True),
         "last_backup_at": row.get("last_backup_at"),
+        "last_data_export_at": row.get("last_data_export_at"),
+        "last_scheduled_export_at": row.get("last_scheduled_export_at"),
     }
 
 
@@ -57,38 +52,20 @@ async def session_timeout_minutes(db, default: int) -> int:
     return min(max(minutes, 15), 480)
 
 
-def _clean(value):
-    if isinstance(value, dict):
-        return {key: _clean(item) for key, item in value.items() if key not in SECRET_KEYS}
-    if isinstance(value, list):
-        return [_clean(item) for item in value]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if type(value).__name__ == "ObjectId":
-        return str(value)
-    return value
-
-
 async def backup_bytes(db) -> bytes:
-    exported = {"generated_at": _now().isoformat(), "collections": {}}
-    for name in BACKUP_COLLECTIONS:
-        rows = []
-        cursor = db[name].find({})
-        async for row in cursor:
-            rows.append(_clean(row))
-            if len(rows) >= 2000:
-                break
-        exported["collections"][name] = {"count": len(rows), "capped": len(rows) >= 2000, "rows": rows}
-    return json.dumps(exported, ensure_ascii=False).encode()
+    """Compatibility name for the limited business export."""
+    return await data_export_bytes(db)
 
 
 async def build_backup(db):
     body = await backup_bytes(db)
     await db.system_settings.update_one(
-        {"_id": "system"}, {"$set": {"last_backup_at": _now()}}, upsert=True)
+        {"_id": "system"}, {"$set": {"last_data_export_at": _now()}}, upsert=True)
     return Response(content=body, media_type="application/json", headers={
         "Content-Disposition": "attachment; filename=rehab-backup.json",
         "Cache-Control": "no-store",
+        "X-Artifact-Type": "limited-credentials-filtered-business-export",
+        "X-Database-Restorable": "false",
     })
 
 
@@ -114,14 +91,14 @@ class BackupSchedule:
             try:
                 await self.run_if_due(db)
             except Exception:
-                logging.warning("定时备份没有写成文件")
+                logging.warning("定时业务导出没有写成文件")
             await asyncio.sleep(3600)
 
     async def run_if_due(self, db):
         from pathlib import Path
         row = await db.system_settings.find_one({"_id": "system"}) or {}
         hours = {"hourly": 1, "daily": 24, "weekly": 24 * 7, "monthly": 24 * 30}.get(row.get("backup_frequency") or "daily", 24)
-        last = row.get("last_backup_at")
+        last = row.get("last_scheduled_export_at", row.get("last_backup_at"))
         if isinstance(last, datetime) and last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
         if isinstance(last, datetime) and _now() - last < timedelta(hours=hours):
@@ -131,7 +108,7 @@ class BackupSchedule:
         stamp = _now().strftime("%Y%m%dT%H%M%SZ")
         (folder / f"rehab-backup-{stamp}.json").write_bytes(await backup_bytes(db))
         await db.system_settings.update_one(
-            {"_id": "system"}, {"$set": {"last_backup_at": _now()}}, upsert=True)
+            {"_id": "system"}, {"$set": {"last_scheduled_export_at": _now()}}, upsert=True)
 
 
 backup_schedule = BackupSchedule()

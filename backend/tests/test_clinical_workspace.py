@@ -23,19 +23,21 @@ class Collection:
     async def insert_one(self, document):
         self.docs.append(document)
 
-    async def find_one(self, query):
+    async def find_one(self, query, **kwargs):
         for doc in self.docs:
-            if all(doc.get(key) == value for key, value in query.items()):
+            if all((doc.get(key) in value["$in"] if isinstance(value, dict) and "$in" in value else doc.get(key) == value) for key, value in query.items()):
                 return doc
         return None
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, **kwargs):
         for doc in self.docs:
-            if all(doc.get(key) == value for key, value in query.items()):
+            if all((doc.get(key) in value["$in"] if isinstance(value, dict) and "$in" in value else doc.get(key) == value) for key, value in query.items()):
                 doc.update(update.get("$set") or {})
+                return SimpleNamespace(matched_count=1)
+        return SimpleNamespace(matched_count=0)
 
-    def find(self, query):
-        rows = [doc for doc in self.docs if all(doc.get(key) == value for key, value in query.items())]
+    def find(self, query, projection=None, **kwargs):
+        rows = [doc for doc in self.docs if all((doc.get(key) in value["$in"] if isinstance(value, dict) and "$in" in value else doc.get(key) == value) for key, value in query.items())]
         return _Cursor(rows)
 
 
@@ -46,6 +48,9 @@ class _Cursor:
     def sort(self, key, direction=1):
         self.rows.sort(key=lambda doc: doc.get(key) or "", reverse=direction < 0)
         return self
+
+    async def to_list(self, length=None):
+        return list(self.rows if length is None else self.rows[:length])
 
     def __aiter__(self):
         self._index = 0
@@ -59,8 +64,23 @@ class _Cursor:
         return row
 
 
+class TestSession:
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *args):
+        return False
+    async def with_transaction(self, callback, **kwargs):
+        return await callback(self)
+
+
+class TestClient:
+    async def start_session(self):
+        return TestSession()
+
+
 class Database:
     def __init__(self):
+        self.client = TestClient()
         self.users = Collection()
         self.followup_records = Collection()
         self.rehab_plans = Collection()
@@ -134,8 +154,8 @@ class ClinicalWorkspaceTests(unittest.IsolatedAsyncioTestCase):
                                   content=b"%PDF", report_date="2026-11-10", stated_patient_id=str(patient_id))
         self.assertEqual(report["parse_status"], "not_parsed")
         self.assertEqual(report["extracted_values"], [])
-        reviewed = await review_report(db, doctor, report["id"], accepted=True, note="人工核对原件，未自动提取指标。")
-        finding = await add_finding(db, doctor, report["id"], "收缩压", "120", "mmHg")
+        reviewed = await review_report(db, doctor, report["id"], accepted=True, note="人工核对原件，未自动提取指标。", expected_version=0)
+        finding = await add_finding(db, doctor, report["id"], "收缩压", "120", "mmHg", expected_version=1)
         self.assertEqual(reviewed["review_status"], "reviewed")
         self.assertEqual(finding["parse_status"], "not_parsed")
         self.assertEqual(finding["findings"][0]["source"], "人工阅读原件")
@@ -234,8 +254,8 @@ class ClinicalWorkspaceTests(unittest.IsolatedAsyncioTestCase):
                                      low=90, high=140, icf_code="b420")
         report = await add_report(db, doctor, str(patient_id), filename="a.pdf", content_type="application/pdf",
                                   content=b"%PDF", report_date="2026-11-10", stated_patient_id=str(patient_id))
-        await review_report(db, doctor, report["id"], accepted=True, note="已核对原件")
-        await add_finding(db, doctor, report["id"], "收缩压", "150", "mmHg")
+        await add_finding(db, doctor, report["id"], "收缩压", "150", "mmHg", expected_version=0)
+        await review_report(db, doctor, report["id"], accepted=True, note="已核对原件", expected_version=1)
         result = await evaluate_indicators(db, doctor, str(patient_id))
         self.assertEqual(result["indicators"][0]["state"], "outside")
         self.assertEqual(result["indicators"][0]["icf_code"], "b420")

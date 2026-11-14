@@ -9,9 +9,15 @@ from pydantic import BaseModel, Field, EmailStr
 
 from ...core.dependencies import get_current_user
 from app.schemas.user import UserResponse
-from ...services.report_scheduler_service import report_scheduler_service
+from ...services.report_scheduler_service import ReportSchedulerService
+from app.db.mongodb import get_database
 
 router = APIRouter(prefix="/report-schedules", tags=["report-schedules"])
+
+
+def get_report_scheduler_service(db=Depends(get_database)):
+    """Request-scoped service; API calls do not start a scheduler loop."""
+    return ReportSchedulerService(db=db)
 
 
 # 数据模型
@@ -92,7 +98,8 @@ def format_schedule(schedule: dict) -> dict:
 @router.post("", response_model=dict)
 async def create_report_schedule(
     schedule: ReportScheduleCreate = Body(...),
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    service: ReportSchedulerService = Depends(get_report_scheduler_service),
 ):
     """
     创建报表调度计划
@@ -113,7 +120,7 @@ async def create_report_schedule(
     
     # 创建调度计划
     try:
-        schedule_id = await report_scheduler_service.create_schedule(schedule_data)
+        schedule_id = await service.create_schedule(schedule_data)
         return {"id": schedule_id, "message": "调度计划创建成功"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"创建调度计划失败: {str(e)}")
@@ -123,7 +130,8 @@ async def create_report_schedule(
 async def update_report_schedule(
     schedule_id: str = Path(..., description="调度计划ID"),
     schedule: ReportScheduleUpdate = Body(...),
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    service: ReportSchedulerService = Depends(get_report_scheduler_service),
 ):
     """
     更新报表调度计划
@@ -136,7 +144,7 @@ async def update_report_schedule(
     - 更新结果
     """
     # 获取现有调度计划
-    existing_schedule = await report_scheduler_service.get_schedule(schedule_id)
+    existing_schedule = await service.get_schedule(schedule_id)
     if not existing_schedule:
         raise HTTPException(status_code=404, detail="调度计划不存在")
     
@@ -150,7 +158,7 @@ async def update_report_schedule(
     
     # 更新调度计划
     try:
-        success = await report_scheduler_service.update_schedule(schedule_id, update_data)
+        success = await service.update_schedule(schedule_id, update_data)
         if success:
             return {"message": "调度计划更新成功"}
         else:
@@ -162,7 +170,8 @@ async def update_report_schedule(
 @router.delete("/{schedule_id}", response_model=dict)
 async def delete_report_schedule(
     schedule_id: str = Path(..., description="调度计划ID"),
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    service: ReportSchedulerService = Depends(get_report_scheduler_service),
 ):
     """
     删除报表调度计划
@@ -174,7 +183,7 @@ async def delete_report_schedule(
     - 删除结果
     """
     # 获取现有调度计划
-    existing_schedule = await report_scheduler_service.get_schedule(schedule_id)
+    existing_schedule = await service.get_schedule(schedule_id)
     if not existing_schedule:
         raise HTTPException(status_code=404, detail="调度计划不存在")
     
@@ -185,7 +194,7 @@ async def delete_report_schedule(
     
     # 删除调度计划
     try:
-        success = await report_scheduler_service.delete_schedule(schedule_id)
+        success = await service.delete_schedule(schedule_id)
         if success:
             return {"message": "调度计划删除成功"}
         else:
@@ -197,7 +206,8 @@ async def delete_report_schedule(
 @router.get("/{schedule_id}", response_model=ReportScheduleResponse)
 async def get_report_schedule(
     schedule_id: str = Path(..., description="调度计划ID"),
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    service: ReportSchedulerService = Depends(get_report_scheduler_service),
 ):
     """
     获取单个报表调度计划
@@ -209,7 +219,7 @@ async def get_report_schedule(
     - 调度计划详情
     """
     # 获取调度计划
-    schedule = await report_scheduler_service.get_schedule(schedule_id)
+    schedule = await service.get_schedule(schedule_id)
     if not schedule:
         raise HTTPException(status_code=404, detail="调度计划不存在")
     
@@ -226,7 +236,8 @@ async def get_report_schedule(
 async def get_report_schedules(
     report_id: Optional[str] = Query(None, description="按报表ID筛选"),
     user_id: Optional[str] = Query(None, description="按用户ID筛选"),
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    service: ReportSchedulerService = Depends(get_report_scheduler_service),
 ):
     """
     获取报表调度计划列表
@@ -247,7 +258,7 @@ async def get_report_schedules(
         user_id = current_user.id
     
     # 获取调度计划列表
-    schedules = await report_scheduler_service.get_schedules(user_id, report_id)
+    schedules = await service.get_schedules(user_id, report_id)
     
     # 格式化并返回
     return [format_schedule(schedule) for schedule in schedules]
@@ -257,7 +268,8 @@ async def get_report_schedules(
 async def toggle_report_schedule(
     schedule_id: str = Path(..., description="调度计划ID"),
     enabled: bool = Query(..., description="启用状态"),
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    service: ReportSchedulerService = Depends(get_report_scheduler_service),
 ):
     """
     启用或禁用报表调度计划
@@ -270,7 +282,7 @@ async def toggle_report_schedule(
     - 操作结果
     """
     # 获取现有调度计划
-    existing_schedule = await report_scheduler_service.get_schedule(schedule_id)
+    existing_schedule = await service.get_schedule(schedule_id)
     if not existing_schedule:
         raise HTTPException(status_code=404, detail="调度计划不存在")
     
@@ -281,7 +293,7 @@ async def toggle_report_schedule(
     
     # 切换状态
     try:
-        success = await report_scheduler_service.toggle_schedule(schedule_id, enabled)
+        success = await service.toggle_schedule(schedule_id, enabled)
         if success:
             return {"message": f"调度计划已{'启用' if enabled else '禁用'}"}
         else:

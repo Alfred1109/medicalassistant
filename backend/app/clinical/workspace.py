@@ -7,6 +7,7 @@ unconfirmed until someone saves it after listening. Indicator bounds are only th
 numbers a clinician stored. A clinician and a patient who both carry a source
 project must share that project.
 """
+from copy import deepcopy
 import hashlib
 import re
 from datetime import datetime, timezone
@@ -34,30 +35,30 @@ def _time_state(value):
     return "invalid"
 
 
-async def _actor(db, actor):
+async def _actor(db, actor, *, session=None):
     identifier = actor.id
     query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(str(identifier)) else {"_id": identifier}
-    return await db.users.find_one(query)
+    return await db.users.find_one(query, **({"session": session} if session is not None else {}))
 
 
-async def _patient_for(db, actor, patient_id):
+async def _patient_for(db, actor, patient_id, *, session=None):
     if actor.role == "patient":
         if str(actor.id) != str(patient_id):
             raise HTTPException(403, detail={"code": "PATIENT_NOT_ASSIGNED"})
-        return await load_patient_doc(db, patient_id)
+        return await load_patient_doc(db, patient_id, **({"session": session} if session is not None else {}))
     if actor.role not in CLINICAL_ROLES:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
     if actor.role == "admin":
-        return await load_patient_doc(db, patient_id)
+        return await load_patient_doc(db, patient_id, **({"session": session} if session is not None else {}))
     try:
-        patient = await ensure_patient_access(db, patient_id, str(actor.id), actor.role)
+        patient = await ensure_patient_access(db, patient_id, str(actor.id), actor.role, **({"session": session} if session is not None else {}))
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
         if status_code:
             raise HTTPException(status_code, detail={"code": getattr(exc, "error_code", "PATIENT_NOT_ASSIGNED"),
                                                      "message": str(exc)}) from None
         raise
-    viewer = await _actor(db, actor)
+    viewer = await _actor(db, actor, session=session)
     patient_project = patient.get("source_project_id")
     viewer_project = (viewer or {}).get("source_project_id")
     if patient_project and viewer_project and patient_project != viewer_project:
@@ -258,7 +259,7 @@ async def add_report(db, actor, patient_id, *, filename, content_type, content, 
     document = {"_id": ObjectId(), "patient_id": str(patient_id), "filename": (filename or "report")[:180],
                 "report_date": parsed_date.date().isoformat(), "uploaded_by": str(actor.id),
                 "parse_status": "not_parsed", "extracted_values": [], "review_status": "pending",
-                "review_note": "", "created_at": _now(), **stored}
+                "review_note": "", "mutation_version": 0, "content_revision": 1, "created_at": _now(), **stored}
     document["findings"] = []
     excerpt, source = await _report_excerpt(content, stored["content_type"])
     if excerpt and source:
@@ -367,7 +368,7 @@ def _pdf_first_page_bytes(content: bytes) -> bytes:
 
 async def _image_excerpt(content: bytes, content_type: str):
     """Ask the configured vision model to copy visible text. Failure leaves the report unparsed."""
-    import base64
+    import asyncio
     import os
     import app.core.config  # load the questionnaire vision settings into the environment
     key = os.getenv("VISION_API_KEY")
@@ -375,19 +376,28 @@ async def _image_excerpt(content: bytes, content_type: str):
     model = os.getenv("VISION_API_MODEL")
     if not key or not base or not model:
         return None
+    return await asyncio.to_thread(_image_excerpt_sync, content, content_type, key, base, model)
+
+
+def _image_excerpt_sync(content, content_type, key, base, model):
+    """Keep synchronous SDK work and client cleanup outside the request event loop."""
+    import base64
     try:
         from openai import OpenAI
         client = OpenAI(base_url=base, api_key=key)
-        encoded = base64.b64encode(content).decode()
-        completion = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": "只摘录图片上能看清的文字，不要补充图片里没有的数值。看不清就只回复看不清。不超过800字。"},
-                {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{encoded}"}},
-            ]}],
-        )
-        text = (completion.choices[0].message.content or "").strip()
+        try:
+            encoded = base64.b64encode(content).decode()
+            completion = client.chat.completions.create(
+                model=model,
+                temperature=0,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": "只摘录图片上能看清的文字，不要补充图片里没有的数值。看不清就只回复看不清。不超过800字。"},
+                    {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{encoded}"}},
+                ]}],
+            )
+            text = (completion.choices[0].message.content or "").strip()
+        finally:
+            client.close()
     except Exception:
         return None
     if not text or text == "看不清":
@@ -395,28 +405,105 @@ async def _image_excerpt(content: bytes, content_type: str):
     return text[:800]
 
 
-def _report_public(row, *, include_findings):
+def _report_public(row, *, include_findings, include_history=False):
     findings = row.get("findings") or [] if include_findings else []
-    return {"id": str(row["_id"]), "patient_id": row["patient_id"], "filename": row["filename"],
+    result = {"id": str(row["_id"]), "patient_id": row["patient_id"], "filename": row["filename"],
             "report_date": row["report_date"], "content_type": row["content_type"], "size": row["size"],
             "sha256": row["sha256"], "parse_status": row.get("parse_status") or "not_parsed",
             "extracted_values": list(row.get("extracted_values") or []) if include_findings else [],
             "findings": [{"label": item["label"], "value": item["value"], "unit": item.get("unit") or "",
                           "source": item.get("source") or "人工阅读原件", "report_id": str(row["_id"])} for item in findings],
-            "review_status": row.get("review_status") or "pending", "review_note": row.get("review_note") or ""}
+            "review_status": row.get("review_status") or "pending", "review_note": row.get("review_note") or "",
+            "mutation_version": _report_version(row), "content_revision": row.get("content_revision"),
+            "review_current": _reviewed_findings(row) is not None}
+    if include_history:
+        history = [{key: event.get(key) for key in
+                    ("action", "at", "actor_id", "note", "accepted", "content_revision")}
+                   for event in (row.get("review_history") or [])]
+        legacy = row.get("legacy_review")
+        if not legacy and "mutation_version" not in row and row.get("review_status") in {"reviewed", "rejected"}:
+            legacy = row
+        if legacy:
+            history.insert(0, {"action": "legacy_review", "at": legacy.get("reviewed_at"),
+                               "actor_id": legacy.get("reviewer_id"), "note": legacy.get("review_note"),
+                               "accepted": legacy.get("review_status") == "reviewed", "content_revision": None})
+        result["review_history"] = history
+    return result
+
+
+def _report_version(row):
+    value = row.get("mutation_version", 0)
+    if type(value) is not int or value < 0:
+        raise HTTPException(409, detail={"code": "REPORT_VERSION_INVALID"})
+    return value
+
+
+def _content_snapshot(row):
+    return {"findings": deepcopy(row.get("findings") or []),
+            "extracted_values": deepcopy(row.get("extracted_values") or []),
+            "sha256": row.get("sha256"), "report_date": row.get("report_date"), "patient_id": row.get("patient_id")}
+
+
+def _reviewed_findings(row):
+    snapshot = row.get("reviewed_snapshot")
+    revision = row.get("content_revision")
+    if (row.get("review_status") != "reviewed" or type(revision) is not int or revision < 1
+            or type(row.get("reviewed_content_revision")) is not int or row["reviewed_content_revision"] != revision
+            or not isinstance(snapshot, dict) or snapshot != _content_snapshot(row)):
+        return None
+    return snapshot["findings"]
 
 
 def _show_findings(actor, row):
-    return actor.role in CLINICAL_ROLES or row.get("review_status") == "reviewed"
+    return actor.role in CLINICAL_ROLES or _reviewed_findings(row) is not None
 
 
 async def list_reports(db, actor, patient_id):
     await _patient_for(db, actor, patient_id)
-    return [_report_public(row, include_findings=_show_findings(actor, row))
+    return [_report_public(row, include_findings=_show_findings(actor, row), include_history=actor.role in CLINICAL_ROLES)
             async for row in db.clinical_reports.find({"patient_id": str(patient_id)})]
 
 
-async def review_report(db, actor, report_id, *, accepted, note):
+async def _fence_report_access(db, actor, patient_id, session):
+    """Reuse clinical scope policy, then serialize with local authorization writes."""
+    patient = await _patient_for(db, actor, patient_id, session=session)
+    viewer = await _actor(db, actor, session=session)
+    if (not viewer or viewer.get("role") != actor.role or viewer.get("is_active", True) is False):
+        raise HTTPException(403, detail={"code": "ACCOUNT_CHANGED"})
+    documents = [viewer, patient]
+    for document in documents:
+        query = {"_id": document["_id"], "role": document.get("role"),
+                 "is_active": document.get("is_active"), "source_project_id": document.get("source_project_id")}
+        if document is patient:
+            for field in ("practitioners", "health_managers"):
+                query[field] = document.get(field)
+        result = await db.users.update_one(query, {"$inc": {"report_access_revision": 1}}, session=session)
+        if result.matched_count != 1:
+            raise HTTPException(409, detail={"code": "REPORT_ACCESS_CHANGED", "message": "患者权限已变化，请重新加载核实"})
+
+
+async def _write_report(db, actor, row, expected_version, values):
+    from app.db.transactions import run_transaction
+    if type(expected_version) is not int or expected_version < 0 or expected_version != _report_version(row):
+        raise HTTPException(409, detail={"code": "REPORT_CONFLICT", "message": "报告已变化，请重新加载后核实"})
+
+    async def persist(session):
+        current = await db.clinical_reports.find_one({"_id": row["_id"]}, session=session)
+        if (not current or _report_version(current) != expected_version
+                or _content_snapshot(current) != _content_snapshot(row)):
+            raise HTTPException(409, detail={"code": "REPORT_CONFLICT", "message": "报告已变化，请重新加载后核实"})
+        await _fence_report_access(db, actor, current["patient_id"], session)
+        query = {"_id": row["_id"], "mutation_version": row.get("mutation_version")}
+        result = await db.clinical_reports.update_one(query, {"$set": {**values, "mutation_version": expected_version + 1}}, session=session)
+        if result.matched_count != 1:
+            raise HTTPException(409, detail={"code": "REPORT_CONFLICT", "message": "报告已变化，请重新加载后核实"})
+        return {**row, **values, "mutation_version": expected_version + 1}
+
+    return await run_transaction(db, persist, error_code="REPORT_TRANSACTION_UNAVAILABLE",
+                                 error_message="报告事务未能确认提交，请重新加载核实；数据库需支持事务")
+
+
+async def review_report(db, actor, report_id, *, accepted, note, expected_version):
     if actor.role not in CLINICAL_ROLES:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
     if not ObjectId.is_valid(report_id):
@@ -428,15 +515,27 @@ async def review_report(db, actor, report_id, *, accepted, note):
     note = (note or "").strip()
     if not note:
         raise HTTPException(422, detail={"code": "REVIEW_NOTE_REQUIRED"})
+    revision = row.get("content_revision", 1)
+    if type(revision) is not int or revision < 1:
+        raise HTTPException(409, detail={"code": "REPORT_VERSION_INVALID"})
+    now = _now()
     status = "reviewed" if accepted else "rejected"
-    await db.clinical_reports.update_one(
-        {"_id": row["_id"]}, {"$set": {"review_status": status, "review_note": note,
-                                       "reviewer_id": str(actor.id), "reviewed_at": _now()}})
-    row.update(review_status=status, review_note=note)
-    return _report_public(row, include_findings=True)
+    snapshot = _content_snapshot(row)
+    event = {"action": "review", "at": now, "actor_id": str(actor.id), "note": note,
+             "accepted": accepted, "content_revision": revision, "snapshot": snapshot}
+    values = {"content_revision": revision, "review_status": status, "review_note": note,
+              "reviewer_id": str(actor.id), "reviewed_at": now,
+              "reviewed_content_revision": revision if accepted else None,
+              "reviewed_snapshot": snapshot if accepted else None,
+              "review_history": deepcopy(row.get("review_history") or []) + [event]}
+    # Preserve an unversioned legacy review as history rather than treating it as attestation.
+    if "mutation_version" not in row and row.get("review_status") in {"reviewed", "rejected"}:
+        values["legacy_review"] = {key: deepcopy(row.get(key)) for key in ("review_status", "review_note", "reviewer_id", "reviewed_at")}
+    updated = await _write_report(db, actor, row, expected_version, values)
+    return _report_public(updated, include_findings=True)
 
 
-async def add_finding(db, actor, report_id, label, value, unit):
+async def add_finding(db, actor, report_id, label, value, unit, *, expected_version):
     if actor.role not in CLINICAL_ROLES:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
     if not ObjectId.is_valid(report_id):
@@ -448,11 +547,19 @@ async def add_finding(db, actor, report_id, label, value, unit):
     label, value, unit = label.strip(), value.strip(), (unit or "").strip()
     if not label or not value or len(label) > 80 or len(value) > 120 or len(unit) > 40:
         raise HTTPException(422, detail={"code": "INVALID_FINDING"})
+    revision = row.get("content_revision", 1)
+    if type(revision) is not int or revision < 1:
+        raise HTTPException(409, detail={"code": "REPORT_VERSION_INVALID"})
     finding = {"label": label, "value": value, "unit": unit, "author_id": str(actor.id), "at": _now()}
-    findings = list(row.get("findings") or []) + [finding]
-    await db.clinical_reports.update_one({"_id": row["_id"]}, {"$set": {"findings": findings, "parse_status": "not_parsed"}})
-    row["findings"] = findings
-    return _report_public(row, include_findings=True)
+    archived = {"content_revision": revision, "snapshot": _content_snapshot(row),
+                "review": {key: deepcopy(row.get(key)) for key in
+                           ("review_status", "review_note", "reviewer_id", "reviewed_at", "reviewed_content_revision", "reviewed_snapshot")}}
+    updated = await _write_report(db, actor, row, expected_version, {
+        "findings": deepcopy(row.get("findings") or []) + [finding], "parse_status": "not_parsed",
+        "content_revision": revision + 1, "review_status": "pending", "review_note": "",
+        "reviewer_id": None, "reviewed_at": None, "reviewed_content_revision": None, "reviewed_snapshot": None,
+        "content_history": deepcopy(row.get("content_history") or []) + [archived]})
+    return _report_public(updated, include_findings=True)
 
 
 async def report_content(db, actor, report_id):
@@ -720,7 +827,7 @@ async def evaluate_indicators(db, actor, patient_id):
                 "message": "还没有医护录入的指标字典，这里不计算达标率或 ICF 评分。"}
     findings = []
     async for report in db.clinical_reports.find({"patient_id": str(patient_id), "review_status": "reviewed"}):
-        findings.extend(report.get("findings") or [])
+        findings.extend(_reviewed_findings(report) or [])
     rows = []
     for rule in rules:
         matches = [item for item in findings if item.get("label") == rule["source_label"]]
@@ -774,7 +881,7 @@ async def recorded_plan_sources(db, actor, patient_id):
               "psychology": _plain(lifestyle.get("psychology"))}
     reviewed = []
     async for report in db.clinical_reports.find({"patient_id": str(patient_id), "review_status": "reviewed"}):
-        for item in report.get("findings") or []:
+        for item in _reviewed_findings(report) or []:
             if item.get("label") == "报告文字摘录":
                 continue
             reviewed.append(" ".join(part for part in (item.get("label"), item.get("value"), item.get("unit")) if part))

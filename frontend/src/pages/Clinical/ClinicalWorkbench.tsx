@@ -16,7 +16,7 @@ interface Portrait {
 interface Material { id: string; title: string; body: string; assignment_id?: string; status?: string; feedback?: string; guidance?: string }
 interface Finding { label: string; value: string; unit: string; source: string }
 interface Extracted { label: string; value: string; unit: string; source: string }
-interface ReportRow { id: string; filename: string; report_date: string; parse_status: string; review_status: string; review_note: string; findings: Finding[]; extracted_values?: Extracted[] }
+interface ReportRow { review_history?: { action: string; note?: string; content_revision?: number | null; accepted?: boolean; at?: string }[]; mutation_version: number; review_current: boolean; id: string; filename: string; report_date: string; parse_status: string; review_status: string; review_note: string; findings: Finding[]; extracted_values?: Extracted[] }
 interface VoiceRow { id: string; transcription_status: string; transcript: string | null; size: number }
 interface IndicatorRow { id: string; label: string; source_label: string; unit: string; low: number | null; high: number | null; icf_code: string; state?: string; value?: string | null }
 interface IndicatorResult { configured: boolean; message: string; indicators: IndicatorRow[]; coverage?: { matched: number; defined: number } | null; within_bounds?: { inside: number; compared: number } | null }
@@ -175,11 +175,14 @@ export default function ClinicalWorkbench() {
         }} />
       </Button>
       {reports.map(row => <Box key={row.id}>
-        <Typography>{row.filename}，日期 {row.report_date}，识别状态：{row.parse_status === 'model_suggested' ? '已摘录，待审核' : '未自动识别'}，审核：{row.review_status === 'pending' ? '待人工审核' : row.review_status === 'reviewed' ? '已审核' : '已退回'}</Typography>
+        <Typography>{row.filename}，日期 {row.report_date}，识别状态：{row.parse_status === 'model_suggested' ? '已摘录，待审核' : '未自动识别'}，审核：{row.review_status === 'pending' ? '待人工审核' : row.review_status === 'reviewed' ? row.review_current ? '已审核当前内容' : '历史审核，需重新核实当前内容' : '已退回'}</Typography>
         <Typography color="text.secondary">从原文抽出的数字还不是已确认指标。人工填写的项目标明来自原件。</Typography>
         {(row.extracted_values || []).map(item => <Typography key={`${row.id}-x-${item.label}-${item.value}`}>{item.label} {item.value} {item.unit}（{item.source}）</Typography>)}
         {(row.findings || []).map(item => <Typography key={`${row.id}-${item.label}`}>{item.label} {item.value} {item.unit}（{item.source}）</Typography>)}
         {row.review_note && <Typography color="text.secondary">{row.review_note}</Typography>}
+        {clinical && row.review_history?.map((event, index) => <Typography key={`${row.id}-review-${index}`} variant="caption" display="block">
+          {event.content_revision ? `内容版本 ${event.content_revision}` : '历史未版本化审核'}：{event.accepted ? '通过' : '退回'}，{event.note || '未记录说明'}
+        </Typography>)}
         <Button size="small" onClick={async () => {
           const { data } = await httpClient.get(`/clinical/reports/${row.id}/content`, { responseType: 'blob' });
           window.open(URL.createObjectURL(data), '_blank');
@@ -189,9 +192,9 @@ export default function ClinicalWorkbench() {
           <TextField size="small" placeholder="项目" value={finding[row.id]?.label || ''} onChange={event => setFinding(current => ({ ...current, [row.id]: { ...current[row.id], label: event.target.value, value: current[row.id]?.value || '', unit: current[row.id]?.unit || '' } }))} />
           <TextField size="small" placeholder="结果" value={finding[row.id]?.value || ''} onChange={event => setFinding(current => ({ ...current, [row.id]: { ...current[row.id], label: current[row.id]?.label || '', value: event.target.value, unit: current[row.id]?.unit || '' } }))} />
           <TextField size="small" placeholder="单位" value={finding[row.id]?.unit || ''} onChange={event => setFinding(current => ({ ...current, [row.id]: { ...current[row.id], label: current[row.id]?.label || '', value: current[row.id]?.value || '', unit: event.target.value } }))} />
-          <Button size="small" onClick={async () => { const item = finding[row.id]; await httpClient.post(`/clinical/reports/${row.id}/findings`, item); await load(selected); }}>记入人工解读</Button>
-          <Button size="small" onClick={async () => { await httpClient.post(`/clinical/reports/${row.id}/review`, { accepted: true, note: reviewNote[row.id] || '' }); await load(selected); }}>通过审核</Button>
-          <Button size="small" color="warning" onClick={async () => { await httpClient.post(`/clinical/reports/${row.id}/review`, { accepted: false, note: reviewNote[row.id] || '' }); await load(selected); }}>退回</Button>
+          <Button size="small" onClick={async () => { const item = finding[row.id]; try { await httpClient.post(`/clinical/reports/${row.id}/findings`, { ...item, expected_version: row.mutation_version }); await load(selected); } catch { setError("报告可能已变化，请重新加载并核实后再操作。"); } }}>记入人工解读</Button>
+          <Button size="small" onClick={async () => { try { await httpClient.post(`/clinical/reports/${row.id}/review`, { accepted: true, note: reviewNote[row.id] || '', expected_version: row.mutation_version }); await load(selected); } catch { setError('报告可能已变化，请重新加载并核实后再审核。'); } }}>通过审核</Button>
+          <Button size="small" color="warning" onClick={async () => { try { await httpClient.post(`/clinical/reports/${row.id}/review`, { accepted: false, note: reviewNote[row.id] || '', expected_version: row.mutation_version }); await load(selected); } catch { setError('报告可能已变化，请重新加载并核实后再审核。'); } }}>退回</Button>
         </>}
       </Box>)}
     </Stack>}

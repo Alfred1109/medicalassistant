@@ -329,8 +329,7 @@ async def create_organization(
 
 
 # 标签管理
-# 说明：标签域当前没有数据模型与集合（app/models/ 无 tag 模型，后端无任何集合读写 tags）。
-# 按约定不发明集合：GET 如实返回真实空列表，POST 如实返回 501，待标签域建模后再实现。
+# 标签读写统一委托 directory.records，持久化到 tags 集合。
 class TagWrite(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=40)
@@ -445,7 +444,7 @@ async def write_operation_settings(payload: OperationsWrite, current_user: UserR
 @router.get("/settings/backup")
 async def download_backup(current_user: UserResponse = Depends(get_current_user),
                           db: AsyncIOMotorDatabase = Depends(get_database)):
-    """下载去掉密码、令牌和头像字节的数据文件。每个集合最多 2000 条。"""
+    """受限业务导出：移除部分凭据，仍含患者信息，不能用于恢复。"""
     await _require_admin(current_user)
     from app.operations.runtime import build_backup
     return await build_backup(db)

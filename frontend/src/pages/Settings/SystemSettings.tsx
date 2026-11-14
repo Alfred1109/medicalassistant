@@ -143,7 +143,7 @@ const SystemSettings: React.FC = () => {
         logLevel: data.log_level || 'info',
       });
       setSecuritySettings(current => ({ ...current, loginNotifications: data.login_notifications !== false, sessionTimeout: String(data.session_timeout_minutes ?? 480) }));
-      setLastBackup(data.last_backup_at ? new Date(data.last_backup_at).toLocaleString() : '');
+      setLastBackup(data.last_scheduled_export_at ? new Date(data.last_scheduled_export_at).toLocaleString() : data.last_backup_at ? `旧记录（未区分手动与定时）：${new Date(data.last_backup_at).toLocaleString()}` : '');
     }).catch(() => undefined);
     httpClient.get('/integrations/forms/catalog/runs/summary').then(({ data }) => {
       const projects = Array.isArray(data?.projects) ? data.projects : [];
@@ -206,7 +206,7 @@ const SystemSettings: React.FC = () => {
       anchor.click();
       URL.revokeObjectURL(url);
     } catch {
-      setNotification({ open: true, message: '备份没有下载。', severity: 'error' });
+      setNotification({ open: true, message: '业务数据导出没有下载。', severity: 'error' });
     }
   };
 
@@ -571,10 +571,10 @@ const SystemSettings: React.FC = () => {
                 
                 <Grid item xs={12} md={6}>
                   <FormControl fullWidth>
-                    <InputLabel>备份频率</InputLabel>
+                    <InputLabel>业务导出频率</InputLabel>
                     <Select
                       value={systemSettings.backupFrequency}
-                      label="备份频率"
+                      label="业务导出频率"
                       onChange={(e) => handleSystemSettingChange('backupFrequency', e.target.value)}
                     >
                       <MenuItem value="hourly">每小时</MenuItem>
@@ -603,11 +603,11 @@ const SystemSettings: React.FC = () => {
               </Grid>
 
               <Alert severity="info" sx={{ mt: 3, mb: 2 }}>
-                立即备份会下载一份去掉密码、令牌和头像的数据文件，每个集合最多 2000 条。服务保持运行时，会按备份频率在服务器数据目录再写一份同样的文件。上次备份：{lastBackup || '还没有'}。
+                业务导出仅移除部分凭据字段，仍含患者可识别信息，请按患者资料保管。每个指定集合最多 2000 条，不包含完整数据、索引或文件，不能用于数据库恢复。服务运行时按所选频率生成同类文件。上次定时导出：{lastBackup || '还没有'}。
               </Alert>
               <Box sx={{ display: 'flex', gap: 2 }}>
                 <Button variant="contained" startIcon={<SaveIcon />} onClick={saveOperations}>保存系统设置</Button>
-                <Button variant="outlined" startIcon={<BackupIcon />} color="info" onClick={downloadBackup}>立即备份</Button>
+                <Button variant="outlined" startIcon={<BackupIcon />} color="info" onClick={downloadBackup}>导出业务数据</Button>
               </Box>
             </Box>
           </TabPanel>

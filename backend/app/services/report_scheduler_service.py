@@ -23,18 +23,24 @@ logger = logging.getLogger(__name__)
 class ReportSchedulerService:
     """报表调度服务，负责管理报表的自动生成和分发"""
     
-    def __init__(self):
+    def __init__(self, db=None):
         """初始化报表调度服务"""
-        self.db = None
+        self.db = db
         self.is_running = False
         self._scheduler_task = None
+
+    async def _database(self):
+        """Use the request database when injected; retain standalone lifecycle support."""
+        if self.db is None:
+            self.db = await get_db()
+        return self.db
     
     async def start(self):
         """启动调度服务"""
         if self.is_running:
             return
         
-        self.db = await get_db()
+        await self._database()
         self.is_running = True
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("报表调度服务已启动")
@@ -503,7 +509,7 @@ class ReportSchedulerService:
     
     async def create_schedule(self, schedule_data: Dict[str, Any]) -> str:
         """创建新的报表调度计划"""
-        self.db = await get_db()
+        await self._database()
         
         # 设置创建时间
         schedule_data["createdAt"] = datetime.utcnow()
@@ -545,7 +551,7 @@ class ReportSchedulerService:
     
     async def update_schedule(self, schedule_id: str, schedule_data: Dict[str, Any]) -> bool:
         """更新报表调度计划"""
-        self.db = await get_db()
+        await self._database()
         
         # 移除不允许更新的字段
         for field in ["_id", "createdAt", "lastRunTime", "lastRunStatus"]:
@@ -609,13 +615,13 @@ class ReportSchedulerService:
     
     async def delete_schedule(self, schedule_id: str) -> bool:
         """删除报表调度计划"""
-        self.db = await get_db()
+        await self._database()
         result = await self.db.report_schedules.delete_one({"_id": ObjectId(schedule_id)})
         return result.deleted_count > 0
     
     async def get_schedule(self, schedule_id: str) -> Optional[Dict[str, Any]]:
         """获取单个报表调度计划"""
-        self.db = await get_db()
+        await self._database()
         schedule = await self.db.report_schedules.find_one({"_id": ObjectId(schedule_id)})
         if schedule:
             schedule["_id"] = str(schedule["_id"])
@@ -623,7 +629,7 @@ class ReportSchedulerService:
     
     async def get_schedules(self, user_id: Optional[str] = None, report_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取报表调度计划列表"""
-        self.db = await get_db()
+        await self._database()
         
         query = {}
         if user_id:
@@ -640,7 +646,7 @@ class ReportSchedulerService:
     
     async def toggle_schedule(self, schedule_id: str, enabled: bool) -> bool:
         """启用或禁用报表调度计划"""
-        self.db = await get_db()
+        await self._database()
         result = await self.db.report_schedules.update_one(
             {"_id": ObjectId(schedule_id)},
             {"$set": {"enabled": enabled}}
@@ -649,4 +655,4 @@ class ReportSchedulerService:
 
 
 # 创建服务实例
-report_scheduler_service = ReportSchedulerService() 
+report_scheduler_service = ReportSchedulerService()

@@ -7,7 +7,7 @@
 - GET /admin/organizations：organizations 集合真实查询；
 - POST /admin/doctors、/admin/patients、/admin/health-managers：走
   user_service.create_user 真实落库（含密码哈希），邮箱冲突 409；
-- GET /admin/tags：标签域无模型，真实空态 []；POST /admin/tags 如实 501；
+- GET/POST /admin/tags：真实空态、持久化、分类过滤、重复拒绝及权限；
 - 非 admin 角色 403。
 
 全部内存打桩 + FastAPI 依赖覆盖，不触碰真实数据库。
@@ -72,6 +72,16 @@ class FakeCursor:
     def limit(self, n):
         self._limit = n
         return self
+
+    def __aiter__(self):
+        self._iterator = iter(self._docs)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            raise StopAsyncIteration
 
     async def to_list(self, length=None):
         items = self._docs[self._skip:]
@@ -410,20 +420,54 @@ class SystemAdminRouterContractTests(unittest.IsolatedAsyncioTestCase):
         response = await self._client.get("/api/admin/organizations")
         self.assertEqual(response.status_code, 403, response.text)
 
-    # ---------- GET/POST /admin/tags（标签域无模型，诚实空态/501）----------
+    # ---------- GET/POST /admin/tags ----------
 
-    async def test_tags_empty_honest_no_model(self):
+    async def test_tags_empty_db_returns_empty_list(self):
         self._setup(FakeDatabase())
         response = await self._client.get("/api/admin/tags")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json(), [])
 
-    async def test_create_tag_not_implemented(self):
-        """标签域无数据模型/集合，创建如实 501，不再返回假 id。"""
-        self._setup(FakeDatabase())
-        response = await self._client.post("/api/admin/tags",
-                                           json={"name": "标签", "category": "康复"})
-        self.assertEqual(response.status_code, 501, response.text)
+    async def test_create_tag_persists_and_filters_category(self):
+        db = FakeDatabase()
+        self._setup(db)
+        payload = {"name": " 步行 ", "category": " 康复 ", "color": "#112233"}
+        response = await self._client.post("/api/admin/tags", json=payload)
+        self.assertEqual(response.status_code, 201, response.text)
+        tag = response.json()
+        self.assertTrue(ObjectId.is_valid(tag["id"]))
+        self.assertEqual(tag["name"], "步行")
+        self.assertEqual(tag["category"], "康复")
+        self.assertEqual(tag["color"], "#112233")
+        self.assertIn(ObjectId(tag["id"]), db.tags.docs)
+        listed = await self._client.get("/api/admin/tags", params={"category": "康复"})
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(listed.json(), [tag])
+        other = await self._client.get("/api/admin/tags", params={"category": "其他"})
+        self.assertEqual(other.status_code, 200, other.text)
+        self.assertEqual(other.json(), [])
+        duplicate = await self._client.post("/api/admin/tags", json=payload)
+        self.assertEqual(duplicate.status_code, 409, duplicate.text)
+        self.assertEqual(len(db.tags.docs), 1)
+
+    async def test_invalid_tag_is_not_persisted(self):
+        db = FakeDatabase()
+        self._setup(db)
+        response = await self._client.post("/api/admin/tags", json={"name": " ", "category": "康复"})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(db.tags.docs, {})
+
+    async def test_tags_non_admin_forbidden(self):
+        db = FakeDatabase()
+        self._setup(db, _make_user("doctor", "doctor@example.com"))
+        responses = [
+            await self._client.get("/api/admin/tags"),
+            await self._client.post("/api/admin/tags", json={"name": "步行", "category": "康复"}),
+            await self._client.delete(f"/api/admin/tags/{ObjectId()}"),
+        ]
+        for response in responses:
+            self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(db.tags.docs, {})
 
 
 if __name__ == "__main__":
