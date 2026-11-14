@@ -2,6 +2,8 @@
 
 本模块默认关闭。统一模式使用 113.44 验证身份，管理员逐个核实绑定后保留康复系统原有 actor、角色和对象授权。源端研究角色、同名账号或单纯 OIDC 身份声明不会获得康复权限。实验目录不用于生产；本地实现与隔离测试不代表现网已切换。
 
+> 2026-11-14 复核：源端（113.44 问卷系统）技术栈为 Flask + SQLAlchemy + SQLite（可选 SM4 字段加密），不是 FastAPI；部署为 gunicorn workers=1、nginx TLS 终结，`TRUSTED_PROXY_HOPS` 必须配置。下文「填报身份委托」所述的显式一对一配对与操作人解析已在源端实现并有测试。两端均为本地实现，未做真实 provider/RP 与浏览器全链路验收，本文不宣称跨端闭环已完成。
+
 启用配置 `OIDC_ENABLED=true`、`OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET`、`OIDC_PUBLIC_BASE_URL` 和独立持久 `OIDC_SESSION_ENCRYPTION_KEY`（Fernet 32 字节密钥的 urlsafe-base64 编码）。密钥保存在服务端私有配置，不进 Git。两项 URL 必须是精确 HTTPS 地址且末尾无 `/`；例如公开根可为 `https://care.example/medical`，预登记回调必须精确为 `https://care.example/medical/api/auth/oidc/callback`。配置不允许公开 HTTP 豁免。后端可在受控 Nginx 后运行 HTTP，浏览器入口与身份提供方对外连接仍需可信 TLS。
 
 `OIDC_AUTHENTICATION_MODE=legacy` 为默认值，保留原认证；此时 OIDC 只进行身份验证，不进入业务依赖。明确切到 `oidc` 后，所有业务 HTTP/WS 使用服务器会话，旧 JWT、密码登录/注册/刷新路由与服务签发入口均拒绝，源不可用不会回退旧身份。部署切换必须同时交付对应前端和源状态接口。
@@ -32,4 +34,6 @@ DEBUG=false backend/.venv/bin/python backend/scripts/manage_oidc_bindings.py bin
 
 填报身份委托要求源端私有 `OIDC_CLIENTS_FILE` 中，为该 OIDC 客户端显式配置 `integration_client_id`，其值为同一康复系统所用的源端集成客户端 ID；源端检查一对一关系，不凭两个 ID 相同推断配对。康复侧只从当前统一登录的服务器会话取得源令牌并经 HTTPS 传递；源端解析操作人，拒绝请求自带操作人 ID，令牌不明文保存到填报会话。缺少配对或源端结构迁移时拒绝填报。旧填报会话缺少身份委托材料时不能继续使用；上线迁移须先备份、隔离演练并核对旧任务处置。本地实现不代表已经配置或部署 113.44。
 
-隔离测试：`DEBUG=false REHAB_TEST_OIDC_MONGO_URI=mongodb://127.0.0.1:<隔离端口> PYTHONPATH=backend backend/.venv/bin/python -m pytest backend/tests/test_oidc_client.py`。仅接受显式本机 URI，各测试创建并清理独立数据库；测试真实 Mongo 一次性消费、JOSE 与 Cookie 路由，身份提供方 HTTP 使用注入 MockTransport，不修改系统或生产 TLS 策略。两端真实 provider/RP 和真实浏览器联调仍需另外验收。
+2026-11-14 复核确认上述要求已在源端实现并有测试：缺配对时源端以 503 拒绝填报；源端从 OIDC access token 解析操作人并在请求自带 `operator_user_id` 时拒绝。此外源端在打开、消费与委托请求中核验会话版本与授权代际（`FillSession.authority_generation`，Grant 撤销、成员撤销、客户端降级、中心停用、问卷关闭、受试者退出等入口触发 bump，与业务变更同事务提交；源端有并行在途改动，不锚定行号），提交时核验 presentation token；版本失效或代际落后即拒绝。
+
+隔离测试：`DEBUG=false REHAB_TEST_OIDC_MONGO_URI=mongodb://127.0.0.1:<隔离端口> PYTHONPATH=backend backend/.venv/bin/python -m pytest backend/tests/test_oidc_client.py`。仅接受显式本机 URI，各测试创建并清理独立数据库；测试真实 Mongo 一次性消费、JOSE 与 Cookie 路由，身份提供方 HTTP 使用注入 MockTransport，不修改系统或生产 TLS 策略。两端真实 provider/RP 和真实浏览器联调仍需另外验收（2026-11-14 复核仍未进行；两端均为本地实现，本文不宣称跨端闭环已完成）。
