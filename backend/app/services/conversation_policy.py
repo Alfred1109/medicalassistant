@@ -79,7 +79,10 @@ class ConversationPolicy:
         if user_id not in participant_ids(conversation):
             return PolicyDecision(False, REASON_NOT_PARTICIPANT)
 
-        # 第 2 层：有效账号（存在且启用；连接期内被停用即拒绝入站写）
+        # 第 2 层：有效账号（存在且启用；连接期内被停用即拒绝入站写）。
+        # 账号身份是会话成员的权威（app/patients/README.md：会话成员 ID 保持
+        # 账号 ID，不批量重写为患者 ID），本层账号语义保持不动；canonical
+        # 波段需经 patient_account_links 解析账号↔患者实体。
         user = await db.users.find_one({"_id": ObjectId(user_id)})
         if not user or not user.get("is_active", False):
             return PolicyDecision(False, REASON_ACCOUNT_INVALID)

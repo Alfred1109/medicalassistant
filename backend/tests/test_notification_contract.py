@@ -11,6 +11,7 @@
 - WS /ws/notifications 契约：连接即推真实未读数；离线消息触发实时推送
 """
 import asyncio
+import os
 import re
 import unittest
 from datetime import datetime
@@ -129,7 +130,9 @@ class FakeCollection:
         self.indexes[name] = definition
         return name
 
-    async def find_one(self, query):
+    async def find_one(self, query, projection=None):
+        # projection 形参对齐真实 Mongo 契约（如通知邮件路径的 {"email": 1}）；
+        # 桩不做投影裁剪，断言只关心是否命中文档。
         for doc in self.docs:
             if _matches(doc, query):
                 return dict(doc)
@@ -399,6 +402,67 @@ class NotificationServiceContractTests(unittest.IsolatedAsyncioTestCase):
             db, str(bob["_id"]), read=True
         )
         self.assertEqual(result_read, [])
+
+
+# ---------------------------------------------------------------------------
+# 邮件投递的账号层契约（_maybe_send_email）
+# ---------------------------------------------------------------------------
+
+class NotificationEmailContractTests(unittest.IsolatedAsyncioTestCase):
+    """_maybe_send_email 是账号层读取（T11 盘点）：收件人 email 来自其账号文档，
+    开关来自 user_preferences 账号偏好；不做患者角色过滤，医护账号同样投递。"""
+
+    MAIL_ENV = {"MAIL_SERVER": "smtp.test", "MAIL_USERNAME": "u",
+                "MAIL_PASSWORD": "p", "MAIL_DEFAULT_SENDER": "s"}
+
+    async def _deliver(self, db, recipient_id):
+        sent = []
+
+        def fake_smtp(address, title, content):  # _send_smtp 经 asyncio.to_thread 同步调用
+            sent.append(address)
+
+        with patch.dict(os.environ, self.MAIL_ENV), \
+                patch("app.services.notification_service._send_smtp", new=fake_smtp):
+            await NotificationService.create_notification(
+                db=db, title="t", content="c",
+                sender_id=str(ObjectId()), sender_name="x", sender_role="doctor",
+                recipient_id=recipient_id,
+            )
+            await _drain_tasks()
+        return sent
+
+    async def test_email_uses_recipient_account_address_without_role_filter(self):
+        for role in ("patient", "doctor"):
+            with self.subTest(role=role):
+                db = FakeDB()
+                account_id = str(ObjectId())
+                db.user_preferences.docs.append(
+                    {"_id": account_id, "notifications": {"enableEmail": True}})
+                db.users.docs.append(
+                    {"_id": ObjectId(account_id), "role": role,
+                     "email": f"{role}@example.com"})
+                # 他人账号在场，验证取的是收件人本人账号的 email
+                db.users.docs.append(
+                    {"_id": ObjectId(), "role": "patient", "email": "other@example.com"})
+
+                self.assertEqual(await self._deliver(db, account_id),
+                                 [f"{role}@example.com"])
+
+    async def test_email_skipped_when_prefs_disabled_or_account_missing(self):
+        db = FakeDB()
+        account_id = str(ObjectId())
+        db.user_preferences.docs.append(
+            {"_id": account_id, "notifications": {"enableEmail": False}})
+        db.users.docs.append(
+            {"_id": ObjectId(account_id), "role": "patient", "email": "bob@example.com"})
+        self.assertEqual(await self._deliver(db, account_id), [])
+
+        # 偏好开启但账号文档缺失 → 不投递
+        db2 = FakeDB()
+        other_id = str(ObjectId())
+        db2.user_preferences.docs.append(
+            {"_id": other_id, "notifications": {"enableEmail": True}})
+        self.assertEqual(await self._deliver(db2, other_id), [])
 
 
 # ---------------------------------------------------------------------------

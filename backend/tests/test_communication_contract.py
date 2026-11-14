@@ -15,6 +15,8 @@ WS01 通信契约测试
   保留审计与原文引用完整性、不硬删
 - D7 事件信封：message / read_receipt / delete_message 帧携带 server_seq
   （_id 大端单调整数，插入型事件重放稳定）
+- 会话对方资料读取：经 legacy 身份分组双字面兼容（歧义 fail-closed），
+  消息/会话响应格式不变
 - 启动集合边界：普通启动不隐式建集合，索引声明跳过空库，
   首个写请求落库前建立索引（test_demo_auth_boundary 回归的契约面）
 - 死代码删除后 import app.main 正常（本模块顶部 import 即隐式覆盖）
@@ -169,7 +171,8 @@ class FakeCollection:
     async def count_documents(self, query):
         return sum(1 for doc in self.docs if _matches(doc, query))
 
-    def find(self, query):
+    def find(self, query, projection=None, **kwargs):
+        # projection/session 为 legacy 身份分组读取（load_identity_groups）的兼容形参
         return FakeCursor([dict(doc) for doc in self.docs if _matches(doc, query)])
 
 
@@ -1135,6 +1138,79 @@ class ConversationPolicyDecisionTests(unittest.IsolatedAsyncioTestCase):
             await CommunicationService.send_message(
                 db, conversation_id, str(alice["_id"]), "ghost")
         self.assertEqual(len(db.messages.docs), 0)
+
+
+# ---------------------------------------------------------------------------
+# 会话对方资料读取（第一波段患者解析收敛：legacy 身份分组双字面兼容）
+# ---------------------------------------------------------------------------
+
+class ParticipantProfileResolutionTests(unittest.IsolatedAsyncioTestCase):
+    """会话对方资料读取契约（消息/会话响应格式不变）：
+
+    - 成员 ID 仍是账号身份，对方可能是医护或患者账号（不做患者角色过滤，
+      /api/patients/communications 契约的 other_user 即医生）；
+    - 读取经 legacy 身份分组：ObjectId/字符串双字面兼容（原实现 ObjectId-only，
+      非 ObjectId 账号 ID 会导致列表报错）；
+    - 同键多文档（身份歧义）与适配器一致 fail-closed（PATIENT_IDENTITY_AMBIGUOUS）。
+    """
+
+    async def _seed(self, db, alice, other_id):
+        conversation_id = str(ObjectId())
+        db.conversations.docs.append({
+            "_id": ObjectId(conversation_id),
+            "participant1_id": str(alice["_id"]),
+            "participant2_id": other_id,
+            "type": "chat",
+            "status": "active",
+            "created_at": datetime.utcnow(),
+            "last_message_time": datetime.utcnow(),
+            "last_message_preview": "",
+            "metadata": {},
+        })
+        return conversation_id
+
+    async def test_non_objectid_account_id_resolves_counterpart_profile(self):
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        legacy_patient = {"_id": "legacy-patient-001", "name": "老病案号",
+                          "role": "patient", "is_active": True}
+        db.users.docs.extend([dict(alice), legacy_patient])
+        conversation_id = await self._seed(db, alice, "legacy-patient-001")
+
+        conversations = await CommunicationService.get_conversations(db, str(alice["_id"]))
+        self.assertEqual(conversations[0]["other_user"]["name"], "老病案号")
+        self.assertEqual(conversations[0]["other_user"]["role"], "patient")
+
+        detail = await CommunicationService.get_conversation(db, conversation_id, str(alice["_id"]))
+        self.assertEqual(detail["participant2"]["name"], "老病案号")
+        self.assertEqual(detail["participant2"]["role"], "patient")
+
+    async def test_missing_counterpart_still_omits_profile_without_failure(self):
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        db.users.docs.append(dict(alice))
+        conversation_id = await self._seed(db, alice, str(ObjectId()))
+        # 对方账号不存在：资料字段不注入，但不失败（既有兜底语义）
+        conversations = await CommunicationService.get_conversations(db, str(alice["_id"]))
+        self.assertNotIn("other_user", conversations[0])
+        detail = await CommunicationService.get_conversation(db, conversation_id, str(alice["_id"]))
+        self.assertNotIn("participant2", detail)
+
+    async def test_ambiguous_identity_is_fail_closed(self):
+        from app.patients.legacy import LegacyPatientIdentityError
+        db = FakeDB()
+        alice = make_user("Alice", "doctor")
+        hex_id = "64b0f1c2a3b4c5d6e7f80901"
+        db.users.docs.extend([dict(alice),
+                              {"_id": hex_id, "name": "串号A", "role": "patient"},
+                              {"_id": ObjectId(hex_id), "name": "串号B", "role": "patient"}])
+        conversation_id = await self._seed(db, alice, hex_id)
+
+        with self.assertRaises(LegacyPatientIdentityError) as caught:
+            await CommunicationService.get_conversations(db, str(alice["_id"]))
+        self.assertEqual(caught.exception.error_code, "PATIENT_IDENTITY_AMBIGUOUS")
+        with self.assertRaises(LegacyPatientIdentityError):
+            await CommunicationService.get_conversation(db, conversation_id, str(alice["_id"]))
 
 
 # ---------------------------------------------------------------------------

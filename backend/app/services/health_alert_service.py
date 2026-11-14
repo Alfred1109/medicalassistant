@@ -32,6 +32,10 @@ class HealthAlertService:
         self.thresholds: AsyncIOMotorCollection = db[HealthDataThreshold.collection_name]
         # 健康数据预警集合
         self.alerts: AsyncIOMotorCollection = db[HealthDataAlert.collection_name]
+        # 患者读取盘点（T11 2026-11-14）：本服务不读 users/patients——patient_id
+        # 是调用方传入的字面量，直存直查自有 alerts 集合（无患者资料/存在性/
+        # 归属校验，授权由路由层承担）。canonical 波段若患者 ID 形态变化，
+        # alerts 内的历史字面量迁移属该集合自身的数据改造，不在患者适配器范围。
         
     async def initialize(self):
         """初始化服务，创建索引等"""

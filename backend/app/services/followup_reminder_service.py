@@ -13,6 +13,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import AppBaseException
 from app.db.transactions import run_followup_transaction
+from app.patients.legacy import LegacyPatientRepository
 from app.services.followup_service import FollowupService
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,9 @@ class FollowupReminderService:
         self.followups = FollowupService(db)
 
     async def _account(self, identifier, session):
+        # 账号层读取（本服务内仅用于医护侧 provider）：doctor/health_manager
+        # 账号的存在性与启停判断沿用双键直查语义，不是患者资料读取。
+        # 患者账号读取已收敛到 LegacyPatientRepository（见 _recipients）。
         if not isinstance(identifier, str) or not identifier:
             return None
         keys = [identifier]
@@ -77,8 +81,15 @@ class FollowupReminderService:
                                     {"$inc": {"_reminder_fence": 1}}, session=session)
 
     async def _recipients(self, record, session):
-        patient = await self._account(record.get("patient_id"), session)
-        if not patient or patient.get("role") != "patient" or patient.get("is_active") is not True:
+        # 患者账号读取收敛到 legacy 患者适配器（LegacyPatientRepository.get）：
+        # ObjectId/字符串双字面兼容，同键多文档由适配器 fail-closed
+        # （PATIENT_IDENTITY_AMBIGUOUS），role=patient 由适配器保证；is_active
+        # 判断按既有语义保留。账号缺失仍维持 PATIENT_ACCOUNT_UNAVAILABLE 兜底，
+        # 收件人（recipient_id）依旧是账号 ID（见 app/patients/README.md）。
+        identifier = record.get("patient_id")
+        patient = (await LegacyPatientRepository(self.db).get(identifier, session=session)
+                   if isinstance(identifier, str) and identifier else None)
+        if not patient or patient.get("is_active") is not True:
             return [("patient", None, "PATIENT_ACCOUNT_UNAVAILABLE"),
                     ("provider", None, "PATIENT_ACCOUNT_UNAVAILABLE")], []
         provider = await self._account(record.get("provider_id"), session)

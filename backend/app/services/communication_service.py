@@ -10,6 +10,8 @@ from pymongo.errors import DuplicateKeyError
 import asyncio
 import logging
 
+from app.core.patient_identity import identity_key, load_identity_groups
+from app.patients.legacy import LegacyPatientIdentityError
 from app.services.notification_service import NotificationService
 from app.services.conversation_policy import (
     ConversationPolicy,
@@ -47,6 +49,26 @@ class CommunicationService:
         全序属 D11/WS04 范畴。
         """
         return int.from_bytes(oid.binary, "big")
+
+    @staticmethod
+    async def _participant_profile(db: AsyncIOMotorClient, identifier) -> Optional[Dict[str, Any]]:
+        """会话对方资料读取（第一波段行为等价）。
+
+        会话成员 ID 仍是账号身份（app/patients/README.md：会话成员/审计操作人
+        继续用账号 ID，不批量重写为患者 ID），对方可能是医护或患者账号，因此
+        不走 load_patient_doc 的患者角色过滤，而是复用患者适配器同源的 legacy
+        身份分组读取：ObjectId/字符串双字面兼容；同键多文档与适配器一致
+        fail-closed（PATIENT_IDENTITY_AMBIGUOUS），不静默挑选。
+        canonical 波段改为经 patient_account_links 解析账号↔患者实体。
+        """
+        value = str(identifier) if identifier else ""
+        if not value:
+            return None
+        groups = await load_identity_groups(db, [value])
+        documents = groups.get(identity_key(value), [])
+        if len(documents) > 1:
+            raise LegacyPatientIdentityError()
+        return documents[0] if documents else None
 
     @staticmethod
     async def is_conversation_participant(
@@ -126,8 +148,8 @@ class CommunicationService:
                     db, conversation["id"], user_id
                 )
             
-            # 获取对话对象的基本信息
-            other_user = await db.users.find_one({"_id": ObjectId(other_user_id)})
+            # 获取对话对象的基本信息（经 legacy 身份分组读取，双字面兼容）
+            other_user = await CommunicationService._participant_profile(db, other_user_id)
             if other_user:
                 conversation["other_user"] = {
                     "id": str(other_user["_id"]),
@@ -156,9 +178,9 @@ class CommunicationService:
         conversation["id"] = str(conversation["_id"])
         del conversation["_id"]
         
-        # 获取对话参与者信息
-        participant1 = await db.users.find_one({"_id": ObjectId(conversation["participant1_id"])})
-        participant2 = await db.users.find_one({"_id": ObjectId(conversation["participant2_id"])})
+        # 获取对话参与者信息（经 legacy 身份分组读取，双字面兼容）
+        participant1 = await CommunicationService._participant_profile(db, conversation["participant1_id"])
+        participant2 = await CommunicationService._participant_profile(db, conversation["participant2_id"])
         
         if participant1:
             conversation["participant1"] = {
@@ -229,6 +251,9 @@ class CommunicationService:
         # 真实业务事件触发点：新会话建立 → 通知受邀参与者（participant2）。
         # 通知失败不影响会话创建（notification_service 内部已兜底 WS 推送失败）。
         try:
+            # 账号层读取：发起人是审计操作人账号（会话成员/审计操作人保持账号
+            # ID，见 app/patients/README.md），仅取通知展示用的 name/role，
+            # 保留直查语义；canonical 波段经 patient_account_links 解析。
             sender = await db.users.find_one({"_id": ObjectId(participant1_id)})
             await NotificationService.create_notification(
                 db=db,
@@ -415,7 +440,8 @@ class CommunicationService:
             # 如果接收者不在线，发送通知
             active_users = manager.get_active_users_in_chat(conversation_id)
             if recipient_id not in active_users:
-                # 获取发送者信息
+                # 账号层读取：发送者是审计操作人账号，仅取通知展示用的 name/role，
+                # 保留直查语义（同 create_conversation）。
                 sender = await db.users.find_one({"_id": ObjectId(sender_id)})
                 
                 if sender:
@@ -603,6 +629,8 @@ class CommunicationService:
                         if user_id == conversation["participant1_id"]
                         else conversation["participant1_id"]
                     )
+                    # 账号层读取：撤回操作人是审计操作人账号，仅取通知展示用的
+                    # name/role，保留直查语义（同 create_conversation）。
                     sender = await db.users.find_one({"_id": ObjectId(user_id)})
                     await NotificationService.create_notification(
                         db=db,

@@ -75,7 +75,9 @@ async def create_conversation(
     """创建新对话"""
     user_id = str(current_user.id)
     
-    # 检查参与者是否存在
+    # 检查参与者是否存在（账号层语义保持不动）：参与者以账号身份入会
+    # （app/patients/README.md：会话成员 ID 保持账号 ID）；canonical 波段
+    # 需经 patient_account_links 解析账号↔患者实体。
     participant = await db.users.find_one({"_id": conversation.participant_id})
     if not participant:
         raise HTTPException(status_code=404, detail="指定的参与者不存在")

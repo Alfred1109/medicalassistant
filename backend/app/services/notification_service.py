@@ -288,7 +288,14 @@ def _send_smtp(recipient: str, title: str, content: str) -> None:
 
 
 async def _maybe_send_email(db, recipient_id: str, title: str, content: str) -> None:
-    """Send only when this account turned email on and local mail settings exist."""
+    """Send only when this account turned email on and local mail settings exist.
+
+    账号层读取（T11 盘点 2026-11-14）：recipient_id 是账号身份（notifications
+    的 recipient_id 即账号 ID，见 app/patients/README.md：账号身份不批量重写），
+    此处 user_preferences 开关与 users.email 都是收件人账号的投递属性，不是
+    患者资料读取，不走患者适配器、无患者角色过滤（医护账号同样收邮件）。
+    canonical 波段 email 若随账号链接迁移，属账号域改造，与本服务无关。
+    """
     if not os.getenv("MAIL_SERVER") or not os.getenv("MAIL_USERNAME") or not os.getenv("MAIL_PASSWORD"):
         return
     try:
