@@ -33,6 +33,8 @@ from datetime import datetime, timedelta, timezone
 from copy import deepcopy
 from hashlib import sha256
 from app.patients.legacy import LegacyPatientRepository
+from app.patients.repository import ClinicalPatientRepository
+from app.core.patient_access import patient_domain_mode
 from bson import encode
 from app.core.exceptions import AppBaseException
 from app.db.transactions import run_followup_transaction
@@ -381,8 +383,17 @@ class FollowupService:
             query["scheduled_date"] = dates
 
         if patient_name:
-            matched_ids = await LegacyPatientRepository(self.db).matching_name_ids(
-                patient_name, patient_ids=scope)
+            # T55 canonical 演练修复：姓名搜索按域分派。canonical 下 patient_id
+            # 是 clinical_patients 主键，legacy 适配器（users）读不到无账号患者，
+            # 会把命中的随访静默过滤成空（且 users 歧义防护语义不适用于
+            # canonical）。canonical 分支执行于 clinical_patients（同名匹配语义
+            # 与 legacy 适配器一致，见 repository.matching_name_ids）。
+            if await patient_domain_mode(self.db) == "canonical":
+                matched_ids = await ClinicalPatientRepository(self.db).matching_name_ids(
+                    patient_name, patient_ids=scope)
+            else:
+                matched_ids = await LegacyPatientRepository(self.db).matching_name_ids(
+                    patient_name, patient_ids=scope)
             if scope is not None:
                 matched_ids.intersection_update(scope)
             query["patient_id"] = {"$in": sorted(matched_ids)}
