@@ -78,6 +78,33 @@ unknown; a crash or uncertain Mongo commit must be investigated without loading
 an old backup. Success adds a separate immutable committed receipt. Subsequent
 invocations never overwrite or refresh an existing canonical domain.
 
+### Noop rerun verification and latecomer patients (post-cutover)
+
+Re-running the apply command against an already canonical domain is not a
+silent noop. It re-reads the current `role: "patient"` documents (the same
+scope as the recorded checksum) and verifies two post-cutover hazards:
+
+- **Baseline drift fails closed.** The fingerprint of the documents covered by
+  the migration baseline — those with a `legacy_same_document` account link —
+  is recomputed and compared with the `legacy_sha256` recorded in
+  `patient_domain_state`. Any difference raises `LEGACY_BASELINE_DRIFTED`
+  carrying both digests (baseline vs. current) and any detected latecomer IDs,
+  and nothing is written. A legacy patient document was modified or deleted
+  after cutover, so canonical and legacy data may have diverged; reconcile
+  manually before any further migration attempt.
+- **Latecomer patients are reported, never auto-migrated.** Legacy patient
+  documents that appear after cutover (no `legacy_same_document` link, hence
+  outside the recorded baseline) do not trigger the drift error; the rerun
+  stays a verified noop and returns their `_id` values in `latecomer_ids`.
+  They are not migrated automatically. **Open decision (pending business
+  confirmation):** the concrete latecomer handling workflow — a per-patient
+  reviewed migration command or a new audited batch tool — is deliberately not
+  implemented in this library.
+
+Baseline coverage is inferred from the `legacy_same_document` links written at
+migration time. If such a link is removed manually later, its patient document
+is conservatively reported as a latecomer rather than silently ignored.
+
 ## Domain switch (patient_access kernel dispatch)
 
 The authorization kernel `app/core/patient_access.py` reads the durable

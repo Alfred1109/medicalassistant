@@ -250,10 +250,11 @@ class PatientMigrationDrillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db[ACCOUNT_LINKS].find_one({}), link_before)
         self.assertEqual(await self.db[STATE].find_one({"_id": STATE_ID}), state_before)
 
-        # cutover 后新增的 legacy 患者不会被 noop 重跑补迁（语义缺口见报告）
+        # cutover 后新增的 legacy 患者不会被 noop 重跑补迁（T17：随结果上报 latecomer_ids）
         await self.db.users.insert_one({"_id": "latecomer-p", "role": "patient", "name": "late"})
         third = await self.migrate()
         self.assertTrue(third["verified_noop"])
+        self.assertEqual(third["latecomer_ids"], ["latecomer-p"])
         self.assertEqual(await self.db[PATIENTS].count_documents({}), 1)
         self.assertEqual(await self.db[ACCOUNT_LINKS].count_documents({}), 1)
         self.assertIsNone(await self.db[PATIENTS].find_one({"_id": "latecomer-p"}))
@@ -323,6 +324,83 @@ class PatientMigrationDrillTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PatientDomainError) as rejected:
             await self.repo.resolve_self("patient-1")
         self.assertEqual(rejected.exception.code, "PATIENT_DOMAIN_NOT_MIGRATED")
+
+    # ---- 场景 8：noop 重跑基线漂移 fail-closed（T17 缺口 1）----
+
+    async def test_noop_rerun_fails_closed_on_legacy_baseline_drift(self):
+        await self.seed_users([{"_id": "patient-1", "role": "patient", "name": "drill"}])
+        self.assertEqual((await self.migrate())["migrated_count"], 1)
+        state = await self.db[STATE].find_one({"_id": STATE_ID})
+
+        # 未篡改：verified_noop 且 latecomer_ids 为空
+        clean = await self.migrate()
+        self.assertTrue(clean["verified_noop"])
+        self.assertEqual(clean["latecomer_ids"], [])
+
+        # 迁移后篡改 legacy 患者文档（如 role 侧字段漂移）→ rerun fail-closed
+        await self.db.users.update_one({"_id": "patient-1"}, {"$set": {"name": "tampered"}})
+        with self.assertRaises(PatientDomainError) as drifted:
+            await self.migrate()
+        self.assertEqual(drifted.exception.code, "LEGACY_BASELINE_DRIFTED")
+        message = str(drifted.exception)
+        # 错误信息携带双方指纹摘要：state 记录的基线指纹与当前 legacy 文档指纹
+        self.assertIn(state["legacy_sha256"], message)
+        self.assertIn(fingerprint(await self.db.users.find(
+            {"role": "patient"}).sort("_id", 1).to_list(None)), message)
+        # fail-closed：canonical 侧未被改动，legacy 文档保持篡改现状待人工核查
+        self.assertEqual(await self.db[PATIENTS].count_documents({}), 1)
+        self.assertEqual((await self.db[PATIENTS].find_one({"_id": "patient-1"}))["name"],
+                         "drill")
+        self.assertEqual((await self.db[STATE].find_one({"_id": STATE_ID})), state)
+
+        # 删除基线患者同样算漂移（集合收缩偏离基线）
+        await self.db.users.update_one({"_id": "patient-1"}, {"$set": {"name": "drill"}})
+        await self.db.users.delete_one({"_id": "patient-1"})
+        with self.assertRaises(PatientDomainError) as deleted:
+            await self.migrate()
+        self.assertEqual(deleted.exception.code, "LEGACY_BASELINE_DRIFTED")
+
+        # 恢复原样后同一库重跑回到干净 noop
+        await self.seed_users([{"_id": "patient-1", "role": "patient", "name": "drill"}])
+        restored = await self.migrate()
+        self.assertTrue(restored["verified_noop"])
+        self.assertEqual(restored["latecomer_ids"], [])
+
+    # ---- 场景 9：晚到患者只上报不补迁（T17 缺口 2，保守策略）----
+
+    async def test_noop_rerun_reports_latecomers_without_auto_migration(self):
+        await self.seed_users([{"_id": "patient-1", "role": "patient", "name": "drill"}])
+        self.assertEqual((await self.migrate())["migrated_count"], 1)
+
+        # 迁移后插入新 legacy 患者文档：rerun 仍 verified_noop，latecomer_ids 上报
+        await self.db.users.insert_one({"_id": "latecomer-p", "role": "patient", "name": "late"})
+        rerun = await self.migrate()
+        self.assertTrue(rerun["verified_noop"])
+        self.assertEqual(rerun["latecomer_ids"], ["latecomer-p"])
+        # 不自动补迁：clinical/链接集合均无该患者
+        self.assertEqual(await self.db[PATIENTS].count_documents({}), 1)
+        self.assertEqual(await self.db[ACCOUNT_LINKS].count_documents({}), 1)
+        self.assertIsNone(await self.db[PATIENTS].find_one({"_id": "latecomer-p"}))
+        self.assertEqual(await self.db[ACCOUNT_LINKS].count_documents(
+            {"account_id": "latecomer-p"}), 0)
+        self.assertIsNone(await self.repo.resolve_self("latecomer-p"))
+
+        # 晚到患者不影响基线校验：基线集合指纹仍与 state 一致（未触发漂移错误）
+        self.assertEqual((await self.db[STATE].find_one({"_id": STATE_ID}))["mode"],
+                         "canonical")
+
+        # 基线漂移与晚到并存：仍 fail-closed，错误信息同时携带双方指纹与晚到 _id
+        await self.db.users.update_one({"_id": "patient-1"}, {"$set": {"name": "tampered"}})
+        with self.assertRaises(PatientDomainError) as drifted:
+            await self.migrate()
+        self.assertEqual(drifted.exception.code, "LEGACY_BASELINE_DRIFTED")
+        message = str(drifted.exception)
+        self.assertIn((await self.db[STATE].find_one({"_id": STATE_ID}))["legacy_sha256"],
+                      message)
+        self.assertIn("latecomer-p", message)
+        # 当前指纹只覆盖基线集合（排除晚到者），仍可被人工核对
+        baseline = await self.db.users.find({"role": "patient", "_id": {"$ne": "latecomer-p"}}).sort("_id", 1).to_list(None)
+        self.assertIn(fingerprint(baseline), message)
 
 
 @unittest.skipUnless(os.environ.get("REHAB_TEST_PATIENT_MIGRATION_STANDALONE_URI"),

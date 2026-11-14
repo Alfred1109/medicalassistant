@@ -300,20 +300,29 @@ class ClinicalPatientMongoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_self_access_requires_live_explicit_relation_and_never_recreates_it(self):
         await self.migrate()
-        for collection, query, update, restore in (
-            ("users", {"_id": self.patient_id}, {"is_active": False}, {"is_active": True}),
-            ("users", {"_id": self.patient_id}, {"role": "doctor"}, {"role": "patient"}),
-            (PATIENTS, {"_id": self.patient_id}, {"status": "inactive"}, {"status": "active"}),
-            ("patient_account_links", {}, {"status": "disabled"}, {"status": "verified"}),
-            ("patient_account_links", {}, {"patient_id": str(self.doctor_id)}, {"patient_id": str(self.patient_id)}),
+        for collection, query, update, restore, drifted in (
+            ("users", {"_id": self.patient_id}, {"is_active": False}, {"is_active": True}, True),
+            ("users", {"_id": self.patient_id}, {"role": "doctor"}, {"role": "patient"}, True),
+            (PATIENTS, {"_id": self.patient_id}, {"status": "inactive"}, {"status": "active"}, False),
+            ("patient_account_links", {}, {"status": "disabled"}, {"status": "verified"}, False),
+            ("patient_account_links", {}, {"patient_id": str(self.doctor_id)}, {"patient_id": str(self.patient_id)}, False),
         ):
             await self.db[collection].update_one(query, {"$set": update})
             self.assertIsNone(await self.repo.resolve_self(str(self.patient_id)))
-            await self.migrate()  # idempotence cannot repair disabled or tampered links
+            if drifted:
+                # legacy 基线被篡改：noop 重跑必须 fail-closed 报基线漂移，不得静默分叉
+                with self.assertRaises(PatientDomainError) as rejected:
+                    await self.migrate()
+                self.assertEqual(rejected.exception.code, "LEGACY_BASELINE_DRIFTED")
+            else:
+                await self.migrate()  # idempotence cannot repair disabled or tampered links
             self.assertIsNone(await self.repo.resolve_self(str(self.patient_id)))
             await self.db[collection].update_one(query, {"$set": restore})
         await self.db.patient_account_links.delete_many({})
-        await self.migrate()
+        # 迁移链接被删除：基线覆盖推断失效，保守报漂移（含晚到者摘要）而非静默重建
+        with self.assertRaises(PatientDomainError) as rejected:
+            await self.migrate()
+        self.assertEqual(rejected.exception.code, "LEGACY_BASELINE_DRIFTED")
         self.assertIsNone(await self.repo.resolve_self(str(self.patient_id)))
         self.assertEqual(await self.db.patient_account_links.count_documents({}), 0)
 

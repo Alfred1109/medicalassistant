@@ -188,6 +188,30 @@ async def _guard(callback):
     return receipt
 
 
+async def _noop_rerun_verification(db):
+    """Post-cutover rerun checks: legacy baseline drift fails closed; latecomer
+    legacy patients (no legacy_same_document link, hence outside the recorded
+    baseline) are reported, never auto-migrated. The fingerprint covers only
+    role:"patient" documents, the same scope as the recorded legacy_sha256;
+    baseline coverage is inferred from the links written at migration time."""
+    source = await _source_documents(db)
+    linked = {item["account_id"] for item in await db[ACCOUNT_LINKS].find(
+        {"source": "legacy_same_document"}, {"account_id": 1}).to_list(length=None)}
+    latecomer_ids = sorted(str(document["_id"]) for document in source
+                           if str(document["_id"]) not in linked)
+    baseline = [document for document in source if str(document["_id"]) in linked]
+    current_sha = fingerprint(baseline)
+    state = await db[STATE].find_one({"_id": STATE_ID})
+    recorded_sha = state.get("legacy_sha256") if state else None
+    if current_sha != recorded_sha:
+        raise PatientDomainError("LEGACY_BASELINE_DRIFTED",
+            "legacy patient baseline drifted after cutover; canonical and legacy "
+            "data may have diverged and require manual reconciliation "
+            f"(baseline_sha256={recorded_sha} current_sha256={current_sha} "
+            f"latecomer_ids={latecomer_ids})")
+    return latecomer_ids
+
+
 async def migrate_legacy_patients(db, *, expected_manifest, backup_directory, reviewer,
                                   evidence_reference, maintenance_guard, fail_at=None):
     """Apply only after reviewed write exclusion; failure never restores data.
@@ -201,7 +225,9 @@ async def migrate_legacy_patients(db, *, expected_manifest, backup_directory, re
     await _guard(maintenance_guard)
     before = await inspect_migration(db)
     if before["mode"] == "canonical":
-        return {"verified_noop": True, "mode": "canonical", "users_modified": False}
+        latecomer_ids = await _noop_rerun_verification(db)
+        return {"verified_noop": True, "mode": "canonical", "users_modified": False,
+                "latecomer_ids": latecomer_ids}
     if not before["replica_set"]:
         raise PatientDomainError("PATIENT_MIGRATION_REQUIRES_REPLICA_SET")
     if before != expected_manifest:
