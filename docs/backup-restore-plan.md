@@ -1,8 +1,8 @@
 # 完整备份与恢复能力方案（T22）
 
-> 状态：方案稿。本方案**未经真实环境演练**，所有数字（RPO/RTO/保留期）均为
-> 建议值，须经业务确认后才有约束力；演练本身按 §4 的清单在隔离环境执行，
-> 演练结果回填本文件后方可视为「具备恢复能力」。
+> 状态：方案稿 → 已于 2026-11-14 在本机隔离实例完成首次实机闭环演练
+> （备份→恢复→对账→负向用例，见文末「演练记录」）。所有数字（RPO/RTO/保留期）
+> 仍为建议值，须经业务确认后才有约束力。
 
 ## 0. 一句话结论
 
@@ -147,10 +147,10 @@ manifest JSON 中追加 `files` 段，本版脚本未实现，属后续增强，
 
 ## 5. 边界声明
 
-- 本方案未经真实环境演练；RPO/RTO/保留期均为建议值，待业务确认。
-- `backup_mongodb.py` / `verify_restore.py` 未在真实 mongodump / Mongo 实例
-  上跑过端到端（单测用打桩验证命令组装与对账逻辑）；首次真实执行建议先对
-  隔离演练实例做一次备份→恢复→对账闭环。
+- 方案已于 2026-11-14 在本机隔离实例完成首次实机闭环演练（见文末演练记录）；
+  RPO/RTO/保留期仍为建议值，待业务确认。
+- `backup_mongodb.py` / `verify_restore.py` 已在真实 mongodump / Mongo 实例上
+  跑通端到端（含负向用例；单测打桩覆盖命令组装与对账逻辑）。
 - 脚本未覆盖媒体目录的文件级备份与密钥保管（§1.2/§1.3 为人工流程），也未
   实现异地上传与加密（推荐 age/gpg 外部流程）。
 - 副本集扩为多节点后，应把备份读偏好切到 secondary 并复核 RPO。
@@ -161,4 +161,112 @@ manifest JSON 中追加 `files` 段，本版脚本未实现，属后续增强，
 - 备份后自动校验 SHA256 与可打开性（`mongodump --archive` 头部探测）；
 - 调度器 systemd unit 示例与告警（备份失败需可见，不能静默失败——现有
   `backup_schedule` 的 except-日志模式即静默失败反例）；
-- 管理端独立 `dump_frequency` 设置（§3）。
+- 管理端独立 `dump_frequency` 设置（§3）；
+- manifest 计数采集时点问题：manifest 在 mongodump 结束**之后**经独立连接
+  采集（演练记录 3.6 实测发现）。备份窗口内有并发写入时，manifest 计数可能
+  与 archive 内容漂移，造成对账「假差异」。根治需把计数对齐到 `--oplog` 的
+  截止时间点（或 dump 前后各采一次取交集），属脚本增强项。备份窗口内并发
+  写入少（生产低峰执行）时影响可忽略。
+
+## 7. 演练记录（2026-11-14，本机隔离实例）
+
+> T33 首次实机闭环演练：备份→恢复→对账→负向用例，全部通过。
+> 本节为实测记录，含环境缺口与踩坑，供下次演练直接复用。
+
+### 7.1 环境与工具路径（如实记录）
+
+- 本机 **无** mongodump / mongorestore / mongosh 二进制，均经 docker 镜像
+  `mongo:7.0.16`（与本机 rehab_rs 同镜像同版本）执行。
+- 备份源：rehab_rs 单节点副本集
+  `mongodb://127.0.0.1:37021/?replicaSet=rehab_rs&directConnection=true`。
+- 恢复目标：一次性容器 `rehab-restore-drill-t33`（mongo:7.0.16，
+  `mongod --replSet drill_rs`，宿主端口 127.0.0.1:38031），rs.initiate 单节点
+  初始化后接收 `--oplogReplay` 恢复。演练后已销毁。
+- mongodump 调用路径（本机无二进制的替代方案）：
+
+  ```sh
+  docker run --rm --network host -v /tmp:/tmp --entrypoint mongodump \
+      mongo:7.0.16 mongodump --uri <uri> --gzip --archive=<路径> --oplog
+  ```
+
+  `--network host` 使 `--uri` 中 `127.0.0.1` 语义与宿主一致；`-v /tmp:/tmp`
+  使 `--archive=` 宿主路径在容器内同路径可写；`--entrypoint mongodump` 见
+  坑 1。经 `backup_mongodb.py --mongodump <wrapper脚本>` 参数接入，未改脚本。
+
+### 7.2 踩坑（下次演练直接绕开）
+
+1. **mongo 镜像 entrypoint 强制降权**：`docker run mongo:7.0.16 mongodump ...`
+   会被 entrypoint `gosu` 到 `mongodb` 用户（uid 999），对宿主属主目录无写
+   权限 → `permission denied`。`--user 0:0` 也拦不住（entrypoint 检测 uid=0
+   且命令为 `mongo*` 时仍降权）。必须 `--entrypoint mongodump` 绕过。
+2. **容器内路径 ≠ 宿主路径**：`-v /tmp/drill-t33:/drill` 时容器内归档路径是
+   `/drill/backup/...`；mongorestore 传宿主路径会报 `no such file or
+   directory`。wrapper 改挂 `/tmp:/tmp` 消除换算。
+3. **镜像内 mongodump 为 100.11.0 但不认 `--nsInclude`**（官方 database-tools
+   支持；镜像为二次打包版本，工具二进制属主异常 uid 1000）。本次未依赖该参数，
+   备份全库归档不受影响，但按库抽取的场景不可用该镜像。
+4. **演练源实例前身崩溃循环（环境缺口，已处置）**：演练开始时 rehab_rs 容器
+   因 fd 耗尽崩溃循环（`epoll: Too many open files`），数据卷内有约 4.2 万个
+   `.wt` 文件（今日此前演练残留的孤儿集合/索引文件），而 compose 未配置
+   ulimit，容器默认软限制 nofile=1024。处置：临时以同数据卷、同副本集名、
+   `--ulimit nofile=65536:65536` 起替代容器顶上 37021 端口，并清理 18 个
+   pytest 残留库后完成演练。**遗留改进：`deploy/mongodb/compose.yml` 应为
+   mongo 服务加 `ulimits.nofile`（本次未改动该文件，属部署层修复项）**。
+
+### 7.3 演练步骤与实测数据
+
+合成数据（独立库 `drill_t33_patients_demo` / `drill_t33_biz_demo`）：
+`clinical_patients_demo` 500 条（含 unique 索引 `clinical_patient_id_unique`、
+`patient_name_idx`）、`messages_demo` 1200 条（含幂等唯一索引
+`uniq_conversation_sender_client_message_id`）、`patient_domain_state` 单例
+（mode=canonical，仿迁移产物）、`feedback_demo` 300 条。备份窗口内另有并行
+任务的测试库在写入（rehab_comm_revocation_*），故本次走 `--oplog` 时间点一致
+路径——与 §1.1 的生产建议一致。
+
+| 步骤 | 实测命令（要点） | 耗时 | 结果 |
+| --- | --- | --- | --- |
+| 备份 | `.venv/bin/python -m scripts.backup_mongodb --uri <rehab_rs> --oplog --output-dir /tmp/drill-t33/backup --mongodump <wrapper>` | **0.84s** | archive 28,279 字节 + manifest；SHA256 记录完整 |
+| 恢复 | `docker exec rehab-restore-drill-t33 mongorestore --host 127.0.0.1:27017 --gzip --archive=/drill/backup/<archive> --drop --oplogReplay` | **0.90s** | 2069 文档恢复成功，0 失败 |
+| 对账 | `.venv/bin/python -m scripts.verify_restore --manifest <manifest> --uri mongodb://127.0.0.1:38031/?directConnection=true` | **0.59s** | 退出码 0；20 库 / 43 集合 / 48 索引全部一致；`extra_collections` 空 |
+
+manifest 校验项（全部符合预期）：
+- 计数与真实库逐一核对一致（含 drill 库 500/1200/1/300）；
+- `source_uri_masked` 掩码生效；日志与 manifest 中无明文连接串
+  （mongodump 子进程输出亦经 `mask_text` 掩码，未回显 URI）；
+- `mongo_version=7.0.16`、`topology.replica_set=rehab_rs`、`oplog_captured=true`；
+- `patient_domain_state`：present=true，mode=canonical。
+
+### 7.4 负向用例（全部按预期）
+
+| 用例 | 操作 | 退出码 | 差异报告 |
+| --- | --- | --- | --- |
+| 篡改计数 | 恢复库 `feedback_demo` 插入 3 条 | 1 | `count_mismatch`（期望 300 / 实际 303），database/collection 定位准确 |
+| 删状态单例 | 恢复库删除 `patient_domain_state` 文档 | 1 | 同时报 `count_mismatch`（1→0）与专项 `patient_domain_state_mismatch`（present/mode 双字段） |
+
+### 7.5 RTO 实测校准
+
+- 实测（本机、库规模 ~2 千文档 / 20 库）：mongodump 0.84s → mongorestore
+  0.90s → 对账 0.59s，**恢复主链路合计 ~2.3s**；隔离实例容器启动 + rs
+  初始化 ~10s。远优于 §2.1 的 RTO ≤ 4h 建议值。
+- 但注意量级差异：本机库为开发数据（catalog 仅 ~2 千文档）。§2.1 的
+  「mongorestore 10–30 分钟」预估针对生产数据量，维持不变；本机演练的价值
+  在于验证链路可行性与对账工具行为，而非推断生产 RTO。
+- 并发写入场景（--oplog 路径）已验证可行；备份窗口内并发写入下对账零差异。
+
+### 7.6 脚本修复与已知限制
+
+- 修复（`backend/scripts/backup_mongodb.py`）：mongodump 非零退出时清理
+  **半成品归档**（中途失败如源库断连会留下部分写入的 archive，此前会残留在
+  输出目录，可能被误当作可用备份）。补单测
+  `test_main_failure_removes_partial_archive`（tests/test_backup_restore_tooling.py）。
+- 已知限制（未修，见 §6）：manifest 计数在 dump 结束后采集，备份窗口内有
+  并发写入时可能产生「假差异」；本次演练恰有并行任务在写，未触发（写入发生
+  在 manifest 采集前）。低峰备份窗口下影响可忽略。
+- 本次演练未覆盖（按方案属人工流程）：媒体目录文件级同步（§1.2）、密钥
+  保管（§1.3）、加密与异地上传。
+
+### 7.7 演练后处置
+
+- rehab_rs 上演练库（`drill_t33_*`）已 drop；恢复容器 `rehab-restore-drill-t33`
+  已销毁；/tmp/drill-t33 临时目录（含归档，内含库内容元数据）已删除。
+- 替代容器处置见 §7.2 坑 4。

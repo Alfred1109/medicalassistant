@@ -3,6 +3,13 @@ name: rehabman-mongodb
 services:
   mongo:
     image: mongo:7.0.16
+    # 2026-11-14 演练教训：数据卷内孤儿 .wt 文件堆积 + 默认 nofile=1024 会导致
+    # mongod 文件描述符耗尽 crash-loop（见 docs/backup-restore-plan.md §7）。
+    # ulimit 必须与镜像默认（999 用户）匹配，显著调高以防再次耗尽。
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     command: ["mongod", "--replSet", "rehab_rs", "--bind_ip_all"]
     ports:
       - "127.0.0.1:${REHAB_MONGO_PORT:-37021}:27017"

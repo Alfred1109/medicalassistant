@@ -214,6 +214,25 @@ class BackupMainTests(unittest.TestCase):
             self.assertEqual(list(Path(tmp).iterdir()), [])
             fake_connect.assert_not_called()
 
+    def test_main_failure_removes_partial_archive(self):
+        # 实测回归（2026-11-14 本机演练）：mongodump 中途失败（如源库断连）会
+        # 留下半成品归档，不得残留——会被误当作可用备份。失败路径必须清理。
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+
+            def fake_run(command, **kwargs):
+                archive_arg = next(item for item in command if item.startswith("--archive="))
+                Path(archive_arg.split("=", 1)[1]).write_bytes(b"partial archive")
+                from subprocess import CompletedProcess
+                return CompletedProcess(command, 1, stderr="network error mid-dump")
+
+            with patch("scripts.backup_mongodb.subprocess.run", side_effect=fake_run), \
+                    patch("scripts.backup_mongodb.connect_client") as fake_connect:
+                with self.assertRaises(SystemExit):
+                    backup_main(["--uri", URI, "--output-dir", str(out_dir)])
+            self.assertEqual(list(out_dir.iterdir()), [])  # 半成品归档已被清理
+            fake_connect.assert_not_called()
+
     def test_connect_client_signatures_untouched(self):
         # 打桩点存在且可被 patch（真实连接不在单测范围）
         self.assertTrue(callable(connect_client))

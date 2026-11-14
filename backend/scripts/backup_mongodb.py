@@ -165,6 +165,9 @@ def main(argv=None):
     if completed.returncode != 0:
         # 输出内容先过掩码再上日志，防 mongodump 回显连接串
         print(mask_text(completed.stderr)[-2000:], file=sys.stderr)
+        # mongodump 中途失败（如源库断连）可能留下半成品归档，必须删除，
+        # 否则会被误当作可用备份（与 manifest 一一对应，缺 manifest 即无效）
+        archive_path.unlink(missing_ok=True)
         raise SystemExit(f"mongodump 失败（退出码 {completed.returncode}），未生成 manifest")
     if not archive_path.is_file():
         raise SystemExit(f"mongodump 报告成功但归档文件不存在: {archive_path}")
