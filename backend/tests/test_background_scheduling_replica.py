@@ -1,0 +1,235 @@
+"""T34：后台调度与多进程边界验证（真实副本集，两个独立 client 模拟两进程）。
+
+覆盖三条后台调度链路的多进程语义：
+- 提醒扫描 reminder_runtime（app/services/followup_reminder_service.py）：
+  main.py 启动的应用内循环，多 worker 部署时每进程各跑一份。本文件验证
+  两个进程（两条独立 Mongo 连接）同时扫描同一到期窗口时投递是否重复、
+  扫描中断后的续扫位置、同一 due 窗口重复扫描（含时钟回拨）的幂等性。
+- 备份调度 backup_schedule（app/operations/runtime.py BackupSchedule.run_if_due）：
+  main.py 启动的应用内循环。验证两个进程同时到点时的导出执行次数，
+  按现实现如实断言（发现记录见下）。
+- 报告调度 report_scheduler_service：只写结论不写用例——
+  ReportSchedulerService.start() 全仓库无任何调用方（routers 仅按请求实例化
+  做 CRUD），_scheduler_loop 为死代码，当前不存在后台报告调度循环。
+
+门控：REHAB_TEST_SCHEDULER_URI（mongodb://127.0.0.1:<port>/...?replicaSet=<name>），
+未显式提供时回退沿用 REHAB_TEST_PATIENT_MIGRATION_URI（同一本机副本集惯例），
+两者都缺省时全部跳过。每个用例使用独立临时库（uuid 后缀）并在 teardown drop，
+只触碰 URI 指向实例上自己创建的库。
+
+发现记录（2026-11-14，T34 验证结论，实现未改）：
+- 提醒扫描多进程安全：投递去重不依赖单 worker 假设，而是依赖 ledger 集合
+  以 reminder_key 为不可变 _id 的唯一约束 + 副本集事务（dispatch_one 的
+  DuplicateKeyError 重试路径）。两进程并发扫描同一到期记录时，输家事务
+  冲突后重读赢家 ledger 跳过，通知恰好各投一次（本文件场景 1 实测）。
+- 提醒扫描崩溃恢复语义：scan() 逐条 dispatch_one，单条失败写 status=failed
+  ledger 并继续不饿死其他记录；失败记录下次扫描重试，已成功记录因 ledger
+  persisted 不重投；游标窗口为 (now, now+24h] 仅向前——计划时间已过的
+  记录永不补投（代码注释明示该取舍，场景 3 实测）。
+- 提醒扫描同窗口重复扫描/时钟回拨幂等：ledger persisted 键覆盖整个
+  (followup, scheduled_date, slot) 事件，回拨后的窗口内重扫零新增（场景 4）。
+- 备份调度多进程缺陷（未修，按任务约定"按现实现断言，如实记录"）：
+  BackupSchedule.run_if_due 是 check-then-act——先读 last_scheduled_export_at
+  判断到点，写文件后再无条件 $set 更新时间戳，没有原子领取。两进程同时
+  到点时都会通过到点判断、都执行全量导出（backup_bytes 各调用一次）并各
+  更新一次时间戳。后果：重复导出 I/O；文件名含秒级时间戳，同秒并发互相
+  覆盖（静默丢一份），跨秒则留下两份含患者数据的敏感导出文件。最小修复
+  建议（T34 记录，不改实现）：把到点判断改为 find_one_and_update 条件领取
+  （filter: {_id: "system", last_scheduled_export_at <= cutoff}，
+  update: $set last_scheduled_export_at = now），领取成功者才执行导出；
+  领取在导出前完成，进程在导出后崩溃最多留下已领取标记（下轮跳过一次，
+  无重复导出），与现状崩溃窗口（导出已做、标记未写、下轮重复导出）相比
+  更安全。
+- 备份调度部署建议：现状依赖单 worker 部署假设（多 worker 必重复导出）；
+  提醒扫描多 worker 已安全（但每进程仍各跑一遍空扫，浪费可接受）。
+"""
+import asyncio
+import os
+import unittest
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
+
+from bson import ObjectId
+from motor.motor_asyncio import AsyncIOMotorClient
+
+from app.core.exceptions import AppBaseException
+from app.operations import runtime as operations_runtime
+from app.services.followup_reminder_service import (
+    FollowupReminderService, ensure_reminder_storage, DELIVERIES,
+)
+
+URI = (os.environ.get("REHAB_TEST_SCHEDULER_URI")
+       or os.environ.get("REHAB_TEST_PATIENT_MIGRATION_URI"))
+
+
+@unittest.skipUnless(URI, "set REHAB_TEST_SCHEDULER_URI to an isolated local replica set")
+class BackgroundSchedulingReplicaTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        if not URI.startswith(("mongodb://127.0.0.1:", "mongodb://localhost:")):
+            self.fail("only an explicit loopback test URI is accepted")
+        # 两个独立连接模拟两个应用进程（各持自己的 client 与事务会话）
+        self.proc_a = AsyncIOMotorClient(URI, serverSelectionTimeoutMS=3000)
+        self.proc_b = AsyncIOMotorClient(URI, serverSelectionTimeoutMS=3000)
+        self.db_a = self.proc_a["rehab_scheduler_" + uuid4().hex]
+        self.db_b = self.proc_b[self.db_a.name]
+        await ensure_reminder_storage(self.db_a)
+        self.now = datetime(2026, 11, 14, 9)
+        self.patient, self.doctor = ObjectId(), ObjectId()
+        await self.db_a.users.insert_many([
+            {"_id": self.patient, "role": "patient", "is_active": True,
+             "name": "Patient", "email": "p@example.test", "password_hash": "secret",
+             "practitioners": [str(self.doctor)], "updated_at": datetime(2020, 1, 1)},
+            {"_id": self.doctor, "role": "doctor", "is_active": True,
+             "name": "Clinician", "email": "d@example.test", "password_hash": "secret"},
+        ])
+        self.push = patch("app.api.websockets.get_connection_manager",
+                          return_value=SimpleNamespace(send_notification=AsyncMock()))
+        self.push.start()
+
+    async def asyncTearDown(self):
+        self.push.stop()
+        await self.proc_a.drop_database(self.db_a.name)
+        self.proc_a.close()
+        self.proc_b.close()
+
+    # ---- 夹具 ----
+
+    async def seed_followup(self, *, hours_ahead=20):
+        followup = ObjectId()
+        await self.db_a.followup_records.insert_one({
+            "_id": followup, "patient_id": str(self.patient),
+            "created_by": str(self.doctor), "provider_id": str(self.doctor),
+            "follow_up_type": "phone", "status": "scheduled",
+            "scheduled_date": self.now + timedelta(hours=hours_ahead),
+            "notes": "plan", "mutation_version": 1})
+        return followup
+
+    def service(self, db):
+        return FollowupReminderService(db, clock=lambda: self.now)
+
+    async def notification_pairs(self):
+        rows = await self.db_a.notifications.find({}).to_list(None)
+        return sorted((row["related_entity_id"], row["recipient_id"]) for row in rows)
+
+    # ---- 场景 1：双进程提醒扫描并发同一到期窗口，投递不重复 ----
+
+    async def test_two_process_concurrent_scan_delivers_exactly_once(self):
+        followups = [await self.seed_followup() for _ in range(3)]
+        # 两进程各自 scan()：游标同窗口、逐条并发 dispatch_one
+        results = await asyncio.gather(self.service(self.db_a).scan(),
+                                       self.service(self.db_b).scan())
+        # ledger 唯一 _id + 事务：赢家提交后输家重读跳过，各进程上报各自
+        # 实际生成的条数（总和恰为每记录两收件人）
+        self.assertEqual(sum(results), 6)
+        self.assertEqual(await self.db_a[DELIVERIES].count_documents({"status": "persisted"}), 6)
+        expected = sorted((str(f), str(r)) for f in followups
+                          for r in (self.patient, self.doctor))
+        self.assertEqual(await self.notification_pairs(), expected)
+        # 输家路径收敛后不残留 failed 历史或异常 fence 状态
+        self.assertEqual(await self.db_a[DELIVERIES].count_documents({"status": "failed"}), 0)
+
+    # ---- 场景 2：双进程备份调度同时到点（按现实现断言，如实记录） ----
+
+    async def test_two_process_backup_schedule_duplicate_export_recorded(self):
+        await self.db_a.system_settings.insert_one({
+            "_id": "system", "backup_frequency": "hourly",
+            "last_scheduled_export_at": self.now - timedelta(hours=2)})
+        calls = []
+        original = operations_runtime.backup_bytes
+
+        async def counting_backup_bytes(db):
+            calls.append(db.client)
+            return await original(db)
+
+        root = self.workdir = os.path.join("/tmp", "rehab-t34-" + uuid4().hex)
+        os.makedirs(os.path.join(root, "app", "operations"), exist_ok=True)
+        fake_file = os.path.join(root, "app", "operations", "runtime.py")
+        with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
+             patch.object(operations_runtime, "__file__", fake_file):
+            # 两进程同时到点：check-then-act 无原子领取，双方都通过到点判断
+            await asyncio.gather(operations_runtime.BackupSchedule().run_if_due(self.db_a),
+                                 operations_runtime.BackupSchedule().run_if_due(self.db_b))
+        try:
+            folder = os.path.join(root, "data", "backups")
+            files = os.listdir(folder)
+            # 缺陷实测：两个进程都执行了全量导出（backup_bytes 各一次），
+            # 时间戳都被无条件 $set。文件名秒级时间戳——同秒并发互相覆盖
+            # （1 个文件），跨秒则留下两份重复敏感导出（2 个文件）。
+            self.assertEqual(len(calls), 2)
+            self.assertIn(len(files), (1, 2), files)
+            settings = await self.db_a.system_settings.find_one({"_id": "system"})
+            self.assertGreaterEqual(
+                (settings["last_scheduled_export_at"] - self.now).total_seconds(), 0)
+        finally:
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+        # 领取标记（last_scheduled_export_at）已推进：随后到点前再跑不再导出
+        with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
+             patch.object(operations_runtime, "__file__", fake_file):
+            await operations_runtime.BackupSchedule().run_if_due(self.db_a)
+        self.assertEqual(len(calls), 2)
+
+    # ---- 场景 3：扫描中断后的续扫位置 ----
+
+    async def test_scan_interrupted_resumes_failed_and_keeps_succeeded(self):
+        first, second = await self.seed_followup(), await self.seed_followup(hours_ahead=18)
+        service = self.service(self.db_a)
+        original = service.dispatch_one
+
+        async def crash_on_first(followup_id):
+            if followup_id == str(first):
+                raise RuntimeError("simulated process crash mid-scan")
+            return await original(followup_id)
+
+        service.dispatch_one = crash_on_first
+        with self.assertRaises(AppBaseException) as caught:
+            await service.scan()
+        self.assertEqual(caught.exception.error_code, "REMINDER_SCAN_FAILED")
+        # 崩溃记录留下可重试的 failed 历史（不覆盖可能已提交的赢家）
+        failed = await self.db_a[DELIVERIES].count_documents(
+            {"status": "failed", "reason": "PERSISTENCE_FAILED",
+             "followup_id": str(first)})
+        self.assertEqual(failed, 2)
+        # 未崩溃记录未被饿死：第二条件计划已投递
+        self.assertEqual(await self.notification_pairs(),
+                         [(str(second), str(self.patient)), (str(second), str(self.doctor))])
+        # 续扫：失败记录重试成功，成功记录不重投
+        service.dispatch_one = original
+        self.assertEqual(await service.scan(), 2)
+        expected = sorted((str(f), str(r)) for f in (first, second)
+                          for r in (self.patient, self.doctor))
+        self.assertEqual(await self.notification_pairs(), expected)
+        self.assertEqual(await self.db_a[DELIVERIES].count_documents({"status": "failed"}), 0)
+
+    async def test_scan_never_catches_up_records_whose_plan_has_passed(self):
+        overdue = await self.seed_followup(hours_ahead=-1)
+        self.assertEqual(await self.service(self.db_a).scan(), 0)
+        self.assertEqual(await self.db_a.notifications.count_documents({}), 0)
+        self.assertEqual(await self.db_a[DELIVERIES].count_documents({}), 0)
+        # 记录原样保留，未被触碰（无补投、无栅栏写入）
+        doc = await self.db_a.followup_records.find_one({"_id": overdue})
+        self.assertIsNotNone(doc)
+        self.assertNotIn("_reminder_fence", doc)
+
+    # ---- 场景 4：同一 due 窗口重复扫描与时钟回拨的幂等性 ----
+
+    async def test_repeated_window_and_clock_rollback_never_redeliver(self):
+        await self.seed_followup()
+        service = self.service(self.db_a)
+        self.assertEqual(await service.scan(), 2)
+        # 同一窗口再扫（含独立第二进程视角）
+        self.assertEqual(await self.service(self.db_b).scan(), 0)
+        # 时钟回拨 30 分钟（仍在 24h 窗口内）：事件键含 scheduled_date，
+        # 回拨不改变键，ledger persisted 兜底，不产生第二条通知
+        self.now -= timedelta(minutes=30)
+        self.assertEqual(await service.scan(), 0)
+        # 回拨后窗口内重扫不产生第二条通知
+        self.assertEqual(await self.db_a.notifications.count_documents({}), 2)
+        self.assertEqual(await self.db_a[DELIVERIES].count_documents(
+            {"status": "persisted"}), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
