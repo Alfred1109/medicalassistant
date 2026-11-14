@@ -66,8 +66,12 @@ def make_patient_doc(practitioners=(OPERATOR_ID,)):
 
 
 def _doc_matches(doc, query):
-    """支持点路径的精确匹配（如 operator.user_id）。"""
+    """支持点路径的精确匹配（如 operator.user_id）与顶层 $or。"""
     for key, value in query.items():
+        if key == "$or":
+            if not any(_doc_matches(doc, sub) for sub in value):
+                return False
+            continue
         current = doc
         for part in key.split("."):
             if not isinstance(current, dict) or part not in current:
@@ -286,7 +290,9 @@ def make_remote_client(remote):
     )
 
 
-class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
+class FormsContractFixture(unittest.IsolatedAsyncioTestCase):
+    """共享夹具：打桩登录/委托、内存库与远端客户端；子类可替换 self.remote。"""
+
     def setUp(self):
         self.fixture_patches = ExitStack()
         self.addCleanup(self.fixture_patches.close)
@@ -376,6 +382,8 @@ class IntegrationFormsContractTests(unittest.IsolatedAsyncioTestCase):
         return await self.client.get(
             f"/api/integrations/forms/fill-tasks/{task_id}", headers=self.auth())
 
+
+class IntegrationFormsContractTests(FormsContractFixture):
     async def test_create_requires_authentication(self):
         response = await self.client.post("/api/integrations/forms/fill-tasks",
                                           json=self.payload())

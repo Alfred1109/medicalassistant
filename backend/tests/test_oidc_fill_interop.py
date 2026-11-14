@@ -81,6 +81,15 @@ class OidcFillInterop(base.OidcSourceInterop):
             self.assertEqual(remote['subject_id'],self.ids['subject'])
             self.assertEqual(remote['questionnaire_id'],self.ids['questionnaire'])
             self.assertNotIn('embedToken', created.json())
+            # T44 双端幂等/对账：同一 payload 重试（缺省 ma_task_ref 由任务身份
+            # 确定性派生）→ 源端活跃引用唯一 409 指针 → 康复端找回既有任务，
+            # 源端不新建会话（源端失败响应不消费幂等键的语义由源端侧测试锁定）。
+            replayed = await self.http.post('/api/integrations/forms/fill-tasks', json=payload, headers=headers)
+            self.assertEqual(replayed.status_code, 200, replayed.text)
+            self.assertEqual(replayed.json()['id'], created.json()['id'])
+            self.assertEqual(replayed.json()['session']['sessionUuid'], created.json()['session']['sessionUuid'])
+            with sqlite3.connect(f'file:{self.store / "source.sqlite"}?mode=ro', uri=True) as source_db:
+                self.assertEqual(source_db.execute('SELECT COUNT(*) FROM integration_fill_session').fetchone()[0], 1)
             old_entry = await self.http.get('/api/integrations/forms/fill-tasks/' + created.json()['id'] + '/embed-url')
             self.assertEqual(old_entry.status_code, 410)
             launched = await self.http.post('/api/integrations/forms/fill-tasks/' + created.json()['id'] + '/launch', headers=headers)

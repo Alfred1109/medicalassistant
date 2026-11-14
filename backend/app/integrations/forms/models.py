@@ -87,7 +87,8 @@ class FollowUpFillTask:
             "visit_code": visit_code,
             "visit_name": visit_name,
             "ma_task_ref": ma_task_ref,
-            # FU01 S4：关联随访节点（正式外键；ma_task_ref 保留为远端自由引用兼容透传）
+            # FU01 S4：关联随访节点（正式外键；ma_task_ref 为任务侧唯一引用——
+            # 显式透传或缺省时按任务身份确定性派生，支撑源端幂等创建与对账找回）
             "followup_visit_id": followup_visit_id,
             "status": TASK_STATUS_SESSION_CREATED,
             # 只保存非敏感会话引用，启动材料仅在启动响应中透传。

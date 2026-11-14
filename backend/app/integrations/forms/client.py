@@ -7,7 +7,7 @@
 """
 
 from typing import Any, Dict, Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -18,10 +18,13 @@ class FormPlatformError(Exception):
     """远端表单平台返回的错误（含状态码与远端错误码）。"""
 
     def __init__(self, message: str, status_code: Optional[int] = None,
-                 remote_code: Optional[str] = None):
+                 remote_code: Optional[str] = None,
+                 details: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.status_code = status_code
         self.remote_code = remote_code
+        # 远端错误响应的 details（如 task_ref_conflict 的既有会话指针），不写入日志
+        self.details = details if isinstance(details, dict) else None
 
 
 class FormPlatformUnavailable(FormPlatformError):
@@ -103,9 +106,20 @@ class FormPlatformClient:
                 "表单平台拒绝了集成凭证或授权范围", status_code=response.status_code,
                 remote_code=code)
         if response.status_code >= 400:
-            code = self._remote_code(response)
-            message = self._remote_message(response) or "表单平台请求被拒绝"
-            raise FormPlatformError(message, status_code=response.status_code, remote_code=code)
+            body = None
+            try:
+                parsed = response.json()
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                body = parsed
+            code = body.get("code") if body and isinstance(body.get("code"), str) else None
+            details = body.get("details") if body and isinstance(body.get("details"), dict) else None
+            message = (body.get("message")
+                       if body and isinstance(body.get("message"), str) else None) \
+                or "表单平台请求被拒绝"
+            raise FormPlatformError(message, status_code=response.status_code,
+                                    remote_code=code, details=details)
 
         try:
             return response.json()
@@ -125,18 +139,27 @@ class FormPlatformClient:
                 return code
         return None
 
-    @staticmethod
-    def _remote_message(response: httpx.Response) -> Optional[str]:
-        try:
-            body = response.json()
-        except ValueError:
-            return None
-        if isinstance(body, dict) and isinstance(body.get("message"), str):
-            return body["message"]
-        return None
+    async def create_fill_session(self, payload: Dict[str, Any], *, source_access_token: str,
+                                  idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        """创建填报会话；idempotency_key 对齐源端 T36（1-128 字符，可选但统一携带）。
 
-    async def create_fill_session(self, payload: Dict[str, Any], *, source_access_token: str) -> Dict[str, Any]:
-        return await self._request("POST", "/integration/v1/fill-sessions", payload, extra_headers={"X-Source-Access-Token": source_access_token})
+        同键同体重试（超时/断连后）返回同一会话并以 Idempotency-Replayed: true
+        标记；键与请求体指纹绑定，重试不得改动 payload。
+        """
+        headers = {"X-Source-Access-Token": source_access_token}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        return await self._request("POST", "/integration/v1/fill-sessions", payload,
+                                   extra_headers=headers)
+
+    async def get_fill_session_by_task_ref(self, ma_task_ref: str) -> Dict[str, Any]:
+        """T36 对账端点：按 (client, ma_task_ref) 找回本客户端的填报会话。
+
+        404 session_not_found 表示该引用下尚无会话（如创建请求在远端处理前
+        即超时），由调用方决定后续处理。
+        """
+        return await self._request(
+            "GET", f"/integration/v1/fill-sessions/by-task-ref/{quote(ma_task_ref, safe='')}")
 
     async def launch_fill_session(self, session_uuid: str, *, source_access_token: str) -> Dict[str, Any]:
         return await self._request(

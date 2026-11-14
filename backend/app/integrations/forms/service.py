@@ -11,6 +11,8 @@
 from typing import Any, Dict, Optional
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
+import json
 import os
 import re
 from urllib.parse import urlsplit
@@ -74,6 +76,183 @@ def _map_remote_error(exc: FormPlatformError, prefix: str) -> FormIntegrationErr
     return FormIntegrationError(f"{prefix}：{exc}",
                                 error_code="FORM_PLATFORM_REJECTED",
                                 status_code=status_code, details={"remote_code": exc.remote_code})
+
+
+# ---- T44：源端创建幂等与对账对齐（源端 0d28031 / T36 语义） ----
+#
+# 任务引用（ma_task_ref）是康复端任务侧的唯一引用：
+# - 源端按 (client, ma_task_ref) 维护"进行中会话唯一"（部分唯一索引兜底），
+#   重复创建 409 task_ref_conflict 并返回既有会话指针；
+# - 康复端不加本地唯一索引：历史任务允许同引用多轮（会话终结后新一轮），
+#   且"进行中唯一"由源端索引权威裁决并经 409 指针回传，本地据此把重复
+#   创建收敛为既有任务/收养孤儿会话，效果上保证进行中引用不重复。
+
+def _resolve_task_ref(payload: Dict[str, Any], *, operator_id: str, patient_id: str,
+                      refs: Dict[str, Any], binding: Dict[str, Any],
+                      followup_visit_id: Optional[str],
+                      visit_code: Optional[str]) -> str:
+    """任务引用解析：显式引用透传，缺省时由任务身份确定性派生。
+
+    - 显式引用：去首尾空白后 1-160 字符（与源端 by-task-ref 对账端点上限
+      一致，保证引用始终可对账）；非字符串/为空/超限 → 422；
+    - 派生引用：绑定操作者、患者、远端资源、审核绑定与访视上下文（不含
+      ttl_seconds / allowed_origin / visit_name 等会话参数）——同一请求体
+      重试得到同一引用，重试改动会话参数不会更换引用，冲突在对账时显式
+      可见（对齐清单 2 的 payload 确定性重建要求）。
+    """
+    raw = payload.get("ma_task_ref")
+    if raw is not None:
+        if not isinstance(raw, str):
+            raise FormIntegrationError("ma_task_ref 必须为字符串",
+                                       error_code="INVALID_TASK_REF", status_code=422)
+        stripped = raw.strip()
+        if not stripped or len(stripped) > 160:
+            raise FormIntegrationError("ma_task_ref 必须为 1 到 160 个字符",
+                                       error_code="INVALID_TASK_REF", status_code=422)
+        return stripped
+    canonical = json.dumps({
+        "operator": operator_id, "patient": patient_id, "refs": refs,
+        "binding": str(binding["_id"]), "purpose": binding.get("purpose"),
+        "visit": followup_visit_id, "visit_code": visit_code,
+    }, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return "auto-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def _session_idempotency_key(task: "models.FollowUpFillTask") -> str:
+    """创建幂等键（对齐清单 1）：任务引用 + 本地任务 _id 复合哈希。
+
+    同一次本地创建尝试内稳定（远端调用失败重试同键同体），跨尝试不复用：
+    同一引用的旧会话终结后的新一轮创建（对齐清单 5）不会被旧幂等记录
+    重放为已终结会话。键长 64 字符，处于源端 1-128 上限内。
+    """
+    material = f"fill-session|{task.doc.get('ma_task_ref')}|{task.doc['_id']}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _validated_adopted_session(body: Any, task: "models.FollowUpFillTask") -> Dict[str, Any]:
+    """收养/找回的远端会话核验：引用一致、会话仍进行中、操作人有效。
+
+    不假设 409 指针指向可复活会话（对齐清单 5）：已 submitted/cancelled/
+    expired 的会话一律拒绝收养，不得绑定为新任务的活动会话。
+    """
+    mismatch = FormIntegrationError("找回的远端会话与当前任务引用不一致",
+                                    error_code="TASK_REF_SESSION_MISMATCH", status_code=409)
+    if not isinstance(body, dict):
+        raise mismatch
+    refs = task.doc.get("remote_refs") or {}
+    if any(body.get(key) != refs.get(key)
+           for key in ("project_id", "center_id", "subject_id", "questionnaire_id")):
+        raise mismatch
+    session_uuid = body.get("session_uuid")
+    if not isinstance(session_uuid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_uuid):
+        raise mismatch
+    if body.get("status") not in ("created", "embedded"):
+        raise FormIntegrationError("任务引用下的远端会话已结束，不能收养为当前任务的会话",
+                                   error_code="TASK_REF_SESSION_NOT_LIVE", status_code=409)
+    if type(body.get("operator_user_id")) is not int or body["operator_user_id"] <= 0:
+        raise FormIntegrationError("表单平台未返回有效操作人",
+                                   error_code="FORM_PLATFORM_INVALID_RESPONSE", status_code=502)
+    return body
+
+
+async def _resolve_task_ref_conflict(db: AsyncIOMotorDatabase, client: FormPlatformClient,
+                                     task: "models.FollowUpFillTask", conflict: FormPlatformError,
+                                     *, patient_id: str, operator_id: str):
+    """对齐清单 3：409 task_ref_conflict 的指针找回，不报错失败。
+
+    - 本地已有持有该会话的进行中任务且属于同一操作者/患者 → 直接返回该
+      任务（引用重试收敛，不再创建本地任务）；
+    - 本地无归属（创建 201 丢失的孤儿会话）→ 核验远端会话后收养为当前
+      任务的会话，走正常持久化流程；
+    - 指针指向失败任务保留的会话 → 如实上报需核查（禁止重新发起）；
+    - 跨操作者/跨患者共享引用 → 拒绝，不泄露他人任务。
+    """
+    details = getattr(conflict, "details", None) or {}
+    existing_uuid = details.get("existing_session_uuid")
+    if not isinstance(existing_uuid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", existing_uuid):
+        raise FormIntegrationError("任务引用冲突缺少可用的既有会话指针",
+                                   error_code="TASK_REF_POINTER_INVALID", status_code=409)
+    live_owner = None
+    failed_owner = None
+    query = {"$or": [{"session.session_uuid": existing_uuid},
+                     {"fill_sessions.session_uuid": existing_uuid}]}
+    async for doc in db[models.COLLECTION_NAME].find(query):
+        if doc.get("status") in (models.TASK_STATUS_SESSION_CREATED, models.TASK_STATUS_WAITING_FILL):
+            live_owner = live_owner or doc
+        elif doc.get("status") == models.TASK_STATUS_FAILED:
+            failed_owner = failed_owner or doc
+    if failed_owner is not None:
+        raise FormIntegrationError("该任务引用指向失败任务保留的远端会话，需按任务标识核查",
+                                   error_code="FILL_TASK_RECOVERY_UNCERTAIN", status_code=503,
+                                   details={"task_id": str(failed_owner["_id"]),
+                                            "session_uuid": existing_uuid})
+    if live_owner is not None:
+        if ((live_owner.get("operator") or {}).get("user_id") == operator_id
+                and live_owner.get("patient_id") == patient_id):
+            return None, live_owner
+        raise FormIntegrationError("该 ma_task_ref 已被其他填报任务占用",
+                                   error_code="TASK_REF_CONFLICT", status_code=409,
+                                   details={"ma_task_ref": task.doc.get("ma_task_ref")})
+    session_body = await client.get_fill_session(existing_uuid)
+    return _validated_adopted_session(session_body, task), None
+
+
+async def _recover_session_by_task_ref(client: FormPlatformClient,
+                                       task: "models.FollowUpFillTask") -> Optional[Dict[str, Any]]:
+    """对账端点找回（对齐清单 4）：创建超时/201 丢失时按引用查询。
+
+    404 session_not_found 表示超时发生在远端创建之前（无会话），返回 None
+    让调用方如实抛 FORM_PLATFORM_UNAVAILABLE，不落本地任务；对账调用自身
+    失败同样返回 None 保留原始不可达错误。
+    """
+    ref = task.doc.get("ma_task_ref")
+    if not ref:
+        return None
+    try:
+        body = await client.get_fill_session_by_task_ref(ref)
+    except FormPlatformError:
+        return None
+    latest = body.get("latest") if isinstance(body, dict) else None
+    return _validated_adopted_session(latest, task)
+
+
+async def _create_remote_session(db: AsyncIOMotorDatabase, client: FormPlatformClient,
+                                 task: "models.FollowUpFillTask", remote_payload: Dict[str, Any],
+                                 *, source_access_token: str, patient_id: str, operator_id: str):
+    """远端会话创建与失败恢复（对齐清单 1-4、6）。
+
+    重试策略（源端失败响应不消费幂等键，同键重试安全）：
+    - 表单平台不可达（超时/断连）→ 同键同体重试一次；两次仍不可达时按
+      ma_task_ref 对账找回可能已创建的会话，对账也无果则如实抛
+      FORM_PLATFORM_UNAVAILABLE，不落本地任务；
+    - 409 task_ref_conflict → 指针找回（见 _resolve_task_ref_conflict）；
+    - 409 idempotency_conflict / 其余 4xx → 不重试直接失败：幂等键与请求体
+      指纹绑定，重试必须保持 payload 确定性重建（含 ttl_seconds、
+      allowed_origin），改体重试只会得到键冲突。
+
+    返回 (session_body, existing_task)：existing_task 非空表示命中本地既有
+    任务（同操作者引用重试），调用方直接返回该任务、不再创建本地任务。
+    """
+    idempotency_key = _session_idempotency_key(task)
+    unavailable: Optional[FormPlatformUnavailable] = None
+    for _attempt in (1, 2):
+        try:
+            body = await client.create_fill_session(
+                remote_payload, source_access_token=source_access_token,
+                idempotency_key=idempotency_key)
+            return body, None
+        except FormPlatformUnavailable as exc:
+            unavailable = unavailable or exc
+        except FormPlatformError as exc:
+            if exc.remote_code == "task_ref_conflict":
+                return await _resolve_task_ref_conflict(
+                    db, client, task, exc, patient_id=patient_id, operator_id=operator_id)
+            raise
+    recovered = await _recover_session_by_task_ref(client, task)
+    if recovered is not None:
+        return recovered, None
+    assert unavailable is not None
+    raise unavailable
 
 
 async def _verify_patient_assignment(db: AsyncIOMotorDatabase, patient_id: str,
@@ -360,13 +539,22 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
     if not visit_code and followup_visit:
         visit_code = followup_visit.get("visit_code")
 
+    # T44 对齐清单 1/3/7：ma_task_ref 是康复端任务侧唯一引用；缺省时由任务
+    # 身份确定性派生，使"同体重试找回"与"by-task-ref 对账"对不携带引用的
+    # 调用方同样成立。
+    ma_task_ref = _resolve_task_ref(
+        payload, operator_id=operator_id, patient_id=patient_id, refs=refs,
+        binding=reviewed_binding,
+        followup_visit_id=str(followup_visit_id) if followup_visit_id else None,
+        visit_code=visit_code)
+
     task = models.FollowUpFillTask.new_task(
         patient_id=patient_id,
         operator_id=operator_id,
         operator_role=operator_role,
         remote_refs=refs,
         allowed_origin=allowed_origin,
-        ma_task_ref=payload.get("ma_task_ref"),
+        ma_task_ref=ma_task_ref,
         visit_code=visit_code,
         visit_name=payload.get("visit_name"),
         ttl_seconds=payload.get("ttl_seconds"),
@@ -393,17 +581,21 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
         remote_payload["visit_code"] = visit_code
     if payload.get("visit_name"):
         remote_payload["visit_name"] = payload["visit_name"]
-    if payload.get("ma_task_ref"):
-        remote_payload["ma_task_ref"] = payload["ma_task_ref"]
+    remote_payload["ma_task_ref"] = ma_task_ref
     if payload.get("ttl_seconds") is not None:
         remote_payload["ttl_seconds"] = payload["ttl_seconds"]
 
     await _require_transaction_topology(db)
     try:
-        session_body = await client.create_fill_session(remote_payload, source_access_token=delegation.token)
+        session_body, existing_task = await _create_remote_session(
+            db, client, task, remote_payload, source_access_token=delegation.token,
+            patient_id=patient_id, operator_id=operator_id)
     except FormPlatformError as exc:
         mapped = _map_remote_error(exc, "创建填报会话失败")
         raise mapped from exc
+    if existing_task is not None:
+        # 对齐清单 3：同引用重试命中本地既有进行中任务 → 找回而非报错失败
+        return models.serialize_task(existing_task)
 
     task.record_remote_session(session_body)
     if (not isinstance(task.doc["session"]["session_uuid"], str)
