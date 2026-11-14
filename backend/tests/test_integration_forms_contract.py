@@ -397,6 +397,19 @@ class IntegrationFormsContractTests(FormsContractFixture):
         self.assertEqual(response.json()["detail"]["error"], "PATIENT_NOT_ASSIGNED")
         self.assertEqual(self.remote.requests, [])
 
+    async def test_create_passes_through_domain_state_unavailable_as_503(self):
+        # 域状态读取失败（canonical 二次状态读取异常）必须 503 透传，
+        # 不得被归属校验 catch-all 压成 403（对抗审查缺陷 2 第四处）。
+        from pymongo.errors import PyMongoError
+        self.database.patient_domain_state.find_one = AsyncMock(
+            side_effect=PyMongoError("domain state read failed"))
+        response = await self.client.post("/api/integrations/forms/fill-tasks",
+                                          json=self.payload(), headers=self.auth())
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["error"],
+                         "PATIENT_DOMAIN_STATE_UNAVAILABLE")
+        self.assertEqual(self.remote.requests, [])
+
     async def test_create_rejects_patient_role_operator(self):
         response = await self.client.post(
             "/api/integrations/forms/fill-tasks", json=self.payload(),

@@ -75,3 +75,10 @@
 6. 旧凭证若在切换前已泄漏，须通过源端会话失效及迁移处理。
 
 两端均为本地实现，未做真实 provider/RP 与浏览器全链路验收；本文不宣称跨端闭环已完成。
+
+## 源端委托填报隐含契约（2026-11-15 实测）
+
+T32 闭环演练发现的两条源端硬契约：它们未在任何跨端接口文档中声明，完全靠源端守卫在请求路径上强制，前端 iframe 封装（含移动端 fill_mobile）若不逐字满足即被源端 409 拒绝。康复端当前实现（裸路径 resume + 逐字重定向，T41 锁定）已满足；任何封装层（自建表单页、移动端壳、代理改写）不得破坏以下两点。
+
+1. **访视标识全程一致**：`visit_code` 必须从草稿保存到正式提交全程与会话一致。源端守卫位于委托答卷绑定 `bind_delegated_response`（源端 `app/routes/integration.py:1326`，`fs.visit_code and response.visit_code != fs.visit_code` 即 409「答卷与当前填报任务不一致」）；该绑定由问卷保存/提交共享路径调用（源端 `app/routes/questionnaire/_common.py:2229`），因此草稿与正式提交都过同一校验。封装层若在提交时改写或丢弃 `visit_code`（例如移动端用自定义表单页重新拼参），草稿能存而提交必 409。
+2. **恢复页隐藏 response_id 必须回传**：经恢复入口 `GET /integration/resume/<session_uuid>`（源端 `app/routes/integration.py:1251`）进入的会话，恢复页/重定向目标中携带的 `response_id`（源端 `_fill_url`，`app/routes/integration.py:1205`）必须随后续草稿保存与正式提交原样回传。源端 `integration_delegated_guard` before_request 守卫（`app/routes/integration.py:1406-1411`）对 `project_fill_questionnaire` / `project_submit_response` 两个端点检查请求中的 `response_id`：多于一个、与会话已绑定答卷不符、或会话已绑定而请求缺失，一律 409「请从原填报任务恢复当前草稿」。封装层不得剥离或替换该隐藏字段，也不得把恢复链接改写为不带 `response_id` 的入口。

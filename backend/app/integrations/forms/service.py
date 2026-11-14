@@ -22,7 +22,10 @@ from bson import ObjectId
 from pymongo.errors import PyMongoError
 
 from app.core.exceptions import AppBaseException
-from app.core.patient_access import PatientAccessError, assigned_patient_query, ensure_patient_access
+from app.core.patient_access import (
+    PatientAccessError, assigned_patient_query, ensure_patient_access,
+    is_domain_state_unavailable,
+)
 from app.patients.legacy import LegacyPatientRepository
 from . import models
 from .client import (
@@ -261,10 +264,18 @@ async def _verify_patient_assignment(db: AsyncIOMotorDatabase, patient_id: str,
 
     校验逻辑复用 app.core.patient_access.ensure_patient_access（AUTH01 共享实现）；
     此处仅把 PatientAccessError 翻译回集成侧错误类型，保持对外行为不变。
+
+    域状态不可用（canonical 二次状态读取失败，503
+    PATIENT_DOMAIN_STATE_UNAVAILABLE）必须透传，不得与归属失败 403
+    混同（对抗审查缺陷 2 的集成侧第四处）。
     """
     try:
         await ensure_patient_access(db, patient_id, operator_id, operator_role)
     except PatientAccessError as exc:
+        if is_domain_state_unavailable(exc):
+            raise FormIntegrationError("患者域状态不可用，已拒绝访问",
+                                       error_code=exc.error_code,
+                                       status_code=exc.status_code) from exc
         if exc.error_code == "PATIENT_NOT_FOUND":
             raise FormIntegrationError("患者不存在",
                                        error_code="PATIENT_NOT_FOUND",
