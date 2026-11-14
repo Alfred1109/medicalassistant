@@ -3,9 +3,8 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from app.core.patient_access import (
-    assigned_scope_query, ensure_patient_access, load_patient_doc, resolve_self_patient_id,
+    assigned_scope_ids, ensure_patient_access, load_patient_doc, resolve_self_patient_id,
 )
-from app.patients.legacy import LegacyPatientRepository
 from app.core.patient_identity import identity_key, load_identity_groups
 
 
@@ -57,13 +56,18 @@ async def ensure_device_access(db, device, actor, roles, *, write=False, session
 
 
 async def device_patient_scope(db, actor, patient_id=None):
-    """Return patient IDs; None is the administrator's read-only inventory."""
+    """Return patient IDs; None is the administrator's read-only inventory.
+
+    legacy：沿用 assigned_ids + is_active 过滤的原语义（extra_query 叠加于
+    legacy 分支）。canonical：由内核 assigned_scope_ids 执行于
+    clinical_patients，status=active 已内建等价的可用性收窄，is_active
+    这类 legacy 专属条件不再叠加。
+    """
     if patient_id is not None or actor.role == "patient":
         return [await resolve_device_patient(db, actor, patient_id)]
     if actor.role == "admin":
         return None
     if actor.role not in {"doctor", "health_manager"}:
         raise HTTPException(403, detail="无权查看患者设备")
-    return await LegacyPatientRepository(db).assigned_ids(
-        {**await assigned_scope_query(db, str(actor.id), actor.role), "$or": [
-            {"is_active": True}, {"is_active": {"$exists": False}}]})
+    return await assigned_scope_ids(db, str(actor.id), actor.role, extra_query={
+        "$or": [{"is_active": True}, {"is_active": {"$exists": False}}]})

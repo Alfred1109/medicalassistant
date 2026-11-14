@@ -5,9 +5,13 @@
 每个用例使用独立临时库（uuid 后缀）并在 teardown drop，只触碰 URI 指向实例上自己创建的库。
 
 主链用例把「迁移→canonical 启用→内核域分派→业务域读取→栅栏双载体」串成一条链；
-辅以 noop 漂移联动、回拨口径、失败注入三个分场景用例。断言全部依据
-migration.py / repository.py / core/patient_access.py / core/fences.py 的真实语义，
-不改实现；发现的构件缺口（编号 1-4）在对应用例注释中记录并汇总于任务报告。
+辅以 noop 漂移联动、回拨口径、失败注入三个分场景用例。断言依据
+migration.py / repository.py / core/patient_access.py / core/followup_access.py /
+core/device_access.py / core/fences.py 的真实语义；首轮演练发现的构件缺口
+1（范围查询载体错位）与 2（canonical status 未被对象访问消费）已修复并以
+修复后行为断言（见 test_business_scope_and_object_access_in_canonical_mode），
+缺口 3（回拨 SOP）以 docs/patient-domain-cutover-plan.md 的回拨口径章节
+收口，缺口 4（迁移失败残留空索引集合，良性运维残留）仍在对应用例注释中记录。
 """
 import os
 import tempfile
@@ -349,7 +353,7 @@ class PatientDomainE2EDrillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db[PATIENTS].count_documents({}), 2)
         self.assertEqual(await self.db[ACCOUNT_LINKS].count_documents({}), 2)
 
-    # ---- 场景 3（业务域读取链）：范围查询与对象访问的现语义 ----
+    # ---- 场景 3（业务域读取链）：范围载体与对象可用性的修复后语义 ----
 
     async def test_business_scope_and_object_access_in_canonical_mode(self):
         await self.seed_users(self.seed_documents())
@@ -368,32 +372,41 @@ class PatientDomainE2EDrillTests(unittest.IsolatedAsyncioTestCase):
                                                  actor(patient_id, "patient"), write=True)
         self.assertEqual(forbidden.exception.status_code, 403)
 
-        # 缺口 1（记录，不改实现）：followup_patient_scope /
-        # device_patient_scope 把 assigned_scope_query 的 canonical 查询
-        # （含 status=active）交给 LegacyPatientRepository.assigned_ids，
-        # 仍落在 users 集合上——legacy 用户文档没有 status 字段，canonical
-        # 形态查询恒不命中，医护范围静默收窄为零患者而非返回 clinical 范围。
+        # 缺口 1 修复验证：followup_patient_scope / device_patient_scope
+        # 经内核 assigned_scope_ids「构造+执行」一体解析，canonical 查询
+        # 执行于 clinical_patients（patient_id 由唯一索引防重），医护范围
+        # 返回完整 clinical 范围且不触碰 users；legacy 分支保持
+        # assigned_patient_query + assigned_ids 原路径（歧义防护不变）。
         spy = SpyDatabase(self.db)
-        self.assertEqual(await followup_patient_scope(spy, actor(DOCTOR, "doctor")), [])
-        self.assertEqual(await device_patient_scope(spy, actor(DOCTOR, "doctor")), [])
-        self.assertEqual(spy.users.find_calls, 2)  # 两次范围读取均查询的是 users
-        # 对照：仓库层同一 canonical 归属条件在 clinical_patients 上可正常命中
-        # （证明是范围函数的集合载体错位，而非查询条件本身失效）
+        self.assertEqual(set(await followup_patient_scope(spy, actor(DOCTOR, "doctor"))),
+                         {patient_id, string_id})
+        self.assertEqual(set(await device_patient_scope(spy, actor(DOCTOR, "doctor"))),
+                         {patient_id, string_id})
+        self.assertEqual(spy.users.find_calls, 0)  # 范围执行不再落在 users
+        # 对照：仓库层同一 canonical 归属条件与范围函数结果一致
         self.assertEqual({item["patient_id"] for item in await self.repo.list_assigned(
             DOCTOR, "doctor")}, {patient_id, string_id})
 
-        # 缺口 2（记录，不改实现）：canonical 停用临床患者（status=inactive）后，
-        # 医护对象访问不检查 canonical 状态字段——device_access.resolve_device_patient
-        # 的 is_active 复核在 canonical 文档上恒通过（字段不存在）。
+        # 缺口 2 修复验证：canonical 停用临床患者（status=inactive）后，
+        # load_patient_doc / ensure_patient_access 的 canonical 分支执行
+        # status=="active" 校验（文档无 is_active 字段，缺校验会恒放行），
+        # 停用患者对象级访问按不存在处理（404，与 legacy 设备消费方对
+        # is_active=False 的 404 语义对齐）。
         await self.db[PATIENTS].update_one({"patient_id": string_id},
                                            {"$set": {"status": "inactive"}})
-        still = await ensure_patient_access(self.db, string_id, DOCTOR, "doctor")
-        self.assertEqual(still["status"], "inactive")
-        self.assertEqual(await resolve_device_patient(self.db, actor(DOCTOR, "doctor"),
-                                                      string_id), string_id)
-        # 范围层：仓库 list_assigned 按 status=active 收窄（canonical 正确语义）
-        self.assertEqual({item["patient_id"] for item in await self.repo.list_assigned(
-            DOCTOR, "doctor")}, {patient_id})
+        with self.assertRaises(PatientAccessError) as unavailable:
+            await ensure_patient_access(self.db, string_id, DOCTOR, "doctor")
+        self.assertEqual(unavailable.exception.status_code, 404)
+        self.assertEqual(unavailable.exception.error_code, "PATIENT_NOT_FOUND")
+        with self.assertRaises(PatientAccessError) as device_denied:
+            await resolve_device_patient(self.db, actor(DOCTOR, "doctor"), string_id)
+        self.assertEqual(device_denied.exception.status_code, 404)
+        # 范围层随之收窄：canonical 范围内建 status=active，停用者不再出现
+        # （legacy 语义中设备的 is_active 过滤等价生效于 canonical status）
+        self.assertEqual(set(await followup_patient_scope(self.db, actor(DOCTOR, "doctor"))),
+                         {patient_id})
+        self.assertEqual(set(await device_patient_scope(self.db, actor(DOCTOR, "doctor"))),
+                         {patient_id})
 
         # 患者自取链路在停用后正确拒绝：resolve_self 要求 active 临床记录。
         with self.assertRaises(PatientAccessError) as inactive_self:
@@ -493,8 +506,10 @@ class PatientDomainE2EDrillTests(unittest.IsolatedAsyncioTestCase):
 
         # 口径 B：状态文档被删除 → 按现行实现回到 legacy 域（users 重新充当
         # 患者文档，患者自取不再需要 verified 链接）。这不是 fail-closed：
-        # 意外删除状态文档会静默降级，回拨演练必须以「显式改 mode」为口径，
-        # 不能用删文档当开关——记录为缺口 3。
+        # 意外删除状态文档会静默降级。回拨 SOP（docs/patient-domain-cutover-plan.md
+        # 回拨口径章节，缺口 3 收口）明确：回拨必须以显式域开关状态变更执行，
+        # 禁止以删文档当开关；本用例固化「删文档=静默回 legacy」的现行语义，
+        # 作为该风险的存在性证据。
         await self.db[STATE].delete_one({"_id": STATE_ID})
         self.assertEqual(await patient_domain_mode(self.db), "legacy")
         legacy_doc = await load_patient_doc(self.db, patient_id)

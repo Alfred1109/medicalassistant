@@ -15,7 +15,7 @@ from bson import ObjectId
 from pymongo.errors import PyMongoError
 
 from app.core.patient_access import (
-    PatientAccessError, assigned_scope_query, ensure_patient_access,
+    PatientAccessError, assigned_scope_ids, assigned_scope_query, ensure_patient_access,
     ensure_self_patient_access, load_patient_doc, patient_domain_mode)
 from app.db.indexes import ensure_patient_scope_indexes
 from app.patients.legacy import LegacyPatientIdentityError
@@ -30,14 +30,29 @@ PATIENT_ID, DOCTOR_ID, MANAGER_ID = str(ObjectId()), ObjectId(), str(ObjectId())
 class FakeCursor:
     def __init__(self, documents):
         self.documents = documents
+        self._iter = None
 
     async def to_list(self, length=None):
         rows = list(self.documents)
         return rows if length is None else rows[:length]
 
+    def __aiter__(self):
+        self._iter = iter(self.documents)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
 
 def _matches(document, query):
     for key, condition in query.items():
+        if key == "$or":
+            if not any(_matches(document, sub) for sub in condition):
+                return False
+            continue
         value = document.get(key)
         if isinstance(condition, dict):
             if "$in" in condition:
@@ -53,6 +68,9 @@ def _matches(document, query):
                     return False
                 flags = re.IGNORECASE if "i" in (condition.get("$options") or "") else 0
                 if not re.search(condition["$regex"], value, flags):
+                    return False
+            elif "$exists" in condition:
+                if bool(key in document) is not bool(condition["$exists"]):
                     return False
             else:
                 return False
@@ -272,6 +290,48 @@ class CanonicalDispatchTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(mode=await patient_domain_mode(db)):
                 with self.assertRaises(PatientAccessError):
                     await assigned_scope_query(db, MANAGER_ID, "patient")
+
+    async def test_assigned_scope_ids_executes_on_the_domain_collection(self):
+        """范围解析构造+执行一体：canonical 落 clinical_patients，legacy 落 users。"""
+        doctor = legacy_user(DOCTOR_ID, role="doctor")
+        db = canonical_db(clinical=[clinical_patient(PATIENT_ID, practitioners=[DOCTOR_ID]),
+                                    clinical_patient(str(ObjectId()), practitioners=[DOCTOR_ID],
+                                                     status="inactive")],
+                          users=[doctor, legacy_user(PATIENT_ID)])
+        self.assertEqual(await assigned_scope_ids(db, str(DOCTOR_ID), "doctor"), [PATIENT_ID])
+        self.assertEqual(db.users.documents, [doctor, legacy_user(PATIENT_ID)])
+
+    async def test_assigned_scope_ids_legacy_path_equals_original_assigned_ids(self):
+        user = legacy_user(PATIENT_ID, practitioners=[DOCTOR_ID])
+        db = FakeDatabase(users=FakeCollection([user]))
+        self.assertEqual(await assigned_scope_ids(db, str(DOCTOR_ID), "doctor"), [PATIENT_ID])
+        self.assertEqual(await assigned_scope_ids(db, str(DOCTOR_ID), "doctor", extra_query={
+            "$or": [{"is_active": True}, {"is_active": {"$exists": False}}]}), [PATIENT_ID])
+        # extra_query 只叠加 legacy 分支：canonical 无 is_active 字段语义
+        canonical = canonical_db(clinical=[clinical_patient(PATIENT_ID,
+                                                            practitioners=[DOCTOR_ID])])
+        self.assertEqual(await assigned_scope_ids(canonical, str(DOCTOR_ID), "doctor",
+                                                  extra_query={"is_active": False}),
+                         [PATIENT_ID])
+
+    async def test_assigned_scope_ids_keeps_legacy_identity_ambiguity_guard(self):
+        db = FakeDatabase(users=FakeCollection([
+            legacy_user(PATIENT_ID, practitioners=[DOCTOR_ID]),
+            legacy_user(PATIENT_ID, practitioners=[DOCTOR_ID])]))
+        with self.assertRaises(LegacyPatientIdentityError):
+            await assigned_scope_ids(db, str(DOCTOR_ID), "doctor")
+
+    async def test_inactive_canonical_patient_is_denied_at_object_access(self):
+        """canonical 停用患者：load/ensure 按 404 拒绝，对齐 legacy is_active=False 语义。"""
+        db = canonical_db(clinical=[clinical_patient(PATIENT_ID, practitioners=[DOCTOR_ID],
+                                                     status="inactive")])
+        with self.assertRaises(PatientAccessError) as missing:
+            await load_patient_doc(db, PATIENT_ID)
+        self.assertEqual(missing.exception.status_code, 404)
+        self.assertEqual(missing.exception.error_code, "PATIENT_NOT_FOUND")
+        with self.assertRaises(PatientAccessError) as denied:
+            await ensure_patient_access(db, PATIENT_ID, str(DOCTOR_ID), "doctor")
+        self.assertEqual(denied.exception.status_code, 404)
 
 
 class CanonicalNameSearchTests(unittest.IsolatedAsyncioTestCase):

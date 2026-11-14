@@ -2,9 +2,8 @@
 from fastapi import HTTPException
 
 from app.core.patient_access import (
-    PatientAccessError, assigned_scope_query, ensure_patient_access, ensure_self_patient_access,
+    PatientAccessError, assigned_scope_ids, ensure_patient_access, ensure_self_patient_access,
 )
-from app.patients.legacy import LegacyPatientRepository
 
 
 async def ensure_followup_patient_access(db, patient_id, actor, *, write=False):
@@ -22,12 +21,16 @@ async def ensure_followup_patient_access(db, patient_id, actor, *, write=False):
 
 
 async def followup_patient_scope(db, actor):
-    """返回查询级授权范围；None 仅表示既有 admin 全域豁免。"""
+    """返回查询级授权范围；None 仅表示既有 admin 全域豁免。
+
+    范围解析走内核「构造+执行」一体的 assigned_scope_ids：legacy 执行于
+    users（歧义防护不变），canonical 执行于 clinical_patients——不再把
+    canonical 查询形状交给 users 集合执行（那会让医护范围静默为空）。
+    """
     if actor.role == "admin":
         return None
     if actor.role == "patient":
         return [await ensure_self_patient_access(db, actor)]
     if actor.role not in {"doctor", "health_manager"}:
         raise HTTPException(status_code=403, detail="无权访问随访记录")
-    return await LegacyPatientRepository(db).assigned_ids(
-        await assigned_scope_query(db, str(actor.id), actor.role))
+    return await assigned_scope_ids(db, str(actor.id), actor.role)

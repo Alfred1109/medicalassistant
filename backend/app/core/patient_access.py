@@ -101,6 +101,10 @@ async def assigned_scope_query(db, operator_id: str, operator_role: str = "docto
 
     角色校验与 legacy 同源（同一 PatientAccessError），避免两条路径的
     医护角色语义漂移。
+
+    只构造不执行：执行载体由调用方决定（这正是早期波段「canonical 查询
+    形状被交给 users 执行」载体错位缺口的根源）。需要「构造+执行」一体的
+    域感知范围解析时，请使用 assigned_scope_ids。
     """
     patient_assignment_field(operator_role)
     if await patient_domain_mode(db, session=session) == "canonical":
@@ -108,14 +112,50 @@ async def assigned_scope_query(db, operator_id: str, operator_role: str = "docto
     return assigned_patient_query(operator_id, operator_role)
 
 
+async def assigned_scope_ids(db, operator_id: str, operator_role: str = "doctor",
+                             *, session=None,
+                             extra_query: Optional[Dict[str, Any]] = None) -> list:
+    """构造并执行一体的域感知医护范围患者 ID 解析；查询落在所在域的集合上。
+
+    legacy：构造 assigned_patient_query（保留身份双形态与
+    LegacyPatientRepository.assigned_ids 的歧义防护，PATIENT_IDENTITY_AMBIGUOUS
+    503 语义逐字不变）后执行于 users。canonical：执行 repository.assigned_query
+    （已含 status=active）于 clinical_patients，返回 patient_id 列表；
+    canonical 患者主键由唯一索引防重，无 legacy 双形态歧义防护的对应物。
+
+    extra_query 仅叠加于 legacy 分支的查询（legacy 专属精化条件，例如设备
+    域的 is_active 过滤）；canonical 的等价可用性语义已由 assigned_query 的
+    status=active 内建，不叠加 legacy 专属字段，避免把 users 形态的查询
+    条件误用于 clinical_patients。
+    """
+    patient_assignment_field(operator_role)
+    if await patient_domain_mode(db, session=session) == "canonical":
+        repo = ClinicalPatientRepository(db)
+        cursor = repo.collection.find(
+            canonical_assigned_query(operator_id, operator_role), {"patient_id": 1},
+            session=session)
+        documents = await cursor.to_list(length=None)
+        return [document["patient_id"] for document in documents]
+    query = assigned_patient_query(operator_id, operator_role)
+    if extra_query:
+        query = {**query, **extra_query}
+    return await LegacyPatientRepository(db).assigned_ids(query)
+
+
 async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str, *, session=None) -> Dict[str, Any]:
     """按 ID 加载当前域的患者文档（legacy: users；canonical: clinical_patients）。
 
     两种主键形态（ObjectId / 非 ObjectId 字符串）在各自域内保持兼容；
-    canonical 分支不读 users。
+    canonical 分支不读 users。canonical 的对象级可用性由 status 承载：
+    status != "active"（迁移自 legacy is_active=False 的停用患者）按不存在
+    处理（404 PATIENT_NOT_FOUND），与 legacy 消费方对 is_active=False 的
+    404 语义对齐——canonical 文档没有 is_active 字段，缺少此校验会让
+    停用患者对所有对象级访问路径恒放行。
     """
     if await patient_domain_mode(db, session=session) == "canonical":
         doc = await ClinicalPatientRepository(db).get(patient_id, session=session)
+        if doc is not None and doc.get("status") != "active":
+            doc = None
     else:
         doc = await LegacyPatientRepository(db).get(patient_id, session=session)
     if not doc:
@@ -129,8 +169,10 @@ async def ensure_patient_access(db: AsyncIOMotorDatabase, patient_id: str,
     """按已认证角色校验患者侧关联；admin 沿用既有豁免。
 
     归属字段与比较逻辑两域同构（clinical_patients 迁移保留原归属列表与
-    ID 字面量）；患者实体的可用状态由所在域文档承载（legacy: is_active，
-    canonical: status），由各域消费方自行执行既有策略。
+    ID 字面量）。患者实体可用性：legacy 的 is_active 仍由各域消费方执行
+    既有策略（行为不变）；canonical 的 status 校验已由 load_patient_doc
+    的 canonical 分支统一执行（inactive → 404），经本函数与
+    load_patient_doc 的对象级路径自动生效。
     """
     if operator_role == "admin":
         return {}
