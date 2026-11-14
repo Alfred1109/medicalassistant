@@ -521,6 +521,74 @@ class UniqueIndexRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.conversations.docs[0]["last_message_preview"], "")
 
 
+class StandaloneDegradationTests(unittest.IsolatedAsyncioTestCase):
+    """无事务部署按现状降级为顺序写（T48/D2 取舍，单元级）。
+
+    run_transaction 在无事务环境会拒绝（设备域语义：不支持事务即拒绝）；
+    通信域消息收发是基本可用性，按架构取舍降级为修复前的顺序写——授权
+    仍逐帧实时查库（ConversationPolicy.authorize），幂等唯一索引兜底与
+    既有错误语义不变。事务路径（副本集）的并发停用回滚语义见
+    test_communication_revocation_replica.py::TransactionalSendRevocationTests。
+    """
+
+    @staticmethod
+    def _standalone_db():
+        """FakeDB + 探针形态为 standalone 的 client：hello 成功但无 setName。"""
+        db = FakeDB()
+
+        async def hello(command):
+            return {"ok": 1.0, "isWritablePrimary": True}
+
+        db.client = SimpleNamespace(admin=SimpleNamespace(command=hello))
+        return db
+
+    async def test_standalone_write_lands_sequentially_without_session(self):
+        db = self._standalone_db()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
+        conversation_id = seed_conversation(db, alice, bob)
+
+        sent = await CommunicationService.send_message(
+            db, conversation_id, str(alice["_id"]), "standalone",
+            client_message_id="sa-1",
+        )
+
+        # 降级顺序写：消息、会话摘要、离线通知与修复前现状一致
+        self.assertEqual(sent["content"], "standalone")
+        self.assertEqual(len(db.messages.docs), 1)
+        self.assertEqual(db.conversations.docs[0]["last_message_preview"], "standalone")
+        self.assertEqual(len(db.notifications.docs), 1)
+
+        # 幂等重放同键返回既有消息，不重复落库、不重复通知
+        replay = await CommunicationService.send_message(
+            db, conversation_id, str(alice["_id"]), "standalone",
+            client_message_id="sa-1",
+        )
+        self.assertEqual(replay["id"], sent["id"])
+        self.assertEqual(len(db.messages.docs), 1)
+        self.assertEqual(len(db.notifications.docs), 1)
+
+    async def test_probe_failure_degrades_instead_of_rejecting(self):
+        """事务能力探测失败（网络抖动/无 admin 句柄）：降级顺序写，不 503。"""
+        db = FakeDB()
+
+        async def broken(command):
+            raise RuntimeError("probe down")
+
+        db.client = SimpleNamespace(admin=SimpleNamespace(command=broken))
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
+        conversation_id = seed_conversation(db, alice, bob)
+
+        sent = await CommunicationService.send_message(
+            db, conversation_id, str(alice["_id"]), "degraded")
+        self.assertEqual(sent["content"], "degraded")
+        self.assertEqual(len(db.messages.docs), 1)
+        self.assertEqual(len(db.notifications.docs), 1)
+
+
 class ObjectIdPaginationTests(unittest.IsolatedAsyncioTestCase):
     async def test_before_id_pagination_orders_by_objectid_immune_to_timestamp_drift(self):
         db = FakeDB()
@@ -814,9 +882,14 @@ class WebSocketChatContractTests(unittest.TestCase):
         self.db.users.docs.extend([dict(self.alice), dict(self.bob)])
         self.conversation_id = seed_conversation(self.db, self.alice, self.bob)
         app.dependency_overrides[get_database] = lambda: self.db
+        # D4 typing 账号复核缓存是模块级全局：用例间隔离
+        from app.api import websockets as ws_module
+        ws_module._typing_account_cache.clear()
 
     def tearDown(self):
         app.dependency_overrides.pop(get_database, None)
+        from app.api import websockets as ws_module
+        ws_module._typing_account_cache.clear()
 
     def connect(self, user):
         """以给定用户身份建立 WS 连接（鉴权走补丁注入，须在会话存续期间生效）。"""
@@ -932,6 +1005,37 @@ class WebSocketChatContractTests(unittest.TestCase):
             broadcast = self.skip_join(ws)
             self.assertEqual(broadcast["message"]["sender_id"], str(self.bob["_id"]))
         self.assertEqual(len(self.db.messages.docs), 1)
+
+    # ---- D4（T48）：typing 帧撤权处置 ----
+
+    def test_typing_frame_forwarded_for_active_room_member(self):
+        """在房有效账号的 typing 帧照旧转发（瞬态信号语义不变，不落库）。"""
+        with self.connect(self.alice) as ws:
+            ws.send_json({"type": "typing", "is_typing": True})
+            frame = self.skip_join(ws)
+            self.assertEqual(frame["type"], "typing")
+            self.assertEqual(frame["user_id"], str(self.alice["_id"]))
+            self.assertTrue(frame["is_typing"])
+        self.assertEqual(len(self.db.messages.docs), 0)
+
+    def test_typing_frame_rejected_after_account_disabled(self):
+        """D4 缺陷修复：连接期内账号停用（非统一认证部署无周期复核），
+        下一条 typing 不再转发，与 message 分支同语义拒绝（NOT_CONVERSATION_
+        PARTICIPANT + 4403 断连）。TTL 钉为 0 即逐帧复核，无缓存窗口。"""
+        recheck_patch = patch("app.api.websockets.TYPING_ACCOUNT_RECHECK_SECONDS", 0)
+        recheck_patch.start()
+        self.addCleanup(recheck_patch.stop)
+        with self.connect(self.alice) as ws:
+            ws.send_json({"type": "typing", "is_typing": True})
+            forwarded = self.skip_join(ws)
+            self.assertEqual(forwarded["type"], "typing")
+            # 连接期内账号停用（真实落库路径：directory.set_account_active 同语义）
+            self.db.users.docs[0]["is_active"] = False
+            ws.send_json({"type": "typing", "is_typing": False})
+            error = ws.receive_json()
+            self.assertEqual(error["type"], "error")
+            self.assertEqual(error["error_code"], "NOT_CONVERSATION_PARTICIPANT")
+        self.assertEqual(len(self.db.messages.docs), 0)
 
     # ---- WS03：read_receipt 真实落库 ----
 

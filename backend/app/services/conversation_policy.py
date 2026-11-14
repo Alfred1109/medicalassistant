@@ -62,17 +62,22 @@ class ConversationPolicy:
         user_id: str,
         *,
         layer: str = "inbound",
+        session: Any = None,
     ) -> PolicyDecision:
         """校验 user_id 能否在 layer 层访问 conversation_id。
 
         layer 仅用于审计语义（join/inbound/outbound），当前三层规则一致；
         校验失败一律返回否定判定（不抛异常），由调用方决定对外错误形态。
+        session（T48/D2）：可选 Mongo 事务会话——send_message 在事务内以同一
+        规则对象复核授权（快照读），与事务外的逐帧授权共用本方法；session 为
+        None 时为普通读，兼容无事务的测试替身（不透传 kwarg）。
         """
         # 入参合法性：无效 id 视为非成员，不区分原因（供握手阶段安全调用）
         if not ObjectId.is_valid(conversation_id) or not ObjectId.is_valid(user_id):
             return PolicyDecision(False, REASON_NOT_PARTICIPANT)
 
-        conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
+        kwargs = {"session": session} if session is not None else {}
+        conversation = await db.conversations.find_one({"_id": ObjectId(conversation_id)}, **kwargs)
         if not conversation:
             return PolicyDecision(False, REASON_NOT_PARTICIPANT)
         # 第 1 层：会话参与者（D1 兼容读两种成员形态）
@@ -83,7 +88,7 @@ class ConversationPolicy:
         # 账号身份是会话成员的权威（app/patients/README.md：会话成员 ID 保持
         # 账号 ID，不批量重写为患者 ID），本层账号语义保持不动；canonical
         # 波段需经 patient_account_links 解析账号↔患者实体。
-        user = await db.users.find_one({"_id": ObjectId(user_id)})
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, **kwargs)
         if not user or not user.get("is_active", False):
             return PolicyDecision(False, REASON_ACCOUNT_INVALID)
 

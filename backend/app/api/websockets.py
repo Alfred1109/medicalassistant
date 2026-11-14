@@ -1,8 +1,10 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
-from typing import Dict, List, Any, Optional, Set
+from typing import Dict, List, Any, Optional, Set, Tuple
 import json
 import asyncio
+import time
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 from datetime import datetime
 import logging
 
@@ -25,6 +27,54 @@ from app.services.notification_service import NotificationService
 # 配置日志
 logger = logging.getLogger(__name__)
 IDENTITY_RECHECK_SECONDS = 5
+
+# ---------------------------------------------------------------------------
+# D4（T48）：typing 帧的撤权处置
+#
+# 缺陷（T23 记录）：typing 帧此前仅转发不复核，非统一认证部署（无
+# identity_validator 周期复核）下，连接期内被停用的账号可无限期继续向房间
+# 发送 typing 帧。typing 是纯瞬态信号（WS03 冻结：不落库），但转发仍是
+# 对已撤权者的房间内广播，须兜底。
+#
+# 权衡（按要求实现并说明）：逐帧做完整 ConversationPolicy.authorize（两次
+# 查库）太贵——typing 可随按键高频发生。本实现为两层廉价复核：
+# 1) 成员层：本进程聊天房连接表（纯内存，入房时已过 is_conversation_participant）；
+# 2) 账号层：is_active 点查（users _id 单键查询）+ 每用户 TTL 缓存
+#   （TYPING_ACCOUNT_RECHECK_SECONDS，默认 5s，对齐 IDENTITY_RECHECK_SECONDS）。
+# 撤权感知的上界即 TTL（撤权后最多再转发一个 TTL 窗口内的 typing 帧，下一条
+# 即 4403 断连，与 message 分支同语义）——对无持久化语义的瞬态信号可接受；
+# 换取每用户每 TTL 至多一次点查。复核查库异常时按「未撤权」放行且不缓存
+# （fail-open：DB 故障不等于撤权，typing 无落库语义，不得因瞬时故障断连）。
+# ---------------------------------------------------------------------------
+TYPING_ACCOUNT_RECHECK_SECONDS = 5
+# user_id -> (缓存失效时刻 monotonic, 是否有效账号)
+_typing_account_cache: Dict[str, Tuple[float, bool]] = {}
+
+
+async def typing_frame_allowed(db, conversation_id: str, user_id: str) -> bool:
+    """typing 帧的廉价成员 + 账号复核（D4，见上方权衡说明）。"""
+    # 成员层：房间在册（免费本地检查；非成员连接不可能在房间表内发帧）
+    if user_id not in get_connection_manager().chat_rooms.get(conversation_id, {}):
+        return False
+    # 账号层：TTL 缓存的 is_active 复核
+    now = time.monotonic()
+    cached = _typing_account_cache.get(user_id)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)})
+        allowed = bool(user and user.get("is_active", False))
+    except Exception as error:
+        # 复核通路故障：fail-open 且不缓存（见上方权衡说明）
+        logger.warning(f"typing 帧账号复核失败，按有效放行: {str(error)}")
+        return True
+    if len(_typing_account_cache) > 1024:
+        # 惰性清理过期项，防止长期运行下的无界增长
+        for stale_id, (deadline, _) in list(_typing_account_cache.items()):
+            if deadline <= now:
+                del _typing_account_cache[stale_id]
+    _typing_account_cache[user_id] = (now + TYPING_ACCOUNT_RECHECK_SECONDS, allowed)
+    return allowed
 
 
 async def receive_authorized(websocket):
@@ -418,6 +468,20 @@ def setup_websockets(app: FastAPI):
                         # 2) 房间内成员均已在入房时通过 is_conversation_participant
                         #    校验，转发只发生在已校验房间内，逐帧重复查库纯属浪费；
                         # 3) 前端（chatWsService.ts）明确不发送不消费该帧。
+                        # D4（T48）：不落库不等于不复核——非统一认证部署无周期
+                        # 身份复核，连接期内被停用的账号此前可无限期发送 typing
+                        # 帧。补廉价成员 + 账号复核（TTL 缓存权衡见
+                        # typing_frame_allowed）；不通过则与 message 分支同语义
+                        # 拒绝并 4403 断连。
+                        if not await typing_frame_allowed(db, conversation_id, user_id):
+                            await websocket.send_json({
+                                "type": "error",
+                                "error_code": "NOT_CONVERSATION_PARTICIPANT",
+                                "message": "用户不是该会话参与者",
+                            })
+                            manager.disconnect(user_id, connection_id)
+                            await websocket.close(code=4403)
+                            return
                         await manager.send_chat_message(
                             {
                                 "type": "typing",

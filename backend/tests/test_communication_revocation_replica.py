@@ -18,9 +18,15 @@ T23 待验证项落地（架构收敛记录「通信」条目）：
   被 outbound 授权 ValueError 误导映射为 READ_RECEIPT_PERSIST_FAILED 且连接不断
   ——已修复为 NOT_CONVERSATION_PARTICIPANT + 4403 断连（与 message 分支同语义，
   见 ChatConnectionRevocationTests）。
-- 已知缺陷如实记录（不修复大改）：send_message 的授权→落库段不在事务内，
-  授权通过后、插入完成前的并发停用不回滚写入（见
-  RevocationRaceWindowDocumentationTests）；typing 转发无撤权处置（D4，记录不动）。
+- D2 修复（T48）：send_message 的授权→落库段事务化（run_transaction：事务内
+  授权复核 + 消息插入 + 会话摘要原子提交）——授权复核后、事务快照建立前的
+  并发停用整体回滚，消息与摘要（及事务后置的通知）都不落
+  （见 TransactionalSendRevocationTests）；快照建立后、提交前落地的撤权为
+  快照隔离的残余窗口，上界为事务时长，如实固化（同见该类第二个用例）。
+  无事务部署（standalone）按现状降级为顺序写，降级断言见
+  test_communication_contract.py::StandaloneDegradationTests。
+- D4 修复（T48）：typing 帧补廉价成员 + 账号复核（TTL 缓存，撤权感知上界
+  即 TTL），不通过 4403 断连（见 TypingFrameRevocationTests）。
 
 WS 端点形态：直接驱动 setup_websockets 注册的真实端点协程（真实 ConnectionManager、
 CommunicationService、ConversationPolicy、通知与身份复核路径），传输层用单事件
@@ -441,16 +447,59 @@ class ServiceLayerRevocationTests(ReplicaCase):
         self.assertEqual(await self.db_a.notifications.count_documents({}), 1)
 
 
-class RevocationRaceWindowDocumentationTests(ReplicaCase):
-    """已知缺陷固化（按要求记录现状、不做大改）：
+class TransactionalSendRevocationTests(ReplicaCase):
+    """D2 事务化（T48）后的并发撤权语义（修复原「固化失败现状」用例）：
 
-    send_message 的授权（ConversationPolicy.authorize）→ 落库（insert_one）
-    段不在事务内、插入前无二次账号复核——授权通过后的并发停用不回滚写入。
-    若未来按 WS02 事务化（run_transaction 包裹授权+插入），本用例会失败，
-    届时须随实现更新为"写入被拒"的语义断言。
+    send_message 的授权复核 + 消息插入 + 会话摘要已在 run_transaction 内原子
+    执行（事务内复核为快照首读）。两个用例分别钉死窗口两侧的语义：
+
+    - 撤权在事务快照建立之前落地（即事务内复核读之前）：复核读看到
+      is_active=False，抛 ValueError 整体回滚——消息、摘要不落，事务后置的
+      离线通知也因执行流未到达而不落（消息与通知都不落）；
+    - 撤权在事务快照建立之后、提交之前落地：MongoDB 事务为快照隔离，撤权
+      写（users.is_active，非事务单语句）与消息事务无共享写载体、不构成写
+      冲突，消息照常提交——这是快照隔离的残余窗口，上界为事务自身时长
+      （复核+两写+提交），远小于修复前「授权→ensure_indexes→落库」的窗口；
+      完全消除需撤权入口与消息事务共享栅栏载体，撤权入口
+      directory/records.py 属冻结面，不在本次范围（如实固化）。
     """
 
-    async def test_write_lands_when_account_disabled_between_authorize_and_insert(self):
+    async def test_revocation_before_transactional_recheck_rolls_back_everything(self):
+        """撤权落在事务快照前：复核拒绝、整体回滚，消息与通知都不落。"""
+        original_find_one = AsyncIOMotorCollection.find_one
+        reached, proceed = asyncio.Event(), asyncio.Event()
+
+        async def intercept(collection, *args, **kwargs):
+            # 事务内复核的首个读（conversations.find_one 带 session kwarg）：
+            # 在快照建立前暂停，让并发停用先落地
+            if collection.name == 'conversations' and kwargs.get('session') is not None:
+                reached.set()
+                await asyncio.wait_for(proceed.wait(), 5)
+            return await original_find_one(collection, *args, **kwargs)
+
+        with patch.object(AsyncIOMotorCollection, 'find_one', intercept):
+            task = asyncio.create_task(CommunicationService.send_message(
+                self.db_a, self.cid, self.alice_id, 'rolled-back'))
+            await asyncio.wait_for(reached.wait(), 5)
+            # 此刻事务尚未建立快照（复核首读被暂停）；并发停用（另一客户端，
+            # 模拟后台目录管理操作）先行提交
+            await self.db_b.users.update_one(
+                {'_id': ObjectId(self.alice_id)}, {'$set': {'is_active': False}})
+            proceed.set()
+            with self.assertRaisesRegex(ValueError, '账号不可用'):
+                await asyncio.wait_for(task, 10)
+
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+        self.assertEqual(await self.db_a.notifications.count_documents({}), 0)
+        conversation = await self.db_a.conversations.find_one({'_id': ObjectId(self.cid)})
+        self.assertEqual(conversation.get('last_message_preview', ''), '')
+        # 撤权后正常拒绝（外层逐帧授权）
+        with self.assertRaisesRegex(ValueError, '账号不可用'):
+            await CommunicationService.send_message(
+                self.db_a, self.cid, self.alice_id, 'blocked')
+
+    async def test_revocation_inside_snapshot_after_recheck_lands_write(self):
+        """撤权落在事务快照后、提交前：快照隔离残余窗口，消息照常提交。"""
         original_insert = AsyncIOMotorCollection.insert_one
         reached, proceed = asyncio.Event(), asyncio.Event()
         paused = False
@@ -468,21 +517,101 @@ class RevocationRaceWindowDocumentationTests(ReplicaCase):
             task = asyncio.create_task(CommunicationService.send_message(
                 self.db_a, self.cid, self.alice_id, 'raced'))
             await asyncio.wait_for(reached.wait(), 5)
-            # 插入已越过授权点：此刻并发停用（模拟后台目录管理操作）
+            # 插入已越过事务内复核（快照内 is_active 仍为 True）：此刻并发停用
             await self.db_b.users.update_one(
                 {'_id': ObjectId(self.alice_id)}, {'$set': {'is_active': False}})
             proceed.set()
             result = await asyncio.wait_for(task, 10)
 
-        # 现状：写入照常落库，离线通知副作用照常产生（撤权对下一条消息才生效）
+        # 残余窗口现状：写入照常提交（原子：消息+摘要一起），离线通知副作用
+        # 照常产生（撤权对下一条消息才生效）
         self.assertEqual(result['content'], 'raced')
         self.assertEqual(await self.db_a.messages.count_documents({}), 1)
         self.assertEqual(await self.db_a.notifications.count_documents({}), 1)
-        # 撤权对下一条消息立即生效（逐条实时查库确认存在）
+        # 撤权对下一条消息立即生效（事务内复核读取到停用后的状态）
         with self.assertRaisesRegex(ValueError, '账号不可用'):
             await CommunicationService.send_message(
                 self.db_a, self.cid, self.alice_id, 'blocked')
         self.assertEqual(await self.db_a.messages.count_documents({}), 1)
+
+
+# ---------------------------------------------------------------------------
+# D4：typing 帧撤权处置（TTL 缓存钉为 0 = 逐帧复核）
+# ---------------------------------------------------------------------------
+
+class TypingFrameRevocationTests(EndpointHarness, ReplicaCase):
+    """非统一认证部署（无周期身份复核）下 typing 帧的成员 + 账号复核。"""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.build_app()
+        self.start_identity(unified=False)
+        ttl_patch = patch('app.api.websockets.TYPING_ACCOUNT_RECHECK_SECONDS', 0)
+        ttl_patch.start()
+        self.addCleanup(ttl_patch.stop)
+        mode_patch = patch.object(settings, 'EVENT_BUS_MODE', 'local')
+        mode_patch.start()
+        self.addCleanup(mode_patch.stop)
+        from app.api import websockets as ws_module
+        ws_module._typing_account_cache.clear()
+        self.addCleanup(ws_module._typing_account_cache.clear)
+
+    async def test_typing_frame_forwarded_for_active_room_member(self):
+        """在房有效账号的 typing 帧照旧转发（不影响既有瞬态信号语义）。"""
+        ws, task = await self.open_chat(self.db_a)
+        try:
+            ws.send_frame({'type': 'typing', 'is_typing': True})
+            frame = await self.business_frame(ws)
+            self.assertEqual(frame['type'], 'typing')
+            self.assertEqual(frame['user_id'], self.alice_id)
+            self.assertTrue(frame['is_typing'])
+        finally:
+            await self._cancel(task)
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+
+    async def test_revoked_account_typing_frame_rejected_with_4403(self):
+        """连接期内账号停用：下一条 typing 不再转发，4403 断连（与 message
+        分支同语义）；TTL 钉为 0 即逐帧复核，撤权感知无缓存窗口。"""
+        ws, task = await self.open_chat(self.db_a)
+        try:
+            ws.send_frame({'type': 'typing', 'is_typing': True})
+            frame = await self.business_frame(ws)
+            self.assertEqual(frame['type'], 'typing')
+            await set_account_active(self.db_a, self.alice_id, False)
+            ws.send_frame({'type': 'typing', 'is_typing': False})
+            error = await self.next_frame(ws, 'error')
+            self.assertEqual(error['error_code'], 'NOT_CONVERSATION_PARTICIPANT')
+            await asyncio.wait_for(ws.closed.wait(), 5)
+            self.assertEqual(ws.close_code, 4403)
+        finally:
+            await self._cancel(task)
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+
+    async def test_typing_frames_do_not_hit_db_per_frame_within_ttl(self):
+        """TTL 窗口内的重复 typing 帧不逐帧查库（缓存命中）。"""
+        from app.api import websockets as ws_module
+        ttl_patch = patch('app.api.websockets.TYPING_ACCOUNT_RECHECK_SECONDS', 60)
+        ttl_patch.start()
+        self.addCleanup(ttl_patch.stop)
+        original_find_one = AsyncIOMotorCollection.find_one
+        user_queries = []
+
+        async def counting(collection, *args, **kwargs):
+            if collection.name == 'users':
+                user_queries.append(dict(args[0]) if args else None)
+            return await original_find_one(collection, *args, **kwargs)
+
+        ws, task = await self.open_chat(self.db_a)
+        try:
+            with patch.object(AsyncIOMotorCollection, 'find_one', counting):
+                for _ in range(5):
+                    ws.send_frame({'type': 'typing', 'is_typing': True})
+                    frame = await self.business_frame(ws)
+                    self.assertEqual(frame['type'], 'typing')
+        finally:
+            await self._cancel(task)
+        # 首帧复核一次（缓存 60s），后续 4 帧全部走缓存
+        self.assertEqual(len(user_queries), 1)
 
 
 # ---------------------------------------------------------------------------

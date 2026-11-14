@@ -9,8 +9,11 @@ from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 import asyncio
 import logging
+import weakref
 
+from app.core.exceptions import AppBaseException
 from app.core.patient_identity import identity_key, load_identity_groups
+from app.db.transactions import run_transaction
 from app.patients.legacy import LegacyPatientIdentityError
 from app.services.notification_service import NotificationService
 from app.services.conversation_policy import (
@@ -22,7 +25,84 @@ from app.services.conversation_policy import (
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# D2 修复（T48）：send_message 授权→落库段事务化
+#
+# 事务边界（真实事务，参照 device_service / db/transactions.py 的 run_transaction
+# 惯例，snapshot 读 + majority 写）：
+# - 事务内：ConversationPolicy.authorize 复核（同一规则对象、session 透传，
+#   为事务快照的首读）→ messages.insert_one → conversations.update_one
+#   （会话摘要）。授权复核与两条写入在同一原子单元：复核不通过（连接期内
+#   并发停用账号 / 移出会话）即抛错整体回滚，消息与摘要都不落。
+# - 事务外（有意保留）：离线通知（NotificationService.create_notification）。
+#   该副作用除 notifications 落库外还承担邮件发送（外部副作用——事务回调可能
+#   被驱动因瞬时冲突整体重试，外部副作用进事务会造成重复投递）与 WS 实时
+#   推送，且不接受 session 参数（notification_service 属冻结面）；保持其既有
+#   best-effort 语义（失败仅告警，不影响已提交的消息，与修复前一致）。事务
+#   回滚时执行流根本不会到达通知，通知同样不落。
+# - 残余窗口（如实记录）：MongoDB 事务为快照隔离；撤权写（users.is_active，
+#   directory/records.set_account_active，非事务单语句）与消息事务无共享写
+#   载体、不构成写冲突——撤权若在事务快照建立之后、提交之前落地，本次消息
+#   仍会提交（快照内 is_active 仍为 True）。残余窗口上界为事务自身时长
+#   （复核+两写+提交，约三次往返），远小于修复前「授权→ensure_indexes→
+#   落库」的多读多写窗口；完全消除需撤权路径与消息事务共享栅栏载体
+#   （fences.py AccountFenceStore），撤权入口 directory/records.py 属冻结面，
+#   不在本次范围。
+#
+# 无事务部署取舍（架构记录「不支持事务时拒绝 vs 通信域现状」）：
+# - standalone / 无事务会话的部署按现状降级为顺序写（授权仍逐帧实时查库，
+#   缺陷窗口与修复前一致），不拒绝服务——消息收发是通信域基本可用性；幂等
+#   唯一索引兜底与既有错误语义保持不变。
+# - 事务能力探测按 client 缓存（WeakKeyDictionary）：hello 的 setName /
+#   msg=mongos 形态在进程存续期不变（standalone 转副本集需重启 mongod 并
+#   重建连接）；探测失败不缓存、按不支持处理（降级保可用）。
+# ---------------------------------------------------------------------------
+
+# 事务能力探测缓存：client → 是否支持多文档事务（副本集/分片）
+_transaction_capable_clients: "weakref.WeakKeyDictionary[Any, bool]" = weakref.WeakKeyDictionary()
+
+
+def _cache_transaction_support(client, supported: Optional[bool]) -> Optional[bool]:
+    """按 client 读写探测缓存；client 不可弱引用（替身）时视为无缓存。"""
+    try:
+        if supported is None:
+            return _transaction_capable_clients.get(client)
+        _transaction_capable_clients[client] = supported
+    except TypeError:
+        return None
+    return supported
+
+
+async def _transactions_supported(db) -> bool:
+    """探测 db 所属 client 是否支持多文档事务（副本集 / mongos）。"""
+    client = getattr(db, "client", None)
+    if client is None:
+        return False
+    cached = _cache_transaction_support(client, None)
+    if cached is not None:
+        return cached
+    try:
+        hello = await client.admin.command("hello")
+        supported = bool(hello.get("setName")) or hello.get("msg") == "mongos"
+    except Exception:
+        # 探测失败（含无 admin 句柄的测试替身）：按不支持处理且不缓存，
+        # 下次写入重新探测。
+        return False
+    _cache_transaction_support(client, supported)
+    return supported
+
 async def require_message_write_storage(db):
+    """落库前声明幂等唯一索引（逐次调用，评估后保持不缓存，T48）。
+
+    T23 曾记录本调用位于授权→落库窗口内。评估结论：维持逐次调用——
+    app/db/indexes.py 的冻结契约明确「No process cache: databases/index
+    state may change. History is never repaired.」，且幂等唯一索引是并发
+    恰好一封的 DB 层兜底：缓存成功会静默放过中途被删除的索引，破坏该
+    契约（契约测试 test_every_write_checks_database_index_before_persist
+    亦逐次断言）。逐次 create_index 对已存在索引是单次 no-op 往返；
+    D2 事务化后授权→落库窗口内已有事务内复核兜底，本调用不再承担
+    撤权窗口的收敛职责，无需为此缓存。
+    """
     from app.db.indexes import ensure_communication_indexes, CommunicationStorageUnavailable
     from app.core.exceptions import AppBaseException
     try:
@@ -377,6 +457,12 @@ class CommunicationService:
         窗口内的重复投递由 DB 层 (conversation_id, sender_id, client_message_id)
         partial unique 索引（见 app/db/indexes.py）以 DuplicateKeyError 拦截，
         捕获后重查返回既有消息，语义与快路径一致（不重复产生副作用）。
+        事务路径内撞唯一索引同样收敛为重查返回既有消息（见
+        _send_message_transaction），幂等兜底不被事务化破坏。
+
+        D2 事务化（T48）：逐帧授权通过后，事务内再以同一规则做授权复核 +
+        消息插入 + 会话摘要更新（原子提交，见模块级事务边界注释）；无事务
+        部署按现状降级为顺序写。
         """
         # ConversationPolicy（D3，默认采纳待评审追认 2026-11-09）：
         # HTTP/WS 入站共用同一校验语义——有效账号 + 会话参与者。
@@ -425,37 +511,52 @@ class CommunicationService:
         if client_message_id:
             message["client_message_id"] = client_message_id
 
-        # 保存消息（落库成功后才允许广播——数据库失败绝不广播）。
-        # DuplicateKeyError：并发投递通过了先查后插的检查窗口，被唯一索引兜底
-        # 拦截——重查返回既有消息，等价于幂等快路径（不更新会话摘要、不广播、
-        # 不发通知，避免重复副作用）。
-        try:
-            await db.messages.insert_one(message)
-        except DuplicateKeyError:
-            existing = await db.messages.find_one({
-                "conversation_id": conversation_id,
-                "sender_id": sender_id,
-                "client_message_id": client_message_id,
-            })
-            if existing:
-                return CommunicationService._format_message(existing)
-            raise
+        if await _transactions_supported(db):
+            # 事务路径：授权复核 + 插入 + 摘要原子提交；并发窗口撞唯一索引
+            # 时返回既有消息（幂等回放），不再走下方落库后置段。
+            replay = await CommunicationService._send_message_transaction(
+                db, conversation_id, sender_id, message)
+            if replay is not None:
+                return replay
+        else:
+            # 降级路径（standalone / 无事务替身）：修复前现状顺序写。
+            # 取舍见模块级注释——授权已逐帧实时查库，索引幂等兜底不变。
+            # DuplicateKeyError：并发投递通过了先查后插的检查窗口，被唯一索引
+            # 兜底拦截——重查返回既有消息，等价于幂等快路径（不更新会话摘要、
+            # 不广播、不发通知，避免重复副作用）。
+            try:
+                await db.messages.insert_one(message)
+            except DuplicateKeyError:
+                existing = await db.messages.find_one({
+                    "conversation_id": conversation_id,
+                    "sender_id": sender_id,
+                    "client_message_id": client_message_id,
+                })
+                if existing:
+                    return CommunicationService._format_message(existing)
+                raise
 
-        # 更新对话最后消息信息
-        await db.conversations.update_one(
-            {"_id": ObjectId(conversation_id)},
-            {
-                "$set": {
-                    "last_message_time": now,
-                    "last_message_preview": content[:50] + ("..." if len(content) > 50 else "")
+            # 更新对话最后消息信息
+            await db.conversations.update_one(
+                {"_id": ObjectId(conversation_id)},
+                {
+                    "$set": {
+                        "last_message_time": now,
+                        "last_message_preview": content[:50] + ("..." if len(content) > 50 else "")
+                    }
                 }
-            }
-        )
+            )
+
+        # 接收者以事务内复核到的会话文档为准（成员模型变更与写入同帧生效）
+        recipient_id = message["recipient_id"]
 
         # 准备返回的消息格式（广播载荷与响应共用，携带真实服务端 id/时间戳）
         message_response = CommunicationService._format_message(message)
         
-        # 通过WebSocket推送消息（如果有连接管理器）
+        # 通过WebSocket推送消息（如果有连接管理器）。
+        # 本段是提交后置段（T48/D2）：事务已提交 / 降级路径已落库之后才执行，
+        # 全部为 best-effort 副作用（WS 广播 + 离线通知），失败仅告警不回滚
+        # 消息——与修复前语义一致。
         try:
             from app.api.websockets import get_connection_manager
             manager = get_connection_manager()
@@ -497,7 +598,75 @@ class CommunicationService:
             logger.warning(f"通过WebSocket推送消息失败: {str(e)}")
         
         return message_response
-    
+
+    @staticmethod
+    async def _send_message_transaction(
+        db: AsyncIOMotorClient,
+        conversation_id: str,
+        sender_id: str,
+        message: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """D2（T48）事务段：授权复核 + 消息插入 + 会话摘要（原子提交）。
+
+        run_transaction（snapshot 读 / majority 写）回调内按序执行：
+        1. ConversationPolicy.authorize 复核（session 透传，快照首读）——
+           授权通过到落库之间的并发停用/移出会话在此被拒并整体回滚；
+        2. messages.insert_one；
+        3. conversations.update_one 会话摘要。
+        回调只做 DB 写入、无外部副作用：驱动对瞬时冲突（WriteConflict）会
+        整体重试回调，消息 _id/时间戳在事务外预生成、重试复用同一 _id
+        （重试只发生在事务未提交的路径上，不会重复落库）。
+
+        返回 None 表示正常落库；并发窗口内撞 (conversation_id, sender_id,
+        client_message_id) 唯一索引时事务中止（DuplicateKeyError 经
+        run_transaction 保留在 __cause__），此处重查返回既有消息（与幂等
+        快路径同语义：不重复广播、不重复通知）。事务不可确认提交时向上抛
+        AppBaseException（MESSAGE_TRANSACTION_UNAVAILABLE），由调用方按既有
+        落库失败语义处置（WS 错误帧 / HTTP 503），同键重试天然幂等。
+        """
+        async def transaction(session):
+            recheck = await ConversationPolicy.authorize(
+                db, conversation_id, sender_id, layer="inbound", session=session)
+            if not recheck.allowed or recheck.conversation is None:
+                if recheck.reason == REASON_ACCOUNT_INVALID:
+                    raise ValueError("发送者账号不可用")
+                raise ValueError("用户不是对话参与者")
+            other_members = [
+                member for member in participant_ids(recheck.conversation)
+                if member != sender_id
+            ]
+            message["recipient_id"] = other_members[0] if other_members else None
+            await db.messages.insert_one(message, session=session)
+            preview = message["content"]
+            await db.conversations.update_one(
+                {"_id": ObjectId(conversation_id)},
+                {
+                    "$set": {
+                        "last_message_time": message["timestamp"],
+                        "last_message_preview": preview[:50] + ("..." if len(preview) > 50 else "")
+                    }
+                },
+                session=session)
+
+        try:
+            await run_transaction(
+                db, transaction,
+                error_code="MESSAGE_TRANSACTION_UNAVAILABLE",
+                error_message="消息事务未能确认提交，请重试；数据库必须支持副本集事务")
+            return None
+        except AppBaseException as exc:
+            # 并发窗口幂等兜底：另一事务已提交同键消息 → 本事务撞唯一索引中止。
+            if isinstance(getattr(exc, "__cause__", None), DuplicateKeyError) \
+                    and message.get("client_message_id"):
+                existing = await db.messages.find_one({
+                    "conversation_id": conversation_id,
+                    "sender_id": sender_id,
+                    "client_message_id": message["client_message_id"],
+                })
+                if existing:
+                    return CommunicationService._format_message(existing)
+            raise
+
     @staticmethod
     async def get_unread_messages_count(
         db: AsyncIOMotorClient,
