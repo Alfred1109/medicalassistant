@@ -219,7 +219,7 @@
 | D4 | 幂等键 | **冻结（追认已实现项）** | `client_message_id` + `(conversation_id, sender_id, client_message_id)` partial unique 索引，HTTP 与 WS 入站同键，重复投递返回既有消息、不重复落库/广播/通知；并发窗口由 `DuplicateKeyError` 兜底（`backend/app/db/indexes.py`、`communication_service.send_message`）。ID 生成端随实现一并追认为客户端生成——**待评审确认**。契约测试覆盖 REST/WS 重放、跨发送者/跨会话不去重、并发兜底 |
 | D5 | 已读语义 | **冻结（追认已实现项）** | 维持已实现语义：读取即标读 + 显式标读接口 + 服务端落库回执广播（`read_receipt` 帧：conversation_id/reader_id/message_ids/read_at）。与盘点原建议的偏差：**「废弃读取即已读副作用」未采纳**——读取即标读是工作区既有已交付行为（开发计划 §11 2026-11-08 已声明保留），该偏差**待评审**。per-message `read_by[]`（群聊）未采纳（群聊未启用） |
 | D6 | 删除语义 | 冻结（默认采纳，待评审追认 2026-11-09） | 软删除：会话任一参与者可删（发送者撤回 / 接收者删除）；删除后**双方会话内不可见**（`get_messages` / `sync_offline_messages` 过滤 `deleted` 文档，`$ne True` 兼容历史文档）；**不硬删**——原文与全部原始字段保留，附 `deleted` / `deleted_at` / `deleted_by` 审计字段，按 id 引用原文仍可解析（引用完整性不破坏）。盘点原推荐的两层语义（发送者撤回对所有人隐藏 + 接收者本地 per-user 隐藏）收敛为单层软删（双方不可见），**待评审追认**（`communication_service.delete_message`） |
-| D7 | WS 事件信封 | 部分冻结（默认采纳，待评审追认 2026-11-09） | `server_seq` 已补：12 字节 ObjectId 大端整数，复用 `_id` 单调游标基建。message 帧取落库文档 `_id`（重放稳定、与插入顺序单调一致）；`read_receipt` / `delete_message` 取发射时刻新生 ObjectId（同进程内单调）。**待评审**：完整 `{type, data, message_id, server_seq, ts}` 信封归一涉及 `websockets.py` 全部帧（user_joined/typing/error）重构，未在本期执行；跨 worker 全序属 D11/WS04 |
+| D7 | WS 事件信封 | 部分冻结（默认采纳，待评审追认 2026-11-09；**表述 2026-11-15 修订**） | `server_seq` 已补：**现行形态为 ObjectId 12 字节的 24 字符小写 hex 字符串**（复用 `_id` 单调游标基建；初稿误写「12 字节 ObjectId 大端整数」——65e11ee 修复 bus 模式聊天帧 BSON 编码超限时将构造点改为 hex 字符串，冻结语义不变，已按评审追认采纳，见下文修订记录）。message 帧取落库文档 `_id` 的 hex 编码（重放稳定、与插入顺序单调一致）；`read_receipt` / `delete_message` 取发射时刻新生 ObjectId 的 hex 编码（同进程内单调）。**待评审**：完整 `{type, data, message_id, server_seq, ts}` 信封归一涉及 `websockets.py` 全部帧（user_joined/typing/error）重构，未在本期执行；跨 worker 全序属 D11/WS04 |
 | D8 | 附件 | **保持开放** | 存储介质选型与病历附件合规要求未决（关联 MC01）；现契约仅透传 `attachments` 元数据 |
 | D9 | 连接凭据 | **保持开放** | token 不入 URL 现状维持；短期一次性 ticket vs cookie 待部署拓扑联调确认 |
 | D10 | 通知边界 | 维持（部分落地） | 离线→通知桥保留（135a5d9 / b335c69），通知域与聊天消息域不合并 |
@@ -237,6 +237,10 @@
 - D4：REST 层重复 `client_message_id` 幂等（同 id 返回、单文档、无重复副作用）。
 - D3：账号停用成员入站写/出站读均拒绝；用户记录缺失拒绝；`participants` 数组形态（D1 目标形态）成员判定与收发可用。
 - D6：发送者删除双方不可见且原文/审计字段保留；接收者可删；非参与者拒绝；重复删除幂等返回 False；离线同步与未读数排除已删消息。
-- D7：message 帧携带 `server_seq`（等于 `_id` 大端整数、随落库顺序单调）、幂等重放不产生新帧、`read_receipt` 帧携带 `server_seq`。
+- D7：message 帧携带 `server_seq`（等于 `_id` 的 24-hex 字符串编码、随落库顺序单调；本行随 2026-11-15 修订同步更正，见下）、幂等重放不产生新帧、`read_receipt` 帧携带 `server_seq`。
+
+### 修订记录（2026-11-15）
+
+- D7 表述修订：本冻结记录初稿把 `server_seq` 写作「12 字节 ObjectId 大端整数」。实际实现自 65e11ee（2026-11-14）起为 ObjectId 12 字节的 **24 字符小写 hex 字符串**——原 int 形态超出 BSON int64 编码上限，bus 模式下携带该字段的聊天帧发布即编码失败，曾导致跨 worker 聊天分发静默失效（`communication_service._server_seq`）。**冻结语义本身不变**：`server_seq` 仍复用 `_id` 单调游标基建、与插入顺序单调一致、消费端经 `decode_server_seq` 无损还原；本次仅更正冻结记录的表述使其与实现一致，修订依据为对该修复的评审追认。
 
 验证（隔离副本集 `127.0.0.1:37021`，`DEBUG=false`）：`test_demo_auth_boundary.py` 7 passed；`test_communication_contract.py` 46 passed。共享工作区验证期间 WS 用例曾受并行在途改动影响（`ws_event_bus.py` 读取 `settings.EVENT_BUS_MODE`，`config.py` 未同步声明），该声明补齐后全部通过；此失败与 WS01 本轮改动无关。

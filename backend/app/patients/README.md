@@ -103,7 +103,11 @@ scope as the recorded checksum) and verifies two post-cutover hazards:
 
 Baseline coverage is inferred from the `legacy_same_document` links written at
 migration time. If such a link is removed manually later, its patient document
-is conservatively reported as a latecomer rather than silently ignored.
+falls outside the recomputed baseline, so the recorded `legacy_sha256` no longer
+matches and the rerun fails closed with `LEGACY_BASELINE_DRIFTED` — the removed
+link's patient ID is carried in the error message's `latecomer_ids` list rather
+than being silently ignored. Manual link removal therefore requires the same
+reviewed reconciliation as any other baseline drift.
 
 ## Domain switch (patient_access kernel dispatch)
 

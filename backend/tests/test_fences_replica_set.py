@@ -10,12 +10,14 @@
 只触碰 URI 指向实例上自己创建的库；并发侧写经独立 client（rival）发起，
 模拟另一连接上的账号停用/患者归属变更。
 
-发现记录（不改实现，供 T14 后续处理）：
-- dual_bump 会把第一跳的 FenceInvalid 降级包装为 FenceMismatch（409），错误
-  分类漂移（如患者栅栏字段被写坏应报 503 FENCE_INVALID，经 dual_bump 变 409）。
+发现记录（T56 已处置）：
+- dual_bump 曾把跳内 FenceInvalid 降级包装为 FenceMismatch（409），错误分类
+  漂移——已由 T56/B2 修复（仅 FenceMismatch 做 hop 标注，FenceInvalid 透传），
+  见场景 6。
 - AccountFenceStore.bump 的 DuplicateKeyError 重试循环只在事务外有效：事务内
-  唯一键冲突会中止事务，同 session 重试不再可用，事务内并发首插依赖
-  with_transaction 的写冲突重试兜底。
+  唯一键冲突会中止事务，同 session 重试只会得到 NoSuchTransaction（code !=
+  11000，原样上抛），事务内并发首插依赖 with_transaction 的写冲突重试兜底
+  （场景 4 实测成立）。T56/B5 已将该约束写入实现注释，行为不变。
 """
 import asyncio
 import os
@@ -368,6 +370,45 @@ class FencesReplicaSetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(results), [(1, 1), (2, 2), (3, 3), (4, 4)])
         self.assertEqual(await self.account_count(), 4)
         self.assertEqual(await self.patient_fence_value(), 4)
+
+    # ---- 场景 6：错误分类与定位键防御（T56/B2、T56/B6 回归） ----
+
+    async def test_dual_bump_patient_hop_fence_invalid_passes_through(self):
+        """患者载体数据损坏（栅栏字段为非数值）：经 dual_bump 仍报 503 FENCE_INVALID。
+
+        B2 修复前该异常被包装成 FenceMismatch（409），数据损坏与 CAS miss 不可区分。
+        """
+        await self.db[PATIENTS].update_one(
+            {"patient_id": self.patient_id},
+            {"$set": {patient_fence_field(FENCE): "corrupt"}})
+        with self.assertRaises(FenceInvalid) as raised:
+            await self.in_transaction(lambda session: dual_bump(
+                (self.accounts, self.account_id, FENCE),
+                (self.patients, self.patient_id, FENCE), session=session))
+        self.assertEqual(raised.exception.error_code, "FENCE_INVALID")
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("hop", raised.exception.details)
+        # 账号跳已成功但事务内异常整体回滚，无残留
+        self.assertIsNone(await self.account_count())
+
+    async def test_dual_bump_account_hop_fence_invalid_passes_through(self):
+        """账号跳参数无效（空账号标识）：FenceInvalid 503 透传，患者跳未执行。"""
+        with self.assertRaises(FenceInvalid) as raised:
+            await self.in_transaction(lambda session: dual_bump(
+                (self.accounts, "", FENCE),
+                (self.patients, self.patient_id, FENCE), session=session))
+        self.assertEqual(raised.exception.error_code, "FENCE_INVALID")
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("hop", raised.exception.details)
+        self.assertIsNone(await self.patient_fence_value())
+
+    async def test_patient_extra_query_cannot_override_patient_id_locator(self):
+        """T56/B6：归属快照条件覆盖 patient_id 定位键时 fail-closed 拒绝。"""
+        with self.assertRaises(FenceInvalid):
+            await self.in_transaction(lambda session: self.patients.bump(
+                self.patient_id, FENCE, session=session,
+                extra_query={"patient_id": "fence-patient-other"}))
+        self.assertIsNone(await self.patient_fence_value())
 
     # ---- 场景 5：FenceError 的 AppBaseException 错误契约 ----
 

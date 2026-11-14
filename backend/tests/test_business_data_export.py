@@ -144,6 +144,26 @@ class BusinessExportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(value["last_scheduled_export_at"])
 
 
+# 与 runtime.py 领取条件中的非 date 标量类型清单保持一致（B1）
+LEGACY_SCALAR_TYPES = ["string", "int", "long", "double"]
+
+# BSON $type 值到 Python 类型的近似映射（fake 只需覆盖用例用到的形态）
+_BSON_TYPE_OF = {
+    datetime: "date",
+    str: "string",
+    float: "double",
+}
+
+
+def _bson_type_of(value):
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        # Python int 按 BSON 编码可能是 int32 或 int64，fake 两种都认
+        return "int"
+    return _BSON_TYPE_OF.get(type(value))
+
+
 def _leg_matches(doc, leg):
     """对 T37 领取条件的单个 $or 分支做 Mongo 语义匹配（仅覆盖用到的算子）。"""
     for field, cond in leg.items():
@@ -152,6 +172,10 @@ def _leg_matches(doc, leg):
         if isinstance(cond, dict):
             if "$exists" in cond and cond["$exists"] != present:
                 return False
+            if "$type" in cond:
+                allowed = cond["$type"] if isinstance(cond["$type"], list) else [cond["$type"]]
+                if value is None or _bson_type_of(value) not in allowed:
+                    return False
             if "$lte" in cond:
                 # 类型限定：非 datetime（含 null/缺失）不匹配 $lte
                 if not isinstance(value, datetime) or value > cond["$lte"]:
@@ -243,16 +267,22 @@ class ScheduledClaimTests(unittest.IsolatedAsyncioTestCase):
         claim = settings.claims[0]
         self.assertEqual(claim["_id"], "system")
         legs = claim["$or"]
-        self.assertEqual(len(legs), 4)
+        self.assertEqual(len(legs), 6)
         # 主分支的 cutoff 按 hourly 频率取 now - 1h（领取先于导出的 $set 时间戳）
         cutoff = legs[0]["last_scheduled_export_at"]["$lte"]
         self.assertAlmostEqual((datetime.now(timezone.utc) - cutoff).total_seconds(),
                                3600, delta=15)
-        self.assertEqual(legs[1], {"last_scheduled_export_at": None,
-                                   "last_backup_at": {"$lte": cutoff}})
+        # B1：date 主分支带显式 $type 栅栏；非 date 标量（legacy 外部写入的
+        # string/int/long/double 时间戳）单列到点分支，避免跨类型 $lte 落空
+        self.assertEqual(legs[0], {"last_scheduled_export_at": {"$type": "date", "$lte": cutoff}})
+        self.assertEqual(legs[1], {"last_scheduled_export_at": {"$type": LEGACY_SCALAR_TYPES}})
         self.assertEqual(legs[2], {"last_scheduled_export_at": None,
+                                   "last_backup_at": {"$type": "date", "$lte": cutoff}})
+        self.assertEqual(legs[3], {"last_scheduled_export_at": None,
+                                   "last_backup_at": {"$type": LEGACY_SCALAR_TYPES}})
+        self.assertEqual(legs[4], {"last_scheduled_export_at": None,
                                    "last_backup_at": None})
-        self.assertEqual(legs[3], {"last_scheduled_export_at": {"$eq": None, "$exists": True}})
+        self.assertEqual(legs[5], {"last_scheduled_export_at": {"$eq": None, "$exists": True}})
         # $set 领取时间戳（领取先于导出）
         self.assertIn("last_scheduled_export_at", settings.doc)
         self.assertGreater(settings.doc["last_scheduled_export_at"], old)
@@ -288,6 +318,45 @@ class ScheduledClaimTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.claims, [])
         self.assertEqual(calls, [])
         self.assertEqual(files, [])
+
+    async def test_string_timestamp_row_claims_and_normalizes_to_date(self):
+        # B1 回归：legacy 外部脚本把调度时间戳写成字符串——Python 预判视同到点，
+        # Mongo 领取必须命中非 date 标量分支并完成领取（修复前 $lte 跨类型落空
+        # → upsert 撞 _id → DuplicateKeyError 静默 return → 永久停摆）
+        db, settings = self.db({"_id": "system", "backup_frequency": "hourly",
+                                "last_scheduled_export_at": "2026-01-01T00:00:00Z"})
+        calls = []
+        files = await self.run_schedule(db, calls)
+        self.assertEqual(len(settings.claims), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(files), 1)
+        # 领取写回 date，字符串形态被归一化
+        self.assertIsInstance(settings.doc["last_scheduled_export_at"], datetime)
+        self.assertEqual(settings.doc["last_scheduled_export_at"].tzinfo, timezone.utc)
+
+    async def test_int_timestamp_row_claims_and_normalizes_to_date(self):
+        # B1 回归：整型（epoch 秒）形态的 legacy 时间戳同样到点领取并归一化
+        db, settings = self.db({"_id": "system", "backup_frequency": "hourly",
+                                "last_scheduled_export_at": 1760000000})
+        calls = []
+        files = await self.run_schedule(db, calls)
+        self.assertEqual(len(settings.claims), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(files), 1)
+        self.assertIsInstance(settings.doc["last_scheduled_export_at"], datetime)
+
+    async def test_int_backup_at_fallback_row_claims(self):
+        # B1：调度时间戳缺失、legacy last_backup_at 为整型形态时同样到点
+        db, settings = self.db({"_id": "system", "backup_frequency": "hourly",
+                                "last_backup_at": 0})
+        calls = []
+        files = await self.run_schedule(db, calls)
+        self.assertEqual(len(settings.claims), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(files), 1)
+        self.assertIsInstance(settings.doc["last_scheduled_export_at"], datetime)
+        # legacy last_backup_at 本身不被改写
+        self.assertEqual(settings.doc["last_backup_at"], 0)
 
     async def test_missing_row_upserts_and_exports(self):
         db, settings = self.db(None)

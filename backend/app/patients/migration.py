@@ -223,11 +223,24 @@ async def migrate_legacy_patients(db, *, expected_manifest, backup_directory, re
     if not reviewer or not evidence_reference:
         raise PatientDomainError("PATIENT_REVIEW_REQUIRED")
     await _guard(maintenance_guard)
-    before = await inspect_migration(db)
-    if before["mode"] == "canonical":
+    # T56（B4 修复）：rerun 判定先于投影校验。原实现先跑 inspect_migration，
+    # 其 _projections 会对全部 role:"patient" 文档（含晚到者）执行投影硬闸，
+    # 晚到者字段非法时抛 INVALID_LEGACY_PATIENT_*，既掩盖"canonical 域重跑"
+    # 的真实状态，也丢失晚到者上报。改为直接读状态单例判定模式：canonical
+    # 即先做基线指纹比较与晚到者收集（_noop_rerun_verification 只比较指纹、
+    # 不做投影校验），仅未迁移路径才执行完整 inspect_migration（其投影硬闸
+    # 对首次迁移保持不变）。
+    state = await db[STATE].find_one({"_id": STATE_ID})
+    if state is not None:
+        # 与 inspect_migration 的首道检查同语义：非 canonical 匹配形态
+        # （migrating / 显式 legacy / schema 版本不符）fail-closed 拒绝
+        if (state.get("mode") != "canonical"
+                or state.get("schema_version") != SCHEMA_VERSION):
+            raise PatientDomainError("PATIENT_DOMAIN_STATE_CONFLICT")
         latecomer_ids = await _noop_rerun_verification(db)
         return {"verified_noop": True, "mode": "canonical", "users_modified": False,
                 "latecomer_ids": latecomer_ids}
+    before = await inspect_migration(db)
     if not before["replica_set"]:
         raise PatientDomainError("PATIENT_MIGRATION_REQUIRES_REPLICA_SET")
     if before != expected_manifest:

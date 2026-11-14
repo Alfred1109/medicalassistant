@@ -204,6 +204,17 @@ class PatientFenceStoreTests(unittest.TestCase):
         with self.assertRaises(FenceMismatch):
             asyncio.run(self.store.check("missing", "access", 0))
 
+    def test_extra_query_cannot_override_patient_id_locator(self):
+        # T56/B6 防御：归属快照条件不得覆盖 patient_id 定位键（否则栅栏递增
+        # 会打到别的患者文档上），必须 fail-closed 拒绝
+        with self.assertRaises(FenceInvalid) as raised:
+            asyncio.run(self.store.bump("p1", "access", extra_query={"patient_id": "p2"}))
+        self.assertEqual(raised.exception.error_code, "FENCE_INVALID")
+        self.assertEqual(self.db["clinical_patients"].docs[0].get("_fence_access"), None)
+        with self.assertRaises(FenceInvalid):
+            asyncio.run(self.store.check("p1", "access", 0,
+                                         extra_query={"patient_id": "p2"}))
+
     def test_check_extra_query_snapshot_mismatch_rejects(self):
         asyncio.run(self.store.bump("p1", "report_access"))
         extra = {"status": "active", "practitioners": ["d1"], "health_managers": ["h1"]}
@@ -271,6 +282,32 @@ class DualBumpTests(unittest.TestCase):
                 (self.patients, "p1", "access")))
         self.assertEqual(raised.exception.details["hop"], "account")
         self.assertEqual(self.db["clinical_patients"].calls, [])
+
+    def test_dual_bump_account_hop_fence_invalid_passes_through(self):
+        # T56/B2：账号跳的 FenceInvalid（503，参数/载体无效）原样透传，
+        # 不得被包装成 FenceMismatch（409 CAS miss）——数据损坏与授权变化
+        # 必须可区分。错误详情不带 hop 标注。
+        with self.assertRaises(FenceInvalid) as raised:
+            asyncio.run(dual_bump(
+                (self.accounts, "", "access"),
+                (self.patients, "p1", "access")))
+        self.assertEqual(raised.exception.error_code, "FENCE_INVALID")
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("hop", raised.exception.details)
+        self.assertEqual(self.db["clinical_patients"].calls, [])
+
+    def test_dual_bump_patient_hop_fence_invalid_passes_through(self):
+        # T56/B2：患者跳载体数据损坏（栅栏字段被打成非数值）→ FenceInvalid
+        # 503 透传；账号跳已成功，真实回滚由 Mongo 事务保证（fake 上可见）
+        self.db["clinical_patients"].docs[0][patient_fence_field("access")] = "corrupt"
+        with self.assertRaises(FenceInvalid) as raised:
+            asyncio.run(dual_bump(
+                (self.accounts, "a1", "access"),
+                (self.patients, "p1", "access")))
+        self.assertEqual(raised.exception.error_code, "FENCE_INVALID")
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("hop", raised.exception.details)
+        self.assertNotIsInstance(raised.exception, FenceMismatch)
 
     def test_dual_bump_validates_hop_descriptors(self):
         with self.assertRaises(FenceInvalid):

@@ -114,14 +114,24 @@ class BackupSchedule:
         # 时间戳，下一轮将跳过一次导出（宁可漏一次，也不能重复落敏感文件）；
         # 旧实现的崩溃窗口（导出已做、标记未写、下轮重复导出）随之消除。
         # 领取条件与上面的 Python 端到点判断保持同一语义：
-        # - 主条件：调度时间戳已过窗口（$lte，类型限定下不匹配 null/缺失）；
-        # - legacy 回退：无调度时间戳时按旧的 last_backup_at 判定（row.get 回退）；
+        # - 主条件：调度时间戳为 date 且已过窗口（$lte，类型限定下不匹配 null/缺失）；
+        # - B1 修复：调度时间戳存在但为非 date 标量（string/int/long/double，
+        #   legacy 外部脚本/运维工具写入的形态）也视为到点。Mongo 的比较算子
+        #   带 BSON 类型栅栏：$lte 接 date 永不匹配字符串/数字时间戳，若只保留
+        #   $lte 分支，此类行的领取必然落空 → upsert 撞唯一 _id → 领取永久
+        #   停摆且无日志。Python 预判对非 datetime 一律视同到点，两端语义在此
+        #   对齐；领取成功后 $set 写回 datetime（_now()），时间戳形态随之归一。
+        # - legacy 回退：无调度时间戳时按旧的 last_backup_at 判定（row.get 回退），
+        #   同样带 date/非 date 标量两个分支；
         # - 两个时间戳都缺失（从未导出）或调度时间戳为 null：视为到点
         #   （与 row.get 命中 None 后跳过 isinstance 判断的行为一致）。
         cutoff = _now() - timedelta(hours=hours)
+        _legacy_scalar_types = ["string", "int", "long", "double"]
         due = {"$or": [
-            {"last_scheduled_export_at": {"$lte": cutoff}},
-            {"last_scheduled_export_at": None, "last_backup_at": {"$lte": cutoff}},
+            {"last_scheduled_export_at": {"$type": "date", "$lte": cutoff}},
+            {"last_scheduled_export_at": {"$type": _legacy_scalar_types}},
+            {"last_scheduled_export_at": None, "last_backup_at": {"$type": "date", "$lte": cutoff}},
+            {"last_scheduled_export_at": None, "last_backup_at": {"$type": _legacy_scalar_types}},
             {"last_scheduled_export_at": None, "last_backup_at": None},
             {"last_scheduled_export_at": {"$eq": None, "$exists": True}},
         ]}
@@ -131,7 +141,19 @@ class BackupSchedule:
                 {"$set": {"last_scheduled_export_at": _now()}},
                 upsert=True, return_document=ReturnDocument.AFTER)
         except DuplicateKeyError:
-            # 行已存在但被并发方抢先领取/创建（upsert 撞唯一 _id）：领取失败即跳过
+            # 行已存在但领取 filter 未命中：要么并发方抢先领取（date 时间戳已被
+            # 推进过窗口），要么行上时间戳的 BSON 类型仍未落入任何 $or 分支
+            # （B1 的类型落空形态）。读回区分两者并留日志——此前该分支静默
+            # return，类型落空会让定时备份永久停摆而无任何痕迹。
+            current = await db.system_settings.find_one({"_id": "system"}) or {}
+            last = current.get("last_scheduled_export_at", current.get("last_backup_at"))
+            if isinstance(last, datetime) and _now() - last < timedelta(hours=hours):
+                logging.info("定时业务导出被并发进程抢先领取，本轮跳过")
+            else:
+                logging.warning(
+                    "定时业务导出领取条件未命中但行已存在（时间戳类型异常或窗口判定落空），"
+                    "本轮跳过：last_scheduled_export_at=%r last_backup_at=%r",
+                    current.get("last_scheduled_export_at"), current.get("last_backup_at"))
             return
         if claimed is None:
             return

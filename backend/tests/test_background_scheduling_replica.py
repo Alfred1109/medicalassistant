@@ -254,6 +254,68 @@ class BackgroundSchedulingReplicaTests(unittest.IsolatedAsyncioTestCase):
             import shutil
             shutil.rmtree(root, ignore_errors=True)
 
+    # ---- 场景 2b：legacy 非 date 时间戳形态（T56/B1 修复回归） ----
+
+    async def _run_and_count_exports(self):
+        calls = []
+        original = operations_runtime.backup_bytes
+
+        async def counting_backup_bytes(db):
+            calls.append(db.client)
+            return await original(db)
+
+        root, fake_file = self._fake_runtime_root()
+        try:
+            with patch.object(operations_runtime, "backup_bytes", counting_backup_bytes), \
+                 patch.object(operations_runtime, "__file__", fake_file):
+                await operations_runtime.BackupSchedule().run_if_due(self.db_a)
+            folder = os.path.join(root, "data", "backups")
+            files = os.listdir(folder) if os.path.isdir(folder) else []
+            return len(calls), files
+        finally:
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+
+    async def _assert_legacy_scalar_timestamp_recovers(self, seeded_value):
+        """string/int 形态的调度时间戳必须恢复导出并归一化为 date。
+
+        修复前：Python 预判放行（非 datetime 视同到点），但 Mongo 领取 filter
+        的 $lte 接 date 永不匹配字符串/数字 → 领取落空 → upsert 撞唯一 _id →
+        DuplicateKeyError 静默 return → 定时备份永久停摆且无日志。
+        """
+        await self.db_a.system_settings.insert_one({
+            "_id": "system", "backup_frequency": "hourly",
+            "last_scheduled_export_at": seeded_value})
+        calls, files = await self._run_and_count_exports()
+        # 修复断言：本轮恢复导出（修复前 0 次），文件恰好一份
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(files), 1)
+        settings = await self.db_a.system_settings.find_one({"_id": "system"})
+        # 领取时间戳已写回且形态归一化为 date（覆盖原字符串/整型值）
+        self.assertIsInstance(settings["last_scheduled_export_at"], datetime)
+        # date 类型行为不变：已推进的 date 时间戳在窗口内拦住下一轮导出
+        calls, files = await self._run_and_count_exports()
+        self.assertEqual(calls, 0)
+        self.assertEqual(files, [])
+
+    async def test_legacy_string_timestamp_recovers_export_and_normalizes(self):
+        await self._assert_legacy_scalar_timestamp_recovers("2026-01-01T00:00:00Z")
+
+    async def test_legacy_int_timestamp_recovers_export_and_normalizes(self):
+        await self._assert_legacy_scalar_timestamp_recovers(1760000000)
+
+    async def test_legacy_int_backup_at_fallback_recovers_export(self):
+        # 调度时间戳缺失、legacy last_backup_at 为整型形态：同样到点领取归一化，
+        # 且 legacy 字段本身不被改写
+        await self.db_a.system_settings.insert_one({
+            "_id": "system", "backup_frequency": "hourly", "last_backup_at": 0})
+        calls, files = await self._run_and_count_exports()
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(files), 1)
+        settings = await self.db_a.system_settings.find_one({"_id": "system"})
+        self.assertIsInstance(settings["last_scheduled_export_at"], datetime)
+        self.assertEqual(settings["last_backup_at"], 0)
+
     # ---- 场景 3：扫描中断后的续扫位置 ----
 
     async def test_scan_interrupted_resumes_failed_and_keeps_succeeded(self):

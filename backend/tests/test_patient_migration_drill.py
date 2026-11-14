@@ -402,6 +402,57 @@ class PatientMigrationDrillTests(unittest.IsolatedAsyncioTestCase):
         baseline = await self.db.users.find({"role": "patient", "_id": {"$ne": "latecomer-p"}}).sort("_id", 1).to_list(None)
         self.assertIn(fingerprint(baseline), message)
 
+    # ---- 场景 10：晚到者字段非法时 rerun 仍如实上报（T56/B4 回归）----
+
+    def rerun_options(self):
+        """rerun 用例不经 self.migrate() 夹具（该夹具先跑 inspect_migration，
+        在非法晚到者上会提前抛 INVALID_LEGACY_PATIENT_*，掩盖被测路径）。
+        rerun 路径不消费 expected_manifest，传空占位即可。"""
+        return dict(expected_manifest={}, backup_directory=self.root / uuid4().hex,
+                    reviewer="drill-reviewer", evidence_reference="drill-evidence-reference",
+                    maintenance_guard=self.stopped)
+
+    async def test_noop_rerun_reports_latecomer_even_when_latecomer_fields_invalid(self):
+        # T56/B4 修复前：rerun 先跑 inspect_migration，其投影硬闸会先在非法
+        # 晚到者上抛 INVALID_LEGACY_PATIENT_*，掩盖 canonical 域重跑的真实
+        # 状态与晚到者上报。修复后 rerun 判定（状态单例 + 基线指纹）先于
+        # 投影校验：rerun 路径不做投影校验，晚到者只收集 _id 上报。
+        await self.seed_users([{"_id": "patient-1", "role": "patient", "name": "drill"}])
+        self.assertEqual((await self.migrate())["migrated_count"], 1)
+
+        # 晚到者带非法字段（createdAt 字符串形态，投影硬闸必拒的形态）
+        await self.db.users.insert_one({"_id": "latecomer-p", "role": "patient",
+                                        "createdAt": "2026-01-01T00:00:00Z"})
+        rerun = await migrate_legacy_patients(self.db, **self.rerun_options())
+        self.assertTrue(rerun["verified_noop"])
+        self.assertEqual(rerun["latecomer_ids"], ["latecomer-p"])
+        # fail-closed 不变：晚到者不被自动补迁
+        self.assertEqual(await self.db[PATIENTS].count_documents({}), 1)
+        self.assertEqual(await self.db[ACCOUNT_LINKS].count_documents({}), 1)
+        self.assertIsNone(await self.db[PATIENTS].find_one({"_id": "latecomer-p"}))
+
+    async def test_invalid_fields_still_block_first_migration_projection_gate(self):
+        # 投影硬闸本身不放松：同一非法字段形态在未迁移路径上仍由迁移工具
+        # 拒绝（不经夹具的预 inspect，验证 migrate_legacy_patients 自身），
+        # 且错误码不变（该闸门只对 rerun 路径让位，不放松任何校验）
+        await self.seed_users([{"_id": "bad-p", "role": "patient",
+                                "createdAt": "2026-01-01T00:00:00Z"}])
+        with self.assertRaises(PatientDomainError) as rejected:
+            await migrate_legacy_patients(self.db, **self.rerun_options())
+        self.assertEqual(rejected.exception.code, "INVALID_LEGACY_PATIENT_TIME")
+        self.assertEqual(await self.domain_counts(), {"patients": 0, "links": 0, "state": 0})
+
+    async def test_rerun_still_fails_closed_on_non_canonical_state_variants(self):
+        # T56/B4 重构后的语义保持：显式 legacy 状态下 rerun 仍以
+        # PATIENT_DOMAIN_STATE_CONFLICT 拒绝（与 README 的 rollback 载体约定一致）
+        await self.seed_users([{"_id": "patient-1", "role": "patient", "name": "drill"}])
+        self.assertEqual((await self.migrate())["migrated_count"], 1)
+        await self.db[STATE].update_one({"_id": STATE_ID},
+                                        {"$set": {"mode": "legacy"}})
+        with self.assertRaises(PatientDomainError) as rejected:
+            await migrate_legacy_patients(self.db, **self.rerun_options())
+        self.assertEqual(rejected.exception.code, "PATIENT_DOMAIN_STATE_CONFLICT")
+
 
 @unittest.skipUnless(os.environ.get("REHAB_TEST_PATIENT_MIGRATION_STANDALONE_URI"),
                      "set REHAB_TEST_PATIENT_MIGRATION_STANDALONE_URI to an isolated local standalone")

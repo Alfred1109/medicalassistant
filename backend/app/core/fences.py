@@ -153,8 +153,12 @@ class AccountFenceStore:
         """
         fence_name = _validate_fence_name(fence_name)
         query = self._key(account_id, fence_name)
-        # 事务外并发 upsert 由唯一索引兜底，DuplicateKeyError 属瞬时冲突，
-        # 重试即可；事务内写冲突由 with_transaction 整体重试。
+        # 唯一索引兜底：事务外并发 upsert 的 DuplicateKeyError 属瞬时冲突，
+        # 同 session 重试即可。注意该重试循环仅在事务外有效——事务内首插冲突
+        # 会中止当前事务，同 session 的下一次操作只会得到 NoSuchTransaction
+        # （code != 11000，走下方 raise 原样上抛），不会进入本循环的重试语义；
+        # 事务内的并发首插由 with_transaction 对整个回调的重试兜底
+        # （对照 test_fences_replica_set.py 场景 4 的实测结论）。
         for _ in range(3):
             try:
                 document = await self.collection.find_one_and_update(
@@ -214,6 +218,11 @@ class PatientFenceStore:
         if extra_query:
             if not isinstance(extra_query, dict):
                 raise FenceInvalid("患者栅栏附加条件无效")
+            # B6 防御：定位键不得被调用方的归属快照条件覆盖——否则栅栏递增会
+            # 打到别的患者文档上（宁可拒绝也不静默改道）。
+            if "patient_id" in extra_query:
+                raise FenceInvalid("患者栅栏附加条件不得覆盖 patient_id 定位键",
+                                   details={"patient_id": str(patient_id)})
             query.update(extra_query)
         return query
 
@@ -284,6 +293,10 @@ async def dual_bump(account: _FenceHop, patient: _FenceHop, *, session=None):
 
     账号跳不支持 extra_query（account_fences 无业务快照字段）；患者跳的
     归属快照比较需折入 extra_query 时，请直接按序调用两个 store 方法。
+
+    异常分类（B2 修复）：仅对 FenceMismatch（409 CAS miss）做 hop 标注包装；
+    FenceInvalid（503，栅栏名称/期望值/载体数据损坏）原样透传——数据损坏与
+    授权变化必须可区分，不得把 503 数据损坏降级为 409 失配。
     """
     def _prepare(hop, carrier):
         if not isinstance(hop, tuple) or len(hop) not in (3, 4):
@@ -300,8 +313,10 @@ async def dual_bump(account: _FenceHop, patient: _FenceHop, *, session=None):
             account_count = await store.bump(key, fence_name, session=session)
         else:
             account_count = await store.check(key, fence_name, expected, session=session)
-    except FenceError as exc:
-        raise FenceMismatch(str(exc), details={**exc.details, "hop": "account"}) from exc
+    except FenceMismatch as exc:
+        # exc.details 由 AppBaseException 归一为 dict，`or {}` 仅为防御 None 形态
+        raise FenceMismatch(str(exc),
+                            details={**(exc.details or {}), "hop": "account"}) from exc
 
     store, key, fence_name, expected = _prepare(patient, "patient")
     try:
@@ -309,8 +324,9 @@ async def dual_bump(account: _FenceHop, patient: _FenceHop, *, session=None):
             patient_count = await store.bump(key, fence_name, session=session)
         else:
             patient_count = await store.check(key, fence_name, expected, session=session)
-    except FenceError as exc:
-        raise FenceMismatch(str(exc), details={**exc.details, "hop": "patient"}) from exc
+    except FenceMismatch as exc:
+        raise FenceMismatch(str(exc),
+                            details={**(exc.details or {}), "hop": "patient"}) from exc
 
     return account_count, patient_count
 
