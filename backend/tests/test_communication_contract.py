@@ -16,7 +16,7 @@ WS01 通信契约测试
 - D7 事件信封：message / read_receipt / delete_message 帧携带 server_seq
   （_id 大端单调整数，插入型事件重放稳定）
 - 启动集合边界：普通启动不隐式建集合，索引声明跳过空库，
-  首个消息落库惰性补建索引（test_demo_auth_boundary 回归的契约面）
+  首个写请求落库前建立索引（test_demo_auth_boundary 回归的契约面）
 - 死代码删除后 import app.main 正常（本模块顶部 import 即隐式覆盖）
 """
 import asyncio
@@ -998,15 +998,42 @@ class WebSocketChatContractTests(unittest.TestCase):
 class StartupCollectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
     """ensure_communication_indexes 不得在空库上隐式创建 messages 集合
     （create_index 会隐式 createCollection，曾导致普通启动产生未声明集合写入），
-    索引由首个消息落库路径惰性补建。"""
+    索引在首个写请求落库前建立。"""
 
-    async def asyncSetUp(self):
-        from app.services import communication_service as communication_module
-        self.communication_module = communication_module
-        communication_module._index_state["ensured"] = False
+    async def test_index_failure_rejects_before_write_and_can_recover(self):
+        from pymongo.errors import OperationFailure
+        from app.core.exceptions import AppBaseException
+        db = FakeDB()
+        alice, bob = make_user("Alice", "doctor"), make_user("Bob", "patient")
+        db.users.docs.extend([alice, bob])
+        cid = seed_conversation(db, alice, bob)
+        original = db.messages.create_index
+        db.messages.create_index = AsyncMock(side_effect=OperationFailure("duplicate history", code=11000))
+        with self.assertRaises(AppBaseException) as raised:
+            await CommunicationService.send_message(db, cid, str(alice['_id']), 'never insert', client_message_id='key')
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(raised.exception.error_code, 'MESSAGE_STORAGE_UNAVAILABLE')
+        self.assertEqual(db.messages.docs, [])
+        self.assertEqual(db.notifications.docs, [])
+        db.messages.create_index = original
+        await CommunicationService.send_message(db, cid, str(alice['_id']), 'retry', client_message_id='key')
+        self.assertEqual(len(db.messages.docs), 1)
 
-    async def asyncTearDown(self):
-        self.communication_module._index_state["ensured"] = False
+    async def test_another_database_does_not_inherit_index_success(self):
+        from pymongo.errors import OperationFailure
+        from app.core.exceptions import AppBaseException
+        for fail in (False, True):
+            db = FakeDB()
+            alice, bob = make_user('Alice', 'doctor'), make_user('Bob', 'patient')
+            db.users.docs.extend([alice, bob])
+            cid = seed_conversation(db, alice, bob)
+            if fail:
+                db.messages.create_index = AsyncMock(side_effect=OperationFailure('denied', code=13))
+                with self.assertRaises(AppBaseException):
+                    await CommunicationService.send_message(db, cid, str(alice['_id']), 'blocked')
+                self.assertEqual(db.messages.docs, [])
+            else:
+                await CommunicationService.send_message(db, cid, str(alice['_id']), 'allowed')
 
     async def test_index_declaration_skips_missing_collection(self):
         db = FakeDB()
@@ -1024,7 +1051,7 @@ class StartupCollectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
         await ensure_communication_indexes(db)
         self.assertEqual(len(db.messages.indexes), 1)
 
-    async def test_first_message_persist_bootstraps_index_lazily_exactly_once(self):
+    async def test_every_write_checks_database_index_before_persist(self):
         db = FakeDB()
         alice = make_user("Alice", "doctor")
         bob = make_user("Bob", "patient")
@@ -1033,7 +1060,7 @@ class StartupCollectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
         await CommunicationService.send_message(
             db, conversation_id, str(alice["_id"]), "m1", client_message_id="lazy-1")
-        # 首个消息落库（隐式建集合）后，索引恰好补建一次
+        # 写入前先建立索引
         self.assertEqual(len(db.messages.indexes), 1)
         self.assertEqual(
             db.messages.indexes[0][1]["name"],
@@ -1041,8 +1068,8 @@ class StartupCollectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         await CommunicationService.send_message(
             db, conversation_id, str(alice["_id"]), "m2", client_message_id="lazy-2")
-        # 每进程最多尝试一次，不随每条消息重复建索引
-        self.assertEqual(len(db.messages.indexes), 1)
+        # 后续写入重新检查，避免缓存错误数据库或已经删除的索引
+        self.assertEqual(len(db.messages.indexes), 2)
 
 
 # ---------------------------------------------------------------------------

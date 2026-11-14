@@ -20,22 +20,14 @@ from app.services.conversation_policy import (
 # 配置日志
 logger = logging.getLogger(__name__)
 
-# 通信索引惰性初始化状态（进程级）：普通启动不隐式建集合（启动边界契约），
-# 首个消息落库隐式创建 messages 集合后，补建幂等唯一索引（见 send_message）。
-_index_state = {"ensured": False}
-
-
-async def _ensure_indexes_after_first_persist(db) -> None:
-    """首个消息落库（隐式建集合）后惰性补建通信索引，每进程最多尝试一次。"""
-    if _index_state["ensured"]:
-        return
-    _index_state["ensured"] = True
+async def require_message_write_storage(db):
+    from app.db.indexes import ensure_communication_indexes, CommunicationStorageUnavailable
+    from app.core.exceptions import AppBaseException
     try:
-        from app.db.indexes import ensure_communication_indexes
-        await ensure_communication_indexes(db)
-    except Exception as e:
-        # 索引补建失败不阻断消息落库：幂等去重退化为应用层先查后插。
-        logger.warning("通信索引惰性初始化失败，幂等去重退化为应用层查重: %s", e)
+        await ensure_communication_indexes(db, for_write=True)
+    except CommunicationStorageUnavailable as error:
+        raise AppBaseException("消息存储暂不可写，请稍后重试", status_code=503,
+                               error_code="MESSAGE_STORAGE_UNAVAILABLE") from error
 
 
 class CommunicationService:
@@ -339,6 +331,8 @@ class CommunicationService:
             raise ValueError("用户不是对话参与者")
         conversation = decision.conversation
 
+        await require_message_write_storage(db)
+
         # 幂等去重：重复投递返回既有消息
         if client_message_id:
             existing = await db.messages.find_one({
@@ -378,9 +372,6 @@ class CommunicationService:
         # 不发通知，避免重复副作用）。
         try:
             await db.messages.insert_one(message)
-            # 首个消息落库隐式创建 messages 集合 → 惰性补建幂等唯一索引
-            # （普通启动不隐式建集合，见 app/db/indexes.py）。
-            await _ensure_indexes_after_first_persist(db)
         except DuplicateKeyError:
             existing = await db.messages.find_one({
                 "conversation_id": conversation_id,

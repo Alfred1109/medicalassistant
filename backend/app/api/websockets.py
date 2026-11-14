@@ -391,6 +391,11 @@ def setup_websockets(app: FastAPI):
                             await websocket.close(code=4403)
                             return
                         except Exception as e:
+                            from app.core.exceptions import AppBaseException
+                            if isinstance(e, AppBaseException) and e.error_code == "MESSAGE_STORAGE_UNAVAILABLE":
+                                await websocket.send_json({"type": "error", "error_code": e.error_code,
+                                                           "message": e.message})
+                                continue
                             # 数据库失败：向发送者回错误帧，不广播
                             logger.error(f"Failed to persist chat message in conversation {conversation_id}: {str(e)}")
                             await websocket.send_json({

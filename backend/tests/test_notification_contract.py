@@ -109,6 +109,25 @@ class FakeCursor:
 class FakeCollection:
     def __init__(self):
         self.docs = []
+        self.indexes = {}
+
+    async def create_index(self, keys, **options):
+        from pymongo.errors import OperationFailure
+        name = options.get("name", "test-index")
+        definition = (tuple(keys), dict(options))
+        if name in self.indexes and self.indexes[name] != definition:
+            raise OperationFailure("index options conflict", code=85)
+        if options.get("unique"):
+            seen = set()
+            for row in self.docs:
+                if options.get("partialFilterExpression") and "client_message_id" not in row:
+                    continue
+                value = tuple(row.get(key) for key, _ in keys)
+                if value in seen:
+                    raise OperationFailure("duplicate historical messages", code=11000)
+                seen.add(value)
+        self.indexes[name] = definition
+        return name
 
     async def find_one(self, query):
         for doc in self.docs:
@@ -117,7 +136,16 @@ class FakeCollection:
         return None
 
     async def insert_one(self, doc):
+        from pymongo.errors import DuplicateKeyError
         stored = dict(doc)
+        for keys, options in self.indexes.values():
+            if not options.get("unique") or (options.get("partialFilterExpression") and "client_message_id" not in stored):
+                continue
+            for row in self.docs:
+                if options.get("partialFilterExpression") and "client_message_id" not in row:
+                    continue
+                if all(row.get(key) == stored.get(key) for key, _ in keys):
+                    raise DuplicateKeyError("duplicate message key")
         self.docs.append(stored)
         return SimpleNamespace(inserted_id=stored.get("_id"))
 
