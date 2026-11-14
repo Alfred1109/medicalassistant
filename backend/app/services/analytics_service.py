@@ -2,6 +2,12 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from pymongo.database import Database
 
+# 患者域唯一集合名（legacy 模式：患者统一存于 users 集合，按 role 区分）。
+# TODO(patient-domain-swap): patients 适配器（app.patients.legacy.LegacyPatientRepository）
+# 当前未导出集合名常量，故在此以模块常量集中定义本服务的患者聚合来源；
+# 将来切 canonical 患者集合时仅需改适配器与此常量，不再散落硬编码。
+PATIENTS_COLLECTION_NAME = "users"
+
 
 class AnalyticsService:
     """数据分析和可视化服务
@@ -19,9 +25,9 @@ class AnalyticsService:
             db: MongoDB数据库连接
         """
         self.db = db
-        # 患者与医生统一存于 users 集合（User.collection_name），按 role 区分；
-        # patients/doctors 为无写入路径的遗留集合名，读取收敛到唯一集合
-        self.patients_collection = db.users
+        # 患者集合来源经模块常量集中定义（与 patients 适配器同源 users，见文件头注释）；
+        # doctors 仍属医生域（users 按 role 区分），不在患者读取收敛范围内
+        self.patients_collection = db[PATIENTS_COLLECTION_NAME]
         self.doctors_collection = db.users
         self.devices_collection = db.devices
         # TODO(orphan-read, 待业务决策): rehabilitation_records 是无写入方的孤儿集合
@@ -37,9 +43,10 @@ class AnalyticsService:
         self.rehabilitation_collection = db.rehabilitation_records
 
     # 趋势/对比聚合的数据源：data_type -> (集合名, 附加过滤条件)
-    # 患者与医生均来自 users 集合（按 role 区分）；设备、康复计划各归唯一集合
+    # 患者集合名经 PATIENTS_COLLECTION_NAME 集中定义（待切 canonical 时只改一处）；
+    # 医生仍来自 users 集合（医生域），设备、康复计划各归唯一集合
     _TREND_SOURCES = {
-        "patient": ("users", {"role": "patient"}),
+        "patient": (PATIENTS_COLLECTION_NAME, {"role": "patient"}),
         "doctor": ("users", {"role": "doctor"}),
         "device": ("devices", {}),
         "rehabilitation": ("rehab_plans", {}),
@@ -57,11 +64,11 @@ class AnalyticsService:
     # 分布聚合的数据源：data_type -> (集合名, 过滤条件, 分组字段表达式)
     # 分组字段均为文档真实存在的字段，缺省值在结果中归入"未填写"，不发明业务分类
     _DISTRIBUTION_SOURCES = {
-        "patient": ("users", {"role": "patient"}, "$demographic_info.gender"),
+        "patient": (PATIENTS_COLLECTION_NAME, {"role": "patient"}, "$demographic_info.gender"),
         "doctor": ("users", {"role": "doctor"}, "$department"),
         "device": ("devices", {}, "$device_type"),
         "rehabilitation": ("rehab_plans", {}, "$status"),
-        "region": ("users", {"role": "patient"}, {
+        "region": (PATIENTS_COLLECTION_NAME, {"role": "patient"}, {
             "$ifNull": ["$demographic_info.city", {"$ifNull": ["$demographic_info.region", "$demographic_info.address"]}],
         }),
     }
@@ -69,7 +76,7 @@ class AnalyticsService:
     # 对比聚合的数据源：data_type -> (集合名, 过滤条件, 类别标签)
     # 对比语义：该实体在当前窗口的"新增数量" vs 对比窗口的"新增数量"
     _COMPARISON_SOURCES = {
-        "patient": ("users", {"role": "patient"}, "新增患者"),
+        "patient": (PATIENTS_COLLECTION_NAME, {"role": "patient"}, "新增患者"),
         "doctor": ("users", {"role": "doctor"}, "新增医生"),
         "device": ("devices", {}, "新增设备"),
         "rehabilitation": ("rehab_plans", {}, "新增康复计划"),

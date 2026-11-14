@@ -8,6 +8,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.db.crud_services import PatientCRUD
 from app.models.user import Patient
 from app.core.patient_access import assigned_patient_query, ensure_patient_access, PatientAccessError
+from app.core.exceptions import AppBaseException
+from app.patients.legacy import LegacyPatientRepository
 from app.services.followup_service import FollowupService
 from app.core.followup_access import ensure_followup_patient_access, followup_patient_scope
 from bson.objectid import ObjectId
@@ -33,6 +35,10 @@ async def get_doctor_patients(
         # 获取当前医生的所有患者
         doctor_id = current_user.id
         patients_data = await patient_crud.find_by_doctor_id(doctor_id)
+    except AppBaseException:
+        # 适配器的患者标识歧义（PATIENT_IDENTITY_AMBIGUOUS/503）等业务异常
+        # 保留全局处理器语义，不降级为 500
+        raise
     except Exception as e:
         # 记录错误并如实上抛为 500，绝不返回模拟患者
         print(f"获取患者数据时出错: {str(e)}")
@@ -256,8 +262,9 @@ async def get_doctor_statistics(
         if not doctor:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到医生信息")
 
-        patient_ids = [str(patient["_id"]) async for patient in
-                       db["users"].find(assigned_patient_query(str(doctor_id)), {"_id": 1})]
+        # 患者 ID 列表读取收敛到适配器（assigned_ids：双字面归属 + 标识歧义防护）
+        patient_ids = await LegacyPatientRepository(db).assigned_ids(
+            assigned_patient_query(str(doctor_id)))
         plans_collection = db["rehab_plans"]
         total_plans = await plans_collection.count_documents({"practitioner_id": doctor_id})
         active_plans = await plans_collection.count_documents(
@@ -285,7 +292,8 @@ async def get_doctor_statistics(
             },
             "completedSessionsThisMonth": completed_sessions,
         }
-    except (HTTPException, PatientAccessError):
+    except (HTTPException, AppBaseException):
+        # PatientAccessError 与适配器的 LegacyPatientIdentityError 均为 AppBaseException
         raise
     except Exception as e:
         print(f"获取医生统计数据时出错: {str(e)}")

@@ -19,6 +19,7 @@ import httpx
 from bson import ObjectId
 
 from app.core.auth import get_current_user
+from app.core.dependencies import get_health_record_for_patient
 from app.db.mongodb import get_database
 from app.main import app
 from app.schemas.user import UserResponse
@@ -135,7 +136,9 @@ class DoctorRouterContractTestBase(unittest.IsolatedAsyncioTestCase):
             base_url="http://doctor-router-test")
 
     async def asyncTearDown(self):
-        await self._client.aclose()
+        # 纯函数级用例（不经 HTTP）可不创建 _client
+        if getattr(self, "_client", None) is not None:
+            await self._client.aclose()
         app.dependency_overrides.clear()
 
 
@@ -358,6 +361,71 @@ class DoctorPatientAuthorityTests(DoctorRouterContractTestBase):
         listed = await self._client.get("/api/doctors/patients")
         self.assertEqual(listed.status_code, 200, listed.text)
         self.assertEqual(listed.json(), [])
+
+
+class PatientReadAdapterContractTests(DoctorRouterContractTestBase):
+    """患者读取收敛到 legacy 适配器后的防护契约（T2 第一波段）。
+
+    - 医护患者列表/统计经 LegacyPatientRepository.assigned_ids，获得标识歧义防护
+      （同一标识存在 ObjectId/字符串双文档时上抛 PATIENT_IDENTITY_AMBIGUOUS/503，
+      不再静默重复列出）；
+    - get_health_record_for_patient 不再 ObjectId-only 直查 users，
+      与适配器一致支持 string/ObjectId 双字面。
+    """
+
+    def _seed_ambiguous_pair(self, db):
+        # 同一患者标识的 ObjectId 与字符串双文档（历史双写形态）→ 歧义
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "name": "医生"})
+        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient",
+                         "name": "患者A", "practitioners": [DOCTOR_ID]})
+        db.users.insert({"_id": PATIENT_ID, "role": "patient",
+                         "name": "患者B", "practitioners": [DOCTOR_ID]})
+
+    async def test_ambiguous_patient_identity_on_list_returns_503(self):
+        db = FakeDatabase()
+        self._seed_ambiguous_pair(db)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients")
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"], "PATIENT_IDENTITY_AMBIGUOUS")
+
+    async def test_ambiguous_patient_identity_on_statistics_returns_503(self):
+        db = FakeDatabase()
+        self._seed_ambiguous_pair(db)
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/statistics")
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"], "PATIENT_IDENTITY_AMBIGUOUS")
+
+    async def test_patient_list_shape_unchanged(self):
+        """列表响应形状契约不变：id/name/age/gender/diagnosis/status 字段保持。"""
+        db = FakeDatabase()
+        db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "name": "医生"})
+        db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient", "name": "张三",
+                         "practitioners": [ObjectId(DOCTOR_ID)], "age": 40, "gender": "男",
+                         "diagnosis": "腰椎间盘突出", "status": "在治疗",
+                         "practitioners_extra": "不应出现在响应中"})
+        self._setup(db, _make_user())
+        response = await self._client.get("/api/doctors/patients")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), [{
+            "id": PATIENT_ID,
+            "name": "张三",
+            "age": 40,
+            "gender": "男",
+            "diagnosis": "腰椎间盘突出",
+            "status": "在治疗",
+        }])
+
+    async def test_health_record_patient_load_supports_non_objectid_id(self):
+        """get_health_record_for_patient 与适配器同源：非 ObjectId 字符串主键可命中。"""
+        db = FakeDatabase()
+        db.users.insert({"_id": "legacy-patient-001", "role": "patient", "name": "老患者",
+                         "age": 55, "gender": "女"})
+        record = await get_health_record_for_patient("legacy-patient-001", db)
+        self.assertEqual(record["name"], "老患者")
+        self.assertEqual(record["age"], 55)
+        self.assertEqual(record["gender"], "女")
 
 
 if __name__ == "__main__":

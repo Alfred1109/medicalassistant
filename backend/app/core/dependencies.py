@@ -13,6 +13,7 @@ from app.services.rehab_plan_structure_service import RehabPlanStructureService
 from app.schemas.user import UserResponse
 from app.core.permissions import PermissionChecker
 from app.core.patient_access import PatientAccessError, load_patient_doc, ensure_patient_access
+from app.patients.legacy import LegacyPatientRepository
 from app.services.health_record_service import HealthRecordService
 from app.services.followup_service import FollowupService
 from app.services.health_alert_service import HealthAlertService
@@ -219,9 +220,9 @@ async def get_health_record_for_patient(
 ) -> Dict[str, Any]:
     """获取或创建患者健康档案"""
     try:
-        # 获取患者数据
-        users_collection = db["users"]
-        patient = await users_collection.find_one({"_id": ObjectId(patient_id), "role": "patient"})
+        # 获取患者数据：读取收敛到 legacy 适配器（string/ObjectId 双字面兼容，
+        # 不再 ObjectId-only 直查 users）
+        patient = await LegacyPatientRepository(db).get(patient_id)
         
         if not patient:
             return {}

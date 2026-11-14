@@ -18,6 +18,12 @@ from ..db.mongodb import get_db
 from ..services.device_analysis_service import device_analysis_service
 from ..core.config import settings
 
+# 患者域唯一集合名（legacy 模式：患者统一存于 users 集合，按 role 区分）。
+# TODO(patient-domain-swap): patients 适配器（app.patients.legacy.LegacyPatientRepository）
+# 当前未导出集合名常量，故在此以模块常量集中定义本服务的患者聚合来源；
+# 将来切 canonical 患者集合时仅需改适配器与此常量，不再散落硬编码。
+PATIENTS_COLLECTION_NAME = "users"
+
 logger = logging.getLogger(__name__)
 
 class ReportSchedulerService:
@@ -276,8 +282,8 @@ class ReportSchedulerService:
         start_date = datetime.utcnow() - timedelta(days=days)
         
         pipeline = [
-            # 患者统一存于 users 集合（User.collection_name），按 role 区分；
-            # patients 为无写入路径的遗留集合名，读取收敛到唯一集合
+            # 患者集合名经 PATIENTS_COLLECTION_NAME 集中定义（与 patients 适配器
+            # 同源 users，见文件头注释），聚合语义不变
             {"$match": {"role": "patient", "created_at": {"$gte": start_date}}},
             {"$group": {
                 "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
@@ -287,7 +293,7 @@ class ReportSchedulerService:
         ]
 
         result = []
-        async for doc in self.db.users.aggregate(pipeline):
+        async for doc in self.db[PATIENTS_COLLECTION_NAME].aggregate(pipeline):
             result.append({
                 "date": doc["_id"],
                 "value": doc["count"]

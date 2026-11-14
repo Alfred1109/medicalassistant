@@ -9,6 +9,8 @@ from bson import ObjectId
 
 from app.db.crud import CRUDBase
 from app.core.patient_access import assigned_patient_query
+from app.core.patient_identity import identity_candidates
+from app.patients.legacy import LegacyPatientRepository
 from app.models.user import User, Doctor, Patient, HealthManager, SystemAdmin
 from app.models.organization import Organization
 from app.models.health_record import HealthRecord, FollowUpRecord
@@ -124,8 +126,20 @@ class PatientCRUD(CRUDBase[Patient]):
         return await self.find_assigned_patients(doctor_id, "doctor")
 
     async def find_assigned_patients(self, operator_id: str, operator_role: str) -> List[dict]:
-        """与对象授权同源，返回医护当前管理的患者展示数据。"""
-        cursor = self.collection.find(assigned_patient_query(operator_id, operator_role))
+        """与对象授权同源，返回医护当前管理的患者展示数据。
+
+        患者读取收敛到 LegacyPatientRepository：先经 assigned_ids 复用授权查询
+        并获得标识歧义防护（歧义时上抛 PATIENT_IDENTITY_AMBIGUOUS/503），
+        再按适配器同源的双字面（string/ObjectId）标识取回完整文档。
+        响应形状（_get_patient_data）与列表顺序（无排序的集合自然序）保持不变。
+        """
+        repository = LegacyPatientRepository(self.db)
+        identifiers = await repository.assigned_ids(
+            assigned_patient_query(operator_id, operator_role))
+        if not identifiers:
+            return []
+        cursor = self.collection.find({"role": "patient",
+                                       "_id": {"$in": identity_candidates(identifiers)}})
         return [await self._get_patient_data(doc) async for doc in cursor]
     
     async def update_medical_info(self, patient_id: str, medical_info: Dict[str, Any]) -> bool:
