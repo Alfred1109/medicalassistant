@@ -22,7 +22,7 @@ from app.services.rehab_publication_service import RehabPublicationService
 # （clinical_patients 无 users 文档）的引用会被误判为 not_found，该聚合换源
 # clinical_patients 属波次 3 换源项；当前门闩移除后 canonical 统计的
 # unresolved_patient_count 对无账号患者会如实按「引用不可核实」计数。
-from app.services.quality_process_queries import FOLLOWUP_STATUSES, PLAN_STATUSES, PUBLICATION_STATES
+from app.services.quality_process_queries import FOLLOWUP_STATUSES, PLAN_STATUSES, PUBLICATION_STATES, resolve_patient_domain
 
 
 def _error(code, message, status=422):
@@ -167,6 +167,10 @@ class QualityMonitoringService:
 
     async def _read(self, kind, scope, start, end, **options):
         source = self.followups if kind == "followup" else self.publications
+        # 波次 3 换源接线（T66 登记的缝）：按域解析后传入聚合管道——
+        # canonical 下 $lookup clinical_patients，legacy 行为逐字不变；
+        # 域读取失败经 resolve_patient_domain fail-closed 透传 503。
+        options.setdefault("patient_domain", await resolve_patient_domain(self.db))
         return await source.quality_process_snapshot(scope,
             start_date=start.replace(tzinfo=None) if start else None,
             end_date=end.replace(tzinfo=None) if end else None, **options)

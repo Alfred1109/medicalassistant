@@ -10,6 +10,9 @@
   demographic_info.gender），缺失归"未填写"；未知 data_type 返回 []。
 - get_comparison_data：当前窗口 vs 对比窗口新增数量；target 无数据源返回
   compareValue=None；未知 compare_with 上抛。
+- T66 患者聚合源按域分派：legacy（users + role）口径逐字等价；canonical
+  （clinical_patients + status=="active"）计入无账号患者；域状态不可观察
+  （unknown）时患者类指标降级为 None 并由 dataAvailable 标记，不猜测域。
 
 全部内存打桩，不触碰真实数据库。
 """
@@ -18,6 +21,7 @@ import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+from app.patients.repository import SCHEMA_VERSION, STATE_ID
 from app.services.analytics_service import AnalyticsService
 
 
@@ -76,11 +80,22 @@ class FakeCollection:
     def __init__(self):
         self.docs = {}
         self.count_error = None
+        # find_one 读取失败注入（模拟 patient_domain_state 传输层失败）
+        self.find_error = None
 
     async def count_documents(self, filter_):
         if self.count_error is not None:
             raise self.count_error
         return sum(1 for doc in self.docs.values() if _match(doc, filter_))
+
+    async def find_one(self, query=None, session=None):
+        """单点读取打桩（本套件仅用于 patient_domain_state 域开关读取）。"""
+        if self.find_error is not None:
+            raise self.find_error
+        for doc in self.docs.values():
+            if _match(doc, query or {}):
+                return dict(doc)
+        return None
 
     def find(self, _filter, projection=None):
         self._cursor = iter(list(self.docs.values()))
@@ -384,6 +399,140 @@ class ComparisonDataContractTests(unittest.IsolatedAsyncioTestCase):
             await _service(db).get_comparison_data("patient", "decade", "lastPeriod"), [])
         with self.assertRaises(ValueError):
             await _service(db).get_comparison_data("patient", "week", "bogus")
+
+
+class PatientDomainDispatchTests(unittest.IsolatedAsyncioTestCase):
+    """T66 患者聚合源按域分派：legacy 等价 / canonical 计无账号患者 / unknown 降级。
+
+    域开关经 db.patient_domain_state 单点文档建模（与
+    patients/repository.domain_mode 同语义）：无文档=legacy、显式
+    {mode:"legacy"}=回拨载体（行为必须与无文档完全一致）、canonical=切换。
+    """
+
+    def _seed_state(self, db, mode):
+        db.patient_domain_state.insert(
+            {"_id": STATE_ID, "mode": mode, "schema_version": SCHEMA_VERSION})
+
+    async def test_no_state_document_stays_legacy_users_aggregate(self):
+        """无状态文档：legacy（users + role），口径与历史版本逐字一致。"""
+        db = FakeDatabase()
+        now = datetime.utcnow()
+        db.users.insert({"_id": "p1", "role": "patient", "created_at": now - timedelta(days=30)})
+        db.users.insert({"_id": "d1", "role": "doctor", "created_at": now})
+
+        stats = await _service(db).get_stats_overview()
+        self.assertEqual(stats["patientCount"], 1)
+        self.assertEqual(stats["doctorCount"], 1)
+        # 成功路径不出现降级标记键（响应形状逐字不变）
+        self.assertEqual(set(stats["dataAvailable"]),
+                         {"rehabilitationRate", "patientSatisfaction"})
+
+    async def test_explicit_legacy_state_behaves_identically(self):
+        """显式 {mode:"legacy"} 回拨载体：行为与无文档 legacy 完全一致。"""
+        db = FakeDatabase()
+        self._seed_state(db, "legacy")
+        db.users.insert({"_id": "p1", "role": "patient", "created_at": datetime.utcnow()})
+
+        stats = await _service(db).get_stats_overview()
+        self.assertEqual(stats["patientCount"], 1)
+        rows = await _service(db).get_trend_data("patient", "week")
+        self.assertEqual(sum(r["value"] for r in rows), 1)
+
+    async def test_canonical_overview_counts_active_clinical_patients(self):
+        """canonical：clinical_patients + status=="active"，无账号患者被计入，
+        users 里的 legacy 患者账号同文档不再重复计数。"""
+        db = FakeDatabase()
+        self._seed_state(db, "canonical")
+        now = datetime.utcnow()
+        db.clinical_patients.insert({"_id": "cp1", "patient_id": "cp1", "status": "active",
+                                     "created_at": now - timedelta(days=30),
+                                     "demographic_info": {"gender": "男"}})
+        # 无账号患者（create_from_source 形态）：有 clinical 文档、无 users 文档
+        db.clinical_patients.insert({"_id": "cp2", "patient_id": "cp2", "status": "active",
+                                     "created_at": now - timedelta(days=1)})
+        db.clinical_patients.insert({"_id": "cp3", "patient_id": "cp3", "status": "inactive",
+                                     "created_at": now})
+        db.users.insert({"_id": "u1", "role": "patient", "created_at": now})
+        db.users.insert({"_id": "d1", "role": "doctor", "created_at": now})
+
+        stats = await _service(db).get_stats_overview()
+        self.assertEqual(stats["patientCount"], 2)  # cp1 + cp2，停用 cp3 不计
+        self.assertEqual(stats["doctorCount"], 1)
+        self.assertEqual(set(stats["dataAvailable"]),
+                         {"rehabilitationRate", "patientSatisfaction"})
+
+    async def test_canonical_patient_trend_and_comparison_count_accountless(self):
+        """canonical 患者趋势/对比：无账号患者按 created_at 计入，
+        legacy users 患者与停用临床患者不计入。"""
+        db = FakeDatabase()
+        self._seed_state(db, "canonical")
+        now = datetime.utcnow()
+        today = now.replace(hour=12, minute=0, second=0, microsecond=0)
+        db.clinical_patients.insert({"_id": "cp1", "patient_id": "cp1", "status": "active",
+                                     "created_at": today})
+        db.clinical_patients.insert({"_id": "cp2", "patient_id": "cp2", "status": "inactive",
+                                     "created_at": today})
+        db.users.insert({"_id": "u1", "role": "patient", "created_at": today})
+
+        rows = await _service(db).get_trend_data("patient", "week")
+        self.assertEqual(sum(r["value"] for r in rows), 1)
+
+        comparison = await _service(db).get_comparison_data("patient", "week", "lastPeriod")
+        self.assertEqual(comparison[0]["currentValue"], 1)
+        self.assertEqual(comparison[0]["compareValue"], 0)
+
+    async def test_canonical_patient_distribution_uses_clinical_documents(self):
+        """canonical 患者分布：按 clinical_patients 的 demographic_info 分组。"""
+        db = FakeDatabase()
+        self._seed_state(db, "canonical")
+        db.clinical_patients.insert({"_id": "cp1", "patient_id": "cp1", "status": "active",
+                                     "demographic_info": {"gender": "男"}})
+        db.clinical_patients.insert({"_id": "cp2", "patient_id": "cp2", "status": "active",
+                                     "demographic_info": {"gender": "男"}})
+        db.clinical_patients.insert({"_id": "cp3", "patient_id": "cp3", "status": "active"})
+        db.clinical_patients.insert({"_id": "cp4", "patient_id": "cp4", "status": "inactive",
+                                     "demographic_info": {"gender": "男"}})
+        db.users.insert({"_id": "u1", "role": "patient", "demographic_info": {"gender": "女"}})
+
+        rows = await _service(db).get_distribution_data("patient", "month")
+        self.assertEqual(rows, [
+            {"category": "男", "value": 2},
+            {"category": "未填写", "value": 1},
+        ])
+
+    async def test_unknown_domain_degrades_patient_metrics_not_guess(self):
+        """域状态读取失败：不猜测域——患者类指标降级 None + dataAvailable 标记，
+        非患者指标（医生/设备）照常聚合。"""
+        db = FakeDatabase()
+        now = datetime.utcnow()
+        db.patient_domain_state.find_error = RuntimeError("state read down")
+        db.users.insert({"_id": "p1", "role": "patient", "created_at": now})
+        db.users.insert({"_id": "d1", "role": "doctor", "created_at": now})
+        db.devices.insert({"_id": "dev1", "status": "active", "created_at": now})
+
+        stats = await _service(db).get_stats_overview()
+        self.assertIsNone(stats["patientCount"])
+        self.assertIsNone(stats["weekPatientChange"])
+        self.assertEqual(stats["doctorCount"], 1)
+        self.assertEqual(stats["totalDevices"], 1)
+        self.assertEqual(stats["activeDeviceRate"], 100.0)
+        self.assertEqual(stats["dataAvailable"]["patientCount"], False)
+        self.assertEqual(stats["dataAvailable"]["weekPatientChange"], False)
+
+    async def test_unknown_domain_patient_series_return_empty(self):
+        """unknown：患者类序列/对比不猜测域，如实返回空序列（已知限制：
+        纯列表响应无 unknown 通道，与"无数据"不可区分）。"""
+        db = FakeDatabase()
+        db.patient_domain_state.find_error = RuntimeError("state read down")
+        db.users.insert({"_id": "p1", "role": "patient", "created_at": datetime.utcnow()})
+        db.clinical_patients.insert({"_id": "cp1", "patient_id": "cp1",
+                                     "status": "active", "created_at": datetime.utcnow()})
+
+        service = _service(db)
+        self.assertEqual(await service.get_trend_data("patient", "week"), [])
+        self.assertEqual(await service.get_distribution_data("patient", "month"), [])
+        self.assertEqual(
+            await service.get_comparison_data("patient", "week", "lastPeriod"), [])
 
 
 if __name__ == "__main__":

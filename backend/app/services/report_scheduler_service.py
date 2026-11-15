@@ -33,12 +33,28 @@ import os
 
 from ..db.mongodb import get_db
 from ..core.config import settings
+from ..patients.repository import PATIENTS as CANONICAL_PATIENTS_COLLECTION
+from .analytics_service import observe_patient_domain_state
 
 # 患者域唯一集合名（legacy 模式：患者统一存于 users 集合，按 role 区分）。
-# TODO(patient-domain-swap): patients 适配器（app.patients.legacy.LegacyPatientRepository）
-# 当前未导出集合名常量，故在此以模块常量集中定义本服务的患者聚合来源；
-# 将来切 canonical 患者集合时仅需改适配器与此常量，不再散落硬编码。
+# T66 域感知：legacy 分支仍读此常量（users + role 过滤，口径逐字不变）；
+# canonical 分支改读 clinical_patients（集合名取自 patients/repository.py
+# 的 PATIENTS 常量），按域分派见 _get_patient_stats。
 PATIENTS_COLLECTION_NAME = "users"
+
+# canonical 域患者聚合源：clinical_patients（与 analytics_service 同源
+# patients/repository.PATIENTS 常量）；status=="active" 对齐 legacy
+# users.is_active 语义（迁移映射见 patients/migration.project_legacy_patient）。
+CANONICAL_PATIENTS_COLLECTION_NAME = CANONICAL_PATIENTS_COLLECTION
+
+# 患者聚合源按域分派：mode -> (集合名, 过滤条件)。
+# 口径差异声明（T12 审计）：legacy created_at = 账号注册时间；canonical 的
+# created_at 对迁移患者继承 legacy 注册时间、对无账号患者（create_from_source）
+# 是建档时间——「日新增患者」跨域不可比，域切换瞬间序列存在口径漂移（已知限制）。
+_PATIENT_AGGREGATE_SPECS = {
+    "legacy": (PATIENTS_COLLECTION_NAME, {"role": "patient"}),
+    "canonical": (CANONICAL_PATIENTS_COLLECTION_NAME, {"status": "active"}),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -247,13 +263,29 @@ class ReportSchedulerService:
             return 30  # 默认为一个月
     
     async def _get_patient_stats(self, days: int) -> List[Dict[str, Any]]:
-        """获取患者统计数据"""
+        """获取患者统计数据（患者聚合源按域分派，T66）。
+
+        legacy：users + role=="patient"（原有管道逐字保留）；canonical：
+        clinical_patients + status=="active"（含无账号患者）。created_at
+        口径差异与域切换瞬间漂移见 _PATIENT_AGGREGATE_SPECS 注释。
+
+        域状态读取失败/未知状态 fail-safe 返回 []（不猜测域，与
+        analytics_service.observe_patient_domain_state 的 unknown 口径一致；
+        纯列表响应无 unknown 通道，空序列与"无数据"不可区分属已知限制）。
+        """
+        mode = await observe_patient_domain_state(self.db)
+        spec = _PATIENT_AGGREGATE_SPECS.get(mode)
+        if spec is None:
+            return []
+
+        collection_name, match = spec
         start_date = datetime.utcnow() - timedelta(days=days)
-        
+
         pipeline = [
-            # 患者集合名经 PATIENTS_COLLECTION_NAME 集中定义（与 patients 适配器
-            # 同源 users，见文件头注释），聚合语义不变
-            {"$match": {"role": "patient", "created_at": {"$gte": start_date}}},
+            # 患者聚合源按域分派（legacy: PATIENTS_COLLECTION_NAME=users；
+            # canonical: clinical_patients，见 _PATIENT_AGGREGATE_SPECS），
+            # 聚合语义（按天分桶计数）不变
+            {"$match": {**match, "created_at": {"$gte": start_date}}},
             {"$group": {
                 "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
                 "count": {"$sum": 1}
@@ -262,7 +294,7 @@ class ReportSchedulerService:
         ]
 
         result = []
-        async for doc in self.db[PATIENTS_COLLECTION_NAME].aggregate(pipeline):
+        async for doc in self.db[collection_name].aggregate(pipeline):
             result.append({
                 "date": doc["_id"],
                 "value": doc["count"]

@@ -2,11 +2,35 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from pymongo.database import Database
 
+from ..core.patient_access import patient_domain_mode
+from ..patients.repository import PATIENTS as CANONICAL_PATIENTS_COLLECTION_NAME
+
 # 患者域唯一集合名（legacy 模式：患者统一存于 users 集合，按 role 区分）。
-# TODO(patient-domain-swap): patients 适配器（app.patients.legacy.LegacyPatientRepository）
-# 当前未导出集合名常量，故在此以模块常量集中定义本服务的患者聚合来源；
-# 将来切 canonical 患者集合时仅需改适配器与此常量，不再散落硬编码。
+# T66 域感知：legacy 分支仍读此常量（users + role 过滤，口径逐字不变）；
+# canonical 分支改读 clinical_patients（集合名取自 patients/repository.py
+# 的 PATIENTS 常量，不再散落硬编码）。
 PATIENTS_COLLECTION_NAME = "users"
+
+# canonical 域患者聚合的可用性载体：clinical_patients 文档没有 role/is_active，
+# status=="active" 对齐 legacy users.is_active 语义（迁移映射 is_active False →
+# status "inactive"，见 patients/migration.project_legacy_patient）。
+CANONICAL_PATIENT_MATCH = {"status": "active"}
+
+
+async def observe_patient_domain_state(db) -> str:
+    """观察患者域开关（core/patient_access.patient_domain_mode）；读取失败或
+    观察到未知状态 fail-safe 降级为 "unknown"，绝不猜测域回退。
+
+    与 operations/data_export 的 fail-safe unknown 口径一致：统计聚合是只读
+    展示路径，域状态不可用不应 500 阻断页面；但 unknown ≠ legacy——静默回退
+    legacy 会把 canonical 患者漏算、把 legacy 停用患者误算，因此 unknown 时
+    患者类指标降级为不可用（patientCount=None / 空序列）并由 dataAvailable
+    如实标记，非患者指标（医生/设备）照常输出。
+    """
+    try:
+        return await patient_domain_mode(db)
+    except Exception:
+        return "unknown"
 
 
 class AnalyticsService:
@@ -25,8 +49,9 @@ class AnalyticsService:
             db: MongoDB数据库连接
         """
         self.db = db
-        # 患者集合来源经模块常量集中定义（与 patients 适配器同源 users，见文件头注释）；
-        # doctors 仍属医生域（users 按 role 区分），不在患者读取收敛范围内
+        # 患者集合来源按域分派（legacy: PATIENTS_COLLECTION_NAME=users，见
+        # 文件头与 observe_patient_domain_state 注释）；doctors 仍属医生域
+        # （users 按 role 区分），不在患者读取收敛范围内
         self.patients_collection = db[PATIENTS_COLLECTION_NAME]
         self.doctors_collection = db.users
         self.devices_collection = db.devices
@@ -43,7 +68,8 @@ class AnalyticsService:
         self.rehabilitation_collection = db.rehabilitation_records
 
     # 趋势/对比聚合的数据源：data_type -> (集合名, 附加过滤条件)
-    # 患者集合名经 PATIENTS_COLLECTION_NAME 集中定义（待切 canonical 时只改一处）；
+    # patient 条目是 legacy 域口径（users + role，逐字保留）；canonical 域的
+    # patient 聚合源在 get_trend_data/get_comparison_data 内按域分派（T66）；
     # 医生仍来自 users 集合（医生域），设备、康复计划各归唯一集合
     _TREND_SOURCES = {
         "patient": (PATIENTS_COLLECTION_NAME, {"role": "patient"}),
@@ -62,7 +88,8 @@ class AnalyticsService:
     }
 
     # 分布聚合的数据源：data_type -> (集合名, 过滤条件, 分组字段表达式)
-    # 分组字段均为文档真实存在的字段，缺省值在结果中归入"未填写"，不发明业务分类
+    # 分组字段均为文档真实存在的字段，缺省值在结果中归入"未填写"，不发明业务分类；
+    # patient/region 条目为 legacy 域口径，canonical 在 get_distribution_data 内分派
     _DISTRIBUTION_SOURCES = {
         "patient": (PATIENTS_COLLECTION_NAME, {"role": "patient"}, "$demographic_info.gender"),
         "doctor": ("users", {"role": "doctor"}, "$department"),
@@ -74,7 +101,8 @@ class AnalyticsService:
     }
 
     # 对比聚合的数据源：data_type -> (集合名, 过滤条件, 类别标签)
-    # 对比语义：该实体在当前窗口的"新增数量" vs 对比窗口的"新增数量"
+    # 对比语义：该实体在当前窗口的"新增数量" vs 对比窗口的"新增数量"；
+    # patient 条目为 legacy 域口径，canonical 在 get_comparison_data 内分派
     _COMPARISON_SOURCES = {
         "patient": (PATIENTS_COLLECTION_NAME, {"role": "patient"}, "新增患者"),
         "doctor": ("users", {"role": "doctor"}, "新增医生"),
@@ -115,13 +143,44 @@ class AnalyticsService:
         """获取系统统计数据概览
 
         所有字段均为真实集合聚合；异常如实上抛（不回退模拟数据）。
+        患者类指标按患者域分派聚合源（见下方 T66 注释）；域状态不可观察时
+        患者类指标降级为 None 并在 dataAvailable 中标记不可用。
 
         Returns:
             包含各种统计数据的字典；rehabilitationRate / patientSatisfaction
             当前无真实数据源，恒为 0 并在 dataAvailable 中标记为不可用
         """
-        # 计算患者数量
-        patient_count = await self.patients_collection.count_documents({"role": "patient"})
+        # 计算患者数量（患者聚合源按域分派，T66）：
+        # - legacy：users + role=="patient"（原有口径逐字保留）；
+        # - canonical：clinical_patients + status=="active"（含无账号患者，
+        #   修复 T55 演练实证的 patientCount 少算）。
+        # 口径差异声明：legacy created_at = 账号注册时间；canonical 的
+        # created_at 对迁移患者继承 legacy 注册时间、对无账号患者
+        # （create_from_source）是建档时间——「一周增长率」跨域不可比，
+        # 域切换瞬间该指标存在口径漂移（已知限制，T12 审计登记）。
+        # 域状态 unknown：不猜测域，患者指标降级为 None 并由 dataAvailable
+        # 标记不可用（非患者指标照常聚合，见 observe_patient_domain_state）。
+        mode = await observe_patient_domain_state(self.db)
+        if mode == "legacy":
+            match = {"role": "patient"}
+            collection = self.patients_collection
+        elif mode == "canonical":
+            match = CANONICAL_PATIENT_MATCH
+            collection = self.db[CANONICAL_PATIENTS_COLLECTION_NAME]
+
+        if mode in ("legacy", "canonical"):
+            patient_count = await collection.count_documents(match)
+            one_week_ago = datetime.utcnow() - timedelta(days=7)
+            previous_patient_count = await collection.count_documents(
+                {**match, "created_at": {"$lt": one_week_ago}}
+            )
+            week_patient_change = ((patient_count - previous_patient_count) / previous_patient_count * 100) if previous_patient_count > 0 else 0
+            week_patient_change = round(week_patient_change, 1)
+        else:
+            # unknown 降级：患者总量如实「不可知」（None）而非 0——0 会断言
+            # 「没有患者」，与事实不符；由下方 dataAvailable 降级标记
+            patient_count = None
+            week_patient_change = None
 
         # 计算医生数量
         doctor_count = await self.doctors_collection.count_documents({"role": "doctor"})
@@ -132,13 +191,6 @@ class AnalyticsService:
         # 计算活跃设备比例
         active_devices = await self.devices_collection.count_documents({"status": "active"})
         active_device_rate = (active_devices / device_count * 100) if device_count > 0 else 0
-
-        # 计算一周内的患者增长率
-        one_week_ago = datetime.utcnow() - timedelta(days=7)
-        previous_patient_count = await self.patients_collection.count_documents(
-            {"role": "patient", "created_at": {"$lt": one_week_ago}}
-        )
-        week_patient_change = ((patient_count - previous_patient_count) / previous_patient_count * 100) if previous_patient_count > 0 else 0
 
         # 计算平均训练时间（分钟）
         rehab_records = self.rehabilitation_collection.find({})
@@ -152,9 +204,9 @@ class AnalyticsService:
 
         avg_training_time = total_duration / record_count if record_count > 0 else 0
 
-        return {
+        result = {
             "patientCount": patient_count,
-            "weekPatientChange": round(week_patient_change, 1),
+            "weekPatientChange": week_patient_change,
             "doctorCount": doctor_count,
             "totalDevices": device_count,
             "activeDeviceRate": round(active_device_rate, 1),
@@ -168,6 +220,12 @@ class AnalyticsService:
                 "patientSatisfaction": False,
             },
         }
+        if patient_count is None:
+            # unknown 降级标记（仅该分支出现；legacy/canonical 成功路径的
+            # 响应形状保持与历史版本逐字一致）
+            result["dataAvailable"]["patientCount"] = False
+            result["dataAvailable"]["weekPatientChange"] = False
+        return result
 
     async def get_trend_data(self, data_type: str, time_range: str) -> List[Dict[str, Any]]:
         """获取趋势数据
@@ -176,6 +234,13 @@ class AnalyticsService:
         （patient/doctor -> users 按 role，device -> devices，rehabilitation -> rehab_plans）。
         缺少 created_at（或 created_at 非日期类型）的历史文档不计入，桶内无数据补 0。
         未知 data_type / time_range 返回空列表（不伪造序列）；异常如实上抛。
+
+        T66 域分派：data_type=patient 时聚合源按患者域分派（legacy: users +
+        role；canonical: clinical_patients + status=="active"，含无账号患者）。
+        canonical 患者的 created_at 口径（迁移患者继承注册时间、无账号患者为
+        建档时间）与 legacy 注册时间不完全同义，域切换瞬间序列存在口径漂移
+        （已知限制，T12 审计登记）。域状态 unknown 不猜测域，返回空序列——
+        纯列表响应无 unknown 通道，空序列与"无数据"不可区分属已知限制。
 
         Args:
             data_type: 数据类型 (patient, doctor, device, rehabilitation)
@@ -189,6 +254,13 @@ class AnalyticsService:
             return []
 
         collection_name, extra_match = source
+        if data_type == "patient":
+            mode = await observe_patient_domain_state(self.db)
+            if mode == "unknown":
+                return []
+            if mode == "canonical":
+                collection_name, extra_match = (
+                    CANONICAL_PATIENTS_COLLECTION_NAME, CANONICAL_PATIENT_MATCH)
         _count, _unit, fmt = self._TREND_BUCKETS[time_range]
         starts = self._trend_bucket_starts(time_range)
 
@@ -218,6 +290,11 @@ class AnalyticsService:
         time_range 参数仅为 API 兼容保留）。字段缺失/空值归入"未填写"。
         未知 data_type 返回空列表；异常如实上抛。
 
+        T66 域分派：data_type=patient（含 region）时聚合源按患者域分派
+        （legacy: users + role；canonical: clinical_patients +
+        status=="active"；demographic_info 经迁移保留同名字段）。域状态
+        unknown 不猜测域，返回空序列（已知限制同 get_trend_data）。
+
         Args:
             data_type: 数据类型 (patient, doctor, device, rehabilitation)
             time_range: 时间范围（仅兼容保留，不影响结果）
@@ -230,6 +307,13 @@ class AnalyticsService:
             return []
 
         collection_name, match, field_expr = source
+        if data_type == "patient":
+            mode = await observe_patient_domain_state(self.db)
+            if mode == "unknown":
+                return []
+            if mode == "canonical":
+                collection_name, match = (
+                    CANONICAL_PATIENTS_COLLECTION_NAME, CANONICAL_PATIENT_MATCH)
         pipeline = [
             {"$match": match},
             {"$group": {
@@ -257,6 +341,11 @@ class AnalyticsService:
         未知 data_type / time_range 返回空列表；未知 compare_with 上抛 ValueError；
         异常如实上抛。
 
+        T66 域分派：data_type=patient 时聚合源按患者域分派（legacy: users +
+        role；canonical: clinical_patients + status=="active"）。created_at
+        口径差异与域切换瞬间漂移同 get_trend_data（已知限制）。域状态
+        unknown 不猜测域，返回空序列（已知限制同 get_trend_data）。
+
         Args:
             data_type: 数据类型 (patient, doctor, device, rehabilitation)
             time_range: 时间范围 (day, week, month, quarter, year)
@@ -270,6 +359,13 @@ class AnalyticsService:
             return []
 
         collection_name, extra_match, label = source
+        if data_type == "patient":
+            mode = await observe_patient_domain_state(self.db)
+            if mode == "unknown":
+                return []
+            if mode == "canonical":
+                collection_name, extra_match = (
+                    CANONICAL_PATIENTS_COLLECTION_NAME, CANONICAL_PATIENT_MATCH)
         window = self._COMPARISON_WINDOW[time_range]
         now = datetime.utcnow()
         current_start = now - window

@@ -67,6 +67,14 @@ class FakeCollection:
     async def count_documents(self, filter_):
         return sum(1 for doc in self.docs.values() if _match(doc, filter_))
 
+    async def find_one(self, query=None, session=None):
+        """单点读取打桩（本套件用于 patient_domain_state 域开关读取；
+        无状态文档 -> legacy，与 patients/repository.domain_mode 同语义）。"""
+        for doc in self.docs.values():
+            if _match(doc, query or {}):
+                return dict(doc)
+        return None
+
     def find(self, _filter, projection=None):
         self._cursor = iter(list(self.docs.values()))
         return self
@@ -271,6 +279,66 @@ class ReportSchedulerOrphanReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0]["count"], 1)
         self.assertEqual(result[0]["avgDuration"], 15.0)
         self.assertEqual(result[0]["avgScore"], 88.0)
+
+
+class ReportSchedulerPatientDomainTests(unittest.IsolatedAsyncioTestCase):
+    """T66：report_scheduler._get_patient_stats 患者聚合源按域分派。
+
+    该执行链当前无调度入口（T53 死代码处置），但作为登记的潜在复用件
+    一并随患者域波次换源：legacy（users + role）逐字等价；canonical
+    （clinical_patients + status=="active"，含无账号患者）；unknown 不猜
+    测域，fail-safe 返回空序列。
+    """
+
+    def _service(self, db):
+        service = ReportSchedulerService()
+        service.db = db
+        return service
+
+    def _seed_state(self, db, mode):
+        from app.patients.repository import SCHEMA_VERSION, STATE_ID
+        db.patient_domain_state.insert(
+            {"_id": STATE_ID, "mode": mode, "schema_version": SCHEMA_VERSION})
+
+    async def test_no_state_reads_users_like_before(self):
+        """无状态文档：legacy 口径不变（users + role=="patient"）。"""
+        db = FakeDatabase()
+        db.users.insert({"_id": "p1", "role": "patient", "created_at": datetime.utcnow()})
+        db.users.insert({"_id": "d1", "role": "doctor", "created_at": datetime.utcnow()})
+
+        rows = await self._service(db)._get_patient_stats(30)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], 1)
+
+    async def test_canonical_reads_clinical_patients_including_accountless(self):
+        """canonical：clinical_patients + status=="active"，无账号患者计入，
+        users 里的患者账号同文档不计入。"""
+        db = FakeDatabase()
+        self._seed_state(db, "canonical")
+        now = datetime.utcnow()
+        db.clinical_patients.insert({"_id": "cp1", "patient_id": "cp1", "status": "active",
+                                     "created_at": now})
+        db.clinical_patients.insert({"_id": "cp2", "patient_id": "cp2", "status": "active",
+                                     "created_at": now - timedelta(days=40)})
+        db.clinical_patients.insert({"_id": "cp3", "patient_id": "cp3", "status": "inactive",
+                                     "created_at": now})
+        db.users.insert({"_id": "u1", "role": "patient", "created_at": now})
+
+        rows = await self._service(db)._get_patient_stats(30)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], 1)  # 30 天窗口内仅 cp1
+
+    async def test_unknown_domain_returns_empty_not_guess(self):
+        """unknown：域状态读取失败不猜测域，fail-safe 返回 []。"""
+        db = FakeDatabase()
+        db.users.insert({"_id": "p1", "role": "patient", "created_at": datetime.utcnow()})
+        # Simulate 域开关读取失败：find_one 未实现/抛错均降级 unknown
+        async def broken_find_one(query=None, session=None):
+            raise RuntimeError("state read down")
+        db.patient_domain_state.find_one = broken_find_one
+
+        rows = await self._service(db)._get_patient_stats(30)
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":
