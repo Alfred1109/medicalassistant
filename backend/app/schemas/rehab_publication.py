@@ -5,8 +5,8 @@ from typing import Literal
 from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 from app.schemas.rehab_plan_structure import (
-    PrescriptionSchedule, DietInterventionFields, MedicationInterventionFields,
-    PsychologyInterventionFields,
+    PrescriptionSchedule, PrescriptionCourse, DietInterventionFields,
+    MedicationInterventionFields, PsychologyInterventionFields,
 )
 
 
@@ -43,6 +43,9 @@ class PublicationItem(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=5000)
     schedule: PrescriptionSchedule | None = None
+    course: PrescriptionCourse | None = None
+    # T72 增量字段：执行要求（每行一条的医护执行口径，只随处方下发）
+    execution_requirements: list[str] | None = Field(default=None, max_length=50, min_length=1)
     contraindications: list[str] | None = Field(default=None, max_length=100)
     applicability_conditions: list[str] | None = Field(default=None, max_length=100)
     patient_instructions: str | None = Field(default=None, max_length=5000)
@@ -62,6 +65,15 @@ class PublicationItem(BaseModel):
         if parsed.scheme in {"http", "https"} and parsed.netloc:
             return value
         raise ValueError("guidance video must be an uploaded file or an http(s) address")
+
+    @field_validator("execution_requirements")
+    @classmethod
+    def non_empty_requirements(cls, value):
+        if value is None:
+            return None
+        if any(not entry.strip() or len(entry) > 500 for entry in value):
+            raise ValueError("execution requirements must be non-empty lines of at most 500 characters")
+        return value
 
     @model_validator(mode="after")
     def matching_fields_and_positive_schedule(self):
@@ -102,6 +114,10 @@ class PublishDraft(OperationRequest):
     expected_draft_revision: int = Field(ge=0, strict=True)
     expected_publication_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{24}$")
     confirmed: StrictBool
+    # T72 签署声明确认：可选增量字段；前端签署对话框勾选后必须显式为 true，
+    # 传 false 直接拒绝（历史调用方不传仍兼容——发布本身自带的 confirmed
+    # 确认是签署行为的最低要求）。
+    declaration_acknowledged: StrictBool | None = None
     confirmation_note: str = Field(min_length=1, max_length=2000)
 
     @field_validator("confirmed")
@@ -109,6 +125,13 @@ class PublishDraft(OperationRequest):
     def explicit_confirmation(cls, value):
         if value is not True:
             raise ValueError("the clinician must explicitly confirm the complete publication")
+        return value
+
+    @field_validator("declaration_acknowledged")
+    @classmethod
+    def signed_declaration(cls, value):
+        if value is False:
+            raise ValueError("the signature declaration must be acknowledged when supplied")
         return value
 
 

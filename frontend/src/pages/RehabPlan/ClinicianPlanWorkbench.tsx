@@ -6,9 +6,9 @@ import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import httpClient from '../../services/httpClient';
 import type { Patient } from '../../types/patient.types';
-import { rehabClinicalWorkbench as api, type ClinicalPlan, type ClinicalFeedback, type DraftItem,
-  type DraftState } from '../../services/rehabClinicalWorkbench';
-import { contentForm, contentPayload, emptyContent, interventionLabels, operationId, validateItems,
+import { rehabClinicalWorkbench as api, type ClinicalPlan, type ClinicalFeedback, type ContraindicationReport,
+  type DraftItem, type DraftState, type PublicationSignature, type SignatureDeclaration } from '../../services/rehabClinicalWorkbench';
+import { contentForm, contentPayload, emptyContent, findingLines, interventionLabels, operationId, validateItems,
   workbenchError, type FormContent } from '../../utils/rehabClinicalWorkbench';
 import { FeedbackAttachments } from './PatientPlans';
 
@@ -87,6 +87,17 @@ function InterventionEditor({ item, index, disabled, change, remove, library }: 
             if (key === 'reps') delete schedule.repetitions;
             change({ ...item, schedule }); }} />)}
       </Stack>}
+      <Typography variant="body2">疗程（选填，发布后随处方展示给患者）</Typography>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+        {(['duration_days', 'sessions_total'] as const).map((key, position) => <TextField key={key}
+          label={['疗程天数（选填）', '疗程总次数（选填）'][position]} type="number" value={item.course?.[key] ?? ''}
+          disabled={disabled} inputProps={{ min: 0, step: 1 }}
+          onChange={event => change({ ...item, course: { ...item.course, [key]: event.target.value === '' ? null : Number(event.target.value) } })} />)}
+      </Stack>
+      <TextField label="疗程说明（选填）" value={item.course?.note || ''} disabled={disabled}
+        inputProps={{ maxLength: 2000 }} onChange={event => change({ ...item, course: { ...item.course, note: event.target.value } })} />
+      <TextField label="执行要求（选填，每行一条）" multiline minRows={2} value={lines(item.execution_requirements)}
+        disabled={disabled} onChange={event => change({ ...item, execution_requirements: parseLines(event.target.value) })} />
       <TextField label="适用条件（选填，每行一条）" multiline minRows={2} value={lines(item.applicability_conditions)}
         disabled={disabled} onChange={event => change({ ...item, applicability_conditions: parseLines(event.target.value) })} />
       <TextField label="禁忌与注意事项（选填，每行一条）" multiline minRows={2} value={lines(item.contraindications)}
@@ -124,8 +135,31 @@ function InterventionEditor({ item, index, disabled, change, remove, library }: 
   </Paper>;
 }
 
-function FeedbackList({ planId, publication }: { planId: string; publication: DraftState['published'] }) {
-  const [rows, setRows] = useState<ClinicalFeedback[]>([]);
+// T72 禁忌规则核对结果（warn 提示、block 阻断；规则口径待临床确认）
+function ContraindicationNotice({ report }: { report: ContraindicationReport | null | undefined }) {
+  const lines = findingLines(report);
+  if (!lines.length) return null;
+  const blocked = (report?.blocks || []).length > 0;
+  return <Alert severity={blocked ? 'error' : 'warning'}>
+    <Typography variant="body2">{blocked
+      ? '禁忌规则核对存在阻断项，发布将被系统拒绝；请调整处方后重试。'
+      : '禁忌规则核对产生以下提示，请核实后再发布。'}（规则口径待临床确认）</Typography>
+    {lines.map(line => <Typography key={line} variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{line}</Typography>)}
+  </Alert>;
+}
+
+// T72 发布签署记录（医护侧展示；患者视图不受影响）
+function SignatureRecord({ signature }: { signature: PublicationSignature }) {
+  return <Paper variant="outlined" sx={{ p: 2 }}>
+    <Typography variant="subtitle2">发布签署记录</Typography>
+    <Typography variant="body2">签署人：{signature.signed_by}{signature.signed_by_role ? `（${signature.signed_by_role}）` : ''} · 签署时间：{dateText(signature.signed_at)}</Typography>
+    {signature.declaration && <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+      签署声明{signature.declaration_status ? `（${signature.declaration_status}）` : ''}：{signature.declaration}</Typography>}
+    <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>内容快照哈希：{signature.snapshot_hash}</Typography>
+  </Paper>;
+}
+
+function FeedbackList({ planId, publication }: { planId: string; publication: DraftState['published'] }) {  const [rows, setRows] = useState<ClinicalFeedback[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [reload, setReload] = useState(0);
@@ -194,6 +228,8 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
   const [reload, setReload] = useState(0);
   const [needsReload, setNeedsReload] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [declaration, setDeclaration] = useState<SignatureDeclaration | null>(null);
+  const [declarationAcknowledged, setDeclarationAcknowledged] = useState(false);
   const [note, setNote] = useState('');
   const [reason, setReason] = useState('');
   const [withdrawAction, setWithdrawAction] = useState<'withdraw' | 'cancel' | 'archive'>('withdraw');
@@ -205,12 +241,22 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
     if (!attempt.current || attempt.current.signature !== signature) attempt.current = { signature, id: operationId() };
     return attempt.current.id;
   };
+  useEffect(() => {
+    const controller = new AbortController();
+    api.signatureDeclaration(controller.signal).then(({ data }) => {
+      if (!controller.signal.aborted && data && typeof data.declaration === 'string' && data.declaration.trim()) {
+        setDeclaration(data);
+      }
+    }).catch(() => { if (!controller.signal.aborted) setDeclaration(null); });
+    return () => controller.abort();
+  }, []);
   const apply = (data: DraftState) => {
     if (data.plan_id !== plan._id || !Number.isSafeInteger(data.publication_revision) ||
         (data.draft && (!Array.isArray(data.draft.items) || !Number.isSafeInteger(data.draft.revision)))) {
       throw new Error('方案读取结果不匹配，请重新加载。');
     }
-    setSnapshot(data); setNeedsReload(false); setDirty(false); setConfirmed(false); setNote('');
+    setSnapshot(data); setNeedsReload(false); setDirty(false); setConfirmed(false);
+    setDeclarationAcknowledged(false); setNote('');
     if (data.draft) { setForm(contentForm(data.draft.content)); setItems(data.draft.items); setEditing(true); }
     else if (!data.has_publication_history) { setForm(contentForm(plan)); setItems([]); setEditing(true); }
     else { setForm(emptyContent()); setItems([]); setEditing(false); }
@@ -244,9 +290,12 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
     apply(response.data); attempt.current = null; setMessage('草稿已保存，患者尚看不到这次修改。'); onChanged();
   });
   const publish = () => mutation(async () => {
-    if (!snapshot?.draft || dirty || !confirmed || !note.trim()) throw new Error('请先保存草稿，核对完整内容并勾选确认，填写确认说明。');
+    if (!snapshot?.draft || dirty || !confirmed || !declarationAcknowledged || !note.trim()) {
+      throw new Error('请先保存草稿，核对完整内容，阅读签署声明并勾选确认，填写确认说明。');
+    }
     const body = { draft_id: snapshot.draft.id, expected_draft_revision: snapshot.draft.revision,
-      expected_publication_id: snapshot.published_version_id, confirmed: true as const, confirmation_note: note.trim() };
+      expected_publication_id: snapshot.published_version_id, confirmed: true as const,
+      declaration_acknowledged: true as const, confirmation_note: note.trim() };
     await api.publish(plan._id, { ...body, request_id: requestId('publish', body) });
     if (!alive.current) return;
     attempt.current = null; setMessage('发布操作已处理，正在刷新方案状态。'); setReload(value => value + 1); onChanged();
@@ -267,6 +316,8 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
       {snapshot && <>
         <Stack direction="row" spacing={1} flexWrap="wrap"><Chip label={snapshot.published_version_id ? '已发布 · 患者可见' : '未发布 · 患者不可见'} color={snapshot.published_version_id ? 'success' : 'default'} />
           {snapshot.draft && <Chip label={`草稿第 ${snapshot.draft.version_no} 版`} />}{dirty && <Chip label="有未保存修改" color="warning" />}</Stack>
+        {snapshot.draft && <ContraindicationNotice report={snapshot.draft.contraindication_findings} />}
+        {snapshot.signature && <SignatureRecord signature={snapshot.signature} />}
         {!editing && <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
           {snapshot.published && <Button disabled={pending} onClick={() => { setForm(contentForm(snapshot.published!.content)); setItems(snapshot.published!.items); setEditing(true); changed(); }}>以当前发布内容起草</Button>}
           <Button disabled={pending} onClick={() => { setForm(emptyContent()); setItems([]); setEditing(true); changed(); }}>建立空白草稿</Button>
@@ -282,11 +333,18 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
             change={next => { setItems(value => value.map((entry, position) => position === index ? next : entry)); changed(); }}
             remove={() => { setItems(value => value.filter((_, position) => position !== index)); changed(); }} />)}
           <Box><Button variant="contained" disabled={pending || needsReload} onClick={save}>保存医护草稿</Button></Box>
-          <Divider /><Typography variant="h6">确认发布给患者</Typography>
+          <Divider /><Typography variant="h6">确认发布给患者（医护签署）</Typography>
           <FormControlLabel control={<Checkbox checked={confirmed} disabled={pending || dirty || !snapshot.draft || needsReload}
             onChange={event => setConfirmed(event.target.checked)} />} label="我已核对以上完整方案和干预内容，确认发布给患者" />
           <TextField label="确认说明" multiline minRows={2} value={note} disabled={pending || needsReload} inputProps={{ maxLength: 2000 }} onChange={event => setNote(event.target.value)} />
-          <Box><Button variant="contained" disabled={pending || needsReload || dirty || !snapshot.draft || !items.length || !confirmed || !note.trim()} onClick={publish}>确认并发布方案</Button></Box>
+          {declaration?.declaration && <Paper variant="outlined" sx={{ p: 2 }}>
+            <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+              签署声明{declaration.status ? `（${declaration.status}）` : ''}：{declaration.declaration}</Typography>
+          </Paper>}
+          <FormControlLabel control={<Checkbox checked={declarationAcknowledged} disabled={pending || dirty || !snapshot.draft || needsReload}
+            onChange={event => setDeclarationAcknowledged(event.target.checked)} />}
+            label={declaration?.declaration ? '我已阅读并同意以上签署声明' : '我确认本次发布并同意随版本保存签署声明'} />
+          <Box><Button variant="contained" disabled={pending || needsReload || dirty || !snapshot.draft || !items.length || !confirmed || !declarationAcknowledged || !note.trim()} onClick={publish}>确认并签署发布方案</Button></Box>
         </>}
         {snapshot.published_version_id && <>
           <Divider /><Typography variant="h6">停止患者查看</Typography>

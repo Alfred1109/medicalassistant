@@ -1,4 +1,4 @@
-import type { ClinicalPlan, DraftContent, DraftItem } from '../services/rehabClinicalWorkbench';
+import type { ClinicalPlan, ContraindicationFinding, ContraindicationReport, DraftContent, DraftItem } from '../services/rehabClinicalWorkbench';
 import { patientDomainErrorCopy } from '../services/patientErrors';
 
 export const interventionLabels = { diet: '饮食', exercise: '运动', medication: '用药', psychology: '心理' } as const;
@@ -33,9 +33,24 @@ export function contentPayload(value: FormContent): DraftContent {
 }
 export function validateItems(items: DraftItem[]): DraftItem[] {
   if (items.some(item => !item.name.trim())) throw new Error('请为每条干预填写名称。');
-  return items.map(item => ({ ...item, name: item.name.trim(), description: item.description?.trim() || null,
-    patient_instructions: item.patient_instructions?.trim() || null,
-    guidance_video_url: item.guidance_video_url?.trim() || null }));
+  return items.map(item => {
+    const requirements = item.execution_requirements?.map(line => line.trim()).filter(Boolean);
+    const requirementLines = requirements && requirements.length ? requirements : null;
+    const course = item.course && (item.course.duration_days || item.course.sessions_total || item.course.note?.trim())
+      ? { ...item.course, note: item.course.note?.trim() || null } : null;
+    return { ...item, name: item.name.trim(), description: item.description?.trim() || null,
+      patient_instructions: item.patient_instructions?.trim() || null,
+      guidance_video_url: item.guidance_video_url?.trim() || null,
+      execution_requirements: requirementLines, course };
+  });
+}
+
+// T72 禁忌命中提示文案（warn 与 block 都展示；block 另行阻断发布）
+export function findingLines(report: ContraindicationReport | null | undefined): string[] {
+  const findings = [...(report?.blocks || []), ...(report?.warnings || [])];
+  return findings.filter(finding => typeof finding?.message === 'string' && finding.message.trim())
+    .map(finding => `${finding.level === 'block' ? '【阻断】' : '【提示】'}${finding.message}` +
+      (finding.status ? `（${finding.status}）` : ''));
 }
 export function operationId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -49,6 +64,11 @@ export function workbenchError(error: unknown, fallback: string): string {
   if (response?.status === 409) return '方案已更新或本次操作发生冲突。请重新加载核对后再操作。';
   if (response?.status === 403) return '当前已无权管理该患者的方案。';
   if (response?.status === 404) return '方案不存在或当前不可访问。';
-  if (typeof response?.data?.detail === 'string') return response.data.detail;
+  const detail = response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  // 结构化错误（如 422 REHAB_CONTRAINDICATION_BLOCK：detail={error,message,details}）
+  if (detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string') {
+    return (detail as { message: string }).message;
+  }
   return fallback;
 }

@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class InterventionType(str, Enum):
@@ -80,6 +80,29 @@ class PrescriptionSchedule(BaseModel):
     duration_minutes: Optional[int] = None
     frequency: Optional[str] = None
     time_of_day: Optional[str] = None
+
+
+class PrescriptionCourse(BaseModel):
+    """处方项疗程结构（T72 增量字段位：疗程天数 / 总次数 / 说明）。
+
+    具体疗程口径待临床确认；字段全部可选，缺省不出现在快照里，
+    兼容既有 items_snapshot 历史（增量字段，不破坏已发布内容）。
+    """
+    model_config = ConfigDict(extra="forbid")
+    duration_days: Optional[int] = None
+    sessions_total: Optional[int] = None
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def positive_quantities(self):
+        for name in ("duration_days", "sessions_total"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError("course quantities must be positive")
+        if (self.duration_days is None and self.sessions_total is None
+                and not (self.note or "").strip()):
+            raise ValueError("an empty course carries no information")
+        return self
 
 
 # ── 处方项（稳定 item_id）────────────────────────────────────────────────

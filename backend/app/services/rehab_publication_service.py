@@ -25,13 +25,17 @@ from app.db.transactions import run_transaction
 from app.patients.legacy import LegacyPatientRepository
 from app.patients.repository import ClinicalPatientRepository, PatientDomainError
 from app.schemas.rehab_publication import PublicationContent, PublicationItem
+from app.services.rehab_clinical_config import load_contraindication_rules, load_signature_declaration
+from app.services.rehab_contraindication_service import (
+    build_patient_context, evaluate_contraindications, findings_summary, split_findings,
+)
 
 WORKFLOW = "patient_publication"
 OPERATIONS = "rehab_publication_operations"
 
 
-def error(code, message, status=409):
-    return AppBaseException(message, status_code=status, error_code=code)
+def error(code, message, status=409, details=None):
+    return AppBaseException(message, status_code=status, error_code=code, details=details)
 
 
 async def run_rehab_transaction(db, callback):
@@ -281,12 +285,17 @@ class RehabPublicationService:
                 raise error("REHAB_DRAFT_INVALID", "康复草稿引用异常", 503)
             entries = await self.items.find({"version_id": identifier, "plan_id": str(plan["_id"])} , session=session).sort("position", 1).to_list(length=201)
             draft = {"id": identifier, "revision": version["draft_revision"], "version_no": version["version_no"],
-                     "content": public_content(version["snapshot"]), "items": [public_item(item) for item in entries]}
+                     "content": public_content(version["snapshot"]), "items": [public_item(item) for item in entries],
+                     "contraindication_findings": version.get("contraindication_findings")}
         published = None
+        signature = None
         if plan.get("published_version_id") and plan.get("status") not in {"cancelled", "canceled", "archived"}:
-            published = self._patient_projection(plan, await self._published(plan, session))
+            version = await self._published(plan, session)
+            published = self._patient_projection(plan, version)
+            signature = self._signature_projection(version)
         return {"plan_id": str(plan["_id"]), "draft": draft, "published": published,
                 "published_version_id": plan.get("published_version_id"),
+                "signature": signature,
                 "publication_revision": plan.get("publication_revision", 0),
                 "has_publication_history": plan.get("has_publication_history") is True}
 
@@ -299,13 +308,19 @@ class RehabPublicationService:
             return await self._draft_response(plan, session)
         return await run_rehab_transaction(self.db, read)
 
+    async def _contraindication_findings(self, patient, items):
+        """对处方项执行禁忌规则引擎（规则口径可被 rehab_clinical_rules 覆盖）。"""
+        context = build_patient_context(patient)
+        rules = await load_contraindication_rules(self.db)
+        return evaluate_contraindications(context, items, rules)
+
     async def save_draft(self, plan_id, actor, payload):
         self._clinical_writer(actor)
         await self.ensure_storage()
         key, fingerprint = self._operation(plan_id, actor, "save_draft", payload)
         async def save(session):
             plan = await self._plan(plan_id, session)
-            await self._authorize(plan, actor, session, write=True, fence=True)
+            patient = await self._authorize(plan, actor, session, write=True, fence=True)
             if await self._prior(key, fingerprint, session):
                 return await self._draft_response(plan, session)
             identifier = plan.get("active_draft_version_id")
@@ -328,10 +343,17 @@ class RehabPublicationService:
             if any(item.item_id and item.item_id not in known for item in payload.items):
                 raise error("REHAB_ITEM_MISMATCH", "处方项不属于当前草稿", 422)
             stamp = now_utc()
+            # 禁忌规则预检（T72）：草稿阶段只做提示预览，block 不阻断草稿保存，
+            # 阻断在发布事务内执行（见 publish）。findings 随草稿版本落库，
+            # 医护每次读取草稿都能看到当前口径下的命中结果。
+            findings = split_findings(await self._contraindication_findings(
+                patient, [item.model_dump(exclude_none=True) for item in payload.items]))
+            findings["checked_at"] = stamp
             if existing:
                 revision = existing["draft_revision"] + 1
                 await self.versions.update_one({"_id": existing["_id"]}, {"$set": {
-                    "snapshot": payload.content.model_dump(), "draft_revision": revision, "updated_at": stamp}}, session=session)
+                    "snapshot": payload.content.model_dump(), "draft_revision": revision,
+                    "contraindication_findings": findings, "updated_at": stamp}}, session=session)
             else:
                 last = await self.versions.find_one({"plan_id": plan_id}, sort=[("version_no", -1)], session=session)
                 number = last.get("version_no", 0) + 1 if last else 1
@@ -340,6 +362,7 @@ class RehabPublicationService:
                 await self.versions.insert_one({"_id": ObjectId(identifier), "plan_id": plan_id,
                     "patient_id": str(plan["patient_id"]), "workflow": WORKFLOW, "status": "draft",
                     "version_no": number, "draft_revision": revision, "snapshot": payload.content.model_dump(),
+                    "contraindication_findings": findings,
                     "created_by": str(actor.id), "created_at": stamp, "updated_at": stamp}, session=session)
             await self.items.delete_many({"plan_id": plan_id, "version_id": identifier}, session=session)
             docs = []
@@ -366,6 +389,17 @@ class RehabPublicationService:
                 "published_at": utc_iso(version["published_at"]),
                 "content": public_content(version["snapshot"]),
                 "items": [public_item(item) for item in version["items_snapshot"]]}
+
+    def _signature_projection(self, version):
+        """医护侧签署记录投影（患者投影不含签署内容，患者读取语义不变）。"""
+        signature = version.get("signature")
+        if not isinstance(signature, dict):
+            return None
+        projected = {key: signature[key] for key in ("signed_by", "signed_by_role", "declaration",
+            "declaration_status", "confirmation_note", "snapshot_hash") if key in signature}
+        if signature.get("signed_at") is not None:
+            projected["signed_at"] = utc_iso(signature["signed_at"])
+        return projected or None
 
     async def _published(self, plan, session):
         if plan.get("status") in {"cancelled", "canceled", "archived"}:
@@ -409,13 +443,28 @@ class RehabPublicationService:
             return {"items": values, "total": await self.plans.count_documents(query, session=session), "skip": skip, "limit": limit}
         return await run_rehab_transaction(self.db, read)
 
+    def _signature(self, actor, stamp, snapshot, items, payload, declaration):
+        """签署记录：签署人、时间、签署声明、所签版本的内容快照哈希。
+
+        快照哈希覆盖版本 snapshot 与 items_snapshot，绑定「签署的内容版本」；
+        声明文案来自可配置口径（rehab_clinical_config），第一版签署行为由
+        publish 请求自带的 confirmed/confirmation_note（与可选的
+        declaration_acknowledged）承载。
+        """
+        digest = hashlib.sha256(json_util.dumps({"snapshot": snapshot, "items": items},
+            sort_keys=True).encode()).hexdigest()
+        return {"signed_by": str(actor.id), "signed_by_role": actor.role, "signed_at": stamp,
+                "declaration": declaration["declaration"], "declaration_status": declaration["status"],
+                "declaration_acknowledged": payload.declaration_acknowledged is True,
+                "confirmation_note": payload.confirmation_note, "snapshot_hash": digest}
+
     async def publish(self, plan_id, actor, payload):
         self._clinical_writer(actor)
         await self.ensure_storage()
         key, fingerprint = self._operation(plan_id, actor, "publish", payload)
         async def publish(session):
             plan = await self._plan(plan_id, session)
-            await self._authorize(plan, actor, session, write=True, fence=True)
+            patient = await self._authorize(plan, actor, session, write=True, fence=True)
             if plan.get("status") in {"cancelled", "canceled", "archived"}:
                 raise error("REHAB_PUBLICATION_STOPPED", "已取消或归档的方案不能发布", 409)
             prior = await self._prior(key, fingerprint, session)
@@ -432,21 +481,33 @@ class RehabPublicationService:
             if not entries or len(entries) > 200:
                 raise error("REHAB_ITEMS_REQUIRED", "发布前请明确填写至少一项干预内容", 422)
             snapshot_items = [public_item(item) for item in entries]
+            # 禁忌规则阻断（T72）：发布事务内按当前生效规则口径对快照项复检；
+            # block 命中即阻断发布（第一版不做覆盖，覆盖流程建议见任务报告）。
+            findings = split_findings(await self._contraindication_findings(patient, snapshot_items))
+            if findings["blocks"]:
+                raise error("REHAB_CONTRAINDICATION_BLOCK", "存在禁忌阻断项，发布被拒绝：" +
+                    findings_summary(findings["blocks"]), 422,
+                    details={"findings": findings["blocks"], "warnings": findings["warnings"]})
             stamp = now_utc()
             revision = plan.get("publication_revision", 0)
             if type(revision) is not int or revision < 0:
                 raise error("REHAB_PUBLICATION_INVALID", "发布修订号异常", 503)
             revision += 1
+            declaration = await load_signature_declaration(self.db)
+            signature = self._signature(actor, stamp, version["snapshot"], snapshot_items, payload, declaration)
+            findings["checked_at"] = stamp
             await self.versions.update_one({"_id": version["_id"]}, {"$set": {
                 "status": "published", "items_snapshot": snapshot_items,
                 "published_by": str(actor.id), "published_at": stamp, "publication_revision": revision,
-                "confirmation_note": payload.confirmation_note, "updated_at": stamp}}, session=session)
+                "confirmation_note": payload.confirmation_note, "signature": signature,
+                "contraindication_findings": findings, "updated_at": stamp}}, session=session)
             await self._touch_plan(plan, session, changes={"published_version_id": payload.draft_id,
                 "active_draft_version_id": None, "has_publication_history": True,
                 "publication_revision": revision, "published_at": stamp})
             version.update(status="published", items_snapshot=snapshot_items, published_at=stamp, publication_revision=revision)
             await self._record_operation(key, fingerprint, "publish", plan_id, actor,
-                                         {"version_id": payload.draft_id}, session)
+                                         {"version_id": payload.draft_id, "signature": signature,
+                                          "contraindication_findings": findings}, session)
             return self._patient_projection(plan, version)
         return await self._run(publish)
 
@@ -477,3 +538,16 @@ class RehabPublicationService:
             await self._record_operation(key, fingerprint, "withdraw", plan_id, actor, result, session)
             return result
         return await self._run(withdraw)
+
+    async def signature_declaration(self, actor):
+        """发布签署声明文案（医护只读；口径可配置，默认文案待临床确认）。"""
+        self._clinical_writer(actor)
+        return await load_signature_declaration(self.db)
+
+    async def contraindication_rules(self, actor):
+        """生效中的禁忌规则元数据（医护只读，不含患者数据）。"""
+        self._clinical_writer(actor)
+        rules = await load_contraindication_rules(self.db)
+        return [{"rule_id": rule.get("rule_id"), "level": rule.get("level"), "scope": rule.get("scope"),
+                 "description": rule.get("description"), "status": rule.get("status"),
+                 "source": rule.get("source")} for rule in rules]

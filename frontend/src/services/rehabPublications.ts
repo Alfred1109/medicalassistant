@@ -2,12 +2,21 @@ import api from './httpClient';
 
 export type RehabInterventionType = 'diet' | 'exercise' | 'medication' | 'psychology';
 
+// T72 结构化处方增量字段（疗程 / 执行要求）；历史快照可能没有这两个字段
+export interface PublishedRehabCourse {
+  duration_days?: number | null;
+  sessions_total?: number | null;
+  note?: string | null;
+}
+
 export interface PublishedRehabItem {
   item_id: string;
   intervention_type: RehabInterventionType;
   name: string;
   description?: string | null;
   schedule?: Record<string, unknown> | null;
+  course?: PublishedRehabCourse | null;
+  execution_requirements?: string[] | null;
   patient_instructions?: string | null;
   guidance_video_url?: string | null;
   contraindications?: string[] | null;

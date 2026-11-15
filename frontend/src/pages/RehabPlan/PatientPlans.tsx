@@ -15,7 +15,7 @@ const labels: Record<string, string> = {
   drug_ref: '药品', dosage: '剂量', route: '给药方式', monitoring: '监测要求',
   meal_structure_ref: '膳食安排', energy_target: '能量目标', nutrient_targets: '营养目标',
   food_restrictions: '食物限制', modality_ref: '干预形式', session_plan: '会话安排',
-  instrument_refs: '量表',
+  instrument_refs: '量表', duration_days: '疗程天数', sessions_total: '疗程总次数',
 };
 
 function newRequestId(): string {
@@ -179,7 +179,7 @@ function PlanSummary({ plan, onFeedbackSaved, onUnavailable }: { plan: Published
             {item.description && <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{item.description}</Typography>}
             {item.guidance_video_url && /^(https?:\/\/\S+|\/api\/rehabilitation\/exercises\/media\/[a-f\d]{32}\.(mp4|webm))$/i.test(item.guidance_video_url) &&
               <Box><Typography variant="body2">本项指导动作</Typography><video src={item.guidance_video_url} controls style={{ width: '100%', maxHeight: 320 }} /></Box>}
-            {([['安排', item.schedule], ['饮食内容', item.diet_fields], ['用药内容', item.medication_fields], ['心理内容', item.psychology_fields], ['医护提示', item.patient_instructions], ['注意事项', item.contraindications]] as const).map(([label, value]) => displayValue(value) &&
+            {([['安排', item.schedule], ['疗程', item.course], ['执行要求', item.execution_requirements], ['饮食内容', item.diet_fields], ['用药内容', item.medication_fields], ['心理内容', item.psychology_fields], ['医护提示', item.patient_instructions], ['注意事项', item.contraindications]] as const).map(([label, value]) => displayValue(value) &&
               <Typography key={label} variant="body2" sx={{ overflowWrap: 'anywhere' }}>{label}：{displayValue(value)}</Typography>)}
             <FeedbackForm key={`${plan.version_id}:${item.item_id}`} plan={plan} itemId={item.item_id} onSaved={onFeedbackSaved} onUnavailable={onUnavailable} />
           </Paper>)}</Stack>}

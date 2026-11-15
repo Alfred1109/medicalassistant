@@ -51,3 +51,15 @@ async def publish(plan_id: str, payload: PublishDraft,
 async def withdraw(plan_id: str, payload: WithdrawPublication,
                    actor=Depends(get_current_active_user), svc=Depends(service)):
     return await svc.withdraw(plan_id, actor, payload)
+
+
+@router.get("/signature-declaration")
+async def signature_declaration(actor=Depends(get_current_active_user), svc=Depends(service)):
+    """发布签署声明文案（医护只读；默认文案待临床确认，可配置覆盖）。"""
+    return await svc.signature_declaration(actor)
+
+
+@router.get("/contraindication-rules")
+async def contraindication_rules(actor=Depends(get_current_active_user), svc=Depends(service)):
+    """生效中的禁忌规则元数据（医护只读；内置示例规则待临床确认）。"""
+    return {"rules": await svc.contraindication_rules(actor)}
