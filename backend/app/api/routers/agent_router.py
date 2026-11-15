@@ -8,10 +8,30 @@ from app.core.auth import get_current_active_user
 
 router = APIRouter()
 
+# T75 安全缺口收口：动态 Agent 平台（构建/配置/问答，含康复计划 LLM 生成）
+# 是医护工作台能力，此前对所有已登录角色开放。患者角色默认禁止，待 D12
+# （Agent 定位）收敛后再评估是否提供受限的患者侧助手。
+AGENT_ALLOWED_ROLES = {"admin", "doctor", "health_manager"}
+
+
+async def require_agent_role(current_user: Any = Depends(get_current_active_user)) -> Any:
+    """Agent 平台角色守卫：仅医疗角色可用，患者角色一律 403。
+
+    403 语义与临床工作台 ROLE_NOT_ALLOWED 对齐；未认证仍由认证链返回 401。
+    """
+    role = getattr(current_user, "role", None)
+    if role not in AGENT_ALLOWED_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "ROLE_NOT_ALLOWED",
+                    "message": "智能助手仅对医疗角色（医生/健康管理师/管理员）开放"},
+        )
+    return current_user
+
 @router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
 async def create_agent(
     agent_data: AgentCreate,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(require_agent_role),
     agent_service: AgentService = Depends(get_agent_service)
 ):
     """Create a new dynamic agent with specified capabilities"""
@@ -20,7 +40,7 @@ async def create_agent(
 @router.get("/{agent_id}", response_model=AgentResponse)
 async def get_agent(
     agent_id: str,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(require_agent_role),
     agent_service: AgentService = Depends(get_agent_service)
 ):
     """Get agent details by ID"""
@@ -33,7 +53,7 @@ async def get_agent(
 async def update_agent(
     agent_id: str,
     agent_data: AgentUpdate,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(require_agent_role),
     agent_service: AgentService = Depends(get_agent_service)
 ):
     """Update an existing agent's configuration"""
@@ -45,7 +65,7 @@ async def update_agent(
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_agent(
     agent_id: str,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(require_agent_role),
     agent_service: AgentService = Depends(get_agent_service)
 ):
     """Delete an agent by ID"""
@@ -57,7 +77,7 @@ async def delete_agent(
 async def query_agent(
     agent_id: str,
     query: Dict[str, Any],
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(require_agent_role),
     agent_service: AgentService = Depends(get_agent_service)
 ):
     """Send a query to the agent and get a response"""
@@ -70,7 +90,7 @@ async def query_agent(
 async def list_agents(
     skip: int = 0,
     limit: int = 100,
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(require_agent_role),
     agent_service: AgentService = Depends(get_agent_service)
 ):
     """List all available agents with pagination"""
@@ -80,7 +100,7 @@ async def list_agents(
 async def add_tool_to_agent(
     agent_id: str,
     tool_data: Dict[str, Any],
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(require_agent_role),
     agent_service: AgentService = Depends(get_agent_service)
 ):
     """Add a new tool/capability to an existing agent"""
@@ -92,7 +112,7 @@ async def add_tool_to_agent(
 @router.post("/generate-parameters", response_model=Dict[str, Any])
 async def generate_agent_parameters(
     config_data: Dict[str, Any],
-    current_user: Any = Depends(get_current_active_user),
+    current_user: Any = Depends(require_agent_role),
     agent_service: AgentService = Depends(get_agent_service)
 ):
     """Generate agent parameters configuration using LLM"""

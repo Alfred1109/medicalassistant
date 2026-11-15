@@ -3,6 +3,7 @@ from fastapi.responses import PlainTextResponse, Response as BinaryResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.auth import get_current_active_user
+from app.core.patient_access import ensure_self_patient_access
 from app.db.mongodb import get_database
 from . import workspace
 
@@ -99,6 +100,43 @@ async def patient_indicators(patient_id: str, response: Response, actor=Depends(
                              db=Depends(get_database)):
     _file(response)
     return await workspace.evaluate_indicators(db, actor, patient_id)
+
+
+@router.get("/patients/{patient_id}/alerts")
+async def patient_alerts(patient_id: str, response: Response, skip: int = 0, limit: int = 100,
+                         actor=Depends(get_current_active_user), db=Depends(get_database)):
+    """患者本人健康预警只读列表（T75 患者端功能面补齐）。
+
+    授权形态：患者角色经共享 self 解析助手（ensure_self_patient_access，
+    canonical 下按 verified 账号链接解析临床患者实体 ID）；医护角色沿用
+    工作台同一 _patient_for 归属/项目校验；其余角色一律拒绝。只读投影，
+    不暴露阈值配置内部字段，也不提供任何写路径。
+    """
+    _file(response)
+    if actor.role == "patient":
+        identifier = await ensure_self_patient_access(db, actor, patient_id)
+    else:
+        await workspace._patient_for(db, actor, patient_id)
+        identifier = patient_id
+    alerts = []
+    cursor = db.health_data_alerts.find({"patient_id": identifier}).sort("recorded_at", -1)
+    async for row in cursor.skip(max(skip, 0)).limit(min(max(limit, 1), 500)):
+        alerts.append({
+            "id": str(row.get("_id")),
+            "patient_id": row.get("patient_id"),
+            "data_type": row.get("data_type"),
+            "value": row.get("value"),
+            "vital_type": row.get("vital_type"),
+            "test_name": row.get("test_name"),
+            "unit": row.get("unit"),
+            "alert_level": row.get("alert_level") or "warning",
+            "status": row.get("status") or "active",
+            "recorded_at": row.get("recorded_at"),
+            "created_at": row.get("created_at"),
+            "resolved_at": row.get("resolved_at"),
+            "resolution_notes": row.get("resolution_notes"),
+        })
+    return {"alerts": alerts}
 
 
 @router.get("/patients/{patient_id}/indicators.csv")
