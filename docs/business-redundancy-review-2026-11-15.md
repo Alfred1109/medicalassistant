@@ -121,9 +121,11 @@
 
 ### 4.1 医生与健管师共用页面组件，目录名误导（合并命名）
 
-医生与健康管理师**用的是同一套页面组件**，只有 URL 前缀不同；`pages/HealthManager/` 这个目录名让人以为健管师有独立界面。
+[frontend/src/routes.tsx:311-355](frontend/src/routes.tsx) 里医生与健康管理师两条路由**用的是同一批页面组件**（患者管理、健康档案、随访、临床工作台、ICF、设备、数据监测、沟通、统计、知情同意），只有 URL 前缀与角色守卫不同。
 
-**判定：合并** —— 目录更名或复用现有目录，消除误导。命名改动会波及 import，按低风险排期。
+`pages/HealthManager/` 目录里则是混装：`HealthManagerDashboard` / `HealthDataTimelinePage` / `HealthThresholdPage` 是健管师专属页（合理），而 `HealthRecords.tsx` 是零引用的重复件（见 4.2）。目录名让人以为健管师有整套独立界面，实际只多两三个专属页。
+
+**判定：合并** —— 删掉重复件后，把剩余专属页集中到能说清含义的位置（保留 `pages/HealthManager/` 亦可，重点是目录里不再有共享组件的副本）。命名改动会波及 import，按低风险排期。
 
 → Wave 2 任务 D
 
