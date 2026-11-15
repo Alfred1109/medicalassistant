@@ -11,7 +11,6 @@ AttributeError → 500。本测试锁定三层契约：
 3. doctor / health_manager 认证后可正常取数（打桩 db，不触碰真实数据库）。
 """
 
-import importlib
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,10 +22,6 @@ from jose import jwt
 from app.core.config import settings
 from app.db.mongodb import get_database
 from app.main import app
-# 注意：app.api.routers 包属性 device_repair_router 被 __init__ 中的
-# `router as device_repair_router` 遮蔽，必须用 importlib 取真实模块
-device_repair_router = importlib.import_module(
-    "app.api.routers.device_repair_router")
 from app.schemas.user import UserResponse
 from app.services.user_service import UserService
 
@@ -75,7 +70,6 @@ class IdCursor:
 class DeviceRepairRouterContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.operator = make_operator()
-        # 路由内以模块属性引用 get_db，直接替换模块属性打桩
         self.db = legacy_domain_state(MagicMock())
         patient = {"_id": "repair-patient", "role": "patient", "practitioners": [OPERATOR_ID],
                    "health_managers": [OPERATOR_ID]}
@@ -83,9 +77,6 @@ class DeviceRepairRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.db.users.find = MagicMock(return_value=IdCursor([patient]))
         self.db.devices.find_one = AsyncMock(return_value={"_id": ObjectId(DEVICE_ID), "patient_id": "repair-patient"})
         self.db.devices.find = MagicMock(return_value=IdCursor([{"_id": ObjectId(DEVICE_ID)}]))
-        self.get_db_patch = patch.object(
-            device_repair_router, "get_db", AsyncMock(return_value=self.db))
-        self.get_db_patch.start()
 
         # 认证链的查库走 UserService 打桩，返回真实 UserResponse
         # （锁定 user 形态契约，而非 dict）
@@ -103,7 +94,6 @@ class DeviceRepairRouterContractTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.aclose()
         self.lookup.stop()
-        self.get_db_patch.stop()
         app.dependency_overrides.clear()
 
     def auth(self):
