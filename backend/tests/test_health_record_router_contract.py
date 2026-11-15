@@ -33,7 +33,6 @@ from app.schemas.health_record import (
     HealthRecordResponse,
 )
 from app.schemas.user import UserResponse
-from app.services.user_service import UserService
 
 PATIENT_ID = str(ObjectId())
 OTHER_PATIENT_ID = str(ObjectId())
@@ -106,9 +105,9 @@ class HealthRecordRouterContractTests(unittest.IsolatedAsyncioTestCase):
             yield legacy_domain_state(MagicMock())
 
         app.dependency_overrides[get_database] = fake_database
-        # get_current_user 内部经 UserService 查库；按既有契约测试模式打桩
+        # 认证用户映射已下沉 core，按当前认证入口打桩。
         self.get_user_mock = AsyncMock(return_value=make_user("doctor", CREATOR_ID))
-        self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
+        self.lookup = patch("app.core.user_record.load_user_response", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),

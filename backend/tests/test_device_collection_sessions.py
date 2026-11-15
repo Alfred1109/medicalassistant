@@ -1,9 +1,8 @@
-"""T74 采集会话生命周期测试：开始/结束/取消、方案执行关联（打通或登记）、
+"""T74 采集会话生命周期测试：开始/结束/取消、方案观测关联（打通或登记）、
 会话摘要与设备在线采集标注。
 
-方案关联探查结论（T74）：rehabilitation_service 真实进度路径为
-rehab_plans.exercises[].progress[]（log_exercise_progress），可关联——
-plan+exercise 核实存在 → linked；否则登记 registered。
+设备会话可以关联方案和运动以便归档观测，但不写康复执行进度；只有患者
+自报代表患者确认的训练执行状态。
 """
 import unittest
 from datetime import datetime, timedelta
@@ -25,7 +24,8 @@ PLAN_OID = "6ab0f1c2a3b4c5d6e7f80901"
 class SessionTestBase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.db = FakeDatabase(["devices", "device_data",
-                                "device_collection_sessions", "rehab_plans"])
+                                "device_collection_sessions", "rehab_plans",
+                                "rehab_plan_versions", "rehab_prescription_items"])
         self.db["devices"].docs.append({
             "_id": ObjectId(DEVICE_OID), "device_id": DEVICE_SN,
             "patient_id": PATIENT_ID, "status": "active",
@@ -43,12 +43,26 @@ class SessionTestBase(unittest.IsolatedAsyncioTestCase):
     def _device(self):
         return self.db["devices"].docs[0]
 
-    def _seed_plan(self, exercise_id="ex1"):
+    VERSION_ID = "6ab0f1c2a3b4c5d6e7f80902"
+    ITEM_ID = "prescription-item-1"
+
+    def _seed_plan(self):
         self.db["rehab_plans"].docs.append({
             "_id": ObjectId(PLAN_OID),
             "patient_id": PATIENT_ID,
-            "exercises": [{"id": exercise_id, "name": "肘关节屈伸",
-                           "progress": []}],
+            "published_version_id": self.VERSION_ID,
+            "status": "active",
+        })
+        self.db["rehab_plan_versions"].docs.append({
+            "_id": ObjectId(self.VERSION_ID), "plan_id": PLAN_OID,
+            "patient_id": PATIENT_ID, "workflow": "patient_publication",
+            "status": "published",
+            "items_snapshot": [{"item_id": self.ITEM_ID, "name": "肘关节屈伸",
+                                "intervention_type": "exercise"}],
+        })
+        self.db["rehab_prescription_items"].docs.append({
+            "plan_id": PLAN_OID, "version_id": self.VERSION_ID,
+            "item_id": self.ITEM_ID, "name": "肘关节屈伸",
         })
 
 
@@ -63,37 +77,48 @@ class StartSessionTests(SessionTestBase):
         self.assertEqual(device_doc.get("active_session_id"), session["_id"])
 
     async def test_start_session_with_verified_plan_is_linked(self):
-        self._seed_plan(exercise_id="ex1")
+        self._seed_plan()
         session = await self.service.start_collection_session(
-            self._device(), PATIENT_ID, plan_id=PLAN_OID, exercise_id="ex1")
+            self._device(), PATIENT_ID, plan_id=PLAN_OID,
+            version_id=self.VERSION_ID, prescription_item_id=self.ITEM_ID)
         self.assertEqual(session["linkage_status"], "linked")
         self.assertIsNone(session["linkage_error"])
 
-    async def test_start_session_by_exercise_name_is_linked(self):
-        self._seed_plan(exercise_id="ex1")
-        session = await self.service.start_collection_session(
-            self._device(), PATIENT_ID, plan_id=PLAN_OID,
-            exercise_id="肘关节屈伸")
-        self.assertEqual(session["linkage_status"], "linked")
+    async def test_partial_plan_linkage_is_rejected(self):
+        with self.assertRaises(DeviceIngestionError) as ctx:
+            await self.service.start_collection_session(
+                self._device(), PATIENT_ID, plan_id=PLAN_OID)
+        self.assertEqual(ctx.exception.status_code, 422)
 
-    async def test_unknown_plan_registered_not_linked(self):
-        session = await self.service.start_collection_session(
-            self._device(), PATIENT_ID, plan_id=str(ObjectId()),
-            exercise_id="ex1")
-        self.assertEqual(session["linkage_status"], "registered")
-        self.assertIn("康复方案不存在", session["linkage_error"])
+    async def test_plan_owned_by_another_patient_is_rejected(self):
+        self._seed_plan()
+        with self.assertRaises(DeviceIngestionError) as ctx:
+            await self.service.start_collection_session(
+                self._device(), "another-patient", plan_id=PLAN_OID,
+                version_id=self.VERSION_ID, prescription_item_id=self.ITEM_ID)
+        self.assertEqual(ctx.exception.status_code, 404)
 
-    async def test_unknown_exercise_registered(self):
-        self._seed_plan(exercise_id="ex1")
-        session = await self.service.start_collection_session(
-            self._device(), PATIENT_ID, plan_id=PLAN_OID, exercise_id="nope")
-        self.assertEqual(session["linkage_status"], "registered")
+    async def test_wrong_version_or_item_is_rejected(self):
+        self._seed_plan()
+        with self.assertRaises(DeviceIngestionError):
+            await self.service.start_collection_session(
+                self._device(), PATIENT_ID, plan_id=PLAN_OID,
+                version_id=str(ObjectId()), prescription_item_id=self.ITEM_ID)
+        await self.db["rehab_plan_versions"].update_one(
+            {"_id": ObjectId(self.VERSION_ID)},
+            {"$set": {"items_snapshot": [{"item_id": "other-item",
+                                             "intervention_type": "exercise"}]}})
+        with self.assertRaises(DeviceIngestionError):
+            await self.service.start_collection_session(
+                self._device(), PATIENT_ID, plan_id=PLAN_OID,
+                version_id=self.VERSION_ID, prescription_item_id=self.ITEM_ID)
 
     async def test_malformed_plan_id_registered(self):
-        session = await self.service.start_collection_session(
-            self._device(), PATIENT_ID, plan_id="not-objectid",
-            exercise_id="ex1")
-        self.assertEqual(session["linkage_status"], "registered")
+        with self.assertRaises(DeviceIngestionError) as ctx:
+            await self.service.start_collection_session(
+                self._device(), PATIENT_ID, plan_id="not-objectid",
+                version_id=self.VERSION_ID, prescription_item_id=self.ITEM_ID)
+        self.assertEqual(ctx.exception.status_code, 422)
 
     async def test_second_active_session_conflict_409(self):
         await self.service.start_collection_session(self._device(), PATIENT_ID)
@@ -129,27 +154,25 @@ class EndSessionTests(SessionTestBase):
         self.assertIsNotNone(ended["ended_at"])
         self.assertEqual(ended["summary"]["readings_count"], 2)
         self.assertEqual(ended["summary"]["flagged_count"], 1)
-        self.assertEqual(ended["summary"]["rehab_progress_logged"], False)
+        self.assertNotIn("rehab_progress_logged", ended["summary"])
         device_doc = self.db["devices"].docs[0]
         self.assertNotIn("active_session_id", device_doc)
 
-    async def test_end_linked_session_logs_rehab_progress(self):
-        self.db["rehab_plans"].docs.append({
-            "_id": ObjectId(PLAN_OID), "patient_id": PATIENT_ID,
-            "exercises": [{"id": "ex1", "name": "肘关节屈伸", "progress": []}],
-        })
-        session = await self._start(plan_id=PLAN_OID, exercise_id="ex1")
+    async def test_end_linked_session_preserves_device_observation_without_rehab_progress(self):
+        self._seed_plan()
+        session = await self._start(plan_id=PLAN_OID,
+                                    version_id=StartSessionTests.VERSION_ID,
+                                    prescription_item_id=StartSessionTests.ITEM_ID)
         self._seed_session_reading(session["_id"], 72)
         ended = await self.service.end_collection_session(
             self._device(), session["_id"])
-        self.assertEqual(ended["summary"]["rehab_progress_logged"], True)
-        plan_doc = self.db["rehab_plans"].docs[0]
-        progress = plan_doc["exercises"][0]["progress"]
-        self.assertEqual(len(progress), 1)
-        # 不替患者虚报训练完成
-        self.assertFalse(progress[0]["completed"])
-        self.assertIn("设备采集会话", progress[0]["notes"])
-        self.assertIn("自动读数 1 条", progress[0]["notes"])
+        self.assertEqual(ended["linkage_status"], "linked")
+        self.assertEqual(ended["plan_id"], PLAN_OID)
+        self.assertEqual(ended["prescription_item_id"], StartSessionTests.ITEM_ID)
+        self.assertNotIn("rehab_progress_logged", ended["summary"])
+        self.assertEqual(self.db["rehab_plans"].docs[0]["published_version_id"],
+                         StartSessionTests.VERSION_ID)
+        self.assertEqual(ended["summary"]["readings_count"], 1)
 
     async def test_cancel_session_marks_cancelled(self):
         session = await self._start()

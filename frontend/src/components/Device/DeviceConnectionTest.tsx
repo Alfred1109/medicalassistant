@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState } from 'react';
 import {
   Box,
@@ -113,7 +114,7 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
         detailsParts.push(`信号强度: ${s.signal_strength}/5`);
       }
       if (s.last_sync_time) {
-        detailsParts.push(`最后同步: ${new Date(s.last_sync_time).toLocaleString()}`);
+        detailsParts.push(`最后同步: ${formatAppDate(s.last_sync_time, 'locale', { invalid: 'Invalid Date' })}`);
       }
       if (s.message) {
         detailsParts.push(s.message);
@@ -140,7 +141,7 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
       return {
         status: 'success',
         message: '设备数据可正常读取',
-        details: `最近一条: ${new Date(latest.timestamp).toLocaleString()}（${latest.data_type}）`
+        details: `最近一条: ${formatAppDate(latest.timestamp, 'locale', { invalid: 'Invalid Date' })}（${latest.data_type}）`
       };
     }
     return {

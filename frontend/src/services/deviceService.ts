@@ -86,7 +86,7 @@ const deviceService = {
   // 绑定设备到患者（POST /api/devices/bind，医护需要提供 patient_id）
   bindDevice: async (deviceData: DeviceCreatePayload): Promise<Device> => {
     try {
-      const response = await apiService.bindUserDevice('', deviceData);
+      const response = await apiService.bindUserDevice(deviceData);
       return response.data;
     } catch (error) {
       console.error('绑定设备失败:', error);
@@ -97,7 +97,7 @@ const deviceService = {
   // 解绑设备（DELETE /api/devices/{id}/unbind）
   unbindDevice: async (deviceId: string): Promise<void> => {
     try {
-      await apiService.unbindUserDevice('', deviceId);
+      await apiService.unbindUserDevice(deviceId);
     } catch (error) {
       console.error('解绑设备失败:', error);
       throw error;
@@ -218,13 +218,21 @@ export interface CollectionSession {
   patient_id: string;
   status: string; // active / ended / cancelled
   plan_id?: string | null;
-  exercise_id?: string | null;
+  version_id?: string | null;
+  prescription_item_id?: string | null;
   linkage_status: 'linked' | 'registered' | 'none';
   linkage_error?: string | null;
   started_at: string;
   ended_at?: string | null;
   summary?: Record<string, any> | null;
   notes?: string | null;
+}
+
+export interface DevicePublicationOption {
+  plan_id: string;
+  plan_name: string;
+  version_id: string;
+  items: Array<{ item_id: string; name: string }>;
 }
 
 // 协议假设条目（GET /devices/{id}/gateway/protocol-assumptions）
@@ -282,7 +290,7 @@ const deviceGateway = {
 
   startCollectionSession: async (
     deviceId: string,
-    body: { plan_id?: string; exercise_id?: string; notes?: string },
+    body: { plan_id?: string; version_id?: string; prescription_item_id?: string; notes?: string },
   ): Promise<CollectionSession> => {
     const response = await api.post(`/devices/${deviceId}/sessions`, body);
     return response.data;
@@ -297,6 +305,11 @@ const deviceGateway = {
 
   listCollectionSessions: async (deviceId: string, limit = 50): Promise<CollectionSession[]> => {
     const response = await api.get(`/devices/${deviceId}/sessions`, { params: { limit } });
+    return Array.isArray(response.data) ? response.data : [];
+  },
+
+  getPublicationOptions: async (deviceId: string): Promise<DevicePublicationOption[]> => {
+    const response = await api.get(`/devices/${deviceId}/publication-options`);
     return Array.isArray(response.data) ? response.data : [];
   },
 

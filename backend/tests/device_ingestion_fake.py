@@ -2,7 +2,7 @@
 
 仅实现 device_ingestion_service / device_protocol 测试所需的操作：
 insert_one / find_one / find(sort→limit→to_list) / update_one($set/$unset/$inc，
-$set 支持点路径含列表下标，覆盖 rehabilitation_service.log_exercise_progress
+$set 支持点路径含列表下标，覆盖设备写入其他业务嵌套字段的场景
 的 exercises.{i} 写法) / to_list(None)。
 匹配支持等值、$ne/$gte/$lte/$in 与点路径（metadata.source）。
 """
@@ -54,6 +54,10 @@ def _unset_path(doc, path):
 
 def _match(doc, query):
     for key, cond in query.items():
+        if key == "$or":
+            if not any(_match(doc, branch) for branch in cond):
+                return False
+            continue
         value = _resolve_path(doc, key)
         if isinstance(cond, dict) and cond and all(
                 k.startswith("$") for k in cond):
@@ -100,7 +104,9 @@ class FakeQuery:
         self._limit = n
         return self
 
-    async def to_list(self, n=None):
+    async def to_list(self, n=None, *, length=None):
+        if length is not None:
+            n = length
         cap = n if n else getattr(self, "_limit", None)
         docs = self._docs
         if cap:
@@ -112,22 +118,22 @@ class FakeCollection:
     def __init__(self):
         self.docs = []
 
-    async def insert_one(self, doc):
+    async def insert_one(self, doc, *, session=None):
         doc = deepcopy(doc)
         doc["_id"] = doc.get("_id")
         self.docs.append(doc)
         return FakeInsertResult(doc["_id"])
 
-    async def find_one(self, query):
+    async def find_one(self, query, *, session=None):
         for doc in self.docs:
             if _match(doc, query):
                 return deepcopy(doc)
         return None
 
-    def find(self, query):
+    def find(self, query, projection=None, *, session=None):
         return FakeQuery([deepcopy(d) for d in self.docs if _match(d, query)])
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, *, session=None):
         matched = modified = 0
         for doc in self.docs:
             if not _match(doc, query):
@@ -151,6 +157,7 @@ class FakeDatabase:
     def __init__(self, collections=()):
         self._collections = {name: FakeCollection()
                              for name in collections}
+        self.client = FakeClient(self)
 
     def __getitem__(self, name):
         return self._collections.setdefault(name, FakeCollection())
@@ -160,6 +167,34 @@ class FakeDatabase:
 
     def seed(self, name, docs):
         self[name].docs.extend(deepcopy(docs))
+
+
+class FakeSession:
+    def __init__(self, db):
+        self.db = db
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def with_transaction(self, callback, **options):
+        snapshots = {name: deepcopy(collection.docs) for name, collection in self.db._collections.items()}
+        try:
+            return await callback(self)
+        except Exception:
+            for name, collection in self.db._collections.items():
+                collection.docs = snapshots.get(name, [])
+            raise
+
+
+class FakeClient:
+    def __init__(self, db):
+        self.db = db
+
+    async def start_session(self):
+        return FakeSession(self.db)
 
 
 def silent_analysis_mock():

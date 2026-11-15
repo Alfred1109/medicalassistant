@@ -47,6 +47,11 @@ class QualityConfigTests(unittest.IsolatedAsyncioTestCase):
 
     async def _ingest(self, settings=None, frames=None):
         device = self._device(settings)
+        if not self.db.devices.docs:
+            self.db.seed("devices", [{**device, "_id": ObjectId(device["_id"])}])
+            self.db.seed("users", [{"_id": device["patient_id"], "role": "patient", "is_active": True}])
+        else:
+            self.db.devices.docs[0].update({key: value for key, value in device.items() if key != "_id"})
         return await self.service.ingest(device, frames or [self._frame()])
 
     async def test_default_ranges_applied(self):

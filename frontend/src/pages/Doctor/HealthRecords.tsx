@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import {
@@ -30,9 +30,11 @@ import EditIcon from '@mui/icons-material/Edit';
 import AddIcon from '@mui/icons-material/Add';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { assignedPatientsApi } from '../../services/api';
-import { useApi } from '../../hooks/useApi';
+import { useAsyncResource } from '../../hooks/useAsyncResource';
 import { RootState } from '../../store';
 import { PatientHealthRecord } from '../../types/patient.types';
+import { healthDataPayload, healthDataQualityFlags, healthDataType, healthDataValueText } from '../../utils/healthDataFacts';
+import { formatAppDate } from '../../utils/dateTime';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -81,15 +83,13 @@ const HealthRecords: React.FC = () => {
   const patientsPath = role === 'health_manager' ? '/app/health-manager/patients' : '/app/doctor/patients';
 
   // 使用API钩子获取患者健康记录（医生与健康管理师各走自己的授权端点）
-  const { 
-    data: healthRecord, 
-    loading, 
-    error,
-    execute: fetchHealthRecord
-  } = useApi<PatientHealthRecord, [string]>(
-    () => assignedPatientsApi(role).getPatientHealthRecord(patientId || ''),
-    true
-  );
+  const loadRecord = useCallback(async (signal: AbortSignal) => {
+    const response = await assignedPatientsApi(role).getPatientHealthRecord(patientId!, signal);
+    return response.data;
+  }, [role, patientId]);
+  const { data: healthRecord, loading, error: loadError, reload } =
+    useAsyncResource(loadRecord, Boolean(patientId) && (role === 'doctor' || role === 'health_manager'));
+  const error = loadError instanceof Error ? loadError : loadError ? new Error('获取健康记录失败') : null;
 
   // 如果没有提供patientId，返回错误信息
   if (!patientId) {
@@ -110,12 +110,11 @@ const HealthRecords: React.FC = () => {
 
   // 处理重试请求
   const handleRetry = () => {
-    fetchHealthRecord(patientId || '');
+    reload();
   };
 
   // 使用实际的健康记录或使用空记录（而不是模拟数据）
   const record = healthRecord || emptyHealthRecord;
-  record.id = record.id || patientId;
 
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
@@ -379,29 +378,24 @@ const HealthRecords: React.FC = () => {
                       <React.Fragment key={index}>
                         <ListItem alignItems="flex-start">
                           <ListItemText
+                            disableTypography
                             primary={
                               <Box display="flex" justifyContent="space-between">
-                                <Typography variant="subtitle1">体征记录</Typography>
+                                <Typography variant="subtitle1">{healthDataType(vitalSign) || '体征记录'}</Typography>
                                 <Typography variant="body2" color="textSecondary">
-                                  {vitalSign.date}
+                                  {formatAppDate(vitalSign.recorded_at, 'localeZh24', { assumeUtc: true, empty: '时间未提供' })}
                                 </Typography>
                               </Box>
                             }
                             secondary={
-                              <Grid container spacing={1} sx={{ mt: 1 }}>
-                                <Grid item xs={3}>
-                                  <Typography variant="body2">血压: {vitalSign.bp}</Typography>
-                                </Grid>
-                                <Grid item xs={3}>
-                                  <Typography variant="body2">心率: {vitalSign.pulse}</Typography>
-                                </Grid>
-                                <Grid item xs={3}>
-                                  <Typography variant="body2">体温: {vitalSign.temp}</Typography>
-                                </Grid>
-                                <Grid item xs={3}>
-                                  <Typography variant="body2">体重: {vitalSign.weight}kg</Typography>
-                                </Grid>
-                              </Grid>
+                              <Box>
+                                <Typography variant="body2">
+                                  {healthDataValueText(healthDataPayload(vitalSign).value)} {healthDataPayload(vitalSign).unit || ''}
+                                </Typography>
+                                {!!healthDataQualityFlags(vitalSign).length && <Typography variant="body2" color="warning.main">
+                                  数据质量标记：{healthDataQualityFlags(vitalSign).join('、')}
+                                </Typography>}
+                              </Box>
                             }
                           />
                         </ListItem>
@@ -423,4 +417,4 @@ const HealthRecords: React.FC = () => {
   );
 };
 
-export default HealthRecords; 
+export default HealthRecords;

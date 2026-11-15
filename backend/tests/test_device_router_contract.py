@@ -33,7 +33,7 @@ device_router = importlib.import_module("app.api.routers.device_router")
 from app.schemas.user import UserResponse
 from app.services import device_service as device_service_module
 from app.services.device_service import DeviceService, ManualReadingValidationError
-from app.services.user_service import UserService
+from app.core import user_record
 from app.models.health_data_threshold import HealthDataThreshold
 from app.core import device_access as device_access_module
 from tests.device_ingestion_fake import FakeCollection, FakeDatabase
@@ -118,7 +118,7 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_database] = self._fake_database
         app.dependency_overrides[get_device_service] = lambda: self.device_service
         self.get_user_mock = AsyncMock(return_value=self.operator)
-        self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
+        self.lookup = patch.object(user_record, "load_user_response", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 
@@ -681,7 +681,7 @@ class ManualReadingEndpointResponseTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_database] = self._fake_database
         app.dependency_overrides[get_device_service] = lambda: self.device_service
         self.get_user_mock = AsyncMock(return_value=self.operator)
-        self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
+        self.lookup = patch.object(user_record, "load_user_response", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 

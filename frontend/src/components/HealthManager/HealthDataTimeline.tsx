@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect } from 'react';
 import {
   Box,
@@ -36,7 +37,7 @@ import TimelineConnector from '@mui/lab/TimelineConnector';
 import TimelineContent from '@mui/lab/TimelineContent';
 import TimelineDot from '@mui/lab/TimelineDot';
 import TimelineOppositeContent from '@mui/lab/TimelineOppositeContent';
-import { format, parseISO, subDays, startOfDay, endOfDay, startOfMonth, endOfMonth, startOfWeek, endOfWeek } from 'date-fns';
+import { parseISO, subDays, startOfDay, endOfDay, startOfMonth, endOfMonth, startOfWeek, endOfWeek } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 
 // 图标导入
@@ -207,25 +208,20 @@ const HealthDataTimeline: React.FC<HealthDataTimelineProps> = ({
   
   // 格式化日期
   const formatDate = (dateString: string, formatStr: string = 'yyyy年MM月dd日 HH:mm') => {
-    try {
-      const date = parseISO(dateString);
-      return format(date, formatStr, { locale: zhCN });
-    } catch (error) {
-      return dateString;
-    }
+    return formatAppDate(dateString, formatStr, { invalid: dateString });
   };
   
   // 格式化日期分组标题
   const formatGroupTitle = (date: Date, groupType: string) => {
     switch (groupType) {
       case 'day':
-        return format(date, 'yyyy年MM月dd日', { locale: zhCN });
+        return formatAppDate(date, 'yyyy年MM月dd日');
       case 'week':
-        return `${format(startOfWeek(date, { locale: zhCN }), 'yyyy年MM月dd日')} - ${format(endOfWeek(date, { locale: zhCN }), 'MM月dd日')}`;
+        return `${formatAppDate(startOfWeek(date, { locale: zhCN }), 'yyyy年MM月dd日')} - ${formatAppDate(endOfWeek(date, { locale: zhCN }), 'MM月dd日')}`;
       case 'month':
-        return format(date, 'yyyy年MM月', { locale: zhCN });
+        return formatAppDate(date, 'yyyy年MM月');
       default:
-        return format(date, 'yyyy年MM月dd日', { locale: zhCN });
+        return formatAppDate(date, 'yyyy年MM月dd日');
     }
   };
   
@@ -405,17 +401,17 @@ const HealthDataTimeline: React.FC<HealthDataTimelineProps> = ({
       
       switch (groupType) {
         case 'day':
-          groupKey = format(date, 'yyyy-MM-dd');
+          groupKey = formatAppDate(date, 'yyyy-MM-dd');
           break;
         case 'week':
           const weekStart = startOfWeek(date, { locale: zhCN });
-          groupKey = format(weekStart, 'yyyy-MM-dd');
+          groupKey = formatAppDate(weekStart, 'yyyy-MM-dd');
           break;
         case 'month':
-          groupKey = format(date, 'yyyy-MM');
+          groupKey = formatAppDate(date, 'yyyy-MM');
           break;
         default:
-          groupKey = format(date, 'yyyy-MM-dd');
+          groupKey = formatAppDate(date, 'yyyy-MM-dd');
       }
       
       if (!groupedData[groupKey]) {
@@ -691,4 +687,4 @@ const HealthDataTimeline: React.FC<HealthDataTimelineProps> = ({
   );
 };
 
-export default HealthDataTimeline; 
+export default HealthDataTimeline;

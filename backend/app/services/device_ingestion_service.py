@@ -2,8 +2,8 @@
 
 链路：设备采集端 → 网关端点(device_router /gateway/*) → 设备凭证鉴权
 → DeviceProtocolAdapter.parse（device_protocol 包，按型号选择适配器）
-→ 质量校验管道（本服务，入库前）→ device_data 增量写入（来源 automated、
-原始载荷留存 metadata.raw_payload）→ 触发既有分析/预警链
+→ 质量校验管道（本服务，入库前）→ 原子写入 device_data 原始遥测与
+health_data 临床事实（模拟回放仅存遥测）→ 触发既有分析/预警链
 （device_analysis_service.generate_device_alerts，复用不重造）。
 
 职责边界：
@@ -83,6 +83,19 @@ class DeviceIngestionService:
     async def _database(self):
         return self.db if self.db is not None else await get_db()
 
+    @staticmethod
+    def _snapshot_selector(device):
+        return {"_id": ObjectId(device["_id"]), "patient_id": device.get("patient_id"),
+                "status": device.get("status"), "device_key": device.get("device_key")}
+
+    @staticmethod
+    def _source_filter(source):
+        if source == SOURCE_AUTOMATED_SIMULATED:
+            return {"$or": [{"metadata.source": SOURCE_AUTOMATED_SIMULATED},
+                            {"metadata.simulated": True}]}
+        return {"metadata.source": {"$ne": SOURCE_AUTOMATED_SIMULATED},
+                "metadata.simulated": {"$ne": True}}
+
     # ── 设备凭证鉴权 ────────────────────────────────────────────────────
     async def authenticate_device(
         self, device_sn: str, device_key: str,
@@ -109,7 +122,7 @@ class DeviceIngestionService:
         return device
 
     async def _touch_device(
-        self, device_internal_id: str, *, battery_level: Optional[float] = None,
+        self, expected_device: Dict[str, Any], *, battery_level: Optional[float] = None,
         session=None) -> None:
         """真实上报/心跳到达 → 更新 last_connected（及可选的真实上报电量）。
 
@@ -120,9 +133,11 @@ class DeviceIngestionService:
                                   "updated_at": datetime.utcnow()}
         if battery_level is not None:
             update["battery_level"] = battery_level
-        await db.devices.update_one(
-            {"_id": ObjectId(device_internal_id)},
+        result = await db.devices.update_one(
+            self._snapshot_selector(expected_device),
             {"$set": update}, **({"session": session} if session else {}))
+        if result.matched_count != 1:
+            raise DeviceIngestionError("设备归属、状态或凭证已变化，未刷新连接状态", 409)
 
     # ── 质量校验管道 ────────────────────────────────────────────────────
     def _quality_config(self, device: Dict[str, Any]) -> Dict[str, Any]:
@@ -173,13 +188,14 @@ class DeviceIngestionService:
 
     async def _is_duplicate(
             self, db, device_internal_id: str, data_type: str,
-            timestamp: datetime) -> bool:
-        """幂等：device_id + timestamp + data_type 已存在即重复。"""
+            timestamp: datetime, *, source=SOURCE_AUTOMATED, session=None) -> bool:
+        """Preserve real-reading identity; simulation occupies a separate source scope."""
         existing = await db.device_data.find_one({
             "device_id": device_internal_id,
             "data_type": data_type,
             "timestamp": timestamp,
-        })
+            **self._source_filter(source),
+        }, session=session)
         return existing is not None
 
     # ── 上报主流程 ──────────────────────────────────────────────────────
@@ -232,7 +248,7 @@ class DeviceIngestionService:
 
         # 乱序检测基准：库内该设备最新一条读数的时间戳
         latest = await db.device_data.find(
-            {"device_id": device_internal_id}
+            {"device_id": device_internal_id, **self._source_filter(source)}
         ).sort("timestamp", -1).limit(1).to_list(1)
         latest_ts = latest[0]["timestamp"] if latest else None
 
@@ -250,16 +266,16 @@ class DeviceIngestionService:
                 outcome = await self._process_reading(
                     db, device_internal_id, str(device.get("patient_id")),
                     reading, config, latest_ts, session_id, source,
-                    frame_index, in_batch_seen)
-                if outcome["action"] == "written":
+                    frame_index, in_batch_seen, device)
+                if outcome["action"] == "written" and (source == SOURCE_AUTOMATED_SIMULATED
+                                                         or outcome["clinical_fact_created"]):
                     ts = outcome["timestamp"]
                     if latest_ts is None or ts > latest_ts:
                         latest_ts = ts
                 results.append(outcome)
 
         # 真实到达：刷新连接状态（电量仅用报文自带的真值）
-        await self._touch_device(device_internal_id,
-                                 battery_level=battery_seen)
+        await self._touch_device(device, battery_level=battery_seen)
         alerts = await self._trigger_analysis(device_internal_id)
         return self._ingest_response(device, results, rejected, alerts=alerts)
 
@@ -267,7 +283,7 @@ class DeviceIngestionService:
         self, db, device_internal_id: str, patient_id: Optional[str],
         reading, config: Dict[str, Any], latest_ts: Optional[datetime],
         session_id: Optional[str], source: str, frame_index: int,
-        in_batch_seen: set,
+        in_batch_seen: set, expected_device: Dict[str, Any],
     ) -> Dict[str, Any]:
         """单条标准化读数：质量校验 → 幂等去重 → 入库（或标记/拒绝）。"""
         data_type = reading.data_type
@@ -281,15 +297,12 @@ class DeviceIngestionService:
         value = float(reading.value)
         flags = self._range_flags(data_type, value, config)
 
-        dedup_key = (device_internal_id, data_type, ts)
+        source_scope = (SOURCE_AUTOMATED_SIMULATED if source == SOURCE_AUTOMATED_SIMULATED
+                        or reading.metadata.get("simulated") is True else source)
+        dedup_key = (device_internal_id, data_type, ts, source_scope)
         if dedup_key in in_batch_seen:
             return self._outcome("duplicate", frame_index, data_type, ts,
                                  reason="同批次内重复读数")
-        if await self._is_duplicate(db, device_internal_id, data_type, ts):
-            in_batch_seen.add(dedup_key)
-            return self._outcome("duplicate", frame_index, data_type, ts,
-                                 reason="库内已存在相同 device_id+时间戳+指标")
-
         out_of_order = (latest_ts is not None and ts < latest_ts)
         if out_of_order:
             flags.append(FLAG_OUT_OF_ORDER)
@@ -316,16 +329,50 @@ class DeviceIngestionService:
             "quality_flags": flags,
             "created_at": datetime.utcnow(),
         }
-        await db.device_data.insert_one(document)
+        from app.db.transactions import run_transaction
+        from .device_health_data import fence_device_patient, insert_device_health_data
+
+        async def persist(session):
+            # Serialize with other ingestion and existing manual device mutations.
+            # Recheck the authenticated ownership/status/key snapshot rather than
+            # silently attaching a stale request to a new patient after rebinding.
+            current = await db.devices.find_one({"_id": ObjectId(device_internal_id)}, session=session)
+            if not current or current.get("status") == "deleted":
+                raise DeviceIngestionError("设备已解绑或不存在，未保存本条读数", 409)
+            if not isinstance(current.get("patient_id"), (str, ObjectId)) or not str(current["patient_id"]):
+                raise DeviceIngestionError("设备尚未关联患者，未保存本条读数", 409)
+            fence = current.get("_device_write_fence", 0)
+            if type(fence) is not int or fence < 0:
+                raise DeviceIngestionError("设备写入并发状态无效", 503)
+            selector = self._snapshot_selector(expected_device)
+            changed = await db.devices.update_one(selector, {"$inc": {"_device_write_fence": 1}}, session=session)
+            if changed.matched_count != 1:
+                raise DeviceIngestionError("设备归属、状态或凭证已变化，未保存本条读数", 409)
+            if source != SOURCE_AUTOMATED_SIMULATED:
+                await fence_device_patient(db, expected_device.get("patient_id"), session=session)
+            if await self._is_duplicate(db, device_internal_id, data_type, ts, source=source_scope, session=session):
+                return False
+            await db.device_data.insert_one(document, session=session)
+            await insert_device_health_data(db, document, patient_id, session=session)
+            return True
+
+        written = await run_transaction(db, persist, error_code="DEVICE_TRANSACTION_UNAVAILABLE",
+                                        error_message="设备读数事务未能确认，请使用相同载荷重试")
         in_batch_seen.add(dedup_key)
+        if not written:
+            return self._outcome("duplicate", frame_index, data_type, ts,
+                                 reason="库内已存在同来源范围的设备+时间戳+指标；本次未新增临床事实，不回填历史")
         return self._outcome("written", frame_index, data_type, ts,
-                             quality_flags=flags)
+                             quality_flags=flags,
+                             clinical_fact_created=(source != SOURCE_AUTOMATED_SIMULATED
+                                                    and metadata.get("simulated") is not True))
 
     @staticmethod
     def _outcome(action: str, frame_index: int, data_type: str,
                  timestamp: datetime, *, reason: str = "",
                  error: str = "",
-                 quality_flags: Optional[List[str]] = None) -> Dict[str, Any]:
+                 quality_flags: Optional[List[str]] = None,
+                 clinical_fact_created: bool = False) -> Dict[str, Any]:
         return {
             "action": action,  # written / duplicate / rejected
             "frame_index": frame_index,
@@ -334,6 +381,7 @@ class DeviceIngestionService:
             "quality_flags": quality_flags or [],
             "reason": reason,
             "error": error,
+            "clinical_fact_created": clinical_fact_created,
         }
 
     @staticmethod
@@ -351,6 +399,7 @@ class DeviceIngestionService:
             "device": {"id": str(device["_id"]),
                        "device_sn": device.get("device_id")},
             "accepted_count": len(written),
+            "clinical_facts_created": sum(r["clinical_fact_created"] for r in written),
             "duplicate_count": len(duplicated),
             "rejected_count": len(rejected),
             "rejected": rejected,
@@ -381,7 +430,7 @@ class DeviceIngestionService:
         """设备心跳：刷新 last_connected，返回当前采集会话（如有）。"""
         db = await self._database()
         device_internal_id = str(device["_id"])
-        await self._touch_device(device_internal_id)
+        await self._touch_device(device)
         session = await db.device_collection_sessions.find_one(
             {"device_id": device_internal_id, "status": "active"})
         return {
@@ -435,15 +484,11 @@ class DeviceIngestionService:
     async def start_collection_session(
         self, device: Dict[str, Any], patient_id: str,
         *, plan_id: Optional[str] = None,
-        exercise_id: Optional[str] = None, notes: Optional[str] = None,
+        version_id: Optional[str] = None,
+        prescription_item_id: Optional[str] = None,
+        notes: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """开始采集会话：关联患者与（可选）康复方案执行项。
-
-        方案执行关联（T74 探查结论）：rehabilitation_service 的真实进度
-        写入路径是 rehab_plans.exercises[].progress[]（log_exercise_progress），
-        可关联——plan_id+exercise_id 均核实存在 → linkage=linked；仅登记
-        （未核实）→ linkage=registered；未提供 → none。
-        """
+        """开始设备观测会话，可选绑定本患者当前已发布版本的处方项。"""
         db = await self._database()
         device_internal_id = str(device["_id"])
         existing = await db.device_collection_sessions.find_one(
@@ -454,9 +499,9 @@ class DeviceIngestionService:
 
         linkage_status = "none"
         linkage_error = None
-        if plan_id or exercise_id:
+        if plan_id or version_id or prescription_item_id:
             linkage_status, linkage_error = await self._verify_plan_linkage(
-                db, plan_id, exercise_id)
+                db, patient_id, plan_id, version_id, prescription_item_id)
 
         session = {
             "_id": ObjectId(),
@@ -465,7 +510,8 @@ class DeviceIngestionService:
             "patient_id": patient_id,
             "status": "active",
             "plan_id": plan_id,
-            "exercise_id": exercise_id,
+            "version_id": version_id,
+            "prescription_item_id": prescription_item_id,
             "linkage_status": linkage_status,
             "linkage_error": linkage_error,
             "started_at": datetime.utcnow(),
@@ -485,30 +531,52 @@ class DeviceIngestionService:
         return session
 
     async def _verify_plan_linkage(
-            self, db, plan_id: Optional[str],
-            exercise_id: Optional[str]) -> Tuple[str, Optional[str]]:
-        """核实康复方案执行项存在性；失败降级为 registered（登记待人工）。"""
-        if not plan_id or not exercise_id:
-            return ("registered", "方案/运动项标识不完整，仅登记不关联")
-        if not ObjectId.is_valid(plan_id):
-            return ("registered", f"plan_id 非法: {plan_id}")
-        plan = await db.rehab_plans.find_one({"_id": ObjectId(plan_id)})
-        if not plan:
-            return ("registered", f"康复方案不存在: {plan_id}")
-        exercises = plan.get("exercises") or []
+            self, db, patient_id: str, plan_id: Optional[str],
+            version_id: Optional[str], prescription_item_id: Optional[str]
+    ) -> Tuple[str, Optional[str]]:
+        """Validate explicit patient, publication version, and stable item identity."""
+        from .rehab_publication_service import WORKFLOW
+
+        if not all((plan_id, version_id, prescription_item_id)):
+            raise DeviceIngestionError(
+                "关联新版方案时必须同时提供方案、已发布版本和处方项标识", 422)
+        if not ObjectId.is_valid(plan_id) or not ObjectId.is_valid(version_id):
+            raise DeviceIngestionError("方案或版本标识无效", 422)
+        plan = await db.rehab_plans.find_one({
+            "_id": ObjectId(plan_id), "patient_id": str(patient_id),
+            "published_version_id": version_id,
+        })
+        if not plan or plan.get("status") in {"cancelled", "canceled", "archived"}:
+            raise DeviceIngestionError("未找到该患者当前可见的已发布方案", 404)
+        version = await db.rehab_plan_versions.find_one({
+            "_id": ObjectId(version_id), "plan_id": plan_id,
+            "patient_id": str(patient_id), "workflow": WORKFLOW,
+            "status": "published",
+        })
+        if not version:
+            raise DeviceIngestionError("处方项不属于该患者当前已发布方案版本", 404)
+        items_snapshot = version.get("items_snapshot")
+        if not isinstance(items_snapshot, list) or len(items_snapshot) > 200:
+            raise DeviceIngestionError("已发布处方快照异常，无法安全关联设备", 503)
         matched = any(
-            ex.get("id") == exercise_id or ex.get("name") == exercise_id
-            for ex in exercises if isinstance(ex, dict))
+            isinstance(item, dict)
+            and item.get("item_id") == prescription_item_id
+            and item.get("intervention_type") == "exercise"
+            for item in items_snapshot
+        )
         if not matched:
-            return ("registered", f"方案内未找到运动项: {exercise_id}")
+            raise DeviceIngestionError("处方项不属于该患者当前已发布方案版本", 404)
         return ("linked", None)
 
     async def end_collection_session(
         self, device: Dict[str, Any], session_id: str, *,
         cancel: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """结束采集会话：写摘要（读数/质量计数），解除设备在线采集标注，
-        并把会话执行情况登记进关联的康复方案执行进度（linked 时）。"""
+        """结束采集会话：写设备观测摘要并解除设备在线采集标注。
+
+        设备会话及其遥测保存在设备域；它不代表患者确认完成康复训练，
+        因此不会写入康复训练进度。
+        """
         db = await self._database()
         device_internal_id = str(device["_id"])
         if not ObjectId.is_valid(session_id):
@@ -539,15 +607,6 @@ class DeviceIngestionService:
             "ended_as": "cancelled" if cancel else "ended",
         }
 
-        progress_logged = False
-        progress_error = None
-        if session.get("linkage_status") == "linked":
-            progress_logged, progress_error = await self._log_rehab_progress(
-                db, session, summary)
-        summary["rehab_progress_logged"] = progress_logged
-        if progress_error:
-            summary["rehab_progress_error"] = progress_error
-
         await db.device_collection_sessions.update_one(
             {"_id": ObjectId(session_id)},
             {"$set": {"status": "cancelled" if cancel else "ended",
@@ -562,28 +621,6 @@ class DeviceIngestionService:
         session["summary"] = summary
         session["_id"] = session_id
         return session
-
-    async def _log_rehab_progress(
-            self, db, session: Dict[str, Any],
-            summary: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
-        """把会话执行登记进 rehab_plans.exercises[].progress[]（打通点）。
-
-        completed=False：设备会话完成≠患者确认完成该训练，不替患者
-        虚报完成状态；进度条目 notes 如实注明"设备采集会话"来源。
-        """
-        try:
-            from .rehabilitation_service import RehabilitationService
-            rehab = RehabilitationService(db)
-            result = await rehab.log_exercise_progress(
-                session["plan_id"], session["exercise_id"], completed=False,
-                notes=(f"设备采集会话完成，自动读数 "
-                       f"{summary.get('readings_count', 0)} 条"
-                       f"（来源：自动采集，未确认为训练完成）"))
-            # log_exercise_progress：找不到运动项返回 {"error": ...} 而非 None
-            ok = isinstance(result, dict) and "error" not in result
-            return (ok, None if ok else str(result.get("error")))
-        except Exception as exc:
-            return (False, f"康复进度登记失败: {exc}")
 
     async def list_collection_sessions(
         self, device_id: str, limit: int = 50,

@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
@@ -38,9 +39,7 @@ interface DeviceOption {
 }
 
 const dateText = (value?: string | null) => {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+  return formatAppDate(value, 'localeZh24', { empty: '—', invalid: String(value) });
 };
 
 const renderValue = (value: unknown): string => {

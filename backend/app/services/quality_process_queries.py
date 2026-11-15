@@ -1,9 +1,8 @@
 """Pure Mongo query construction for process facts; no clinical scoring rules."""
 from app.core.patient_access import patient_domain_mode
+from app.core.followup_semantics import FOLLOWUP_STATUSES
 from app.patients.repository import PATIENTS
 
-FOLLOWUP_STATUSES = ("pending_schedule", "scheduled", "awaiting_fill", "in_review",
-                     "completed", "canceled", "missed", "overdue", "lost", "rescheduled")
 PLAN_STATUSES = ("draft", "active", "completed", "cancelled", "canceled", "archived")
 PUBLICATION_STATES = ("published", "unpublished", "withdrawn", "stopped", "invalid_reference")
 

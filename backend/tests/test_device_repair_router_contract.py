@@ -78,13 +78,11 @@ class DeviceRepairRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.db.devices.find_one = AsyncMock(return_value={"_id": ObjectId(DEVICE_ID), "patient_id": "repair-patient"})
         self.db.devices.find = MagicMock(return_value=IdCursor([{"_id": ObjectId(DEVICE_ID)}]))
 
-        # 认证链的查库走 UserService 打桩，返回真实 UserResponse
-        # （锁定 user 形态契约，而非 dict）
+        # 认证映射边界返回真实 UserResponse；数据库仍供患者归属检查使用。
         identity_find_from_lookup(self.db.users)
         app.dependency_overrides[get_database] = self._fake_database
         self.get_user_mock = AsyncMock(return_value=self.operator)
-        self.lookup = patch.object(UserService, "get_user_by_id",
-                                   new=self.get_user_mock)
+        self.lookup = patch("app.core.user_record.load_user_response", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 

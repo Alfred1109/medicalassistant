@@ -11,6 +11,7 @@ import {
   DialogTitle,
   Divider,
   Grid,
+  MenuItem,
   Paper,
   Stack,
   Table,
@@ -29,6 +30,7 @@ import {
   AutomatedReading,
   CollectionSession,
   DeviceQualityReport,
+  DevicePublicationOption,
   ProtocolAssumption,
 } from '../../services/deviceService';
 
@@ -105,12 +107,14 @@ const DeviceIngestionPanel: React.FC<{
   const [readings, setReadings] = useState<AutomatedReading[]>([]);
   const [report, setReport] = useState<DeviceQualityReport | null>(null);
   const [sessions, setSessions] = useState<CollectionSession[]>([]);
+  const [publicationOptions, setPublicationOptions] = useState<DevicePublicationOption[]>([]);
   const [assumptions, setAssumptions] = useState<ProtocolAssumption[]>([]);
   const [adapterId, setAdapterId] = useState<string | null>(null);
   const [assumptionNote, setAssumptionNote] = useState<string | null>(null);
   const [selectedType, setSelectedType] = useState<string | null>(null);
   const [planId, setPlanId] = useState('');
-  const [exerciseId, setExerciseId] = useState('');
+  const [versionId, setVersionId] = useState('');
+  const [prescriptionItemId, setPrescriptionItemId] = useState('');
   const [sessionBusy, setSessionBusy] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -119,15 +123,17 @@ const DeviceIngestionPanel: React.FC<{
     setLoading(true);
     setError(null);
     try {
-      const [readingRows, qualityReport, sessionRows, protocol] = await Promise.all([
+      const [readingRows, qualityReport, sessionRows, protocol, planOptions] = await Promise.all([
         deviceGateway.getAutomatedReadings(deviceId),
         deviceGateway.getQualityReport(deviceId),
         deviceGateway.listCollectionSessions(deviceId),
         deviceGateway.getProtocolAssumptions(deviceId),
+        deviceGateway.getPublicationOptions(deviceId).catch(() => []),
       ]);
       setReadings(readingRows);
       setReport(qualityReport);
       setSessions(sessionRows);
+      setPublicationOptions(planOptions);
       setAssumptions(protocol.assumptions ?? []);
       setAdapterId(protocol.adapter_id ?? null);
       setAssumptionNote(protocol.message ?? null);
@@ -169,7 +175,8 @@ const DeviceIngestionPanel: React.FC<{
     try {
       await deviceGateway.startCollectionSession(deviceId, {
         plan_id: planId.trim() || undefined,
-        exercise_id: exerciseId.trim() || undefined,
+        version_id: versionId.trim() || undefined,
+        prescription_item_id: prescriptionItemId.trim() || undefined,
       });
       setActionMessage('采集会话已开始，期间设备上报读数将挂到该会话');
       await load();
@@ -306,22 +313,40 @@ const DeviceIngestionPanel: React.FC<{
               </Typography>
               <Stack direction="row" spacing={2} alignItems="flex-end" flexWrap="wrap" useFlexGap>
                 <TextField
+                  select
                   size="small"
-                  label="关联康复方案 ID（可选）"
+                  label="关联已发布运动方案（可选）"
                   value={planId}
-                  onChange={(e) => setPlanId(e.target.value)}
+                  onChange={(e) => {
+                    const selected = publicationOptions.find(option => option.plan_id === e.target.value);
+                    setPlanId(selected?.plan_id ?? '');
+                    setVersionId(selected?.version_id ?? '');
+                    setPrescriptionItemId('');
+                  }}
                   sx={{ width: 260 }}
-                />
+                >
+                  <MenuItem value="">不关联方案</MenuItem>
+                  {publicationOptions.map(option => <MenuItem key={option.plan_id} value={option.plan_id}>
+                    {option.plan_name}
+                  </MenuItem>)}
+                </TextField>
                 <TextField
+                  select
                   size="small"
-                  label="关联运动项 ID/名称（可选）"
-                  value={exerciseId}
-                  onChange={(e) => setExerciseId(e.target.value)}
+                  label="已发布运动处方项"
+                  value={prescriptionItemId}
+                  disabled={!planId}
+                  onChange={(e) => setPrescriptionItemId(e.target.value)}
                   sx={{ width: 260 }}
-                />
+                >
+                  <MenuItem value="">请选择运动项</MenuItem>
+                  {(publicationOptions.find(option => option.plan_id === planId)?.items ?? []).map(item => <MenuItem key={item.item_id} value={item.item_id}>
+                    {item.name}
+                  </MenuItem>)}
+                </TextField>
                 <Button
                   variant="contained"
-                  disabled={sessionBusy || !!activeSession}
+                  disabled={sessionBusy || !!activeSession || (!!planId && (!versionId || !prescriptionItemId))}
                   onClick={handleStartSession}
                 >
                   开始采集会话
@@ -335,6 +360,9 @@ const DeviceIngestionPanel: React.FC<{
                   模拟数据回放（演示）
                 </Button>
               </Stack>
+              <Typography variant="caption" color="text.secondary">
+                可选方案和运动项由该设备绑定患者当前发布内容自动加载；采集数据仍作为设备观测保存，不登记为训练完成。
+              </Typography>
               {activeSession && (
                 <Alert severity="info" sx={{ mt: 2 }}>
                   进行中会话 {activeSession._id}（方案关联：
@@ -376,7 +404,7 @@ const DeviceIngestionPanel: React.FC<{
                           </TableCell>
                           <TableCell>
                             {session.linkage_status === 'linked'
-                              ? `已打通（${session.plan_id ?? ''} / ${session.exercise_id ?? ''}）`
+                              ? `已关联（${session.plan_id ?? ''} / ${session.prescription_item_id ?? ''}）`
                               : session.linkage_status === 'registered'
                                 ? '登记待人工关联'
                                 : '无'}

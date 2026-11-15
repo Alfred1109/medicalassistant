@@ -29,6 +29,7 @@ from app.models.icf import (
     ICF_ASSESSMENT_SOURCES, ICF_DOMAINS, IcfAssessment, IcfCategory,
     IcfMetricConfig, IcfReport)
 from app.schemas.health_data_threshold import AlertCreate
+from app.core.followup_semantics import FOLLOWUP_COMPLETION_POLICY, followup_completion
 from app.services.health_alert_service import HealthAlertService
 from app.services.review_state_machine import (
     append_review_history, check_review_version, commit_review, export_gate,
@@ -89,15 +90,11 @@ DEFAULT_METRIC_CONFIGS = [
     {
         "metric_key": "followup_completion_rate",
         "name": "随访完成率",
-        "description": "非作废随访中 status=completed 的占比；低于 min_rate 触发预警。",
+        "description": "非作废随访中完成节点的占比，未终态按未完成计；待临床确认。",
         "enabled": True,
-        "params": {"min_rate": 0.8},
+        "params": {"min_rate": 0.8, "completion_policy": FOLLOWUP_COMPLETION_POLICY},
     },
 ]
-
-_VOID_FOLLOWUP_STATUS = {"canceled", "cancelled", "void"}
-_COMPLETED_FOLLOWUP_STATUS = {"completed", "done", "finished"}
-
 
 def _now():
     return datetime.now(timezone.utc)
@@ -411,9 +408,12 @@ async def _seed_default_metric_configs(db):
 
 
 def _metric_config_public(row):
+    params = deepcopy(row.params)
+    if row.metric_key == "followup_completion_rate":
+        params.setdefault("completion_policy", FOLLOWUP_COMPLETION_POLICY)
     return {"id": str(row._id), "metric_key": row.metric_key, "name": row.name,
             "description": row.description, "enabled": bool(row.enabled),
-            "params": deepcopy(row.params), "note": METRIC_NOTE}
+            "params": params, "note": METRIC_NOTE}
 
 
 async def update_metric_config(db, actor, metric_key, *, enabled=None, params=None):
@@ -427,6 +427,14 @@ async def update_metric_config(db, actor, metric_key, *, enabled=None, params=No
     if params is not None:
         if not isinstance(params, dict):
             raise HTTPException(422, detail={"code": "INVALID_METRIC_PARAMS"})
+        if metric_key == "followup_completion_rate":
+            try:
+                followup_completion({}, params)
+                rate = params.get("min_rate", 0.8)
+                if type(rate) not in (int, float) or not 0 <= rate <= 1:
+                    raise ValueError("随访完成率阈值须在 0 到 1 之间")
+            except ValueError as exc:
+                raise HTTPException(422, detail={"code": "INVALID_METRIC_PARAMS", "message": str(exc)}) from None
         update["params"] = params
     await db.icf_metric_configs.update_one({"metric_key": metric_key}, {"$set": update})
     return {"metric_key": metric_key, **{key: value for key, value in update.items()
@@ -514,22 +522,24 @@ def _compute_attainment_rate(assessments, params):
 
 def _compute_followup_completion(followups, params):
     min_rate = params.get("min_rate", 0.8)
-    rows = [row for row in followups
-            if (row.get("status") or "") not in _VOID_FOLLOWUP_STATUS]
-    if not rows:
+    counts = {}
+    for row in followups:
+        status = row.get("status")
+        status = status if isinstance(status, str) else "__invalid__"
+        counts[status] = counts.get(status, 0) + 1
+    result = followup_completion(counts, params)
+    if result["value"] is None:
         return {"metric_key": "followup_completion_rate", "state": "insufficient_data",
-                "value": None, "threshold": min_rate, "detail": [],
-                "message": "暂无非作废随访记录，无法计算完成率。"}
-    completed = sum(1 for row in rows
-                    if (row.get("status") or "") in _COMPLETED_FOLLOWUP_STATUS)
-    rate = completed / len(rows)
+                "value": None, "threshold": min_rate, "detail": [result],
+                "message": "暂无非作废随访记录，无法计算完成率。" + result["note"]}
+    rate = result["completed"] / result["total"]
     breached = rate < min_rate
     return {"metric_key": "followup_completion_rate",
             "state": "alert" if breached else "ok",
             "value": round(rate, 4), "threshold": min_rate,
-            "detail": [{"total": len(rows), "completed": completed}],
-            "message": (f"随访完成率 {rate:.0%} 低于阈值 {min_rate:.0%}（口径待临床确认）。"
-                        if breached else f"随访完成率 {rate:.0%} 达到阈值。")}
+            "detail": [result],
+            "message": (f"随访完成率 {rate:.0%} 低于阈值 {min_rate:.0%}。"
+                        if breached else f"随访完成率 {rate:.0%} 达到阈值。") + result["note"]}
 
 
 _COMPUTERS = {
@@ -538,7 +548,8 @@ _COMPUTERS = {
     "followup_completion_rate": _compute_followup_completion,
 }
 
-# 随访完成率指标的取样上限（口径待临床确认；超出按最近 500 条计算）。
+# 随访完成率保留既有实际采样：计划时间升序取前 500 条（含 Mongo 空值排序）；
+# 旧注释的「最近」与实现不符，不能据此改变历史取样口径。
 _FOLLOWUP_SAMPLE_LIMIT = 500
 
 
@@ -548,9 +559,7 @@ async def _load_followups(db, patient_id):
     只取完成率所需的 status 字段；软删除由 FollowupService 过滤。
     """
     from app.services.followup_service import FollowupService
-    records = await FollowupService(db).list_all_followups(
-        patient_id, skip=0, limit=_FOLLOWUP_SAMPLE_LIMIT)
-    return [{"status": str(record.status or "")} for record in records]
+    return await FollowupService(db).metric_status_sample(patient_id, limit=_FOLLOWUP_SAMPLE_LIMIT)
 
 
 async def compute_patient_metrics(db, actor, patient_id):
@@ -588,6 +597,13 @@ async def _compute_metrics_for(db, patient_id):
             continue
         result = computer(metric_sources.get(config.metric_key, []), config.params)
         result["name"] = config.name
+        if config.metric_key == "followup_completion_rate":
+            result["sample_scope"] = {"source": "followup_records", "order": "scheduled_date_ascending",
+                "limit": _FOLLOWUP_SAMPLE_LIMIT, "selected_count": len(followups),
+                "soft_deleted_excluded": True, "date_window": None,
+                "limit_reached": len(followups) == _FOLLOWUP_SAMPLE_LIMIT}
+            result["message"] += (f"样本范围：按计划时间升序取前 {_FOLLOWUP_SAMPLE_LIMIT} 条非软删除节点"
+                                  f"（含空时间的既有排序），本次取到 {len(followups)} 条；不推断总体完成率。")
         rows.append(result)
     return {"patient_id": patient_id, "computed_at": _now(), "metrics": rows,
             "note": METRIC_NOTE}

@@ -22,20 +22,34 @@ from app.core.followup_access import ensure_followup_patient_access, followup_pa
 from app.models.user import User
 from app.schemas.health_record import (
     HealthRecordCreate, HealthRecordUpdate, HealthRecordResponse,
-    FollowUpRecordCreate, FollowUpRecordUpdate, FollowUpRecordResponse,
-    CompleteFollowUpRequest, CancelFollowUpRequest, RescheduleFollowUpRequest,
-    ReviewFollowUpRequest, ReEvaluateFollowUpRequest,
     HealthDataCreate, HealthDataResponse, HealthRecordStats, HealthTimelineItem,
-    RecordType, FollowUpType, FollowUpStatus
+    RecordType,
 )
 from app.core.permissions import Permission
 from app.core.health_record_access import ensure_health_record_patient_access
+from app.core.patient_access import PatientAccessError, ensure_self_patient_access, is_domain_state_unavailable
 from app.schemas.followup import (
+    FollowUpRecordCreate, FollowUpRecordUpdate, FollowUpRecordResponse,
+    CompleteFollowUpRequest, CancelFollowUpRequest, RescheduleFollowUpRequest,
+    ReviewFollowUpRequest, ReEvaluateFollowUpRequest, FollowUpType, FollowUpStatus,
     FollowUpDispositionRequest, FollowUpWorkbenchPage,
     FollowUpSummaryPayload, FollowUpDispositionRules, FollowUpDispositionRulesUpdate,
 )
 
 router = APIRouter(prefix="/health-records", tags=["健康档案"])
+
+
+@router.get("/patient-context")
+async def patient_record_context(current_user: User = Depends(get_current_user),
+                                 health_record_service: HealthRecordService = Depends(get_health_record_service)):
+    """Resolve the authenticated patient's clinical identity; no client target is accepted."""
+    try:
+        patient_id = await ensure_self_patient_access(health_record_service.db, current_user)
+    except PatientAccessError as error:
+        if is_domain_state_unavailable(error):
+            raise
+        raise HTTPException(403, detail="当前账号没有可访问的本人患者档案") from None
+    return {"patient_id": patient_id}
 
 # -------- 健康档案管理 --------
 
@@ -825,8 +839,9 @@ async def get_medical_timeline(
     start_date: Optional[datetime] = Query(None, description="开始日期"),
     end_date: Optional[datetime] = Query(None, description="结束日期"),
     item_types: Optional[List[str]] = Query(None, description="项目类型，可多选"),
-    skip: int = Query(0, description="分页偏移量"),
-    limit: int = Query(100, description="每页数量"),
+    skip: int = Query(0, ge=0, description="分页偏移量"),
+    limit: int = Query(100, ge=1, le=500, description="每页数量"),
+    view: str = Query("current", pattern="^(current|history)$", description="current=实时事实及孤儿历史；history=只读历史快照"),
     current_user: User = Depends(get_current_user),
     health_record_service: HealthRecordService = Depends(get_health_record_service)
 ):
@@ -847,7 +862,8 @@ async def get_medical_timeline(
         end_date=end_date,
         item_types=item_types,
         skip=skip,
-        limit=limit
+        limit=limit,
+        view=view,
     )
 
     return result

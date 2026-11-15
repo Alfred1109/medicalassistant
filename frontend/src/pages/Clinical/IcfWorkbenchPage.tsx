@@ -8,10 +8,11 @@ import {
 } from '@mui/material';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
-import api from '../../services/httpClient';
+import { usePatientOptions } from '../../hooks/usePatientOptions';
+import PatientSelect from '../../components/common/PatientSelect';
 import {
   ICF_DOMAINS, ICF_DOMAIN_LABELS, ICF_PENDING_CONFIRMATION_NOTE,
-  dedupePatients, groupIcfItemsByDomain, icfError, icfMetricStateLabel,
+  groupIcfItemsByDomain, icfError, icfMetricStateLabel,
   icfMetricValueText, icfQualifierLabel, validateIcfCategory, validateIcfItems,
 } from '../../utils/icf';
 import type { IcfCategory, IcfItemInput } from '../../utils/icf';
@@ -20,35 +21,24 @@ import {
   type IcfReport,
 } from '../../services/icfService';
 
-interface PatientOption { id: string; name: string }
-
 export default function IcfWorkbenchPage() {
   const actor = useSelector((state: RootState) => state.auth.user);
   if (!actor || !['doctor', 'health_manager', 'admin'].includes(actor.role)) {
     return <Alert severity="error">当前账号无权访问 ICF 工作台。</Alert>;
   }
-  return <IcfWorkspace key={`${actor.id}:${actor.role}`} role={actor.role} />;
+  return <IcfWorkspace key={`${actor.id}:${actor.role}`} role={actor.role} actorId={actor.id} />;
 }
 
-function IcfWorkspace({ role }: { role: string }) {
-  const [patients, setPatients] = useState<PatientOption[]>([]);
-  const [patientError, setPatientError] = useState('');
+function IcfWorkspace({ role, actorId }: { role: string; actorId: string }) {
+  const { patients, error: patientFailure, loading: patientsLoading } = usePatientOptions(role, actorId);
+  const patientError = patientFailure ? icfError(patientFailure, '患者目录加载失败。') : '';
   const [patientId, setPatientId] = useState('');
   const [tab, setTab] = useState(0);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const medical = role === 'doctor' || role === 'health_manager';
-  useEffect(() => {
-    const controller = new AbortController();
-    if (!medical) return () => controller.abort();
-    icfListPatients(role, controller.signal).then(({ data, failure }) => {
-      if (controller.signal.aborted) return;
-      if (failure) setPatientError(icfError(failure, '患者目录加载失败。'));
-      else setPatients(dedupePatients(data ?? []).map(patient => ({ id: patient.id, name: patient.name })));
-    });
-    return () => controller.abort();
-  }, [medical, role]);
+
 
   const run = useCallback(async (action: () => Promise<void>) => {
     setError(''); setMessage('');
@@ -67,14 +57,9 @@ function IcfWorkspace({ role }: { role: string }) {
         {medical && (
           <Paper variant="outlined" sx={{ p: 2 }}>
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }}>
-              <TextField select label="选择患者" size="small" sx={{ minWidth: 240 }}
-                value={patientId}
-                onChange={event => { setPatientId(event.target.value); setError(''); setMessage(''); }}>
-                <MenuItem value="">请选择患者</MenuItem>
-                {patients.map(patient => (
-                  <MenuItem key={patient.id} value={patient.id}>{patient.name}</MenuItem>
-                ))}
-              </TextField>
+              <PatientSelect label="选择患者" size="small" sx={{ minWidth: 240 }}
+                value={patientId} patients={patients} loading={patientsLoading}
+                onChange={value => { setPatientId(value); setError(''); setMessage(''); }} />
               {patientError && <Typography color="error" variant="body2">{patientError}</Typography>}
             </Stack>
           </Paper>
@@ -102,17 +87,6 @@ function IcfWorkspace({ role }: { role: string }) {
       </Stack>
     </Container>
   );
-}
-
-async function icfListPatients(role: string, signal: AbortSignal):
-    Promise<{ data: PatientOption[] | null; failure: unknown }> {
-  try {
-    const url = role === 'health_manager' ? '/health-managers/patients' : '/doctors/patients';
-    const { data } = await api.get<PatientOption[]>(url, { signal });
-    return { data, failure: null };
-  } catch (failure) {
-    return { data: null, failure };
-  }
 }
 
 // ---------------- ICF 评估 ----------------
@@ -258,6 +232,7 @@ function MetricsTab({ patientId, run, onMessage }: {
   const [metrics, setMetrics] = useState<IcfMetricsResult | null>(null);
   const [configs, setConfigs] = useState<IcfMetricConfig[]>([]);
   const [includeDisabled, setIncludeDisabled] = useState(false);
+  const [followupRates, setFollowupRates] = useState<Record<string, string>>({});
 
   const loadConfigs = useCallback(() => run(async () => {
     const { data } = await icfApi.metricConfigs();
@@ -283,6 +258,18 @@ function MetricsTab({ patientId, run, onMessage }: {
   const toggleConfig = (config: IcfMetricConfig, enabled: boolean) => run(async () => {
     await icfApi.updateMetricConfig(config.metric_key, { enabled });
     await loadConfigs();
+  });
+
+  const saveFollowupConfig = (config: IcfMetricConfig) => run(async () => {
+    const text = followupRates[config.id] ?? String(config.params.min_rate ?? 0.8);
+    const minRate = Number(text);
+    if (!text.trim() || !Number.isFinite(minRate) || minRate < 0 || minRate > 1) throw new Error('完成率阈值须在 0 到 1 之间。');
+    await icfApi.updateMetricConfig(config.metric_key, { params: {
+      ...config.params, min_rate: minRate, completion_policy: 'conservative_non_void',
+    } });
+    setMetrics(null);
+    await loadConfigs();
+    onMessage('随访完成率阈值已保存；当前口径待临床确认。');
   });
 
   return (
@@ -320,6 +307,13 @@ function MetricsTab({ patientId, run, onMessage }: {
           </Stack>
           <Typography variant="body2" color="text.secondary">{config.description}</Typography>
           <Typography variant="body2">阈值参数：{JSON.stringify(config.params)}</Typography>
+          {config.metric_key === 'followup_completion_rate' && <Stack spacing={1} sx={{ mt: 1 }}>
+            <Typography variant="body2" color="text.secondary">待临床确认：默认排除作废节点，其他未终态及未知状态均按未完成计入分母；兼容历史完成状态。ICF 保留按计划时间升序前 500 条的既有取样（含空时间排序），未对总体完成率作推断。</Typography>
+            <TextField size="small" type="number" label="完成率预警阈值（0—1）" inputProps={{ min: 0, max: 1, step: 0.05 }}
+              value={followupRates[config.id] ?? String(config.params.min_rate ?? 0.8)}
+              onChange={event => setFollowupRates(values => ({ ...values, [config.id]: event.target.value }))} />
+            <Button size="small" onClick={() => saveFollowupConfig(config)}>保存完成率配置</Button>
+          </Stack>}
           <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
             <Button size="small" onClick={() => toggleConfig(config, !config.enabled)}>
               {config.enabled ? '停用' : '启用'}

@@ -134,9 +134,6 @@ async def get_manager_statistics(
     - followUps:    本人归属患者范围内的随访记录总数/已完成/待完成
                     （followup_records，与 FollowupService 口径同源：
                     排除已删除节点；待完成 = 未终结且仍需跟进的状态）
-    - completedSessionsThisMonth: 本人患者本月完成的训练进度记录数
-                    （rehab_progress，completed=true 且 date 不早于本月；
-                    该集合当前无写入方，通常为 0 —— 是真实空数据而非存根）
     - implemented:  显式标记端点已实现真实聚合
 
     与医生端共用 collect_work_statistics（唯一聚合实现），差异只在康复

@@ -1,3 +1,4 @@
+import { formatAppDate } from './dateTime';
 import type { QualityFactPage, QualityFilters, QualityOverview, QualitySource } from '../types/quality';
 import { patientDomainErrorCopy } from '../services/patientErrors';
 
@@ -5,9 +6,7 @@ export const issueStatusLabels = { open: '待确认', in_progress: '整改中', 
 export const publicationLabels: Record<string, string> = { published: '发布引用及基本结构已核对', unpublished: '尚未发布', withdrawn: '已撤回', stopped: '已取消或归档', invalid_reference: '发布引用或基本结构异常' };
 export const specialStatusLabels: Record<string, string> = { __unknown__: '未识别状态', __missing__: '缺失状态', __invalid__: '无效状态' };
 export function qualityTime(value?: string | null): string {
-  if (!value) return '未记录';
-  const date = new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '时间格式无法识别';
+  return formatAppDate(value, 'localeZh24', { empty: '未记录', invalid: '时间格式无法识别', assumeUtc: true });
 }
 export function qualityFilters(patientId: string, startDate: string, endDate: string): QualityFilters {
   const result: QualityFilters = {};
@@ -63,6 +62,12 @@ export function validQualityOverview(value: QualityOverview): boolean {
       summary.invalid_date_count, summary.unresolved_patient_count].every(count) || !Array.isArray(summary.by_status)
       || summary.by_status.some(item => !item || typeof item.status !== 'string' || !count(item.count))) return false;
   }
+  const completion = value.followups.completion;
+  if (completion && (completion.policy !== 'conservative_non_void' || typeof completion.note !== 'string'
+    || ![completion.total, completion.completed, completion.excluded].every(count)
+    || completion.completed > completion.total
+    || (completion.total === 0 ? completion.value !== null
+      : typeof completion.value !== 'number' || !Number.isFinite(completion.value) || completion.value < 0 || completion.value > 1))) return false;
   return count(value.followups.in_review_count) && Array.isArray(value.plans.publication_states)
     && value.plans.publication_states.every(item => item && typeof item.state === 'string' && count(item.count));
 }

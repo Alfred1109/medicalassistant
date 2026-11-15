@@ -1,7 +1,6 @@
 """
 健康档案相关的schema定义
-包括健康档案、健康数据等；随访相关 schema 已拆分至 .followup（FU01 S1），
-本文件保留转发导入以兼容既有引用（路由层 S2 收敛后移除）。
+包括健康档案、健康数据等；随访相关 schema 位于 .followup。
 """
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Union
@@ -9,26 +8,6 @@ from datetime import datetime
 from enum import Enum
 
 from .base import TimestampModel, PyObjectId, PydanticConfig
-from .followup import (  # noqa: F401  转发导出：随访唯一契约在 app/schemas/followup.py
-    FollowUpType,
-    FollowUpStatus,
-    FollowUpQuestion,
-    FollowUpAnswer,
-    FollowUpTemplate,
-    FollowUpBase,
-    FollowUpRecordCreate,
-    FollowUpRecordUpdate,
-    CompleteFollowUpRequest,
-    CancelFollowUpRequest,
-    RescheduleFollowUpRequest,
-    ReviewDecision,
-    ReviewFollowUpRequest,
-    ReEvaluateFollowUpRequest,
-    FollowUpRecordDB,
-    FollowUpRecordResponse,
-)
-
-
 # 记录类型枚举
 class RecordType(str, Enum):
     MEDICAL_RECORD = "medical_record"          # 门诊病历
@@ -309,10 +288,11 @@ class HealthTimelineItem(BaseModel):
     """健康时间线项目"""
     id: str
     patient_id: str
-    item_type: TimelineItemType
+    # Read-only history may contain historical/custom types beyond the old enum.
+    item_type: str
     title: str
     description: Optional[str] = None
-    timestamp: datetime
+    timestamp: Optional[datetime] = None
     data: Dict[str, Any] = {}
     icon: Optional[str] = None
     color: Optional[str] = None

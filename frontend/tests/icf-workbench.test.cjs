@@ -105,14 +105,6 @@ test('icfError prefers backend conflict/permission copy over fallback', () => {
   assert.equal(icf.icfError({}, 'fallback'), 'fallback');
 });
 
-test('dedupePatients drops invalid and duplicate entries preserving order', () => {
-  const merged = icf.dedupePatients([
-    { id: 'a', name: '甲' }, null, { id: 'a', name: '甲重复' },
-    { id: '', name: '空' }, { id: 'b', name: '乙' },
-  ]);
-  assert.deepEqual(Array.from(merged, patient => patient.id), ['a', 'b']);
-});
-
 test('icf transport uses the /icf router contract and encodes identifiers', async () => {
   const calls = [];
   const transport = Object.fromEntries(['get', 'post', 'put'].map(method => [method,

@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Box,
@@ -174,7 +175,7 @@ const DeviceDataDisplay: React.FC<DeviceDataDisplayProps> = ({
               {latest ? formatValue(latest.value) : '-'}
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              {latest ? `${latest.unit || ''} · ${new Date(latest.timestamp).toLocaleString()}` : '-'}
+              {latest ? `${latest.unit || ''} · ${formatAppDate(latest.timestamp, 'locale', { invalid: 'Invalid Date' })}` : '-'}
             </Typography>
           </CardContent>
         </Card>
@@ -201,7 +202,7 @@ const DeviceDataDisplay: React.FC<DeviceDataDisplayProps> = ({
         {numeric.slice(0, 12).map(({ item, num }) => (
           <Box key={item.id} sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
             <Typography variant="caption" color="text.secondary" sx={{ width: 140, flexShrink: 0 }}>
-              {new Date(item.timestamp).toLocaleString()}
+              {formatAppDate(item.timestamp, 'locale', { invalid: 'Invalid Date' })}
             </Typography>
             <Box sx={{ flex: 1, bgcolor: 'grey.100', borderRadius: 1, height: 16, mr: 1 }}>
               <Box
@@ -232,7 +233,7 @@ const DeviceDataDisplay: React.FC<DeviceDataDisplayProps> = ({
           <ListItem key={item.id} divider>
             <ListItemText
               primary={`${formatValue(item.value)} ${item.unit || ''}`}
-              secondary={new Date(item.timestamp).toLocaleString()}
+              secondary={formatAppDate(item.timestamp, 'locale', { invalid: 'Invalid Date' })}
             />
           </ListItem>
         ))}

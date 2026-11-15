@@ -58,11 +58,13 @@ class DeviceMutationTransactions(unittest.IsolatedAsyncioTestCase):
             await original(self.db.users, {'_id': self.pid}, {'$set': {'practitioners': []}})
         await self.paused_mutation(self.reading, 'users', self.pid, revoke)
         self.assertEqual(await self.db.device_data.count_documents({}), 0)
+        self.assertEqual(await self.db.health_data.count_documents({}), 0)
     async def test_device_removed_during_manual_reading_rejects_write(self):
         async def revoke(original):
             await original(self.db.devices, {'_id': self.did}, {'$set': {'status': 'deleted'}})
         await self.paused_mutation(self.reading, 'devices', self.did, revoke)
         self.assertEqual(await self.db.device_data.count_documents({}), 0)
+        self.assertEqual(await self.db.health_data.count_documents({}), 0)
     async def test_account_disabled_during_configure_rolls_back(self):
         async def operation():
             return await self.service.configure_device(str(self.did), {'new': 'blocked'}, actor=self.actor)

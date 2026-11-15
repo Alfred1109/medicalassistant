@@ -1,3 +1,6 @@
+import { healthDataQualityFlags, healthDataType } from '../../utils/healthDataFacts';
+import { convertHealthDataToTimelineItems, dataTypeLabelMap, getDisplayValue, type HealthDataTimelineItem } from '../../utils/healthDataTimeline';
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect, FC } from 'react';
 import {
   Box,
@@ -23,26 +26,6 @@ import HealthDataTimeline from '../../components/HealthManager/HealthDataTimelin
 import { apiService } from '../../services/api';
 import api from '../../services/api';
 import * as XLSX from 'xlsx';
-
-// 健康数据时间线项目类型
-interface HealthDataTimelineItem {
-  id: string;
-  data_type: string;
-  title: string;
-  description: string;
-  value: string | number;
-  unit: string;
-  timestamp: string;
-  metadata?: {
-    device?: string;
-    location?: string;
-    notes?: string;
-    tags?: string[];
-    alert_status?: string;
-    alert_level?: string;
-    [key: string]: any;
-  };
-}
 
 // 健康数据类型（对应后端 HealthDataResponse：data_content 承载具体数值）
 interface HealthData {
@@ -85,96 +68,6 @@ interface AlertData {
   resolution_notes?: string;
 }
 
-// 数据类型映射
-const dataTypeLabelMap: Record<string, string> = {
-  blood_pressure: '血压测量',
-  blood_glucose: '血糖检测',
-  heart_rate: '心率监测',
-  body_temperature: '体温记录',
-  weight: '体重记录',
-  height: '身高测量',
-  sleep: '睡眠记录',
-  step_count: '步数统计',
-  blood_oxygen: '血氧监测',
-  oxygen_saturation: '血氧监测',
-  respiratory_rate: '呼吸频率'
-};
-
-// 数据类型默认单位
-const getUnitByDataType = (dataType: string): string => {
-  const unitMap: Record<string, string> = {
-    blood_pressure: 'mmHg',
-    blood_glucose: 'mmol/L',
-    heart_rate: 'bpm',
-    body_temperature: '°C',
-    weight: 'kg',
-    height: 'cm',
-    oxygen_saturation: '%',
-    blood_oxygen: '%',
-    respiratory_rate: '次/分',
-    step_count: '步',
-  };
-  return unitMap[dataType] || '';
-};
-
-// 获取显示值（血压支持 {systolic, diastolic} 结构）
-const getDisplayValue = (data: HealthData): string | number => {
-  const value = data.data_content?.value;
-  if (value && typeof value === 'object') {
-    const bp = value as { systolic?: number; diastolic?: number };
-    if (bp.systolic != null && bp.diastolic != null) {
-      return `${bp.systolic}/${bp.diastolic}`;
-    }
-    return JSON.stringify(value);
-  }
-  return value != null ? (value as string | number) : '-';
-};
-
-// 转换健康数据到时间线项目
-const convertHealthDataToTimelineItems = (healthData: HealthData[]): HealthDataTimelineItem[] => {
-  return healthData.map(item => {
-    const semanticType = item.data_content?.type || item.data_type;
-    const baseTitle = dataTypeLabelMap[semanticType] || dataTypeLabelMap[item.data_type] || `${item.data_type}记录`;
-
-    // 如果有预警信息，添加预警标记
-    let title = baseTitle;
-    if (item.alert_level === 'warning') {
-      title = `⚠️ ${title} (警告)`;
-    } else if (item.alert_level === 'critical') {
-      title = `🚨 ${title} (严重)`;
-    }
-
-    // 描述：预警信息 + 备注
-    let description = '';
-    if (item.alert_level) {
-      const alertMsg = item.alert_level === 'warning' ? '警告: 数值超出正常范围' : '严重: 数值大幅偏离正常范围';
-      description += alertMsg;
-      if (item.alert_message) {
-        description += ` - ${item.alert_message}`;
-      }
-      description += '\n';
-    }
-    if (item.data_content?.notes) {
-      description += item.data_content.notes;
-    }
-
-    return {
-      id: item.id,
-      data_type: item.data_type,
-      title,
-      description,
-      value: getDisplayValue(item),
-      unit: item.data_content?.unit || getUnitByDataType(semanticType),
-      timestamp: item.recorded_at || '',
-      metadata: {
-        notes: item.data_content?.notes,
-        source: item.source,
-        alert_status: item.alert_status,
-        alert_level: item.alert_level
-      }
-    };
-  });
-};
 
 function timelinePdfPages(rows: HealthDataTimelineItem[]) {
   const chunks = rows.length ? Array.from({ length: Math.ceil(rows.length / 26) }, (_, index) => rows.slice(index * 26, index * 26 + 26)) : [[]];
@@ -192,6 +85,11 @@ function timelinePdfPages(rows: HealthDataTimelineItem[]) {
     ctx.font = '24px sans-serif';
     (chunk.length ? chunk : [{ timestamp: '', data_type: '', title: '当前没有可导出的记录', value: '', unit: '' } as HealthDataTimelineItem]).forEach((item, index) => {
       ctx.fillText(`${item.timestamp}  ${item.data_type}  ${item.title}  ${item.value} ${item.unit}`.slice(0, 72), 64, 170 + index * 58);
+      if (item.metadata?.quality_flags?.length) {
+        ctx.font = '16px sans-serif';
+        ctx.fillText(`质量标记：${item.metadata.quality_flags.join('、')}`.slice(0, 100), 64, 194 + index * 58);
+        ctx.font = '24px sans-serif';
+      }
     });
     canvas.toBlob(blob => {
       if (!blob) { resolve({ jpeg: new Uint8Array(), width: canvas.width, height: canvas.height }); return; }
@@ -339,6 +237,7 @@ const HealthDataTimelinePage: React.FC = () => {
 
   const tableRows = () => timelineData.map(item => ({
     时间: item.timestamp, 类型: item.data_type, 标题: item.title, 数值: item.value, 单位: item.unit,
+    质量标记: (item.metadata?.quality_flags || []).join('、'),
   }));
 
   const saveBlob = (blob: Blob, name: string) => {
@@ -351,8 +250,8 @@ const HealthDataTimelinePage: React.FC = () => {
   };
 
   const csvBlob = () => {
-    const header = ['时间', '类型', '标题', '数值', '单位'];
-    const lines = timelineData.map(item => [item.timestamp, item.data_type, item.title, item.value, item.unit]
+    const header = ['时间', '类型', '标题', '数值', '单位', '质量标记'];
+    const lines = timelineData.map(item => [item.timestamp, item.data_type, item.title, item.value, item.unit, (item.metadata?.quality_flags || []).join('、')]
       .map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','));
     return new Blob([`\uFEFF${[header.join(','), ...lines].join('\n')}`], { type: 'text/csv;charset=utf-8' });
   };
@@ -503,7 +402,7 @@ const HealthDataTimelinePage: React.FC = () => {
       <Dialog open={!!detailItem} onClose={() => setDetailItem(null)} maxWidth="sm" fullWidth>
         <DialogTitle>
           {detailItem
-            ? dataTypeLabelMap[detailItem.data_content?.type || detailItem.data_type] ||
+            ? dataTypeLabelMap[healthDataType(detailItem)] ||
               `${detailItem.data_type}记录`
             : '数据详情'}
         </DialogTitle>
@@ -521,7 +420,7 @@ const HealthDataTimelinePage: React.FC = () => {
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
                 <strong>测量时间：</strong>
-                {detailItem.recorded_at ? new Date(detailItem.recorded_at).toLocaleString('zh-CN') : '-'}
+                {detailItem.recorded_at ? formatAppDate(detailItem.recorded_at, 'localeZh', { invalid: 'Invalid Date' }) : '-'}
               </Typography>
               {detailItem.source && (
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
@@ -533,6 +432,9 @@ const HealthDataTimelinePage: React.FC = () => {
                   <strong>记录人ID：</strong>{detailItem.recorded_by}
                 </Typography>
               )}
+              {healthDataQualityFlags(detailItem).length > 0 && <Alert severity="warning" sx={{ my: 1 }}>
+                质量待核查：{healthDataQualityFlags(detailItem).join('、')}。原始数值保留，此标记不代表临床诊断。
+              </Alert>}
               {detailItem.alert_level && (
                 <Typography variant="body2" color="error" sx={{ mb: 1 }}>
                   <strong>预警级别：</strong>{detailItem.alert_level}

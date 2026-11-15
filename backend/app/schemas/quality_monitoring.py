@@ -23,8 +23,18 @@ class ProcessSummary(BaseModel):
     by_status: list[StatusCount]
 
 
+class FollowupCompletion(BaseModel):
+    policy: Literal["conservative_non_void"]
+    total: int = Field(ge=0)
+    completed: int = Field(ge=0)
+    excluded: int = Field(ge=0)
+    value: float | None
+    note: str
+
+
 class FollowupProcessSummary(ProcessSummary):
     in_review_count: int = Field(ge=0)
+    completion: FollowupCompletion | None = None
 
 
 class PlanProcessSummary(ProcessSummary):

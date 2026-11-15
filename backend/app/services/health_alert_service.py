@@ -3,10 +3,12 @@
 提供健康数据阈值管理和健康数据异常检测功能
 """
 import logging
+import hashlib
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Union
-from bson import ObjectId
+from bson import ObjectId, json_util
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorCollection
+from fastapi import HTTPException
 
 from app.core.patient_access import load_patient_doc, patient_assignment_field
 from app.core.patient_identity import resolve_unique_account
@@ -17,6 +19,7 @@ from app.schemas.health_data_threshold import (
     BloodPressureThresholdCreate, SingleValueThresholdCreate
 )
 from app.services.notification_service import NotificationService
+from app.services.review_state_machine import commit_versioned_change, review_conflict
 
 logger = logging.getLogger(__name__)
 
@@ -741,57 +744,61 @@ class HealthAlertService:
         alert = HealthDataAlert.from_mongo(alert_doc)
         return self._map_alert_to_response(alert)
     
-    async def update_alert(self, alert_id: str, data: AlertUpdate) -> Optional[AlertResponse]:
-        """更新预警状态
-        
-        Args:
-            alert_id: 预警ID
-            data: 更新请求数据
-            
-        Returns:
-            Optional[AlertResponse]: 更新后的预警响应，不存在则返回None
-        """
-        # 查询预警
-        alert_doc = await self.alerts.find_one({"_id": ObjectId(alert_id)})
-        if not alert_doc:
+    async def update_alert(self, alert_id: str, data: AlertUpdate, *, actor_id=None) -> Optional[AlertResponse]:
+        """All three-state edits use the same CAS and atomic disposition history."""
+        changes = data.model_dump(exclude_none=True, exclude={"expected_version", "request_id"})
+        return await self._change_alert(alert_id, changes, actor_id=actor_id,
+            expected_version=data.expected_version, request_id=data.request_id)
+
+    async def _change_alert(self, alert_id, changes, *, actor_id, expected_version=None, request_id=None):
+        row = await self.alerts.find_one({"_id": ObjectId(alert_id)})
+        if row is None:
             return None
+        version = 0 if row.get("version") is None else row["version"]
+        expected = version if expected_version is None else expected_version
+        if (type(version) is not int or version < 0 or type(expected) is not int or expected < 0):
+            raise review_conflict("ALERT_VERSION_CONFLICT", "预警版本无效，请核实存量记录")
+        fingerprint = hashlib.sha256(json_util.dumps(
+            [changes, expected_version], sort_keys=True).encode()).hexdigest()
+
+        def replay(document):
+            if request_id is None:
+                return False
+            for event in document.get("timeline", []):
+                if event.get("request_id") == request_id and event.get("actor_id") == actor_id:
+                    if event.get("fingerprint") != fingerprint:
+                        raise review_conflict("ALERT_IDEMPOTENCY_CONFLICT", "相同请求标识不能用于不同内容")
+                    return True
+            return False
         
-        # 创建对象
-        alert = HealthDataAlert.from_mongo(alert_doc)
-        
-        # 更新字段
-        update_data = {}
-        if data.status is not None:
-            update_data["status"] = data.status
-            alert.status = data.status
-        if data.resolved_at is not None:
-            update_data["resolved_at"] = data.resolved_at
-            alert.resolved_at = data.resolved_at
-        if data.resolved_by is not None:
-            update_data["resolved_by"] = data.resolved_by
-            alert.resolved_by = data.resolved_by
-        if data.resolution_notes is not None:
-            update_data["resolution_notes"] = data.resolution_notes
-            alert.resolution_notes = data.resolution_notes
-        
-        # 更新时间
-        update_data["updated_at"] = datetime.utcnow()
-        alert.updated_at = update_data["updated_at"]
-        
-        # 如果状态变为已解决，但未提供解决时间，则设置为当前时间
-        if data.status == "resolved" and data.resolved_at is None:
-            update_data["resolved_at"] = update_data["updated_at"]
-            alert.resolved_at = update_data["resolved_at"]
-        
-        # 更新数据库
-        if update_data:
-            await self.alerts.update_one(
-                {"_id": ObjectId(alert_id)},
-                {"$set": update_data}
-            )
-        
-        # 返回响应
-        return self._map_alert_to_response(alert)
+        if replay(row):
+            # A receipt prevents reapplying an operation; the response is the current resource.
+            return self._map_alert_to_response(HealthDataAlert.from_mongo(row))
+        now = datetime.utcnow()
+        values = {**changes, "updated_at": now}
+        if changes.get("status") in {"resolved", "ignored"} and changes.get("resolved_at") is None:
+            values["resolved_at"] = now
+        event = {"actor_id": actor_id, "at": now, "from_status": row["status"],
+                 "to_status": changes.get("status", row["status"]), "version": expected + 1,
+                 "changes": changes}
+        if request_id is not None:
+            event.update(request_id=request_id, fingerprint=fingerprint)
+        try:
+            await commit_versioned_change(self.alerts, row, expected_version=expected,
+                changes=values, version_field="version", history_field="timeline", event=event,
+                allow_missing_version=True,
+                conflict_error=lambda: review_conflict("ALERT_VERSION_CONFLICT", "预警已变化，请刷新后操作"))
+        except HTTPException as exc:
+            if not isinstance(exc.detail, dict) or exc.detail.get("code") != "ALERT_VERSION_CONFLICT":
+                raise
+            # A concurrent identical retry may have committed the same receipt.
+            latest = await self.alerts.find_one({"_id": row["_id"]}) if request_id else None
+            if latest and replay(latest):
+                return self._map_alert_to_response(HealthDataAlert.from_mongo(latest))
+            raise
+        row.update(values, version=expected + 1)
+        row["timeline"] = [*row.get("timeline", []), event]
+        return self._map_alert_to_response(HealthDataAlert.from_mongo(row))
     
     async def list_alerts(
         self,
@@ -855,89 +862,21 @@ class HealthAlertService:
         # 转换为响应对象
         return [self._map_alert_to_response(HealthDataAlert.from_mongo(doc)) for doc in alert_list]
     
-    async def resolve_alert(
-        self,
-        alert_id: str,
-        resolved_by: str,
-        resolution_notes: Optional[str] = None
-    ) -> Optional[AlertResponse]:
-        """解决预警
-        
-        Args:
-            alert_id: 预警ID
-            resolved_by: 解决人ID
-            resolution_notes: 解决备注
-            
-        Returns:
-            Optional[AlertResponse]: 更新后的预警响应，不存在则返回None
-        """
-        # 更新预警状态
-        update_data = {
-            "status": "resolved",
-            "resolved_at": datetime.utcnow(),
-            "resolved_by": resolved_by,
-            "updated_at": datetime.utcnow()
-        }
-        
-        if resolution_notes:
-            update_data["resolution_notes"] = resolution_notes
-        
-        # 更新数据库
-        result = await self.alerts.update_one(
-            {"_id": ObjectId(alert_id)},
-            {"$set": update_data}
-        )
-        
-        if result.modified_count == 0:
-            # 检查是否是因为记录不存在
-            alert = await self.alerts.find_one({"_id": ObjectId(alert_id)})
-            if not alert:
-                return None
-        
-        # 获取更新后的预警
-        return await self.get_alert(alert_id)
-    
-    async def ignore_alert(
-        self,
-        alert_id: str,
-        resolved_by: str,
-        resolution_notes: Optional[str] = None
-    ) -> Optional[AlertResponse]:
-        """忽略预警
-        
-        Args:
-            alert_id: 预警ID
-            resolved_by: 处理人ID
-            resolution_notes: 处理备注
-            
-        Returns:
-            Optional[AlertResponse]: 更新后的预警响应，不存在则返回None
-        """
-        # 更新预警状态
-        update_data = {
-            "status": "ignored",
-            "resolved_at": datetime.utcnow(),
-            "resolved_by": resolved_by,
-            "updated_at": datetime.utcnow()
-        }
-        
-        if resolution_notes:
-            update_data["resolution_notes"] = resolution_notes
-        
-        # 更新数据库
-        result = await self.alerts.update_one(
-            {"_id": ObjectId(alert_id)},
-            {"$set": update_data}
-        )
-        
-        if result.modified_count == 0:
-            # 检查是否是因为记录不存在
-            alert = await self.alerts.find_one({"_id": ObjectId(alert_id)})
-            if not alert:
-                return None
-        
-        # 获取更新后的预警
-        return await self.get_alert(alert_id)
+    async def resolve_alert(self, alert_id: str, resolved_by: str,
+                            resolution_notes: Optional[str] = None, *,
+                            expected_version=None, request_id=None) -> Optional[AlertResponse]:
+        return await self._change_alert(alert_id,
+            {"status": "resolved", "resolved_by": resolved_by,
+             **({"resolution_notes": resolution_notes} if resolution_notes else {})},
+            actor_id=resolved_by, expected_version=expected_version, request_id=request_id)
+
+    async def ignore_alert(self, alert_id: str, resolved_by: str,
+                           resolution_notes: Optional[str] = None, *,
+                           expected_version=None, request_id=None) -> Optional[AlertResponse]:
+        return await self._change_alert(alert_id,
+            {"status": "ignored", "resolved_by": resolved_by,
+             **({"resolution_notes": resolution_notes} if resolution_notes else {})},
+            actor_id=resolved_by, expected_version=expected_version, request_id=request_id)
     
     async def get_patient_alerts_stats(self, patient_id: str) -> AlertStatistics:
         """获取患者预警统计
@@ -1060,5 +999,6 @@ class HealthAlertService:
             resolved_at=alert.resolved_at,
             resolved_by=alert.resolved_by,
             resolution_notes=alert.resolution_notes,
-            metadata=alert.metadata
-        ) 
+            metadata=alert.metadata,
+            version=alert.version
+        )

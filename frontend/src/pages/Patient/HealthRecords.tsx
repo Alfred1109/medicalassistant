@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { formatAppDate } from '../../utils/dateTime';
+import { timelineMeasurement } from '../../utils/healthTimeline';
 import { useSelector } from 'react-redux';
 import {
   Box,
@@ -13,6 +14,7 @@ import {
   ListItemText,
   Chip,
   CircularProgress,
+  Button,
 } from '@mui/material';
 import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
@@ -40,7 +42,8 @@ interface HealthTimelineItem {
   item_type?: string;
   title: string;
   description?: string | null;
-  occurred_at?: string;
+  timestamp?: string | null;
+  data?: { source?: { view?: string; orphan?: boolean; ambiguous?: boolean }; metadata?: { source?: string; quality_flags?: unknown; values?: Record<string, unknown> } };
 }
 
 // 患者端随访只读呈现（T73）：状态与小结均为后端 FollowUpRecordResponse 投影
@@ -89,6 +92,8 @@ const HealthRecords: React.FC = () => {
   const [error, setError] = useState(false);
   const [records, setRecords] = useState<HealthRecordItem[]>([]);
   const [timeline, setTimeline] = useState<HealthTimelineItem[]>([]);
+  const [timelineView, setTimelineView] = useState<'current' | 'history'>('current');
+  const [timelinePage, setTimelinePage] = useState(0);
   const [followUps, setFollowUps] = useState<FollowUpRecord[]>([]);
 
   const patientId = currentUser?.id;
@@ -110,10 +115,22 @@ const HealthRecords: React.FC = () => {
     setError(false);
 
     const loadData = async () => {
+      let targetPatientId: string;
+      try {
+        const context = await apiClient.get<{ patient_id: string }>('/health-records/patient-context');
+        if (cancelled) return;
+        if (!context || typeof context.patient_id !== 'string' || !context.patient_id) throw new Error('invalid patient context');
+        targetPatientId = context.patient_id;
+      } catch {
+        if (!cancelled) { setRecords([]); setTimeline([]); setFollowUps([]); setError(true); setLoading(false); }
+        return;
+      }
       const [recordsRes, timelineRes, followUpsRes] = await Promise.allSettled([
-        apiService.getHealthRecords(patientId),
-        apiClient.get<HealthTimelineItem[]>(`/health-records/timeline/${patientId}`),
-        apiService.getFollowUps(patientId),
+        apiService.getHealthRecords(targetPatientId),
+        apiClient.get<HealthTimelineItem[]>(`/health-records/timeline/${encodeURIComponent(targetPatientId)}`, {
+          params: { view: timelineView, skip: timelinePage * 50, limit: 50 },
+        }),
+        apiService.getFollowUps(targetPatientId),
       ]);
 
       if (cancelled) return;
@@ -147,7 +164,7 @@ const HealthRecords: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [patientId]);
+  }, [patientId, timelineView, timelinePage]);
 
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
@@ -179,6 +196,16 @@ const HealthRecords: React.FC = () => {
           </Tabs>
 
           <Box sx={{ p: 3 }}>
+            {tabValue === 1 && <Box sx={{ mb: 2 }}>
+              <Button disabled={loading || timelineView === 'current'} onClick={() => { setTimelineView('current'); setTimelinePage(0); }}>当前事实</Button>
+              <Button disabled={loading || timelineView === 'history'} onClick={() => { setTimelineView('history'); setTimelinePage(0); }}>只读历史快照</Button>
+              <Typography variant="body2" color="text.secondary">{timelineView === 'history'
+                ? '历史快照保留当时记录，可能与当前事实不同；包含已删除来源的原快照。'
+                : '实时读取健康数据、随访与评估；无法核实来源的历史条目单独标识。健康记录按最近更新时间排列，原始时间保留在来源数据中。'}</Typography>
+              <Button disabled={loading || timelinePage === 0} onClick={() => setTimelinePage(page => page - 1)}>上一页</Button>
+              <Typography component="span" variant="body2">第 {timelinePage + 1} 页</Typography>
+              <Button disabled={loading || timeline.length < 50} onClick={() => setTimelinePage(page => page + 1)}>下一页</Button>
+            </Box>}
             {loading ? (
               <PanelLoading />
             ) : error ? (
@@ -321,16 +348,19 @@ const HealthRecords: React.FC = () => {
                                 )}
                               </Box>
                               <Typography variant="body2" color="text.secondary">
-                                {formatDateTime(item.occurred_at) ?? '时间未知'}
+                                {formatDateTime(item.timestamp) ?? '时间未知'}
                               </Typography>
                             </Box>
                           }
                           secondary={
-                            item.description ? (
+                            <>
                               <Typography variant="body2" component="span" color="text.primary">
-                                {item.description}
+                                {item.data?.source?.view === 'history' ? `${item.data.source.ambiguous ? '来源关联有歧义的历史快照' : item.data.source.orphan ? '孤儿历史快照' : '历史快照'}：` : ''}{timelineMeasurement(item.data?.metadata?.values) ?? item.description}
                               </Typography>
-                            ) : undefined
+                              {item.data?.metadata?.source && <Typography variant="caption" component="span" display="block">来源：{item.data.metadata.source}</Typography>}
+                              {Array.isArray(item.data?.metadata?.quality_flags) && item.data.metadata.quality_flags.length > 0 && <Typography variant="body2" component="span" display="block" color="warning.main">读数质量待核实：{item.data.metadata.quality_flags.map(String).join('、')}</Typography>}
+                              {item.data?.metadata?.quality_flags != null && !Array.isArray(item.data.metadata.quality_flags) && <Typography variant="body2" component="span" display="block" color="warning.main">读数质量标志格式异常，请核实原始记录。</Typography>}
+                            </>
                           }
                         />
                       </ListItem>

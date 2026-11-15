@@ -15,13 +15,13 @@ function load(relative, replacements) {
   return compiled.exports;
 }
 
-test('patient device queries carry an explicit patient filter without changing the legacy account adapter', async () => {
+test('patient device queries carry an explicit patient filter and user devices use the current identity', async () => {
   const calls = [];
   const transport = { get: async (...args) => { calls.push(args); return { data: [] }; } };
   const { apiService } = load('services/api.ts', { './httpClient': transport,
     '../config/apiPaths': { API_COLLECTION_PATHS: { DEVICES: '/devices/' } } });
   await apiService.getPatientDevices('patient-a');
-  await apiService.getUserDevices('legacy-account-parameter');
+  await apiService.getUserDevices();
   assert.deepEqual(calls, [['/devices/', { params: { patient_id: 'patient-a' } }], ['/devices/']]);
 });
 
@@ -30,7 +30,7 @@ test('the device adapter rejects another patient response and binds to the selec
   let rows = [{ id: 'device-a', patient_id: 'patient-a' }];
   const apiService = {
     getPatientDevices: async id => { calls.push(['list', id]); return { data: rows }; },
-    bindUserDevice: async (account, payload) => { calls.push(['bind', account, payload]); return { data: payload }; },
+    bindUserDevice: async payload => { calls.push(['bind', payload]); return { data: payload }; },
   };
   const { deviceService } = load('services/deviceService.ts', { './api': { apiService } });
   await assert.rejects(deviceService.getPatientDevices(''), /先选择患者/);
@@ -41,5 +41,5 @@ test('the device adapter rejects another patient response and binds to the selec
   rows = null;
   await assert.rejects(deviceService.getPatientDevices('patient-a'), /所属患者/);
   await deviceService.bindDevice({ patient_id: 'patient-a', device_type: '血压计', name: '合成设备' });
-  assert.deepEqual(calls.at(-1), ['bind', '', { patient_id: 'patient-a', device_type: '血压计', name: '合成设备' }]);
+  assert.deepEqual(calls.at(-1), ['bind', { patient_id: 'patient-a', device_type: '血压计', name: '合成设备' }]);
 });

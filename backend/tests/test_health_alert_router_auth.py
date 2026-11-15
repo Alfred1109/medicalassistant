@@ -28,7 +28,6 @@ from app.core.config import settings
 from app.api.dependencies import get_database
 from app.main import app
 from app.schemas.user import UserResponse
-from app.services.user_service import UserService
 from patient_identity_fake import identity_find_from_lookup, legacy_domain_state
 
 PATIENT_ID = str(ObjectId())
@@ -219,7 +218,7 @@ class HealthAlertRouterAuthTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_database] = fake_database
         self.operator = make_operator()
         self.get_user_mock = AsyncMock(return_value=self.operator)
-        self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
+        self.lookup = patch("app.core.user_record.load_user_response", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 
@@ -411,6 +410,21 @@ class HealthAlertRouterAuthTests(unittest.IsolatedAsyncioTestCase):
                                          params={"patient_id": OTHER_PATIENT_ID},
                                          headers=self.auth())
         self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_alert_versions_conflict_and_disposition_identity_is_server_owned(self):
+        self.seed_alerts()
+        self.set_operator("doctor", DOCTOR_ID)
+        own_id = self.own_alert_ids()[0]
+        response = await self.client.put(f"/api/health/alerts/alerts/{own_id}",
+            headers=self.auth(), json={"status": "resolved", "resolved_by": ADMIN_ID,
+                                       "expected_version": 0, "request_id": "route-request-001"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["resolved_by"], DOCTOR_ID)
+        self.assertEqual(response.json()["version"], 1)
+        response = await self.client.put(f"/api/health/alerts/alerts/{own_id}/ignore",
+            headers=self.auth(), params={"expected_version": 0})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "ALERT_VERSION_CONFLICT")
 
     # ── admin 豁免 ───────────────────────────────────────────────────
 

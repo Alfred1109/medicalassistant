@@ -369,7 +369,9 @@ class HealthDataAlert:
         resolved_by: Optional[str] = None,  # 解决人
         resolution_notes: Optional[str] = None,  # 解决备注
         _id: str = None,
-        metadata: Dict[str, Any] = None
+        metadata: Dict[str, Any] = None,
+        version: int = 0,
+        timeline: Optional[List[Dict[str, Any]]] = None
     ):
         self.health_data_id = health_data_id
         self.patient_id = patient_id
@@ -389,6 +391,8 @@ class HealthDataAlert:
         self.resolution_notes = resolution_notes
         self._id = _id or str(ObjectId())
         self.metadata = metadata or {}
+        self.version = 0 if version is None else version
+        self.timeline = timeline or []
     
     @classmethod
     def from_mongo(cls, mongo_doc):
@@ -439,4 +443,4 @@ class HealthDataAlert:
             alert_level=check_result["status"],
             recorded_at=recorded_at,
             metadata={"message": check_result.get("message")}
-        ) 
+        )

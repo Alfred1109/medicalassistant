@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from app.core.exceptions import AppBaseException
 from app.core.followup_access import followup_patient_scope
+from app.core.followup_semantics import followup_completion
 from app.core.patient_access import ensure_patient_access, patient_domain_mode
 from app.core.patient_identity import identity_key, load_identity_groups, resolve_unique_account
 from app.patients.legacy import LegacyPatientIdentityError
@@ -66,6 +67,11 @@ def process_csv(overview, patient_id):
             rows.append((name, key, getattr(summary, key), ""))
         rows.extend((name, "status:" + item.status, item.count, "") for item in summary.by_status)
     rows.append(("followups", "in_review_count", overview.followups.in_review_count, "当前待医护审阅节点数"))
+    if overview.followups.completion:
+        completion = overview.followups.completion
+        for key in ("policy", "total", "completed", "excluded", "value"):
+            value = getattr(completion, key)
+            rows.append(("followups", "completion:" + key, "无法计算" if value is None else value, completion.note))
     rows.extend(("plans", "publication:" + item.state, item.count,
         "当前发布引用及必要结构已核对；不保证全部嵌套内容通过患者DTO校验或具临床效力" if item.state == "published" else "当前发布事实")
         for item in overview.plans.publication_states)
@@ -196,11 +202,19 @@ class QualityMonitoringService:
         scope = await self.scope(actor, patient_id)
         followup, plan = await asyncio.gather(self._read("followup", scope, start, end), self._read("rehab_plan", scope, start, end))
         followup_summary = self.summary(followup, FOLLOWUP_STATUSES)
+        config = await self.db.icf_metric_configs.find_one({"metric_key": "followup_completion_rate"})
+        try:
+            completion = followup_completion(
+                {item["status"]: item["count"] for item in followup_summary["by_status"]},
+                (config or {}).get("params"))
+        except ValueError as exc:
+            raise _error("INVALID_METRIC_PARAMS", str(exc)) from None
         publication_counts = {row["_id"]: row["count"] for row in plan.get("publications", [])}
         return QualityProcessOverview(generated_at=datetime.now(timezone.utc),
             scope_kind="selected_patient" if patient_id else "all_source_records" if scope is None else "assigned_patients",
             window=ProcessWindow(start_date=start, end_date=end),
             followups=FollowupProcessSummary(**followup_summary,
+                completion=completion,
                 in_review_count=next(item["count"] for item in followup_summary["by_status"] if item["status"] == "in_review")),
             plans=PlanProcessSummary(**self.summary(plan, PLAN_STATUSES),
                 publication_states=[{"state": state, "count": publication_counts.get(state, 0)} for state in PUBLICATION_STATES]))

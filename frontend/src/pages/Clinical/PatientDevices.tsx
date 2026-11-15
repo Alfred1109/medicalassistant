@@ -1,5 +1,6 @@
+import PatientSelect from '../../components/common/PatientSelect';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Box, Button, CircularProgress, MenuItem, Stack, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, CircularProgress, Stack, Typography } from '@mui/material';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
@@ -95,11 +96,8 @@ const PatientDevices: React.FC = () => {
       {loading && <CircularProgress size={24} />}
       {error && <Alert severity="error" action={<Button color="inherit" onClick={() => setRetry(value => value + 1)}>重试</Button>}>{error}</Alert>}
       {!loading && !error && choices.length === 0 && <Alert severity="info">当前没有已分配的患者。</Alert>}
-      {choices.length > 0 && <TextField select label="患者" value={selectedId} disabled={managing}
-        onChange={event => setSelectedId(event.target.value)} sx={{ maxWidth: 400 }}>
-        <MenuItem value="">选择患者</MenuItem>
-        {choices.map(patient => <MenuItem key={patient.id} value={patient.id}>{patient.name}</MenuItem>)}
-      </TextField>}
+      {choices.length > 0 && <PatientSelect label="患者" value={selectedId} disabled={managing}
+        onChange={setSelectedId} patients={choices} emptyLabel="选择患者" sx={{ maxWidth: 400 }} />}
       {moreError && <Alert severity="error" action={<Button color="inherit" onClick={handleLoadMore}>重试</Button>}>{moreError}</Alert>}
       {showLoadMore && <Button variant="outlined" onClick={handleLoadMore}
         disabled={loadingMore || managing} sx={{ alignSelf: 'flex-start' }}>

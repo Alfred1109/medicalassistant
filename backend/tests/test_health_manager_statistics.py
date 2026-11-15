@@ -2,7 +2,7 @@
 
 覆盖 GET /api/health-managers/statistics：
 - 健康管理师角色可见，返回真实聚合（患者数、康复方案状态分布、随访状态
-  分布、本月完成训练记录数），响应体非空字典且带 implemented 标记；
+  分布），响应体非空字典且带 implemented 标记；
 - 无数据时如实为 0（不再返回存根空对象 {}）；
 - 归属判定与对象授权同源（health_managers 归属字段），非归属患者的
   方案/随访不计入；
@@ -61,6 +61,12 @@ def _match(doc, filter_):
                             return False
                     except TypeError:
                         # 类型括号语义：字符串与 datetime 不参与范围比较
+                        return False
+                elif op == "$lte":
+                    try:
+                        if not (value is not None and value <= operand):
+                            return False
+                    except TypeError:
                         return False
                 elif op == "$lt":
                     try:
@@ -168,7 +174,7 @@ class HealthManagerStatisticsContractTestBase(unittest.IsolatedAsyncioTestCase):
 
 class HealthManagerStatisticsContractTests(HealthManagerStatisticsContractTestBase):
     async def test_seeded_statistics_are_real_aggregation(self):
-        """命中数据：患者数、方案状态分布、随访状态分布、本月完成训练按真实集合聚合。"""
+        """命中数据：患者数、方案状态、随访状态真实聚合，不读取旧执行集合。"""
         db = FakeDatabase()
         self._seed_manager(db)
         self._seed_assigned_patient(db)
@@ -197,10 +203,15 @@ class HealthManagerStatisticsContractTests(HealthManagerStatisticsContractTestBa
                                     "created_by": MANAGER_ID, "status": "scheduled",
                                     "scheduled_date": datetime.utcnow(), "deleted": True})
 
+        # 历史集合虽有记录，也不应进入新的自报统计。
         db.rehab_progress.insert({"_id": "pg1", "patient_id": PATIENT_ID, "completed": True,
                                   "date": datetime.utcnow() - timedelta(days=1)})
-        db.rehab_progress.insert({"_id": "pg2", "patient_id": PATIENT_ID, "completed": False,
-                                  "date": datetime.utcnow()})
+        db.rehab_execution_events.insert({"_id": "ev1", "patient_id": PATIENT_ID,
+            "event_type": "patient_report", "schema_version": 1, "source": "patient_self_report",
+            "execution_status": "not_done", "performed_at": datetime.utcnow() - timedelta(days=1)})
+        db.rehab_execution_events.insert({"_id": "ev2", "patient_id": str(ObjectId()),
+            "event_type": "patient_report", "schema_version": 1, "source": "patient_self_report",
+            "execution_status": "completed", "performed_at": datetime.utcnow()})
 
         self._setup(db, _make_user())
         response = await self._client.get("/api/health-managers/statistics")
@@ -211,7 +222,8 @@ class HealthManagerStatisticsContractTests(HealthManagerStatisticsContractTestBa
         self.assertEqual(body["patientCount"], 2)
         self.assertEqual(body["rehabPlans"], {"total": 3, "active": 2, "completed": 1})
         self.assertEqual(body["followUps"], {"total": 4, "completed": 1, "pending": 2})
-        self.assertEqual(body["completedSessionsThisMonth"], 1)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["total"], 1)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["not_done"], 1)
 
     async def test_empty_scope_returns_real_zeros_not_stub(self):
         """无数据：implemented=true + 真实 0 计数，而非存根空对象。"""
@@ -226,7 +238,7 @@ class HealthManagerStatisticsContractTests(HealthManagerStatisticsContractTestBa
         self.assertEqual(body["patientCount"], 0)
         self.assertEqual(body["rehabPlans"], {"total": 0, "active": 0, "completed": 0})
         self.assertEqual(body["followUps"], {"total": 0, "completed": 0, "pending": 0})
-        self.assertEqual(body["completedSessionsThisMonth"], 0)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["total"], 0)
 
     async def test_other_manager_patients_not_counted(self):
         """归属隔离：其他健康管理师的患者不计入本人的统计。"""

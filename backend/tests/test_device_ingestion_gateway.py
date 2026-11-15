@@ -65,6 +65,7 @@ class IngestionServiceTestBase(unittest.IsolatedAsyncioTestCase):
         self.db = FakeDatabase(["devices", "device_data",
                                 "device_collection_sessions", "rehab_plans"])
         self.db.seed("devices", [make_device()])
+        self.db.seed("users", [{"_id": ObjectId(PATIENT_ID), "role": "patient", "is_active": True}])
         self.service = device_ingestion_service.__class__(db=self.db)
         # 分析链打桩：验证复用既有 device_analysis_service，不重造
         self.analysis_mock = AsyncMock()

@@ -10,13 +10,14 @@ from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
-from app.models.health_record import HealthRecord, HealthData, MedicalTimeline
+from app.models.health_record import HealthRecord, HealthData
 from app.schemas.health_record import (
     HealthRecordCreate, HealthRecordUpdate, HealthRecordResponse,
     HealthDataCreate, HealthDataResponse, HealthRecordStats, HealthTimelineItem,
     RecordType
 )
 from app.services.followup_service import FollowupService
+from app.services.medical_timeline import read_timeline
 
 
 class HealthRecordService:
@@ -33,8 +34,6 @@ class HealthRecordService:
         self.health_records = db[HealthRecord.collection_name]
         # 健康数据集合
         self.health_data = db[HealthData.collection_name]
-        # 医疗时间线集合
-        self.medical_timelines = db[MedicalTimeline.collection_name]
         # 随访域唯一入口（FU01 S2）：统计域随访计数转调，不在本服务直连随访集合
         self.followup_service = FollowupService(db)
 
@@ -70,9 +69,6 @@ class HealthRecordService:
         # 更新ID
         record._id = str(result.inserted_id)
         
-        # 创建关联的时间线项目
-        timeline_item = MedicalTimeline.from_health_record(record)
-        await self.medical_timelines.insert_one(timeline_item.to_mongo())
         
         # 返回响应
         return self._map_health_record_to_response(record)
@@ -154,18 +150,6 @@ class HealthRecordService:
         
         # 保存到数据库
         await self.health_records.replace_one({"_id": ObjectId(record_id)}, record.to_mongo())
-        
-        # 更新关联的时间线项目
-        timeline_item = MedicalTimeline.from_health_record(record)
-        await self.medical_timelines.update_one(
-            {"item_type": "health_record", "related_ids": record_id},
-            {"$set": {
-                "title": record.title,
-                "description": f"{record.record_type.capitalize()} 记录",
-                "occurred_at": record.updated_at,
-                "metadata.record_type": record.record_type
-            }}
-        )
         
         # 返回响应
         return self._map_health_record_to_response(record)
@@ -298,22 +282,12 @@ class HealthRecordService:
             patient_id, since=datetime.utcnow()
         )
         
-        # 获取最近的活动
-        recent_timeline_cursor = self.medical_timelines.find(
-            {"patient_id": patient_id}
-        ).sort("occurred_at", -1).limit(5)
-        recent_timeline = await recent_timeline_cursor.to_list(length=5)
-        recent_activity = []
-        for item in recent_timeline:
-            timeline = MedicalTimeline.from_mongo(item)
-            recent_activity.append({
-                "id": timeline._id,
-                "type": timeline.item_type,
-                "title": timeline.title,
-                "date": timeline.occurred_at.isoformat(),
-                "description": timeline.description
-            })
-        
+        # 与时间线端点共用实时事实投影；存量孤儿历史仍只读可见。
+        recent_timeline = await self.get_medical_timeline(patient_id, limit=5)
+        recent_activity = [{"id": item.id, "type": item.item_type, "title": item.title,
+                            "date": item.timestamp.isoformat() if item.timestamp else None,
+                            "description": item.description} for item in recent_timeline]
+
         # 计算完成度（简单示例）
         completion_percentage = 100.0  # 实际应用中可能需要更复杂的计算
         
@@ -367,9 +341,6 @@ class HealthRecordService:
         # 更新ID
         health_data._id = str(result.inserted_id)
         
-        # 创建关联的时间线项目
-        timeline_item = MedicalTimeline.from_health_data(health_data)
-        await self.medical_timelines.insert_one(timeline_item.to_mongo())
         
         # 返回响应
         return self._map_health_data_to_response(health_data)
@@ -480,9 +451,6 @@ class HealthRecordService:
         # 更新ID
         health_data._id = str(result.inserted_id)
         
-        # 创建关联的时间线项目
-        timeline_item = MedicalTimeline.from_health_data(health_data)
-        await self.medical_timelines.insert_one(timeline_item.to_mongo())
         
         # 返回响应
         return self._map_health_data_to_response(health_data)
@@ -537,9 +505,6 @@ class HealthRecordService:
         # 更新ID
         health_data._id = str(result.inserted_id)
         
-        # 创建关联的时间线项目
-        timeline_item = MedicalTimeline.from_health_data(health_data)
-        await self.medical_timelines.insert_one(timeline_item.to_mongo())
         
         # 返回响应
         return self._map_health_data_to_response(health_data)
@@ -553,7 +518,8 @@ class HealthRecordService:
         end_date: Optional[datetime] = None,
         item_types: Optional[List[str]] = None,
         skip: int = 0,
-        limit: int = 100
+        limit: int = 100,
+        view: str = "current",
     ) -> List[HealthTimelineItem]:
         """获取患者的医疗时间线
         
@@ -568,28 +534,9 @@ class HealthRecordService:
         Returns:
             List[HealthTimelineItem]: 健康时间线项目列表
         """
-        # 构建查询条件
-        query = {"patient_id": patient_id}
-        
-        if item_types:
-            query["item_type"] = {"$in": item_types}
-            
-        date_query = {}
-        if start_date:
-            date_query["$gte"] = start_date
-        if end_date:
-            date_query["$lte"] = end_date
-            
-        if date_query:
-            query["occurred_at"] = date_query
-        
-        # 查询数据库
-        cursor = self.medical_timelines.find(query).sort("occurred_at", -1).skip(skip).limit(limit)
-        timeline_items = await cursor.to_list(length=limit)
-        
-        # 转换为响应对象
-        return [self._map_timeline_to_response(MedicalTimeline.from_mongo(doc)) for doc in timeline_items]
-    
+        return await read_timeline(self.db, patient_id, view=view,
+            start_date=start_date, end_date=end_date, item_types=item_types, skip=skip, limit=limit)
+
     # -------- 对象映射方法 --------
     
     def _map_health_record_to_response(self, health_record: HealthRecord) -> HealthRecordResponse:
@@ -641,28 +588,3 @@ class HealthRecordService:
             updated_at=health_data.updated_at,
             metadata=health_data.metadata
         )
-    
-    def _map_timeline_to_response(self, timeline: MedicalTimeline) -> HealthTimelineItem:
-        """将医疗时间线对象映射为响应对象
-        
-        Args:
-            timeline: 医疗时间线对象
-            
-        Returns:
-            HealthTimelineItem: 健康时间线项目响应对象
-        """
-        return HealthTimelineItem(
-            id=timeline._id,
-            patient_id=timeline.patient_id,
-            item_type=timeline.item_type,
-            title=timeline.title,
-            description=timeline.description,
-            timestamp=timeline.occurred_at,
-            data={
-                "related_ids": timeline.related_ids,
-                "metadata": timeline.metadata
-            },
-            icon=timeline.metadata.get("icon") if timeline.metadata else None,
-            color=timeline.metadata.get("color") if timeline.metadata else None,
-            importance=timeline.metadata.get("importance", 0) if timeline.metadata else 0
-        ) 

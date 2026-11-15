@@ -129,15 +129,3 @@ export function icfError(error: unknown, fallback: string): string {
   if (typeof response?.data?.message === 'string') return response.data.message;
   return fallback;
 }
-
-// 患者下拉的归并去重（沿用患者列表分页共享口径）。
-export function dedupePatients<T extends { id: string }>(patients: (T | null | undefined)[]): T[] {
-  const known = new Set<string>();
-  const merged: T[] = [];
-  for (const patient of patients ?? []) {
-    if (!patient || typeof patient.id !== 'string' || !patient.id || known.has(patient.id)) continue;
-    known.add(patient.id);
-    merged.push(patient);
-  }
-  return merged;
-}

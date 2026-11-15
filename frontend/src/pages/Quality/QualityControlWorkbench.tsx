@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Button, Container, MenuItem, Paper, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
+import React, { useState } from 'react';
+import { Alert, Button, Container, Paper, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
 import { useSelector } from 'react-redux';
 import api from '../../services/httpClient';
 import type { RootState } from '../../store';
-import type { Patient } from '../../types/patient.types';
+import PatientSelect from '../../components/common/PatientSelect';
+import { usePatientOptions } from '../../hooks/usePatientOptions';
 import type { QualityFact, QualityFilters } from '../../types/quality';
 import { qualityError, qualityFilters } from '../../utils/quality';
 import QualityMonitoringPanel from './QualityMonitoringPanel';
@@ -17,8 +18,8 @@ export default function QualityControlWorkbench() {
 }
 
 function QualityWorkspace({ actor }: {actor: {id: string; role: string}}) {
-  const [patients, setPatients] = useState<Patient[]>([]);
-  const [patientError, setPatientError] = useState('');
+  const { patients, loading: patientsLoading, error: patientFailure } = usePatientOptions(actor.role, actor.id);
+  const patientError = patientFailure ? qualityError(patientFailure, '患者目录加载失败，当前仍可查询后端限定的全部授权范围。') : '';
   const [patientId, setPatientId] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -30,15 +31,6 @@ function QualityWorkspace({ actor }: {actor: {id: string; role: string}}) {
   const [issueId, setIssueId] = useState<string | null>(null);
   const [issueRefresh, setIssueRefresh] = useState(0);
   const medical = actor.role === 'doctor' || actor.role === 'health_manager';
-  useEffect(() => {
-    const controller = new AbortController();
-    setPatients([]); setPatientError('');
-    if (!medical) return () => controller.abort();
-    api.get<Patient[]>(actor.role === 'health_manager' ? '/health-managers/patients' : '/doctors/patients', { signal: controller.signal })
-      .then(({data}) => { if (!controller.signal.aborted) { if (!Array.isArray(data)) throw new Error('invalid patients'); setPatients(data); } })
-      .catch(failure => { if (!controller.signal.aborted) setPatientError(qualityError(failure, '患者目录加载失败，当前仍可查询后端限定的全部授权范围。')); });
-    return () => controller.abort();
-  }, [actor.role, medical]);
   const apply = () => {
     try { setFilters(qualityFilters(patientId, startDate, endDate)); setFilterError(''); }
     catch (failure) { setFilterError((failure as Error).message); }
@@ -52,9 +44,8 @@ function QualityWorkspace({ actor }: {actor: {id: string; role: string}}) {
     {!medical && <Alert severity="info">管理员可查看当前记录与处置历史；问题登记、分派和复核由当前获授权的医护操作。</Alert>}
     <Paper variant="outlined" sx={{ p: 2 }}><Stack spacing={2}>
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-        {medical ? <TextField select label="患者范围" value={patientId} size="small" sx={{ minWidth: 230 }} onChange={event => setPatientId(event.target.value)}>
-          <MenuItem value="">全部启用且获授权患者</MenuItem>{patients.map(patient => <MenuItem key={patient.id} value={patient.id}>{patient.name}</MenuItem>)}
-        </TextField> : <TextField label="患者编号（选填）" size="small" value={patientId} onChange={event => setPatientId(event.target.value)} />}
+        {medical ? <PatientSelect label="患者范围" value={patientId} size="small" sx={{ minWidth: 230 }}
+          onChange={setPatientId} patients={patients} loading={patientsLoading} emptyLabel="全部启用且获授权患者" /> : <TextField label="患者编号（选填）" size="small" value={patientId} onChange={event => setPatientId(event.target.value)} />}
         <TextField label="开始日期（选填）" type="date" size="small" value={startDate} onChange={event => setStartDate(event.target.value)} InputLabelProps={{ shrink: true }} />
         <TextField label="结束日期（选填）" type="date" size="small" value={endDate} onChange={event => setEndDate(event.target.value)} InputLabelProps={{ shrink: true }} />
         <Button variant="contained" onClick={apply}>应用筛选</Button><Button onClick={clear}>清除筛选</Button>

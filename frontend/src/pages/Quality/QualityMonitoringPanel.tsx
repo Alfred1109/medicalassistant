@@ -90,6 +90,12 @@ export default function QualityMonitoringPanel({ filters, source, patientNames, 
       <Alert severity="info">缺失时间、时间格式异常及患者引用待核实数量覆盖当前完整读取范围，不受日期筛选限制；无有效日期的记录不能被放进具体日期窗口。</Alert>
       <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">{summary.by_status.map(item => <Chip key={item.status} label={`${statusText(source, item.status)}：${item.count}`} />)}</Stack>
       {source === 'followup' && <Typography>待医护审阅：{visibleOverview.followups.in_review_count}</Typography>}
+      {source === 'followup' && visibleOverview.followups.completion && <Alert severity="info">
+        随访完成率：{visibleOverview.followups.completion.value === null ? '无法计算' : `${(visibleOverview.followups.completion.value * 100).toFixed(1)}%`}
+        （已完成 {visibleOverview.followups.completion.completed} / 非作废 {visibleOverview.followups.completion.total}；
+        排除作废 {visibleOverview.followups.completion.excluded}）。{visibleOverview.followups.completion.note}
+        当前筛选范围的过程统计与 ICF 按计划时间升序前 500 条取样范围可能不同。
+      </Alert>}
       {source === 'rehab_plan' && <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">{visibleOverview.plans.publication_states.map(item => <Chip key={item.state} label={`${publicationLabels[item.state] || item.state}：${item.count}`} />)}</Stack>}
       {source === 'rehab_plan' && <Typography variant="body2" color="text.secondary">发布统计核对发布引用及必要结构，不替代完整内容核验或临床审核。</Typography>}
     </>}

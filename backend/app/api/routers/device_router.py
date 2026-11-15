@@ -406,9 +406,10 @@ class GatewayCredentialResponse(BaseModel):
 
 
 class CollectionSessionStartRequest(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
-    plan_id: Optional[str] = Field(None, description="关联康复方案ID（可选）")
-    exercise_id: Optional[str] = Field(None, description="关联方案内运动项ID/名称（可选）")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    plan_id: Optional[str] = Field(None, description="关联患者当前已发布康复方案ID（可选）")
+    version_id: Optional[str] = Field(None, description="关联方案已发布版本ID")
+    prescription_item_id: Optional[str] = Field(None, description="关联稳定处方项ID")
     notes: Optional[str] = Field(None, max_length=500)
 
 
@@ -419,7 +420,8 @@ class CollectionSessionResponse(BaseModel):
     patient_id: str
     status: str
     plan_id: Optional[str] = None
-    exercise_id: Optional[str] = None
+    version_id: Optional[str] = None
+    prescription_item_id: Optional[str] = None
     linkage_status: str
     linkage_error: Optional[str] = None
     started_at: datetime
@@ -520,6 +522,59 @@ async def get_device_quality_report(
     return await ingestion.quality_report(device_id, start=start, end=end)
 
 
+@router.get("/{device_id}/publication-options", response_model=List[dict])
+async def list_device_publication_options(
+    device_id: str,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+):
+    """List current published exercise items for this device's assigned patient."""
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES)
+    patient_id = str(device.get("patient_id") or "")
+    if not patient_id:
+        return []
+
+    plans = db.rehab_plans.find({
+        "patient_id": patient_id,
+        "published_version_id": {"$type": "string"},
+    })
+    result = []
+    async for plan in plans:
+        if plan.get("status") in {"cancelled", "canceled", "archived"}:
+            continue
+        version_id = plan.get("published_version_id")
+        if not ObjectId.is_valid(version_id):
+            continue
+        version = await db.rehab_plan_versions.find_one({
+            "_id": ObjectId(version_id), "plan_id": str(plan["_id"]),
+            "patient_id": patient_id, "workflow": "patient_publication",
+            "status": "published",
+        })
+        if not version:
+            continue
+        items_snapshot = version.get("items_snapshot")
+        # SavePublicationDraft caps the complete publication at 200 items.
+        # More indicates corrupt/incompatible persisted state; never silently
+        # omit a valid linked item from the selection list.
+        if not isinstance(items_snapshot, list) or len(items_snapshot) > 200:
+            raise HTTPException(status_code=503,
+                                detail="已发布处方快照异常或超出系统上限，无法安全关联设备")
+        exercise_items = [{"item_id": row["item_id"], "name": row.get("name") or "运动处方"}
+                          for row in items_snapshot if isinstance(row, dict)
+                          and row.get("intervention_type") == "exercise"
+                          and isinstance(row.get("item_id"), str)]
+        if exercise_items:
+            result.append({
+                "plan_id": str(plan["_id"]),
+                "plan_name": (version.get("snapshot") or {}).get("name") or plan.get("name") or "康复方案",
+                "version_id": version_id,
+                "items": exercise_items,
+            })
+    return result
+
+
 # ── 采集会话 ─────────────────────────────────────────────────────────────
 
 
@@ -532,8 +587,7 @@ async def start_collection_session(
     device_api: Any = Depends(get_device_service),
     ingestion: Any = Depends(get_device_ingestion_service),
 ):
-    """开始采集会话：关联患者与（可选）康复方案执行项（能核实则打通，
-    否则登记 linkage=registered 待人工关联）。"""
+    """开始独立设备观测，可显式关联患者当前已发布方案处方项。"""
     device = await _get_device_or_404(device_id, device_api)
     await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES, write=True)
     patient_id = str(device.get("patient_id")) if device.get("patient_id") else None
@@ -542,7 +596,9 @@ async def start_collection_session(
     try:
         session = await ingestion.start_collection_session(
             device, patient_id, plan_id=payload.plan_id,
-            exercise_id=payload.exercise_id, notes=payload.notes)
+            version_id=payload.version_id,
+            prescription_item_id=payload.prescription_item_id,
+            notes=payload.notes)
     except DeviceIngestionError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc))
     return session
@@ -558,8 +614,7 @@ async def end_collection_session(
     device_api: Any = Depends(get_device_service),
     ingestion: Any = Depends(get_device_ingestion_service),
 ):
-    """结束/取消采集会话：写会话摘要（读数/质量计数），linked 会话登记
-    康复方案执行进度（completed=False，不替患者虚报训练完成）。"""
+    """结束/取消设备观测会话并写入读数与质量摘要。"""
     device = await _get_device_or_404(device_id, device_api)
     await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES, write=True)
     session = await ingestion.end_collection_session(

@@ -284,7 +284,8 @@ class DeviceService:
           超范围读数、设备类型不兼容一律拒绝（MANUAL_READING_INVALID 422，
           事务中止零写入）；未登记数据类型与自动采集管道语义一致，打
           unregistered_metric 标记放行（不硬拒、不猜测范围）；合格读数按
-          标准精度与标准单位归一化后入库。
+          标准精度与标准单位归一化后，同事务写入原始 device_data 与
+          health_data 事实，二者共享记录 ID；任一写入失败整体回滚。
         - 事务提交后 best-effort 触发阈值预警检查
           （_run_manual_reading_alert_check）：预警是读数的派生副作用，
           不进读数事务（理由见该方法 docstring），检查结论如实写回
@@ -299,6 +300,8 @@ class DeviceService:
                         "metadata": {"source": "手工登记", "recorded_by": str(actor.id)},
                         "created_at": datetime.utcnow()}
             await db.device_data.insert_one(document, session=session)
+            from .device_health_data import insert_device_health_data
+            await insert_device_health_data(db, document, device.get("patient_id"), session=session)
             document["id"] = str(document.pop("_id"))
             context["patient_id"] = device.get("patient_id")
             return document
@@ -391,6 +394,7 @@ class DeviceService:
         data_type = document["data_type"]
         vital_type = MANUAL_READING_VITAL_TYPES.get(data_type)
         check_value = self._as_numeric(document["value"])
+        check_unit, recorded_at = document.get("unit"), document.get("timestamp")
         if check_value is None:
             return {"status": "skipped", "message": "读数值非数值，未做阈值比对"}
         if vital_type is None:
@@ -398,13 +402,20 @@ class DeviceService:
             if part is None:
                 return {"status": "skipped",
                         "message": "该数据类型未配置健康阈值映射，未做阈值比对"}
-            counterpart = await self._paired_blood_pressure_value(db, document, part)
+            fact = await db.health_data.find_one({"_id": ObjectId(document["id"]),
+                "patient_id": str(patient_id), "device_id": document["device_id"],
+                "data_type": "vital_sign", "deleted": {"$ne": True}})
+            check_value = self._blood_pressure_fact_value(fact, patient_id, document["device_id"], data_type)
+            if check_value is None or not isinstance(fact.get("recorded_at"), datetime):
+                return {"status": "skipped", "message": "血压分量缺少可追溯、质量合格且单位一致的患者事实，未做阈值比对"}
+            counterpart = await self._paired_blood_pressure_value(db, fact, part)
             if counterpart is None:
                 return {"status": "skipped",
-                        "message": "血压双分量不成对（窗口内缺另一分量读数），未做阈值比对"}
+                        "message": "血压双分量不成对（窗口内缺少可追溯、质量合格且单位一致的同患者分量），未做阈值比对"}
             vital_type = "blood_pressure"
             check_value = {part: check_value,
                            "diastolic" if part == "systolic" else "systolic": counterpart}
+            check_unit, recorded_at = fact["data"]["unit"], fact["recorded_at"]
 
         from .health_alert_service import HealthAlertService
         check = await HealthAlertService(db).check_health_data(
@@ -413,23 +424,48 @@ class DeviceService:
             data_type="vital_sign",
             vital_type=vital_type,
             value=check_value,
-            recorded_at=document.get("timestamp"),
-            unit=document.get("unit"))
+            recorded_at=recorded_at,
+            unit=check_unit)
         return {"status": check["status"], "message": check.get("message"),
                 "threshold_id": check.get("threshold_id"),
                 "alert_id": check.get("alert_id")}
 
-    async def _paired_blood_pressure_value(self, db, document: Dict, part: str) -> Optional[float]:
-        """取同设备、该读数时刻前配对窗口内另一血压分量的最近读数。"""
+    @classmethod
+    def _blood_pressure_fact_value(cls, fact, patient_id, device_id, component):
+        """Only traceable, accepted device facts in the standard mmHg unit may pair."""
+        if not isinstance(fact, dict) or fact.get("deleted") is True:
+            return None
+        metadata, data = fact.get("metadata"), fact.get("data")
+        if not isinstance(metadata, dict) or not isinstance(data, dict):
+            return None
+        if (fact.get("patient_id") != str(patient_id) or fact.get("device_id") != device_id
+                or fact.get("source") != "device" or metadata.get("device_id") != device_id
+                or metadata.get("device_data_id") != str(fact.get("_id"))
+                or metadata.get("measurement_source") not in {"automated", "手工登记"}
+                or metadata.get("simulated") is True or metadata.get("quality_flags") != []
+                or fact.get("quality_flags", []) != [] or data.get("type") != component
+                or isinstance(data.get("value"), bool)
+                or not isinstance(data.get("unit"), str) or data["unit"].strip().casefold() != "mmhg"):
+            return None
+        return cls._as_numeric(data.get("value"))
+
+    async def _paired_blood_pressure_value(self, db, fact: Dict, part: str) -> Optional[float]:
+        """Preserve the existing 30-minute backwards window using same-patient facts.
+
+        The nearest fact must itself be trustworthy; an invalid nearest measurement
+        is not silently replaced with an older convenient reading. No raw replay or
+        pre-cutover telemetry is promoted into a clinical pair.
+        """
         counterpart_type = ("blood_pressure_diastolic" if part == "systolic"
                             else "blood_pressure_systolic")
-        since = document["timestamp"] - BLOOD_PRESSURE_PAIR_WINDOW
-        docs = await db.device_data.find({
-            "device_id": document["device_id"],
-            "data_type": counterpart_type,
-            "timestamp": {"$gte": since, "$lte": document["timestamp"]},
-        }).sort("timestamp", -1).limit(1).to_list(1)
-        return self._as_numeric(docs[0].get("value")) if docs else None
+        measured_at = fact["recorded_at"]
+        docs = await db.health_data.find({
+            "patient_id": fact["patient_id"], "device_id": fact["device_id"],
+            "data_type": "vital_sign", "data.type": counterpart_type,
+            "deleted": {"$ne": True},
+            "recorded_at": {"$gte": measured_at - BLOOD_PRESSURE_PAIR_WINDOW, "$lte": measured_at},
+        }).sort("recorded_at", -1).limit(1).to_list(1)
+        return self._blood_pressure_fact_value(docs[0], fact["patient_id"], fact["device_id"], counterpart_type) if docs else None
 
     @staticmethod
     def _as_numeric(value) -> Optional[float]:

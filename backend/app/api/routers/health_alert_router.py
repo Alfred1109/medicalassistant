@@ -360,13 +360,18 @@ async def update_alert(
         )
     await _authorize_alert_management(db, current_user, existing.patient_id)
     try:
-        alert = await service.update_alert(alert_id, data)
+        # 处置身份来自当前认证主体，客户端不能冒名填写解决人。
+        if data.resolved_by is not None or data.status in {"resolved", "ignored"}:
+            data = data.model_copy(update={"resolved_by": current_user.id})
+        alert = await service.update_alert(alert_id, data, actor_id=current_user.id)
         if not alert:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="预警不存在"
             )
         return alert
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -377,6 +382,8 @@ async def update_alert(
 async def resolve_alert(
     alert_id: str,
     resolution_notes: Optional[str] = Query(None, description="解决备注"),
+    expected_version: Optional[int] = Query(None, ge=0),
+    request_id: Optional[str] = Query(None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
     current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service),
     db: AsyncIOMotorDatabase = Depends(get_database)
@@ -393,7 +400,8 @@ async def resolve_alert(
         alert = await service.resolve_alert(
             alert_id=alert_id,
             resolved_by=current_user.id,
-            resolution_notes=resolution_notes
+            resolution_notes=resolution_notes,
+            expected_version=expected_version, request_id=request_id
         )
         if not alert:
             raise HTTPException(
@@ -401,6 +409,8 @@ async def resolve_alert(
                 detail="预警不存在"
             )
         return alert
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -411,6 +421,8 @@ async def resolve_alert(
 async def ignore_alert(
     alert_id: str,
     resolution_notes: Optional[str] = Query(None, description="忽略原因"),
+    expected_version: Optional[int] = Query(None, ge=0),
+    request_id: Optional[str] = Query(None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
     current_user: UserResponse = Depends(get_current_user),
     service: HealthAlertService = Depends(get_health_alert_service),
     db: AsyncIOMotorDatabase = Depends(get_database)
@@ -427,7 +439,8 @@ async def ignore_alert(
         alert = await service.ignore_alert(
             alert_id=alert_id,
             resolved_by=current_user.id,
-            resolution_notes=resolution_notes
+            resolution_notes=resolution_notes,
+            expected_version=expected_version, request_id=request_id
         )
         if not alert:
             raise HTTPException(
@@ -435,6 +448,8 @@ async def ignore_alert(
                 detail="预警不存在"
             )
         return alert
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

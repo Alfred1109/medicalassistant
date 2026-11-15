@@ -103,6 +103,8 @@ class AlertUpdate(BaseModel):
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[str] = None
     resolution_notes: Optional[str] = None
+    expected_version: Optional[int] = Field(default=None, ge=0, strict=True)
+    request_id: Optional[str] = Field(default=None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 # 预警响应模型
@@ -112,6 +114,7 @@ class AlertResponse(AlertBase, TimestampModel):
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[str] = None
     resolution_notes: Optional[str] = None
+    version: int = 0
 
     class Config(PydanticConfig):
         pass

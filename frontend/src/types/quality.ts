@@ -11,7 +11,10 @@ export interface QualityOverview {
   scope_kind: 'assigned_patients' | 'all_source_records' | 'selected_patient'; read_consistency: 'independent_live_reads';
   publication_validation: 'reference_and_required_structure';
   window: { start_date: string | null; end_date: string | null; followup_date_field: string; plan_date_field: string };
-  followups: ProcessSummary & { in_review_count: number };
+  followups: ProcessSummary & { in_review_count: number; completion?: {
+    policy: 'conservative_non_void'; total: number; completed: number; excluded: number;
+    value: number | null; note: string;
+  } | null };
   plans: ProcessSummary & { publication_states: Array<{state: string; count: number}> };
 }
 export interface QualityFact {

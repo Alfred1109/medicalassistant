@@ -48,6 +48,8 @@ export interface IcfMetricRow {
   threshold: number | null;
   detail?: unknown[];
   message?: string;
+  sample_scope?: { source: 'followup_records'; order: 'scheduled_date_ascending'; limit: number;
+    selected_count: number; soft_deleted_excluded: boolean; date_window: null; limit_reached: boolean };
 }
 
 export interface IcfMetricsResult {
@@ -65,7 +67,7 @@ export interface IcfMetricConfig {
   name: string;
   description: string;
   enabled: boolean;
-  params: Record<string, number>;
+  params: Record<string, number | string>;
   note?: string;
 }
 
@@ -118,7 +120,7 @@ export const icfApi = {
     api.post<IcfMetricsResult>(`/icf/patients/${path(patientId)}/metrics/evaluate`, {}),
   metricConfigs: (signal?: AbortSignal) =>
     api.get<{ metrics: IcfMetricConfig[]; note: string }>('/icf/metric-configs', { signal }),
-  updateMetricConfig: (metricKey: string, body: { enabled?: boolean; params?: Record<string, number> }) =>
+  updateMetricConfig: (metricKey: string, body: { enabled?: boolean; params?: IcfMetricConfig['params'] }) =>
     api.put<{ metric_key: string }>(`/icf/metric-configs/${path(metricKey)}`, body),
 
   // 正式报告

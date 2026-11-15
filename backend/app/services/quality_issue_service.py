@@ -13,11 +13,14 @@ from app.core.exceptions import AppBaseException
 from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump, legacy_document_fence
 from app.db.transactions import run_transaction
 from app.core.patient_access import (PatientAccessError, is_domain_state_unavailable,
-                                     patient_assignment_field, patient_domain_context)
+                                     patient_assignment_field, patient_domain_context,
+                                     assigned_scope_ids, patient_domain_mode)
 from app.core.patient_identity import identity_key, load_identity_groups, resolve_unique_account
-from app.patients.legacy import LegacyPatientIdentityError
+from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
+from app.patients.repository import ClinicalPatientRepository
 from app.services.followup_service import FollowupService
 from app.services.rehabilitation_service import RehabilitationService
+from app.services.review_state_machine import commit_versioned_change
 
 ISSUES = "quality_issues"
 OPERATIONS = "quality_issue_operations"
@@ -278,10 +281,10 @@ class QualityIssueService:
             else:
                 raise fail("QUALITY_ACTION_INVALID", "质控操作无效", 422)
             event["to_status"] = changes["status"]
-            result = await self.issues.update_one({"_id": document["_id"], "version": payload.expected_version},
-                {"$set": {**changes, "updated_at": event["at"]}, "$inc": {"version": 1}, "$push": {"timeline": event}}, session=session)
-            if result.matched_count != 1:
-                raise fail("QUALITY_VERSION_CONFLICT", "质控问题已变化，请刷新后操作")
+            await commit_versioned_change(self.issues, document, expected_version=payload.expected_version,
+                changes={**changes, "updated_at": event["at"]}, version_field="version",
+                history_field="timeline", event=event, session=session,
+                conflict_error=lambda: fail("QUALITY_VERSION_CONFLICT", "质控问题已变化，请刷新后操作"))
             document.update(changes, version=document["version"] + 1, updated_at=event["at"])
             document["timeline"].append(event)
             await self._write_receipt(key, fingerprint, document, actor, kind, session)

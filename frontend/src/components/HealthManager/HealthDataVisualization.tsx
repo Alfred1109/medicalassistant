@@ -1,3 +1,6 @@
+import { healthObservations, healthDataValueText, healthDataTimestamp, isTrendObservation, type HealthDataFact, type HealthObservation } from '../../utils/healthDataFacts';
+import HealthDataQualityNotice from '../common/HealthDataQualityNotice';
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect } from 'react';
 import type { FC } from 'react';
 import type { MouseEvent } from 'react';
@@ -25,8 +28,7 @@ import {
   ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell, 
   BarChart, Bar, Legend 
 } from 'recharts';
-import { format, parseISO, subDays, addDays, eachDayOfInterval } from 'date-fns';
-import { zhCN } from 'date-fns/locale';
+import { subDays, startOfDay } from 'date-fns';
 import { Line as ChartJSLine } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -52,19 +54,11 @@ ChartJS.register(
 );
 
 // 数据类型定义
-interface HealthDataPoint {
-  id: string;
-  data_type: string;
-  data: any;
-  recorded_at: string;
-  source?: string;
-}
+type HealthDataPoint = HealthDataFact;
 
 // 处理后的数据点类型
-interface ProcessedDataPoint {
+interface ProcessedDataPoint extends HealthObservation {
   date: string;
-  value?: number;
-  unit?: string;
   formattedDate?: string;
   [key: string]: any;
 }
@@ -108,6 +102,8 @@ const CHART_COLORS = [
 // 数据单位映射
 const DATA_UNITS: {[key: string]: string} = {
   blood_pressure: 'mmHg',
+  blood_pressure_systolic: 'mmHg',
+  blood_pressure_diastolic: 'mmHg',
   blood_glucose: 'mmol/L',
   heart_rate: 'bpm',
   body_temperature: '°C',
@@ -176,6 +172,8 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
   const getDataTypeLabel = (type: string) => {
     const dataTypeMapping: { [key: string]: string } = {
       blood_pressure: '血压',
+      blood_pressure_systolic: '收缩压（独立分量）',
+      blood_pressure_diastolic: '舒张压（独立分量）',
       heart_rate: '心率',
       body_temperature: '体温',
       respiratory_rate: '呼吸频率',
@@ -197,11 +195,7 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
   
   // 格式化日期
   const formatDate = (dateString: string, formatStr: string = 'MM-dd') => {
-    try {
-      return format(parseISO(dateString), formatStr, { locale: zhCN });
-    } catch (err) {
-      return dateString;
-    }
+    return formatAppDate(dateString, formatStr, { invalid: dateString });
   };
   
   // 处理数据，转换为图表所需格式
@@ -213,114 +207,28 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
       return;
     }
     
-    // 筛选选定数据类型的数据
-    const filteredData = data.filter(item => item.data_type === dataType);
-    
-    // 获取所有可用的数据类型
-    const types = [...new Set(filteredData.map(item => {
-      if (dataType === 'vital_sign') {
-        return item.data.vital_type;
-      } else if (dataType === 'lab_result') {
-        return item.data.test_name;
-      }
-      return item.data_type;
-    }))];
-    
-    const typeObjects = types.map((type: any) => ({
-      type: String(type),
-      label: getDataTypeLabel(String(type)),
-      unit: DATA_UNITS[String(type)] || ''
-    }));
-    
+    const observations = healthObservations(data, dataType);
+    const types = [...new Set(observations.map(point => point.type))];
+    const typeObjects = types.map(type => ({ type, label: getDataTypeLabel(type),
+      unit: observations.find(point => point.type === type)?.unit || DATA_UNITS[type] || '' }));
     setAvailableDataTypes(typeObjects);
-    
-    // 如果未选择类型，默认选择第一个
-    if (selectedDataTypes.length === 0 && typeObjects.length > 0) {
-      setSelectedDataTypes([typeObjects[0].type]);
-    }
-    
-    // 基于时间范围筛选和处理数据
-    const startDate = getStartDate(timeRange);
-    const endDate = new Date();
-    
-    // 为每个数据类型创建连续日期序列
-    const dateRange = eachDayOfInterval({ start: startDate, end: endDate });
-    const dateMap: { [key: string]: ProcessedDataPoint } = {};
-    
-    // 初始化日期映射
-    dateRange.forEach(date => {
-      const dateStr = format(date, 'yyyy-MM-dd');
-      dateMap[dateStr] = {
-        date: dateStr,
-        formattedDate: format(date, 'MM/dd', { locale: zhCN })
-      };
-      // 初始化所有数据类型字段
-      types.forEach(type => {
-        dateMap[dateStr][type] = null;
-      });
+    setSelectedDataTypes(previous => {
+      const retained = previous.filter(type => types.includes(type));
+      return retained.length ? retained : types.slice(0, 1);
     });
-    
-    // 填充数据
-    filteredData.forEach(item => {
-      try {
-        const itemDate = format(parseISO(item.recorded_at), 'yyyy-MM-dd');
-        
-        if (parseISO(itemDate) < startDate || parseISO(itemDate) > endDate) {
-          return;
-        }
-        
-        const itemType = dataType === 'vital_sign' 
-          ? item.data.vital_type 
-          : dataType === 'lab_result' 
-            ? item.data.test_name 
-            : item.data_type;
-            
-        if (!itemType || !dateMap[itemDate]) {
-          return;
-        }
-            
-        let value: number | null = null;
-        
-        if (dataType === 'vital_sign') {
-          if (itemType === 'blood_pressure') {
-            // 血压特殊处理，存储收缩压和舒张压
-            if (item.data.value && typeof item.data.value === 'object') {
-              dateMap[itemDate]['systolic'] = item.data.value.systolic;
-              dateMap[itemDate]['diastolic'] = item.data.value.diastolic;
-              // 平均动脉压 MAP = (SBP + 2*DBP) / 3
-              const systolic = item.data.value.systolic || 0;
-              const diastolic = item.data.value.diastolic || 0;
-              value = (systolic + 2 * diastolic) / 3;
-            }
-          } else {
-            // 其他生命体征直接使用值
-            value = typeof item.data.value === 'number' 
-              ? item.data.value 
-              : parseFloat(item.data.value);
-          }
-        } else if (dataType === 'lab_result') {
-          value = typeof item.data.value === 'number' 
-            ? item.data.value 
-            : parseFloat(item.data.value);
-        } else {
-          value = typeof item.data.value === 'number' 
-            ? item.data.value 
-            : parseFloat(item.data.value);
-        }
-        
-        if (value !== null && !isNaN(value)) {
-          dateMap[itemDate][itemType] = value;
-        }
-      } catch (err) {
-        console.error('处理数据项时出错:', err, item);
-      }
-    });
-    
-    // 转换为数组
-    const processed = Object.values(dateMap);
-    setProcessedData(processed);
-    
-  }, [data, dataType, timeRange, selectedDataTypes]);
+    const start = startOfDay(getStartDate(timeRange)).getTime();
+    const end = Date.now();
+    // Preserve one row per actual observation: no daily overwrite, MAP inference or BP pairing.
+    setProcessedData(observations.filter(point => {
+      const timestamp = healthDataTimestamp(point.timestamp);
+      return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;
+    }).sort((a, b) => healthDataTimestamp(a.timestamp) - healthDataTimestamp(b.timestamp)).map(point => ({
+      ...point, date: point.timestamp,
+      formattedDate: formatAppDate(point.timestamp, 'MM/dd HH:mm:ss', { assumeUtc: true, parse: 'native' }),
+      [point.type]: point.value,
+    })));
+
+  }, [data, dataType, timeRange]);
   
   // 自定义工具提示组件
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -364,7 +272,7 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
     
     return (
       <ResponsiveContainer width="100%" height={height * 0.8}>
-        <BarChart data={processedData}>
+        <BarChart data={processedData.map(row => !isTrendObservation(row) ? { ...row, [row.type]: null } : row)}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="formattedDate" />
           <YAxis />
@@ -397,7 +305,7 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
     
     return (
       <ResponsiveContainer width="100%" height={height * 0.8}>
-        <LineChart data={processedData}>
+        <LineChart data={processedData.map(row => !isTrendObservation(row) ? { ...row, [row.type]: null } : row)}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="formattedDate" />
           <YAxis />
@@ -412,7 +320,7 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
               stroke={CHART_COLORS[index % CHART_COLORS.length]} 
               dot={{ r: 4 }} 
               activeDot={{ r: 8 }}
-              connectNulls
+              connectNulls={false}
             />
           ))}
         </LineChart>
@@ -438,6 +346,7 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
           <thead>
             <tr style={{ backgroundColor: '#f5f5f5' }}>
               <th style={{ padding: '8px', border: '1px solid #ddd' }}>日期</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd' }}>质量标记</th>
               {selectedDataTypes.map(type => (
                 <th key={type} style={{ padding: '8px', border: '1px solid #ddd' }}>
                   {getDataTypeLabel(type)} ({availableDataTypes.find(t => t.type === type)?.unit || ''})
@@ -449,9 +358,10 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
             {processedData.map((item, index) => (
               <tr key={index} style={{ backgroundColor: index % 2 === 0 ? 'white' : '#f9f9f9' }}>
                 <td style={{ padding: '8px', border: '1px solid #ddd' }}>{item.formattedDate}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd' }}>{item.qualityFlags.join('、') || '未附质量标记'}</td>
                 {selectedDataTypes.map(type => (
                   <td key={`${index}-${type}`} style={{ padding: '8px', border: '1px solid #ddd' }}>
-                    {item[type] !== null ? item[type] : '-'}
+                    {item.type === type ? item.value ?? `${healthDataValueText(item.rawValue)}（非有效数值）` : '-'}
                   </td>
                 ))}
               </tr>
@@ -566,6 +476,7 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
           </Stack>
         </Box>
         
+        <HealthDataQualityNotice observations={healthObservations(data, dataType)} label={getDataTypeLabel} />
         {loading ? (
           <Box display="flex" justifyContent="center" alignItems="center" height={height}>
             <CircularProgress />
@@ -578,4 +489,4 @@ const HealthDataVisualization: FC<HealthDataVisualizationProps> = ({
   );
 };
 
-export default HealthDataVisualization; 
+export default HealthDataVisualization;

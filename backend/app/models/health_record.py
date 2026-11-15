@@ -398,20 +398,6 @@ class MedicalTimeline:
         return self.__dict__.copy()
     
     @staticmethod
-    def from_health_record(health_record: HealthRecord) -> 'MedicalTimeline':
-        """从健康档案创建时间线项目"""
-        return MedicalTimeline(
-            patient_id=health_record.patient_id,
-            item_type="health_record",
-            title=health_record.title,
-            description=f"{health_record.record_type.capitalize()} 记录",
-            occurred_at=health_record.created_at,
-            created_by=health_record.created_by,
-            related_ids=[health_record._id],
-            metadata={"record_type": health_record.record_type}
-        )
-    
-    @staticmethod
     def from_follow_up(follow_up: FollowUpRecord) -> 'MedicalTimeline':
         """从随访记录创建时间线项目"""
         occurred_at = follow_up.actual_date if follow_up.actual_date else follow_up.scheduled_date
@@ -432,41 +418,4 @@ class MedicalTimeline:
             created_by=follow_up.created_by,
             related_ids=[follow_up._id] + follow_up.health_record_ids,
             metadata={"status": follow_up.status, "type": follow_up.follow_up_type}
-        )
-    
-    @staticmethod
-    def from_health_data(health_data: HealthData) -> 'MedicalTimeline':
-        """从健康数据创建时间线项目"""
-        title_map = {
-            "vital_sign": "生命体征",
-            "lab_result": "实验室检查",
-            "medication": "用药记录",
-            "activity": "活动记录",
-            "sleep": "睡眠记录",
-            "diet": "饮食记录"
-        }
-        
-        title = title_map.get(health_data.data_type, health_data.data_type.capitalize())
-        
-        description = ""
-        if health_data.data_type == "vital_sign":
-            vital_type = health_data.data.get("type", "")
-            value = health_data.data.get("value", "")
-            unit = health_data.data.get("unit", "")
-            description = f"{vital_type}: {value} {unit}"
-        elif health_data.data_type == "lab_result":
-            test_name = health_data.data.get("test_name", "")
-            result = health_data.data.get("result_value", "")
-            unit = health_data.data.get("unit", "")
-            description = f"{test_name}: {result} {unit}"
-        
-        return MedicalTimeline(
-            patient_id=health_data.patient_id,
-            item_type=f"health_data_{health_data.data_type}",
-            title=title,
-            description=description,
-            occurred_at=health_data.recorded_at,
-            created_by=health_data.recorded_by,
-            related_ids=[health_data._id],
-            metadata={"data_type": health_data.data_type, "source": health_data.source}
         )

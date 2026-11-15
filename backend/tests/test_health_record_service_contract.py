@@ -191,10 +191,8 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         # 第一代独有字段 organization_id / visibility：不再按请求写入（模型默认值兜底）
         self.assertIsNone(doc.get("organization_id"))
         self.assertEqual(doc.get("visibility"), "all")
-        # 时间线项目同步创建
-        self.assertEqual(len(self.timelines.docs), 1)
-        timeline_doc = next(iter(self.timelines.docs.values()))
-        self.assertIn(str(doc["_id"]), timeline_doc["related_ids"])
+        # 时间线实时投影，不再创建副本。
+        self.assertEqual(self.timelines.docs, {})
 
     async def test_update_health_record_with_effective_schema_fields(self):
         seed = HealthRecord(
@@ -268,8 +266,7 @@ class HealthRecordServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(doc.get("device_id"), False)
         # metadata 为第一代独有字段，停止写入（模型默认空 dict 兜底）
         self.assertEqual(doc.get("metadata"), {})
-        # 时间线项目同步创建
-        self.assertEqual(len(self.timelines.docs), 1)
+        self.assertEqual(self.timelines.docs, {})
 
 
 if __name__ == "__main__":
