@@ -220,11 +220,28 @@ class FeedbackReplicaTests(unittest.IsolatedAsyncioTestCase):
         # 对齐 T38（followup/publications/quality 夹具修法）：状态文档必须带
         # schema_version=1；缺版本时 domain_mode fail-closed 503
         # PATIENT_DOMAIN_STATE_UNAVAILABLE，本用例将得到错误信号而非门闩 503。
+        # 波次 2 门闩移除后 canonical 不再 503 拒绝，改为分阶段验证 canonical
+        # 目标形态：临床记录缺失 → 404；临床记录存在但无 verified 链接 →
+        # 403（同 ID 账号绝不自动获得本人访问权）；医护历史查询的身份锚点
+        # 无法解析 → 503 REHAB_PATIENT_ACCOUNT_UNAVAILABLE。
         await self.db.patient_domain_state.insert_one(
             {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         with self.assertRaises(AppBaseException) as unavailable:
             await self.submit()
-        self.assertEqual(unavailable.exception.error_code, "REHAB_PATIENT_DOMAIN_UNSUPPORTED")
+        self.assertEqual(unavailable.exception.status_code, 404)
+        self.assertEqual(unavailable.exception.error_code, "REHAB_PATIENT_UNAVAILABLE")
+        await self.db.clinical_patients.insert_one({
+            "patient_id": str(self.patient), "schema_version": 1, "status": "active",
+            "practitioners": [str(self.doctor)], "health_managers": [str(self.manager)]})
+        with self.assertRaises(AppBaseException) as denied:
+            await self.submit()
+        self.assertEqual(denied.exception.status_code, 403)
+        self.assertEqual(denied.exception.error_code, "REHAB_PATIENT_FORBIDDEN")
+        doctor = SimpleNamespace(id=str(self.doctor), role="doctor", is_active=True)
+        with self.assertRaises(AppBaseException) as anchor:
+            await self.service.list(str(self.plan), doctor)
+        self.assertEqual(anchor.exception.status_code, 503)
+        self.assertEqual(anchor.exception.error_code, "REHAB_PATIENT_ACCOUNT_UNAVAILABLE")
         self.assertEqual(await self.db.rehab_execution_events.count_documents({}), 0)
 
     async def test_old_event_namespace_collision_cannot_return_or_overwrite_old_content(self):

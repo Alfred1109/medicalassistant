@@ -14,6 +14,8 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.core.exceptions import AppBaseException
+from app.core.patient_access import patient_domain_mode
+from app.patients.repository import ACCOUNT_LINKS
 from app.schemas.rehab_feedback import (
     PatientFeedbackCreate, PatientFeedbackPage, PatientFeedbackResponse,
     PatientFeedbackResult,
@@ -89,9 +91,10 @@ async def ensure_feedback_indexes(db):
 class RehabFeedbackService:
     def __init__(self, db):
         # 患者资料读取（存在性/可用性/医护归属）不在此处直查 users，统一委托
-        # RehabPublicationService._authorize（经患者读取适配器）。本服务其余
-        # 读取均以 plan.patient_id 为域内身份锚点（见 _identity_query 注释），
-        # 账号层假设保留至 canonical 波段收敛。
+        # RehabPublicationService._authorize（域分派：legacy 经患者读取适配器，
+        # canonical 经 clinical_patients + 链接解析）。本服务其余读取以
+        # plan.patient_id 为域内身份锚点；recorded_by 的解析规则见
+        # _identity_query 注释（legacy 同文档假设 / canonical 链接解析）。
         self.db = db
         self.events = db.rehab_execution_events
         self.publication = RehabPublicationService(db)
@@ -104,15 +107,35 @@ class RehabFeedbackService:
             raise _error("REHAB_PLAN_NOT_FOUND", "康复方案不存在", 404)
         return plan
 
-    def _identity_query(self, plan):
-        # TODO(patient-domain): legacy 同文档假设——plan.patient_id 被同时当作
-        # 患者实体 ID 与患者账号 ID（recorded_by 身份锚点）。canonical 波段必须
-        # 先经 resolve_self 把账号解析到患者实体，再以实体 ID 落事件身份字段。
-        # The current publication domain is legacy account-backed patients.
-        # Authorization below refuses the canonical domain; do not infer links.
-        patient_account = str(ObjectId(plan["patient_id"])) if ObjectId.is_valid(plan["patient_id"]) else plan["patient_id"]
-        return {"plan_id": str(plan["_id"]), "patient_id": plan["patient_id"],
-                "recorded_by": patient_account, "event_type": PATIENT_REPORT,
+    async def _linked_account_id(self, patient_id, *, session=None):
+        """patient_id → 患者账号 ID：仅认 patient_account_links 的 verified 链接。
+
+        account_id 与 patient_id 各有唯一索引，命中至多一条；不命中返回 None，
+        绝不推断（不猜同 ID、不做姓名/归属映射）。
+        """
+        link = await self.db[ACCOUNT_LINKS].find_one(
+            {"patient_id": str(patient_id), "status": "verified"}, session=session)
+        return link["account_id"] if link else None
+
+    async def _identity_query(self, plan, *, session=None):
+        # 反馈身份锚点按域分派：
+        # - legacy 同文档假设：plan.patient_id 同时是患者实体 ID 与患者账号 ID
+        #   （recorded_by 锚点，提交路径的 _authorize 已确保账号与患者同文档）。
+        # - canonical：recorded_by 经 patient_account_links 显式解析（verified
+        #   链接），不再把 plan.patient_id 当账号 ID。提交路径中链接核验已由
+        #   发布域授权（resolve_self）完成；无链接患者没有可锚定的反馈身份，
+        #   在此 fail-closed 抛 503，绝不回退同 ID 假设（无链接患者无法提交
+        #   反馈是预期形态）。
+        patient_id = plan["patient_id"]
+        if await patient_domain_mode(self.db, session=session) == "canonical":
+            recorded_by = await self._linked_account_id(patient_id, session=session)
+            if recorded_by is None:
+                raise _error("REHAB_PATIENT_ACCOUNT_UNAVAILABLE",
+                             "该患者尚未关联患者账号，无法定位反馈身份", 503)
+        else:
+            recorded_by = str(ObjectId(patient_id)) if ObjectId.is_valid(patient_id) else patient_id
+        return {"plan_id": str(plan["_id"]), "patient_id": patient_id,
+                "recorded_by": recorded_by, "event_type": PATIENT_REPORT,
                 "schema_version": REPORT_SCHEMA}
 
     async def submit(self, plan_id, payload: PatientFeedbackCreate, actor):
@@ -128,7 +151,7 @@ class RehabFeedbackService:
             existing = await self.events.find_one({"plan_id": str(plan["_id"]),
                                                     "event_id": event_id}, session=session)
             if existing is not None:
-                expected = {**self._identity_query(plan), "event_id": event_id,
+                expected = {**(await self._identity_query(plan, session=session)), "event_id": event_id,
                             "request_fingerprint": fingerprint, "client_event_id": str(payload.event_id)}
                 if any(existing.get(key) != value for key, value in expected.items()):
                     raise _error("REHAB_FEEDBACK_EVENT_CONFLICT", "此提交标识已用于其他内容，请重新核对")
@@ -166,7 +189,7 @@ class RehabFeedbackService:
             now = datetime.now(timezone.utc)
             if payload.performed_at > now:
                 raise _error("REHAB_FEEDBACK_FUTURE_TIME", "执行时间不能晚于当前时间", 422)
-            document = {"_id": ObjectId(), **self._identity_query(plan),
+            document = {"_id": ObjectId(), **(await self._identity_query(plan, session=session)),
                 "event_id": event_id, "client_event_id": str(payload.event_id),
                 "request_fingerprint": fingerprint, "version_id": payload.version_id,
                 "version_no": version.get("version_no"),
@@ -189,7 +212,7 @@ class RehabFeedbackService:
         await self.publication._authorize(plan, actor, None, write=False, fence=False)
         if skip < 0 or not 1 <= limit <= 100:
             raise _error("REHAB_FEEDBACK_PAGINATION", "分页参数无效", 422)
-        query = self._identity_query(plan)
+        query = await self._identity_query(plan)
         if version_id:
             if not ObjectId.is_valid(version_id):
                 raise _error("REHAB_FEEDBACK_FILTER", "反馈版本筛选无效", 422)

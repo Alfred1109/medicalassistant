@@ -361,13 +361,17 @@ class PublicationMongoTests(unittest.IsolatedAsyncioTestCase):
             denied = await client.get("/api/rehabilitation/publications/plans/" + self.plan + "/draft")
             self.assertEqual(denied.status_code, 403)
 
-    async def test_canonical_domain_stops_legacy_mapping_and_empty_items_cannot_publish(self):
+    async def test_empty_items_cannot_publish_and_canonical_list_requires_verified_link(self):
         draft = await self.draft(items=[])
         with self.assertRaises(AppBaseException) as caught:
             await self.svc.publish(self.plan, self.doctor, self.publish_request(draft))
         self.assertEqual(caught.exception.error_code, "REHAB_ITEMS_REQUIRED")
+        # 波次 2 门闩移除后 canonical 不再 503 拒绝：患者列表改经 resolve_self
+        # 的 verified 链接解析。本库无 clinical_patients / 链接，患者本人访问
+        # 被拒绝且绝不回退同 ID 假设。
         await self.db.patient_domain_state.insert_one(
             {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
         with self.assertRaises(AppBaseException) as caught:
             await self.svc.patient_list(self.patient)
-        self.assertEqual(caught.exception.error_code, "REHAB_PATIENT_DOMAIN_UNSUPPORTED")
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(caught.exception.error_code, "REHAB_PATIENT_FORBIDDEN")
