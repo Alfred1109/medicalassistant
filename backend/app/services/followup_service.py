@@ -6,7 +6,7 @@ cancel / reschedule 全部收敛到本服务，路由层（health_record_router�
 health_manager_router）一律转调本服务，禁止直连 followup_records 集合。
 
 共享辅助（_FOLLOWUP_FORMAL_FIELDS / followup_from_mongo / map_followup_record_to_response）
-随方法组下沉到本模块——它们耦合 models.FollowUpRecord 的存储形状与 MedicalTimeline
+随方法组下沉到本模块——它们耦合 models.FollowUpRecord 的存储形状
 落库行为，属于服务层实现细节，不放 schemas（schemas 保持纯契约）；
 health_record_service 保留健康档案域，随访统计经本服务转调。
 
@@ -40,13 +40,13 @@ from bson import encode
 from app.core.exceptions import AppBaseException
 from app.core.followup_semantics import (
     current_followup_evidence, followup_conflict, followup_submission_fields,
-    followup_version_filter, submission_history_with_legacy)
+    followup_version_filter, submission_history_with_legacy, followup_evidence_value)
 from app.db.transactions import run_followup_transaction
 from app.schemas.audit_log import AuditLogCreate
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
-from app.models.health_record import FollowUpRecord, MedicalTimeline
+from app.models.health_record import FollowUpRecord
 from app.schemas.followup import (
     FollowUpRecordCreate, FollowUpRecordUpdate, FollowUpRecordResponse,
     CompleteFollowUpRequest, CancelFollowUpRequest, RescheduleFollowUpRequest,
@@ -298,8 +298,6 @@ class FollowupService:
         self.db = db
         # 随访记录集合（唯一集合名 followup_records）
         self.followup_records = db[FollowUpRecord.collection_name]
-        # 医疗时间线集合（随访节点联动时间线）
-        self.medical_timelines = db[MedicalTimeline.collection_name]
 
     # -------- 创建 / 查询 --------
 
@@ -488,9 +486,6 @@ class FollowupService:
         # 更新ID
         followup_record._id = str(result.inserted_id)
 
-        # 创建关联的时间线项目
-        timeline_item = MedicalTimeline.from_follow_up(followup_record)
-        await self.medical_timelines.insert_one(timeline_item.to_mongo())
 
         # 返回响应
         return map_followup_record_to_response(followup_record)
@@ -623,6 +618,18 @@ class FollowupService:
 
         return await self._list_records(query, skip=skip, limit=limit)
 
+    async def metric_status_sample(self, patient_id: str, *, limit: int = 500):
+        """Read bounded raw status facts after caller-side patient authorization.
+
+        Historical/unknown spellings must reach the conservative metric instead
+        of being rejected by the writable node DTO. No node data is changed.
+        """
+        if not patient_id or not 1 <= limit <= 500:
+            raise ValueError("invalid follow-up metric sample")
+        return await self.followup_records.find(
+            {"patient_id": patient_id, "deleted": {"$ne": True}}, {"_id": 0, "status": 1}
+        ).sort("scheduled_date", 1).limit(limit).to_list(length=limit)
+
     async def get_upcoming_followups(self, patient_id: Optional[str] = None, days: int = 7, patient_ids: Optional[List[str]] = None) -> List[FollowUpRecordResponse]:
         """获取即将到来的随访记录
 
@@ -717,19 +724,6 @@ class FollowupService:
             raise followup_conflict()
         return {**doc, **values, "mutation_version": doc.get("mutation_version", 0) + 1}
 
-    async def _write_timeline(self, doc, session):
-        record = followup_from_mongo(doc)
-        timeline = MedicalTimeline.from_follow_up(record)
-        query = {"related_ids": str(doc["_id"]), "item_type": "follow_up"}
-        if not await self.medical_timelines.find_one(query, session=session):
-            await self.medical_timelines.insert_one(timeline.to_mongo(), session=session)
-            return
-        await self.medical_timelines.update_one(
-            query,
-            {"$set": {"description": timeline.description,
-                      "occurred_at": timeline.occurred_at,
-                      "metadata.status": doc["status"]}}, session=session)
-
     async def _write_audit(self, resource_id, user_id, action, details, session):
         """在同一事务内写审计日志（audit_logs 集合，落库形状与 AuditLogService 一致）。
 
@@ -772,8 +766,6 @@ class FollowupService:
         record.mutation_version = 0
         child = record.to_mongo()
         await self.followup_records.insert_one(child, session=session)
-        timeline = MedicalTimeline.from_follow_up(record)
-        await self.medical_timelines.insert_one(timeline.to_mongo(), session=session)
         return str(child["_id"])
 
     async def update_followup_record(self, followup_id, followup_data):
@@ -787,8 +779,6 @@ class FollowupService:
                 if value is not None:
                     values[mapping.get(key, key)] = value.value if hasattr(value, "value") else value
             updated = await self._write_node(doc, values, session)
-            if followup_data.status:
-                await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
@@ -847,13 +837,12 @@ class FollowupService:
                 {"decision": "manual_entry", "source": "manual_entry",
                  "result": data.follow_up_result},
                 session)
-            await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
     async def _verified_external_review_evidence(self, doc, session):
         """Approval uses persisted confirmation bound to this patient/visit, never client evidence."""
-        reference = _evidence_value(doc, "effective_response") or {}
+        reference = followup_evidence_value(doc, "effective_response") or {}
         task_id = str(reference.get("task_id") or "")
         if not ObjectId.is_valid(task_id):
             raise followup_conflict("当前答卷缺少有效的本地确认任务，请退回重新提交")
@@ -948,7 +937,6 @@ class FollowupService:
                 {"decision": data.decision.value, "comment": data.comment,
                  "review_id": entry["review_id"],
                  "evidence": data.evidence}, session)
-            await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
@@ -975,7 +963,6 @@ class FollowupService:
                 await self.followup_records.update_one(
                     {"_id": doc["_id"]}, {"$set": {"next_follow_up_id": child_id, "next_visit_id": child_id}}, session=session)
                 updated.update(next_follow_up_id=child_id, next_visit_id=child_id)
-            await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
@@ -995,7 +982,6 @@ class FollowupService:
             if data.provider_id is not None:
                 values["provider_id"] = data.provider_id
             updated = await self._write_node(doc, values, session)
-            await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
@@ -1069,7 +1055,6 @@ class FollowupService:
                 metadata["overdue"]["reason"] = reason.strip()
             updated = await self._write_node(
                 doc, {"status": "overdue", "metadata": metadata, "updated_at": now}, session)
-            await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
@@ -1092,7 +1077,6 @@ class FollowupService:
                 metadata["lost"]["reason"] = reason.strip()
             updated = await self._write_node(
                 doc, {"status": "lost", "metadata": metadata, "updated_at": now}, session)
-            await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 
@@ -1235,7 +1219,6 @@ class FollowupService:
         async for doc in self.automated_overdue_cursor(now, rules):
             if await self._automated_overdue_mark(doc, now, rules):
                 result["overdue_marked"] += 1
-                await self._write_timeline({**doc, "status": "overdue"}, None)
         lost_cutoff = now - timedelta(days=rules["lost_days"])
         async for doc in self.automated_lost_cursor(now, rules):
             # 宽筛游标命中但逾期观察窗口未满（如恢复后重新逾期）：跳过
@@ -1247,7 +1230,6 @@ class FollowupService:
                 continue
             if await self._automated_lost_mark(doc, now, rules, delivered):
                 result["lost_marked"] += 1
-                await self._write_timeline({**doc, "status": "lost"}, None)
         return result
 
     async def restore_lost(self, followup_id, *, operator_id=None, reason=None):
@@ -1274,7 +1256,6 @@ class FollowupService:
                 followup_id, operator_id, "followup_lost_restore",
                 {"restored_to": "awaiting_fill", "reason": (reason or "").strip() or None},
                 session)
-            await self._write_timeline(updated, session)
             return map_followup_record_to_response(followup_from_mongo(updated))
         return await self._mutate(followup_id, operation)
 

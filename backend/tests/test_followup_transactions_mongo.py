@@ -58,7 +58,7 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
         await self.service.cancel_followup(self.followup_id, self.request.model_copy())
         self.assertEqual(len({response.next_follow_up_id for response in responses}), 1)
         self.assertEqual(await self.db.followup_records.count_documents({}), 2)
-        self.assertEqual(await self.db.medical_timelines.count_documents({}), 2)
+        self.assertEqual(await self.db.medical_timelines.count_documents({}), 1)
         child = await self.db.followup_records.find_one({"previous_visit_id": self.followup_id})
         for key in ("provider_id", "template_id", "reminder_before", "reminder_settings", "form_binding", "questions"):
             self.assertEqual(child[key], self.doc[key])
@@ -110,16 +110,17 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.actual_date.replace(microsecond=first.actual_date.microsecond // 1000 * 1000), second.actual_date)
         self.assertEqual(await self.db.followup_records.count_documents({}), 1)
 
-    async def test_missing_original_timeline_is_created_in_same_transaction(self):
+    async def test_missing_timeline_replica_is_not_recreated(self):
         await self.db.medical_timelines.delete_many({})
         await self.service.cancel_followup(self.followup_id, self.request)
-        self.assertEqual(await self.db.medical_timelines.count_documents({}), 2)
-        original_timeline = await self.db.medical_timelines.find_one({"related_ids": self.followup_id})
-        self.assertEqual(original_timeline["metadata"]["status"], "canceled")
+        self.assertEqual(await self.db.medical_timelines.count_documents({}), 0)
+        self.assertEqual(await self.db.followup_records.count_documents({}), 2)
+        original = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
+        self.assertEqual(original["status"], "canceled")
 
     async def test_each_late_failure_rolls_back_parent_child_and_timelines(self):
         before = await self.db.followup_records.find_one({"_id": self.doc["_id"]})
-        for method in ("_write_node", "_write_timeline"):
+        for method in ("_write_node", "_create_successor"):
             original = getattr(self.service, method)
             async def fail_after_write(*args, **kwargs):
                 await original(*args, **kwargs)
@@ -137,9 +138,24 @@ class FollowupMongoTransactionTests(unittest.IsolatedAsyncioTestCase):
     async def _seed_in_review(self):
         """把节点置为 in_review（模拟填报 confirm 后的待审阅状态）。"""
         task_id = ObjectId()
+        link_id, binding_id = ObjectId(), ObjectId()
+        reference = {"project_id": 1, "center_id": 2, "subject_id": 3,
+                     "source": {"system": "form-platform-11344", "environment": "pilot"}}
+        version = {"form_id": 4, "family_id": 4, "version": 1,
+                   "version_state": "current", "definition_sha256": "a" * 64}
+        review = {"verified_by": "test-reviewer", "verified_at": datetime.utcnow(),
+                  "evidence_reference": "synthetic-reviewed-context", "source_origin": "https://source.example"}
+        await self.db.external_patient_links.insert_one({"_id": link_id,
+            "local_patient_id": self.doc["patient_id"], "status": "verified", "reference": reference,
+            "references": [reference], **review})
+        await self.db.external_form_bindings.insert_one({"_id": binding_id, "status": "active", "project_id": 1,
+            "form_id": 4, "version": 1, "version_ref": version, "purpose": "followup", "source": reference["source"], **review})
         await self.db.integration_fill_tasks.insert_one({
             "_id": task_id, "status": "confirmed", "patient_id": self.doc["patient_id"],
             "followup_visit_id": self.followup_id,
+            "remote_refs": {"project_id": 1, "center_id": 2, "subject_id": 3, "questionnaire_id": 4},
+            "reviewed_context": {"patient_link_id": str(link_id), "form_binding_id": str(binding_id),
+                                 "reference": reference, "version_ref": version, "purpose": "followup"},
             "confirmation": {"response_id": "resp-1", "remote_status": "submitted", "answers": []}})
         await self.db.followup_records.update_one(
             {"_id": self.doc["_id"]},

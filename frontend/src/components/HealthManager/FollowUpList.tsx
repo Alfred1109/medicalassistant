@@ -28,7 +28,7 @@ import {
   CircularProgress,
   Alert
 } from '@mui/material';
-import { format, isValid, parseISO } from 'date-fns';
+import { isValid, parseISO } from 'date-fns';
 import { formatAppDate } from '../../utils/dateTime';
 import { zhCN } from 'date-fns/locale';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
@@ -361,7 +361,7 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
                     value={filters.start_date ? parseISO(filters.start_date) : null}
                     onChange={(date) => {
                       if (date === null || isValid(date)) {
-                        handleFilterChange('start_date', date ? format(date, 'yyyy-MM-dd') : null);
+                        handleFilterChange('start_date', date ? formatAppDate(date, 'yyyy-MM-dd') : null);
                       }
                     }}
                     slotProps={{ textField: { size: 'small', fullWidth: true } }}
@@ -376,7 +376,7 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
                     value={filters.end_date ? parseISO(filters.end_date) : null}
                     onChange={(date) => {
                       if (date === null || isValid(date)) {
-                        handleFilterChange('end_date', date ? format(date, 'yyyy-MM-dd') : null);
+                        handleFilterChange('end_date', date ? formatAppDate(date, 'yyyy-MM-dd') : null);
                       }
                     }}
                     slotProps={{ textField: { size: 'small', fullWidth: true } }}

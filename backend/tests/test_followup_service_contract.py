@@ -394,9 +394,8 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
         new_id = str(new_doc["_id"])
         self.assertEqual(original["next_follow_up_id"], new_id)
         self.assertEqual(original["next_visit_id"], new_id)
-        # 新节点时间线同步创建
-        # 即使原节点缺历史时间线，也在同一事务补建原节点和新节点时间线。
-        self.assertEqual(len(self.timelines.docs), 2)
+        # 原节点和新节点由只读投影生成时间线，不再维护副本。
+        self.assertEqual(self.timelines.docs, {})
 
     async def test_cancel_without_reschedule_creates_no_new_node(self):
         """纯取消不产生新节点，也不写链后继。"""
@@ -950,8 +949,7 @@ class FollowupServiceContractTests(unittest.IsolatedAsyncioTestCase):
                     "visit_code", "effective_response", "review", "answers",
                     "scheduled_date", "notes", "reminder_before", "current_evidence", "submission_history"):
             self.assertEqual(original[key], before[key], key)
-        # 新节点时间线创建（原节点状态未变，时间线不重写）
-        self.assertEqual(len(self.timelines.docs), 1)
+        self.assertEqual(self.timelines.docs, {})
 
     async def test_re_evaluate_retry_returns_same_child(self):
         """相同复评请求重试返回同一后继节点（幂等，不产生分叉）。"""

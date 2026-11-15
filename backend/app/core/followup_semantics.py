@@ -11,10 +11,55 @@
 环被打断（服务层→集成层是主方向，保留）。
 """
 from copy import deepcopy
+from enum import Enum
 
 from bson import ObjectId
 
 from app.core.exceptions import AppBaseException
+
+
+class FollowUpStatus(str, Enum):
+    PENDING_SCHEDULE = "pending_schedule"
+    SCHEDULED = "scheduled"
+    AWAITING_FILL = "awaiting_fill"
+    IN_REVIEW = "in_review"
+    COMPLETED = "completed"
+    CANCELED = "canceled"
+    MISSED = "missed"
+    OVERDUE = "overdue"
+    LOST = "lost"
+    RESCHEDULED = "rescheduled"
+
+
+# legacy-shape: 历史状态拼写仅用于读取与统计，不扩展节点写入/流转契约。
+FOLLOWUP_STATUS_ALIASES = {"done": "completed", "finished": "completed",
+                           "cancelled": "canceled", "void": "canceled", "pending": "pending_schedule"}
+FOLLOWUP_STATUSES = tuple(status.value for status in FollowUpStatus) + tuple(FOLLOWUP_STATUS_ALIASES)
+FOLLOWUP_COMPLETION_POLICY = "conservative_non_void"
+FOLLOWUP_COMPLETION_NOTE = "待临床确认：非作废节点均计入分母，仅完成节点计入分子，未终态及未知状态均按未完成统计。"
+
+
+def followup_completion(counts, params=None):
+    """One conservative, explicitly provisional policy shared by all metric readers.
+
+    Only the documented default is supported; a future clinical policy requires
+    an explicit implementation rather than silently accepting arbitrary params.
+    """
+    policy = (params or {}).get("completion_policy", FOLLOWUP_COMPLETION_POLICY)
+    if policy != FOLLOWUP_COMPLETION_POLICY:
+        raise ValueError("不支持的随访完成率口径")
+    completed = total = excluded = 0
+    for status, count in counts.items():
+        canonical = FOLLOWUP_STATUS_ALIASES.get(status, status)
+        if canonical == FollowUpStatus.CANCELED.value:
+            excluded += count
+            continue
+        total += count
+        if canonical == FollowUpStatus.COMPLETED.value:
+            completed += count
+    return {"policy": policy, "total": total, "completed": completed, "excluded": excluded,
+            "value": round(completed / total, 4) if total else None,
+            "note": FOLLOWUP_COMPLETION_NOTE}
 
 
 # ---------------------------------------------------------------- 并发语义
@@ -32,16 +77,17 @@ def followup_version_filter(doc):
 
 # ---------------------------------------------------------------- 证据链语义
 
-def _evidence_value(doc, key):
+def followup_evidence_value(doc, key):
     if key in doc:
         return doc[key]
+    # legacy-shape: 存量证据在 metadata 中，患者域切换不改变其读取契约。
     return (doc.get("metadata") or {}).get("result" if key == "follow_up_result" else key)
 
 
 def current_followup_evidence(doc):
     """Resolve only unambiguous current evidence; never choose between mixed legacy sources."""
-    manual = (_evidence_value(doc, "completion_data") or {}).get("source") == "manual_entry"
-    external = _evidence_value(doc, "effective_response") or {}
+    manual = (followup_evidence_value(doc, "completion_data") or {}).get("source") == "manual_entry"
+    external = followup_evidence_value(doc, "effective_response") or {}
     external_valid = bool(external.get("task_id") and external.get("response_id") is not None)
     marker = doc.get("current_evidence") or {}
     if manual and external:
@@ -51,11 +97,12 @@ def current_followup_evidence(doc):
         return {"source": "ambiguous"}
     if source == "unknown":
         return {"source": source}
+    # legacy-shape: 无 current_evidence 标记的存量证据须显式注明，不随域切换删除。
     return {**marker, "source": source, **({"legacy": True} if not marker else {})}
 
 
 def _submission_snapshot(doc):
-    return {key: deepcopy(_evidence_value(doc, key)) for key in (
+    return {key: deepcopy(followup_evidence_value(doc, key)) for key in (
         "completion_data", "effective_response", "answers", "notes", "actual_date", "follow_up_result")}
 
 
@@ -64,7 +111,7 @@ def submission_history_with_legacy(doc):
     """Archive pre-marker evidence before replacing or returning it, without rewriting history."""
     history = deepcopy(doc.get("submission_history") or [])
     if (not (doc.get("current_evidence") or {}).get("submission_id")
-            and (_evidence_value(doc, "completion_data") or _evidence_value(doc, "effective_response"))):
+            and (followup_evidence_value(doc, "completion_data") or followup_evidence_value(doc, "effective_response"))):
         history.append({"submission_id": str(ObjectId()), "source": "legacy_snapshot",
                         "observed_version": doc.get("mutation_version", 0) or 0,
                         "evidence_state": current_followup_evidence(doc),

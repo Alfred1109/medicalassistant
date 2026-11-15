@@ -1,3 +1,4 @@
+import { formatAppDate } from './dateTime';
 import type { FollowUpReminderStatus } from '../types/followupReminders';
 
 const reasons: Record<string, string> = {
@@ -28,7 +29,5 @@ export function reminderServiceInfo(status: FollowUpReminderStatus): { severity:
 
 /** These endpoints serialize BSON UTC timestamps without an offset. */
 export function reminderTime(value: string | null | undefined) {
-  if (!value) return '未记录';
-  const date = new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`);
-  return Number.isNaN(date.getTime()) ? '时间不可用' : date.toLocaleString('zh-CN', { hour12: false });
+  return formatAppDate(value, 'localeZh24', { empty: '未记录', invalid: '时间不可用', assumeUtc: true });
 }

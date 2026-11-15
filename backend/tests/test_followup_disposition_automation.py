@@ -144,9 +144,9 @@ class AutomatedOverdueTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(marker["source"], "automated")
             self.assertIsNone(marker["operator_id"])
             self.assertEqual(marker["rule_overdue_days"], 1)
-        # 时间线同步更新
+        # 自动状态更新不再写时间线副本。
         timelines = collections["medical_timelines"].docs
-        self.assertTrue(any(item["metadata"]["status"] == "overdue" for item in timelines.values()))
+        self.assertEqual(timelines, {})
 
     async def test_automated_mark_is_atomic_and_idempotent(self):
         # 条件更新内联全部前置条件：状态已被并发改动时 matched_count==0，不重复计数
@@ -343,7 +343,7 @@ class DispositionReplicaTests(unittest.IsolatedAsyncioTestCase):
         self.collection = self.db[FollowUpRecord.collection_name]
 
     async def asyncTearDown(self):
-        self.client.drop_database(self.db.name)
+        await self.client.drop_database(self.db.name)
         self.client.close()
 
     async def _insert(self, *, status, days_ago):
@@ -357,8 +357,7 @@ class DispositionReplicaTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_scans_mark_each_node_once(self):
         service_a, service_b = FollowupService(self.db), FollowupService(self.db)
         await self._insert(status="scheduled", days_ago=3)
-        await self._insert(status="overdue", days_ago=40)
-        followup_id = str((await self.collection.find_one({}))["_id"])
+        followup_id = await self._insert(status="overdue", days_ago=40)
         for _ in range(3):
             await self.db[FOLLOWUP_REMINDER_DELIVERIES].insert_one(
                 {"followup_id": followup_id, "slot": "patient", "status": "persisted"})
@@ -369,7 +368,8 @@ class DispositionReplicaTests(unittest.IsolatedAsyncioTestCase):
         lost_marked = sum(result["lost_marked"] for result in results)
         self.assertEqual(overdue_marked, 1)
         self.assertEqual(lost_marked, 1)
-        self.assertEqual(await self.collection.count_documents({"status": "overdue"}), 0)
+        # 新标记的 overdue 尚未满足失访观察窗口；旧 overdue 经足够提醒进入 lost。
+        self.assertEqual(await self.collection.count_documents({"status": "overdue"}), 1)
         self.assertEqual(await self.collection.count_documents({"status": "lost"}), 1)
         stored = await self.collection.find_one({"status": "lost"})
         self.assertEqual(stored["metadata"]["lost"]["delivered_reminders"], 3)

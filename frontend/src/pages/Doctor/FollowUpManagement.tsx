@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect } from 'react';
 import { useSelector } from 'react-redux';
 import {
@@ -20,15 +21,14 @@ import {
   Stack,
   CircularProgress
 } from '@mui/material';
-import type { SelectChangeEvent } from '@mui/material';
 import { LocalizationProvider, DateTimePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { zhCN } from 'date-fns/locale';
-import { format } from 'date-fns';
 import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
 import { apiErrorMessage } from '../../services/patientErrors';
-import type { Patient } from '../../types/patient.types';
+import { usePatientOptions, type PatientOption } from '../../hooks/usePatientOptions';
+import PatientSelect from '../../components/common/PatientSelect';
 
 // 导入组件
 import FollowUpList from '../../components/HealthManager/FollowUpList';
@@ -54,16 +54,15 @@ const FollowUpManagement: React.FC = () => {
 const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = ({ currentUser }) => {
 
   // 患者列表状态
-  const [patients, setPatients] = useState<Patient[]>([]);
-  const [patientsLoading, setPatientsLoading] = useState(true);
-  const [patientsError, setPatientsError] = useState<string | null>(null);
+  const { patients, loading: patientsLoading, error: patientFailure } = usePatientOptions(currentUser?.role, currentUser?.id);
+  const patientsError = patientFailure ? apiErrorMessage(patientFailure, '加载患者列表失败') : null;
   const [selectedPatientId, setSelectedPatientId] = useState<string>(ALL_PATIENTS);
 
   // 随访列表状态
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [filters, setFilters] = useState<FollowUpFilters>({});
-  const today = format(new Date(), 'yyyy-MM-dd');
+  const today = formatAppDate(new Date(), 'yyyy-MM-dd');
   const hasFilters = Object.values(filters).some(value => Boolean(value));
   const identity = currentUser ? `${currentUser.id}:${currentUser.role}` : '';
   const { records: followUps, total, loading, error, statusCounts, reload: loadFollowUps } = useFollowUpWorkbench(
@@ -126,38 +125,13 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
     setSnackbar({ open: true, message, severity });
   };
 
-  // 加载医生的患者列表（真实接口 GET /doctors/patients）
+  // 身份切换时重置筛选和操作状态；目录加载由共享 hook 负责。
   useEffect(() => {
-    let cancelled = false;
-    setPatients([]);
-    setPatientsError(null);
     setSelectedPatientId(ALL_PATIENTS);
     setPage(0);
     setFilters({});
     setCreateOpen(false); setReviewId(null); setDetailsId(null); setReEvaluateId(null);
     setManualEntryId(null); setEditTarget(null); setCancelTarget(null); setRescheduleTarget(null);
-    const loadPatients = async () => {
-      try {
-        setPatientsLoading(true);
-        if (!identity) return;
-        const response = await (currentUser?.role === 'health_manager' ? apiService.healthManager.getPatients() : apiService.doctor.getPatients());
-        if (cancelled) return;
-        const list = Array.isArray(response.data) ? response.data : [];
-        setPatients(list);
-        setPatientsError(null);
-      } catch (err) {
-        if (cancelled) return;
-        setPatientsError(apiErrorMessage(err, '加载患者列表失败'));
-      } finally {
-        if (!cancelled) {
-          setPatientsLoading(false);
-        }
-      }
-    };
-    loadPatients();
-    return () => {
-      cancelled = true;
-    };
   }, [identity]);
 
   // -------- 新建随访 --------
@@ -328,9 +302,9 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
     setSnackbar(prev => ({ ...prev, open: false }));
   };
 
-  const handlePatientChange = (event: SelectChangeEvent<string>) => {
+  const handlePatientChange = (value: string) => {
     setPage(0);
-    setSelectedPatientId(event.target.value);
+    setSelectedPatientId(value);
   };
 
   const handleCreateFormChange = (field: 'patient_id' | 'follow_up_type' | 'description', value: string) => {
@@ -340,7 +314,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
     }
   };
 
-  const renderPatientOption = (patient: Patient) =>
+  const renderPatientOption = (patient: PatientOption) =>
     `${patient.name || '未命名患者'}${patient.diagnosis ? `（${patient.diagnosis}）` : ''}`;
 
   return (
@@ -364,23 +338,10 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
 
       {/* 患者选项只用于筛选和创建；列表由工作台接口统一授权并分页。 */}
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
-        <FormControl size="small" sx={{ minWidth: 280 }}>
-          <InputLabel id="doctor-followup-patient-label">患者范围</InputLabel>
-          <Select
-            labelId="doctor-followup-patient-label"
-            value={selectedPatientId}
-            label="患者范围"
-            onChange={handlePatientChange}
-            disabled={patientsLoading || patients.length === 0}
-          >
-            <MenuItem value={ALL_PATIENTS}>全部患者</MenuItem>
-            {patients.map(patient => (
-              <MenuItem key={patient.id} value={patient.id}>
-                {renderPatientOption(patient)}
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
+        <PatientSelect size="small" sx={{ minWidth: 280 }} label="患者范围" value={selectedPatientId}
+          onChange={handlePatientChange} loading={patientsLoading} disabled={!patients.length}
+          patients={patients.map(patient => ({ ...patient, name: renderPatientOption(patient) }))}
+          emptyValue={ALL_PATIENTS} emptyLabel="全部患者" />
         {patientsLoading && <CircularProgress size={20} />}
       </Stack>
 
@@ -395,7 +356,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         <Button variant={filters.status === 'in_review' ? 'contained' : 'outlined'} onClick={() => applyFilters({ status: 'in_review' })}>待医护审阅</Button>
         <Button variant={filters.status === 'overdue' ? 'contained' : 'outlined'} onClick={() => applyFilters({ status: 'overdue' })}>已逾期</Button>
         <Button variant={filters.status === 'lost' ? 'contained' : 'outlined'} onClick={() => applyFilters({ status: 'lost' })}>已失访</Button>
-        <Button variant={!filters.status && filters.start_date === today && filters.end_date === today ? 'contained' : 'outlined'} onClick={() => { const day = format(new Date(), 'yyyy-MM-dd'); applyFilters({ start_date: day, end_date: day }); }}>今日安排</Button>
+        <Button variant={!filters.status && filters.start_date === today && filters.end_date === today ? 'contained' : 'outlined'} onClick={() => { const day = formatAppDate(new Date(), 'yyyy-MM-dd'); applyFilters({ start_date: day, end_date: day }); }}>今日安排</Button>
       </Stack>
 
       <FollowUpList

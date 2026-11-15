@@ -26,8 +26,9 @@ loaded._compile(compiled, filename);
 const domain = loaded.exports;
 
 function backendValues(enumName) {
-  const schema = readFileSync(path.resolve(__dirname, '../../backend/app/schemas/followup.py'), 'utf8');
-  const body = schema.match(new RegExp(`class ${enumName}\\(str, Enum\\):([\\s\\S]*?)(?=\\nclass )`))[1];
+  const source = enumName === 'FollowUpStatus' ? 'core/followup_semantics.py' : 'schemas/followup.py';
+  const schema = readFileSync(path.resolve(__dirname, '../../backend/app', source), 'utf8');
+  const body = schema.match(new RegExp(`class ${enumName}\\(str, Enum\\):([\\s\\S]*?)(?=\\n\\S|$)`))[1];
   return [...body.matchAll(/^\s+[A-Z_]+\s*=\s*"([^"]+)"/gm)].map(match => match[1]);
 }
 
@@ -48,6 +49,13 @@ test('shared follow-up filter metadata covers each actual backend status and typ
     const values = options.map(item => item.value);
     assert.deepEqual([...values].sort(), backendValues(name).sort());
     assert.equal(new Set(values).size, values.length);
+  }
+});
+
+test('historical spellings display their canonical meaning without adding writable filter states', () => {
+  for (const [alias, canonical] of Object.entries({ done: 'completed', finished: 'completed', cancelled: 'canceled', void: 'canceled', pending: 'pending_schedule' })) {
+    assert.deepEqual(domain.getFollowUpStatusInfo(alias), domain.getFollowUpStatusInfo(canonical));
+    assert.equal(domain.followUpStatuses.some(item => item.value === alias), false);
   }
 });
 

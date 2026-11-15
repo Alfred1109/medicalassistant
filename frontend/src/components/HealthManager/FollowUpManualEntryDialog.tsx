@@ -4,10 +4,10 @@ import { apiService } from '../../services/api';
 import type { FollowUpRecord } from '../../types/followup';
 import { followUpError } from '../../utils/followupReview';
 import { getFollowUpStatusInfo } from '../../constants/followup';
+import { formatAppDate } from '../../utils/dateTime';
 
 function localDateTime() {
-  const now = new Date();
-  return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  return formatAppDate(new Date(), "yyyy-MM-dd'T'HH:mm");
 }
 
 export default function FollowUpManualEntryDialog({ followUpId, onClose, onSaved }: {

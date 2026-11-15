@@ -26,6 +26,8 @@ export const followUpStatuses = [
 ] as const;
 
 export function getFollowUpStatusInfo(status: string): { label: string; color: ChipProps['color'] } {
+  const historical: Record<string, string> = { done: 'completed', finished: 'completed', cancelled: 'canceled', void: 'canceled', pending: 'pending_schedule' };
+  status = historical[status] ?? status;
   const entry = followUpStatuses.find(item => item.value === status);
   return entry ?? { label: status, color: 'default' };
 }

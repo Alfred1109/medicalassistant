@@ -4,8 +4,7 @@
 S1 切片（docs/wp3-fu01-domain-design-draft-2026-11-07.md §五 S1、§2.4）：
 以第二代骨架（原 schemas/health_record.py:465-555 的运行时生效定义）为唯一契约
 拆出本文件，pydantic v2 风格改写；第一代同名定义已从 health_record.py 删除。
-schemas/health_record.py 保留本模块符号的转发导入，兼容既有
-`from app.schemas.health_record import FollowUpXxx` 引用（路由层 S2 收敛）。
+随访路由直接从本模块导入契约。
 """
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, Dict, List, Optional
@@ -13,6 +12,7 @@ from datetime import datetime
 from enum import Enum
 
 from .base import PyObjectId, TimestampModel
+from app.core.followup_semantics import FollowUpStatus
 
 
 # 随访类型枚举
@@ -24,23 +24,6 @@ class FollowUpType(str, Enum):
     REMOTE_MONITORING = "remote_monitoring"   # 远程监测
     GROUP = "group"                           # 小组随访
     OTHER = "other"                           # 其他
-
-
-# 随访状态枚举
-# S1 扩展（设计稿 §2.2 节点状态机）：pending_schedule / awaiting_fill / in_review /
-# overdue / lost 仅为后续切片预留，本轮服务层不产生新状态流转；
-# missed 与 overdue 的拆分口径待 FU03 确认后收敛。
-class FollowUpStatus(str, Enum):
-    PENDING_SCHEDULE = "pending_schedule"     # 创建未分配（预留）
-    SCHEDULED = "scheduled"                   # 已计划
-    AWAITING_FILL = "awaiting_fill"           # 待填写（预留）
-    IN_REVIEW = "in_review"                   # 待医护审阅（预留）
-    COMPLETED = "completed"                   # 已完成
-    CANCELED = "canceled"                     # 已取消（拼写沿用现有 canceled）
-    MISSED = "missed"                         # 已错过（FU03 口径确认前保留）
-    OVERDUE = "overdue"                       # 超窗口未填（FU03 预留）
-    LOST = "lost"                             # 失访认定（FU03 预留）
-    RESCHEDULED = "rescheduled"               # 已重新安排
 
 
 class FollowUpQuestion(BaseModel):

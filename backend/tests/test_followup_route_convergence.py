@@ -535,13 +535,25 @@ class FollowupSourceRegressionTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"路由层直连随访集合: {offenders}")
 
     def test_followup_collection_single_service_entry(self):
-        """app/services 内仅 followup_service.py 访问 followup_records 集合。"""
+        """随访写入由 FollowupService 收口，投影与指标读取走受控入口。"""
         offenders = []
         for path in _iter_py_files("app/services"):
-            text = path.read_text(encoding="utf-8")
-            if "followup_records" in text and path.name != "followup_service.py":
+            if path.name == "followup_service.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            if re.search(
+                r"(?:db|self\.db)(?:\.followup_records|\[['\"]followup_records['\"]\])"
+                r"\s*\.\s*(?:insert_one|update_one|delete_one|replace_one|bulk_write)\s*\(",
+                source,
+            ):
                 offenders.append(str(path))
-        self.assertEqual(offenders, [], f"随访集合服务入口未收敛: {offenders}")
+        self.assertEqual(offenders, [], f"随访集合存在服务层旁路写入: {offenders}")
+
+        icf_text = (BACKEND_DIR / "app" / "services" / "icf_service.py").read_text(encoding="utf-8")
+        self.assertIn("FollowupService(db).metric_status_sample", icf_text)
+        timeline_text = (BACKEND_DIR / "app" / "services" / "medical_timeline.py").read_text(encoding="utf-8")
+        self.assertIn('("followup_records",', timeline_text)
+        self.assertIn("aggregate(", timeline_text)
 
     def test_storage_model_cancel_spelling_normalized(self):
         """存储模型不再产生 cancelled 状态（拼写归一 canceled，§2.2）。"""
@@ -555,7 +567,7 @@ class FollowupSourceRegressionTests(unittest.TestCase):
 
     def test_followup_service_is_registered_dependency(self):
         """FollowupService 已注册为 FastAPI 依赖（唯一随访服务入口可用）。"""
-        deps_text = (BACKEND_DIR / "app" / "core" / "dependencies.py").read_text(
+        deps_text = (BACKEND_DIR / "app" / "api" / "dependencies.py").read_text(
             encoding="utf-8")
         self.assertIn("get_followup_service", deps_text)
 
