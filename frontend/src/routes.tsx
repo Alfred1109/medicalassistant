@@ -91,6 +91,7 @@ import AdminDashboard from './pages/Admin/AdminDashboard';
 import DoctorManagement from './pages/Admin/DoctorManagement';
 import AdminPatientManagement from './pages/Admin/PatientManagement';
 import PatientLinks from './pages/Admin/PatientLinks';
+import AccountBindings from './pages/Admin/AccountBindings';
 import AccessApplications from './pages/Admin/AccessApplications';
 import IntegrationRuns from './pages/Admin/IntegrationRuns';
 import ClinicalWorkbench from './pages/Clinical/ClinicalWorkbench';
@@ -402,6 +403,8 @@ const AppRoutes: React.FC = () => (
         <Route path="doctors" element={<DoctorManagement />} />
         <Route path="patients" element={<AdminPatientManagement />} />
         <Route path="patient-links" element={<PatientLinks />} />
+        {/* T77：显式账号绑定管理（/api/patients/account-bindings，admin-only） */}
+        <Route path="account-bindings" element={<AccountBindings />} />
         <Route path="access-applications" element={<AccessApplications />} />
         <Route path="integration-runs" element={<IntegrationRuns />} />
         <Route path="clinical" element={<ClinicalWorkbench />} />

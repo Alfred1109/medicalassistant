@@ -67,6 +67,7 @@ import {
   Schedule as ScheduleIcon,
   TrendingUp as TrendingUpIcon,
   Assignment as AssignmentIcon,
+  Link as LinkIcon,
   Search as SearchIcon,
   Notifications as NotificationsIcon
 } from '@mui/icons-material';
@@ -299,6 +300,8 @@ const Layout: React.FC = () => {
         { name: '医生管理', path: '/app/admin/doctors', icon: <DoctorIcon /> },
         { name: '患者管理', path: '/app/admin/patients', icon: <PatientIcon /> },
         { name: '患者与问卷来源', path: '/app/admin/patient-links', icon: <AssignmentIcon /> },
+        // T77：显式账号绑定管理（临床患者 ↔ 登录账号），与问卷来源（patient-links）区分
+        { name: '账号绑定管理', path: '/app/admin/account-bindings', icon: <LinkIcon /> },
         { name: '接入申请', path: '/app/admin/access-applications', icon: <AssignmentIcon /> },
         { name: '同步记录', path: '/app/admin/integration-runs', icon: <HistoryIcon /> },
         { name: '患者记录', path: '/app/admin/clinical', icon: <FolderIcon /> },

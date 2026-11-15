@@ -11,6 +11,7 @@ import { rehabClinicalWorkbench as api, type ClinicalPlan, type ClinicalFeedback
 import { contentForm, contentPayload, emptyContent, findingLines, interventionLabels, operationId, validateItems,
   workbenchError, type FormContent } from '../../utils/rehabClinicalWorkbench';
 import { FeedbackAttachments } from './PatientPlans';
+import PlanVersionHistoryDialog from '../../components/Rehabilitation/PlanVersionHistoryDialog';
 
 type Actor = { id: string; role: string };
 const LIMIT = 20;
@@ -233,6 +234,8 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
   const [note, setNote] = useState('');
   const [reason, setReason] = useState('');
   const [withdrawAction, setWithdrawAction] = useState<'withdraw' | 'cancel' | 'archive'>('withdraw');
+  // T77 方案版本历史（管理页内直达入口）
+  const [historyOpen, setHistoryOpen] = useState(false);
   const alive = useRef(true);
   const attempt = useRef<{ signature: string; id: string } | null>(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -312,7 +315,8 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
     <DialogContent dividers><Stack spacing={2.5}>
       {loading && <CircularProgress size={24} aria-label="正在读取方案" />}{error && <Alert severity="error">{error}</Alert>}
       {message && <Alert severity="success">{message}</Alert>}
-      <Box><Button disabled={pending || loading} onClick={() => setReload(value => value + 1)}>重新加载方案</Button></Box>
+      <Box><Button disabled={pending || loading} onClick={() => setReload(value => value + 1)}>重新加载方案</Button>
+        <Button disabled={loading} onClick={() => setHistoryOpen(true)}>版本历史</Button></Box>
       {snapshot && <>
         <Stack direction="row" spacing={1} flexWrap="wrap"><Chip label={snapshot.published_version_id ? '已发布 · 患者可见' : '未发布 · 患者不可见'} color={snapshot.published_version_id ? 'success' : 'default'} />
           {snapshot.draft && <Chip label={`草稿第 ${snapshot.draft.version_no} 版`} />}{dirty && <Chip label="有未保存修改" color="warning" />}</Stack>
@@ -359,6 +363,9 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
       </>}
     </Stack></DialogContent>
     <DialogActions><Button disabled={pending} onClick={onClose}>关闭</Button></DialogActions>
+    {historyOpen && (
+      <PlanVersionHistoryDialog planId={plan._id} open={historyOpen} onClose={() => setHistoryOpen(false)} />
+    )}
   </Dialog>;
 }
 
@@ -369,6 +376,8 @@ function PatientWorkspace({ actor, patient }: { actor: Actor; patient: Patient }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<ClinicalPlan | null>(null);
+  // T77 方案版本历史入口：按方案查看版本快照与差异
+  const [versionHistoryPlan, setVersionHistoryPlan] = useState<ClinicalPlan | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState(emptyContent);
   const [pending, setPending] = useState(false);
@@ -415,13 +424,21 @@ function PatientWorkspace({ actor, patient }: { actor: Actor; patient: Patient }
     {plans.map(plan => <Card variant="outlined" key={plan._id}><CardContent><Stack spacing={1}>
       <Typography variant="h6">{plan.name}</Typography><Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{plan.description}</Typography>
       <Typography variant="body2" color="text.secondary">目标：{plan.goal || '未填写'}；发布情况以管理页核验结果为准。</Typography>
-      <Box><Button onClick={() => setSelected(plan)}>管理内容、发布与患者反馈</Button></Box>
+      <Box><Button onClick={() => setSelected(plan)}>管理内容、发布与患者反馈</Button>
+        <Button onClick={() => setVersionHistoryPlan(plan)}>版本历史</Button></Box>
     </Stack></CardContent></Card>)}
     <Stack direction="row" spacing={2} alignItems="center" justifyContent="flex-end">
       <Button disabled={loading || !page} onClick={() => setPage(value => value - 1)}>上一页</Button><Typography>第 {page + 1} 页</Typography>
       <Button disabled={loading || plans.length < LIMIT} onClick={() => setPage(value => value + 1)}>下一页</Button>
     </Stack>
     {selected && <PlanEditor key={`${actor.id}:${selected._id}`} plan={selected} onClose={() => setSelected(null)} onChanged={() => setReload(value => value + 1)} />}
+    {versionHistoryPlan && (
+      <PlanVersionHistoryDialog
+        planId={versionHistoryPlan._id}
+        open={!!versionHistoryPlan}
+        onClose={() => setVersionHistoryPlan(null)}
+      />
+    )}
     <Dialog open={creating} fullWidth maxWidth="sm" onClose={() => { if (!pending) setCreating(false); }}>
       <DialogTitle>为{patient.name}新建方案草稿</DialogTitle><DialogContent dividers>
         <Stack spacing={2}><Typography variant="body2">填写经核实的方案基本信息，保存后继续配置四类干预。草稿不会直接展示给患者。</Typography>

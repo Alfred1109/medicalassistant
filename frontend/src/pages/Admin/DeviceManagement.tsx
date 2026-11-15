@@ -15,10 +15,13 @@ import {
   TableHead,
   TableRow,
   CircularProgress,
+  Tab,
+  Tabs,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import apiClient from '../../services/api';
 import DeviceIngestionPanel from './DeviceIngestionPanel';
+import DeviceRepairRecords from '../../components/Devices/DeviceRepairRecords';
 
 // 设备管理：数据来自真实接口 GET /api/devices（admin 在设备读取角色白名单内）
 // 设备生命周期由绑定/解绑流程管理，后端不存在管理员侧设备增删接口，故不提供添加/删除入口
@@ -44,6 +47,8 @@ const DeviceManagement: React.FC = () => {
   const [reloadKey, setReloadKey] = useState(0);
   // T74：自动采集详情面板（时序/质量/会话/协议假设）
   const [panelDevice, setPanelDevice] = useState<DeviceRow | null>(null);
+  // T77：维修记录 Tab（后端只读端点 /device-repairs）
+  const [tabValue, setTabValue] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,6 +176,15 @@ const DeviceManagement: React.FC = () => {
         </Typography>
       </Box>
 
+      {/* T77：设备列表 / 维修记录两个视图（维修记录为后端只读端点消费） */}
+      <Tabs value={tabValue} onChange={(_, next: number) => setTabValue(next)} sx={{ mb: 2 }}>
+        <Tab label="设备列表" />
+        <Tab label="维修记录" />
+      </Tabs>
+
+      {tabValue === 1 && <DeviceRepairRecords devices={devices.map(d => ({ id: d.id, name: d.name }))} />}
+
+      {tabValue === 0 && <>
       <Box mb={3}>
         <TextField
           placeholder="搜索设备名称、类型或型号..."
@@ -260,6 +274,7 @@ const DeviceManagement: React.FC = () => {
           onClose={() => setPanelDevice(null)}
         />
       )}
+      </>}
     </Box>
   );
 };
