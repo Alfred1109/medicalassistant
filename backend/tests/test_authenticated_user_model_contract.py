@@ -65,19 +65,6 @@ class AuthenticatedUserModelContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.client.put("/api/report-schedules/existing", json={"name": "forged"})).status_code, 403)
             domain.assert_not_awaited()
 
-    async def test_filter_creation_attributes_actor_and_denies_global_scope(self):
-        body = dict(name="Filter", collection="rehab_plans", conditions=[], global_=False)
-        body["global"] = body.pop("global_")
-        with patch("app.api.routers.data_filter_router.data_filter_service.save_filter",
-                   new=AsyncMock(return_value="filter-id")) as domain:
-            self.assertEqual((await self.client.post("/api/data-filters/save", json=body)).status_code, 200)
-            data = domain.call_args.args[0]
-            self.assertEqual(data["createdBy"], self.user.id)
-            self.assertEqual(data["createdByName"], self.user.name)
-            body["global"] = True
-            self.assertEqual((await self.client.post("/api/data-filters/save", json=body)).status_code, 403)
-            self.assertEqual(domain.await_count, 1)
-
     async def test_health_threshold_actor_cannot_be_forged_in_payload(self):
         response = dict(id="threshold-id", name="Threshold", data_type="custom", created_by=self.user.id)
         service = SimpleNamespace(create_threshold=AsyncMock(return_value=response))

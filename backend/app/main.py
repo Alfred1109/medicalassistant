@@ -39,8 +39,9 @@ from app.api.websockets import setup_websockets
 # 导入通信路由
 from app.api.routers import communication_router
 
-# 添加新的路由导入
-from .api.routers import report_scheduler_router, data_filter_router
+# 添加新的路由导入（data_filter_router 已于 T79 下线：任意集合原生查询透传
+# 无白名单/角色/对象级访问控制，且前端零引用、无业务页面语义挂靠）
+from .api.routers import report_scheduler_router
 
 # 导入设备相关路由
 from .api.routers.device_router import router as device_router
@@ -310,7 +311,6 @@ app.include_router(communication_router, prefix="/api", tags=["communications"])
 
 # 在 app.include_router 部分添加新的路由
 app.include_router(report_scheduler_router.router, prefix="/api")
-app.include_router(data_filter_router.router, prefix="/api")
 
 # 添加设备相关路由
 app.include_router(device_router, prefix="/api")
