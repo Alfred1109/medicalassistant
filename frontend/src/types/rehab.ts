@@ -130,12 +130,6 @@ export interface RehabPlanFormValues {
   metadata?: Record<string, any>;
 }
 
-export interface ExerciseCompletionParams {
-  planId: string;
-  exerciseId: string;
-  completed: boolean;
-}
-
 export interface RecommendationRequest {
   condition: string;
   goal: string;

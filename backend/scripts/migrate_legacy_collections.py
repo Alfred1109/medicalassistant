@@ -133,11 +133,6 @@ MIGRATIONS = [
         "target": "rehab_plans",
         "enrich": {},
     },
-    {
-        "legacy": "progress_records",
-        "target": "rehab_progress",
-        "enrich": {},
-    },
 ]
 
 # 同为遗留集合名，但与唯一集合（users）文档形状差异过大，
@@ -147,6 +142,8 @@ REPORT_ONLY = [
     "doctors",
     "rehabilitation_records",
     "rehabilitation_sessions",
+    # 历史训练进度不再迁入 rehab_progress 或新版执行事件；只报告源数据数量。
+    "progress_records",
 ]
 
 

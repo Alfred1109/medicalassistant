@@ -55,7 +55,7 @@ class RehabPlanBase(BaseModel):
     condition: Optional[str] = None
     goal: str
     frequency: Optional[str] = None
-    exercises: List[Dict[str, Any]] = []  # Contains exercise_id, schedule, and progress
+    exercises: List[Dict[str, Any]] = []  # 方案运动内容；执行反馈由患者自报记录
     notes: Optional[str] = None
     status: str = Field(default="active", description="active, completed, cancelled")
     metadata: Optional[Dict[str, Any]] = {}

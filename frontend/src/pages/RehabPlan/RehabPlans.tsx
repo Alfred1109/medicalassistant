@@ -1,21 +1,21 @@
 import React from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Link, useNavigate } from 'react-router-dom';
-import { 
-  Box, 
-  Button, 
-  Card, 
-  CardActions, 
-  CardContent, 
-  Container, 
+import {
+  Box,
+  Button,
+  Card,
+  CardActions,
+  CardContent,
+  Container,
   Divider,
   FormControl,
-  Grid, 
+  Grid,
   IconButton,
   InputLabel,
   LinearProgress,
   MenuItem,
-  Paper, 
+  Paper,
   Select,
   TextField,
   Typography
@@ -81,11 +81,11 @@ const RehabPlans: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
   const navigate = useNavigate();
   const theme = useTheme();
-  
+
   // 从Redux中获取康复计划数据
   const plans = useSelector(selectRehabPlans);
   const loading = useSelector((state: RootState) => state.rehab.loading);
-  
+
   // 本地状态
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<PlanStatus>('all');
@@ -101,30 +101,30 @@ const RehabPlans: React.FC = () => {
   const [bulkDeleting, setBulkDeleting] = useState<boolean>(false);
   // 批量删除结果：逐条如实上报成功/失败（含后端返回的失败原因）
   const [bulkDeleteResult, setBulkDeleteResult] = useState<{ succeeded: string[]; failed: { id: string; name: string; reason: string }[] } | null>(null);
-  
+
   // 加载康复计划数据
   useEffect(() => {
     dispatch(fetchRehabPlans());
   }, [dispatch]);
-  
+
   // 菜单处理函数
   const handleMenuOpen = (event: React.MouseEvent<HTMLElement>, planId: string) => {
     setMenuAnchorEl(event.currentTarget);
     setActivePlanId(planId);
   };
-  
+
   const handleMenuClose = () => {
     setMenuAnchorEl(null);
     setActivePlanId(null);
   };
-  
+
   // 删除对话框处理
   const handleDeleteClick = (planId: string) => {
     setPlanToDelete(planId);
     setDeleteDialogOpen(true);
     handleMenuClose();
   };
-  
+
   const handleDeleteConfirm = () => {
     if (planToDelete) {
       dispatch(deleteRehabPlan(planToDelete));
@@ -132,12 +132,12 @@ const RehabPlans: React.FC = () => {
     setDeleteDialogOpen(false);
     setPlanToDelete(null);
   };
-  
+
   const handleDeleteCancel = () => {
     setDeleteDialogOpen(false);
     setPlanToDelete(null);
   };
-  
+
   // 选择项处理
   const handleSelectPlan = (planId: string) => {
     setSelectedPlans(prev => {
@@ -148,7 +148,7 @@ const RehabPlans: React.FC = () => {
       }
     });
   };
-  
+
   const handleSelectAll = () => {
     if (selectedPlans.length === filteredPlans.length) {
       setSelectedPlans([]);
@@ -156,7 +156,7 @@ const RehabPlans: React.FC = () => {
       setSelectedPlans(filteredPlans.map(plan => plan.id || plan._id || ''));
     }
   };
-  
+
   // 打开批量删除确认对话框
   const handleBulkDeleteClick = () => {
     setBulkDeleteResult(null);
@@ -192,25 +192,25 @@ const RehabPlans: React.FC = () => {
       setBulkDeleteDialogOpen(false);
     }
   };
-  
+
   // 筛选和排序逻辑
   const filteredPlans = React.useMemo(() => {
     let result = [...plans];
-    
+
     // 搜索过滤
     if (searchTerm) {
       const lowerCaseSearch = searchTerm.toLowerCase();
-      result = result.filter(plan => 
-        (plan.name?.toLowerCase() || '').includes(lowerCaseSearch) || 
+      result = result.filter(plan =>
+        (plan.name?.toLowerCase() || '').includes(lowerCaseSearch) ||
         (plan.description?.toLowerCase() || '').includes(lowerCaseSearch)
       );
     }
-    
+
     // 状态过滤
     if (statusFilter !== 'all') {
       result = result.filter(plan => plan.status === statusFilter);
     }
-    
+
     // 排序
     result.sort((a, b) => {
       switch (sortBy) {
@@ -224,21 +224,14 @@ const RehabPlans: React.FC = () => {
           return 0;
       }
     });
-    
+
     return result;
   }, [plans, searchTerm, statusFilter, sortBy]);
-  
+
   // 格式化日期函数
   const formatDate = (dateString?: string) =>
     formatAppDate(dateString, 'day', { empty: 'N/A', invalid: 'Invalid date' });
-  
-  // 计算完成百分比
-  const calculateProgress = (plan: RehabPlan) => {
-    if (!plan.exercises || plan.exercises.length === 0) return 0;
-    const completedExercises = plan.exercises.filter(ex => ex.completed).length;
-    return Math.round((completedExercises / plan.exercises.length) * 100);
-  };
-  
+
   // 获取状态芯片样式
   const getStatusChipColor = (status: string): { color: string; icon?: React.ReactElement } => {
     switch (status) {
@@ -263,19 +256,18 @@ const RehabPlans: React.FC = () => {
         };
     }
   };
-  
+
   // 渲染计划卡片 (网格视图)
   const renderPlanCard = (plan: RehabPlan) => {
     const planId = plan.id || plan._id || '';
     const isSelected = selectedPlans.includes(planId);
-    const progress = calculateProgress(plan);
     const statusInfo = getStatusChipColor(plan.status);
-    
+
     return (
-      <Card 
-        sx={{ 
-          height: '100%', 
-          display: 'flex', 
+      <Card
+        sx={{
+          height: '100%',
+          display: 'flex',
           flexDirection: 'column',
           position: 'relative',
           border: isSelected ? `2px solid ${theme.palette.primary.main}` : 'none',
@@ -288,7 +280,7 @@ const RehabPlans: React.FC = () => {
           onChange={() => handleSelectPlan(planId)}
           sx={{ position: 'absolute', top: 0, left: 0, zIndex: 1 }}
         />
-        
+
         {/* 菜单按钮 */}
         <IconButton
           aria-label="more"
@@ -297,45 +289,39 @@ const RehabPlans: React.FC = () => {
         >
           <MoreVertIcon />
         </IconButton>
-        
+
         <CardContent sx={{ flexGrow: 1, pt: 4 }}>
           <Stack direction="row" alignItems="center" spacing={1} mb={1}>
             <Typography variant="h6" component="div" noWrap>
               {plan.name || plan.title}
             </Typography>
-            <Chip 
+            <Chip
               size="small"
               label={plan.status}
               color={statusInfo.color as any}
               icon={statusInfo.icon}
             />
           </Stack>
-          
+
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            {plan.description?.length > 80 
-              ? `${plan.description.substring(0, 80)}...` 
+            {plan.description?.length > 80
+              ? `${plan.description.substring(0, 80)}...`
               : plan.description}
           </Typography>
-          
+
           <Stack spacing={1}>
             <Typography variant="body2">
               <ScheduleIcon fontSize="small" sx={{ verticalAlign: 'middle', mr: 0.5 }} />
               开始时间: {formatDate(plan.startDate)}
             </Typography>
-            
+
             <Typography variant="body2">
               练习数量: {plan.exercises?.length || 0}
             </Typography>
-            
-            <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-              <Typography variant="body2" sx={{ mr: 1 }}>
-                完成进度:
-              </Typography>
-              <Box sx={{ width: '100%', mr: 1 }}>
-                <LinearProgress variant="determinate" value={progress} />
-              </Box>
-              <Typography variant="body2">{progress}%</Typography>
-            </Box>
+
+            <Typography variant="body2" color="text.secondary">
+              训练完成情况由患者自报记录
+            </Typography>
           </Stack>
         </CardContent>
         <Divider />
@@ -358,18 +344,17 @@ const RehabPlans: React.FC = () => {
       </Card>
     );
   };
-  
+
   // 渲染计划列表项 (列表视图)
   const renderPlanListItem = (plan: RehabPlan) => {
     const planId = plan.id || plan._id || '';
     const isSelected = selectedPlans.includes(planId);
-    const progress = calculateProgress(plan);
     const statusInfo = getStatusChipColor(plan.status);
-    
+
     return (
-      <Paper 
-        sx={{ 
-          p: 2, 
+      <Paper
+        sx={{
+          p: 2,
           mb: 2,
           border: isSelected ? `2px solid ${theme.palette.primary.main}` : 'none',
           transition: 'all 0.2s'
@@ -388,7 +373,7 @@ const RehabPlans: React.FC = () => {
             </Typography>
           </Grid>
           <Grid item xs={2}>
-            <Chip 
+            <Chip
               size="small"
               label={plan.status}
               color={statusInfo.color as any}
@@ -401,17 +386,14 @@ const RehabPlans: React.FC = () => {
             </Typography>
           </Grid>
           <Grid item xs={2}>
-            <Box sx={{ display: 'flex', alignItems: 'center' }}>
-              <Box sx={{ width: '50%', mr: 1 }}>
-                <LinearProgress variant="determinate" value={progress} />
-              </Box>
-              <Typography variant="body2">{progress}%</Typography>
-            </Box>
+            <Typography variant="body2" color="text.secondary">
+              患者自报
+            </Typography>
           </Grid>
           <Grid item xs={2}>
             <Stack direction="row" spacing={1}>
               <Tooltip title="查看详情">
-                <IconButton 
+                <IconButton
                   size="small"
                   component={Link}
                   to={`/app/rehab-plans/${planId}`}
@@ -420,7 +402,7 @@ const RehabPlans: React.FC = () => {
                 </IconButton>
               </Tooltip>
               <Tooltip title="编辑">
-                <IconButton 
+                <IconButton
                   size="small"
                   component={Link}
                   to={`/app/rehab-plans/edit/${planId}`}
@@ -442,7 +424,7 @@ const RehabPlans: React.FC = () => {
       </Paper>
     );
   };
-  
+
   return (
     <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
       {/* 标题和操作按钮区 */}
@@ -460,7 +442,7 @@ const RehabPlans: React.FC = () => {
           新建计划
         </Button>
       </Box>
-      
+
       {/* 搜索和筛选区 */}
       <Paper sx={{ p: 2, mb: 3 }}>
         <Grid container spacing={2} alignItems="center">
@@ -511,7 +493,7 @@ const RehabPlans: React.FC = () => {
           </Grid>
         </Grid>
       </Paper>
-      
+
       {/* 批量操作工具栏 */}
       {selectedPlans.length > 0 && (
         <Paper sx={{ p: 2, mb: 3, bgcolor: theme.palette.primary.light }}>
@@ -529,7 +511,7 @@ const RehabPlans: React.FC = () => {
               >
                 批量删除
               </Button>
-              <Button 
+              <Button
                 size="small"
                 onClick={() => setSelectedPlans([])}
                 sx={{ color: theme.palette.primary.contrastText }}
@@ -540,7 +522,7 @@ const RehabPlans: React.FC = () => {
           </Box>
         </Paper>
       )}
-      
+
       {/* 视图切换和结果计数 */}
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
         <Typography variant="subtitle1" color="text.secondary">
@@ -565,14 +547,14 @@ const RehabPlans: React.FC = () => {
           </Tooltip>
         </Box>
       </Box>
-      
+
       {/* 加载指示器 */}
       {loading && (
         <Box sx={{ width: '100%', mt: 2, mb: 2 }}>
           <LinearProgress />
         </Box>
       )}
-      
+
       {/* 批量删除结果反馈：成功/失败逐条如实展示 */}
       {bulkDeleteResult && (
         <Alert
@@ -593,8 +575,8 @@ const RehabPlans: React.FC = () => {
           {filteredPlans.length === 0 ? (
             <Paper sx={{ p: 4, textAlign: 'center' }}>
               <Typography variant="body1">
-                {searchTerm || statusFilter !== 'all' 
-                  ? '没有找到匹配的康复计划。' 
+                {searchTerm || statusFilter !== 'all'
+                  ? '没有找到匹配的康复计划。'
                   : '您目前还没有康复计划。点击"新建计划"按钮开始创建。'}
               </Typography>
             </Paper>
@@ -603,11 +585,11 @@ const RehabPlans: React.FC = () => {
               {viewMode === 'grid' ? (
                 <Grid container spacing={3}>
                   {filteredPlans.map((plan: RehabPlan) => (
-                    <Grid 
-                      item 
-                      xs={12} 
-                      sm={6} 
-                      md={4} 
+                    <Grid
+                      item
+                      xs={12}
+                      sm={6}
+                      md={4}
                       key={plan.id || plan._id}
                     >
                       {renderPlanCard(plan)}
@@ -643,7 +625,7 @@ const RehabPlans: React.FC = () => {
                       </Grid>
                     </Grid>
                   </Paper>
-                  
+
                   {/* 列表内容 */}
                   {filteredPlans.map((plan: RehabPlan) => renderPlanListItem(plan))}
                 </Box>
@@ -652,23 +634,23 @@ const RehabPlans: React.FC = () => {
           )}
         </>
       )}
-      
+
       {/* 上下文菜单 */}
       <Menu
         anchorEl={menuAnchorEl}
         open={Boolean(menuAnchorEl)}
         onClose={handleMenuClose}
       >
-        <MenuItem 
-          component={Link} 
+        <MenuItem
+          component={Link}
           to={`/app/rehab-plans/${activePlanId}`}
           onClick={handleMenuClose}
         >
           <SearchIcon fontSize="small" sx={{ mr: 1 }} />
           查看详情
         </MenuItem>
-        <MenuItem 
-          component={Link} 
+        <MenuItem
+          component={Link}
           to={`/app/rehab-plans/edit/${activePlanId}`}
           onClick={handleMenuClose}
         >
@@ -681,7 +663,7 @@ const RehabPlans: React.FC = () => {
           <Typography color="error">删除计划</Typography>
         </MenuItem>
       </Menu>
-      
+
       {/* 删除确认对话框 */}
       <Dialog
         open={deleteDialogOpen}
@@ -722,4 +704,4 @@ const RehabPlans: React.FC = () => {
   );
 };
 
-export default RehabPlans; 
+export default RehabPlans;

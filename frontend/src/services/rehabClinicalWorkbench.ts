@@ -1,5 +1,4 @@
 import api from './httpClient';
-import type { Patient } from '../types/patient.types';
 import type { PublishedRehabCourse, PublishedRehabItem, PublishedRehabPlan, PatientRehabFeedback } from './rehabPublications';
 
 export interface ClinicalPlan {
@@ -47,8 +46,6 @@ const root = '/rehabilitation/publications/plans';
 const planPath = (id: string) => `${root}/${encodeURIComponent(id)}`;
 
 export const rehabClinicalWorkbench = {
-  patients: (role: string, signal?: AbortSignal) => api.get<Patient[]>(
-    role === 'health_manager' ? '/health-managers/patients' : '/doctors/patients', { signal }),
   plans: (patientId: string, skip: number, limit: number, signal?: AbortSignal) => api.get<ClinicalPlan[]>(
     '/rehabilitation/plans', { params: { patient_id: patientId, skip, limit }, signal }),
   create: (patientId: string, content: DraftContent) => api.post<ClinicalPlan>('/rehabilitation/plans', {

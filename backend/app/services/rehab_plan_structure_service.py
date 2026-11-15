@@ -9,7 +9,7 @@
 
 所有临床语义（四类干预规则值、阈值、禁忌内容、审核口径、完成率统计口径）
 一律留空待定（D05/REH02/REH03 未决策），本服务不编造、不推断任何临床数据。
-历史集合（rehab_plans / exercises / rehab_progress）不做迁移，新集合为增量。
+方案与运动库保留既有结构，患者执行反馈由独立服务记录。
 """
 from copy import deepcopy
 from datetime import datetime
@@ -22,7 +22,6 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from app.core.exceptions import AppBaseException
 from app.core.patient_access import ensure_patient_access
 from app.schemas.rehab_plan_structure import (
-    ExecutionEventCreate,
     PlanVersionCreate,
     PrescriptionItemCreate,
 )
@@ -43,7 +42,6 @@ class RehabPlanStructureService:
         self.versions_collection = db.rehab_plan_versions
         self.items_collection = db.rehab_prescription_items
         self.events_collection = db.rehab_execution_events
-        self._indexes_ready = False
 
     # ── 对象级授权 ────────────────────────────────────────────────────────
 
@@ -231,83 +229,6 @@ class RehabPlanStructureService:
         return items
 
     # ── 执行事件（幂等）───────────────────────────────────────────────────
-
-    async def _ensure_event_indexes(self) -> None:
-        """建立执行事件幂等唯一索引；失败必须拒绝写入。"""
-        if self._indexes_ready:
-            return
-        try:
-            await self.events_collection.create_index(
-                [("plan_id", 1), ("event_id", 1)], unique=True,
-                name="uniq_plan_event_id")
-            self._indexes_ready = True
-        except (PyMongoError, AttributeError) as exc:
-            raise AppBaseException("执行记录唯一索引不可用，请核查后重试", status_code=503,
-                                   error_code="REHAB_EXECUTION_INDEX_UNAVAILABLE") from exc
-
-    async def record_execution_event(
-        self, plan_id: str, item_id: str, event_data: ExecutionEventCreate, *,
-        operator_id: str, operator_role: str,
-    ) -> Dict[str, Any]:
-        """记录一次训练执行事件；(plan_id, event_id) 幂等。
-
-        重复提交返回既有事件（created=False），不产生第二条记录、不重复
-        参与任何统计分母（统计口径本身待定 REH03）。事件绑定处方项及其
-        所在版本；完成/撤回/补做的语义与并发更正历史待定 REH03，本方法
-        只做幂等落库。
-        """
-        if event_data.event_id.startswith("patient-report:"):
-            raise AppBaseException("该事件标识仅用于患者执行反馈", status_code=422,
-                                   error_code="REHAB_RESERVED_EVENT_ID")
-        plan, item = await self._get_item_checked(
-            plan_id, item_id, operator_id, operator_role)
-        item_version = await self.versions_collection.find_one(
-            {"_id": ObjectId(item["version_id"]), "plan_id": plan_id}) if ObjectId.is_valid(str(item.get("version_id", ""))) else None
-        if item_version and item_version.get("workflow") == "patient_publication":
-            raise AppBaseException("已发布处方的患者执行反馈须使用专用入口", status_code=409,
-                                   error_code="REHAB_PUBLICATION_EVENT_REQUIRED")
-        await self._ensure_event_indexes()
-        existing = await self.events_collection.find_one(
-            {"plan_id": plan_id, "event_id": event_data.event_id})
-        if existing:
-            existing["_id"] = str(existing["_id"])
-            return {"event": existing, "created": False}
-        now = datetime.utcnow()
-        doc = event_data.model_dump(exclude_unset=True)
-        doc.update({
-            "plan_id": plan_id,
-            "prescription_item_id": item_id,
-            "version_id": item.get("version_id"),
-            "version_no": item.get("version_no"),
-            "patient_id": str(plan["patient_id"]),
-            # 计划训练实例字段位：实例划分口径待定 REH03，一律留空
-            "training_instance": None,
-            # 中心/项目字段位（值待定 D02）
-            "center_id": plan.get("center_id"),
-            "project_id": plan.get("project_id"),
-            "recorded_by": operator_id,
-            # 更正历史字段位：撤回/更正语义待定 REH03，先留空列表
-            "correction_history": [],
-            "created_at": now,
-            "updated_at": now,
-        })
-        doc.pop("_id", None)
-        try:
-            result = await self.events_collection.insert_one(doc)
-        except DuplicateKeyError:
-            # 并发同 event_id：唯一索引兜底，返回先写入的事件
-            existing = await self.events_collection.find_one(
-                {"plan_id": plan_id, "event_id": event_data.event_id})
-            if existing:
-                existing["_id"] = str(existing["_id"])
-                return {"event": existing, "created": False}
-            raise AppBaseException("执行事件写入冲突，请重新读取", status_code=409,
-                                   error_code="REHAB_EXECUTION_EVENT_CONFLICT")
-        except PyMongoError as exc:
-            raise AppBaseException("执行事件保存失败，请稍后重试", status_code=503,
-                                   error_code="REHAB_EXECUTION_EVENT_SAVE_FAILED") from exc
-        doc["_id"] = str(result.inserted_id)
-        return {"event": doc, "created": True}
 
     async def list_execution_events(
         self, plan_id: str, *, item_id: Optional[str] = None,

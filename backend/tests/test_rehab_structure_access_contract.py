@@ -26,7 +26,6 @@ from app.api.dependencies import (
 from app.db.mongodb import get_database as db_get_database
 from app.main import app
 from app.schemas.user import UserResponse
-from app.services.user_service import UserService
 
 OPERATOR_ID = "507f1f77bcf86cd799439011"
 PATIENT_ID = str(ObjectId())
@@ -58,8 +57,6 @@ class RehabStructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
         self.structure_service.add_prescription_item = AsyncMock(
             return_value={"item_id": ITEM_ID})
         self.structure_service.list_prescription_items = AsyncMock(return_value=[])
-        self.structure_service.record_execution_event = AsyncMock(
-            return_value={"event": {"event_id": "evt-1"}, "created": True})
         self.structure_service.list_execution_events = AsyncMock(return_value=[])
 
         app.dependency_overrides[get_rehabilitation_service] = lambda: self.rehab_service
@@ -76,8 +73,10 @@ class RehabStructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_database] = fake_database
         app.dependency_overrides[db_get_database] = fake_database
         self.get_user_mock = AsyncMock(return_value=self.operator)
-        self.lookup = patch.object(UserService, "get_user_by_id",
-                                   new=self.get_user_mock)
+        # Authentication now maps stored users through core.user_record directly;
+        # patch that boundary while retaining JWT parsing and the 401 behavior.
+        self.lookup = patch("app.core.user_record.load_user_response",
+                            new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 
@@ -97,7 +96,7 @@ class RehabStructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
         self.get_user_mock.return_value = self.operator
 
     def structure_endpoints(self):
-        """7 个方案结构化端点（method, path, kwargs）。"""
+        """方案版本 / 处方项读取和写入端点。"""
         return [
             ("post", f"/api/rehabilitation/plans/{PLAN_ID}/versions", {}),
             ("get", f"/api/rehabilitation/plans/{PLAN_ID}/versions", {}),
@@ -105,8 +104,6 @@ class RehabStructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
             ("post", f"/api/rehabilitation/plans/{PLAN_ID}/versions/{VERSION_ID}/items",
              {"json": {"intervention_type": "exercise", "exercise_id": "ex-1"}}),
             ("get", f"/api/rehabilitation/plans/{PLAN_ID}/items", {}),
-            ("post", f"/api/rehabilitation/plans/{PLAN_ID}/items/{ITEM_ID}/events",
-             {"json": {"event_id": "evt-1"}}),
             ("get", f"/api/rehabilitation/plans/{PLAN_ID}/items/{ITEM_ID}/events", {}),
         ]
 
@@ -117,7 +114,6 @@ class RehabStructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
             self.structure_service.get_plan_version,
             self.structure_service.add_prescription_item,
             self.structure_service.list_prescription_items,
-            self.structure_service.record_execution_event,
             self.structure_service.list_execution_events,
         ]
 
@@ -188,12 +184,13 @@ class RehabStructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["item_id"], ITEM_ID)
 
+
+    async def test_clinician_event_registration_is_removed(self):
         response = await self.client.post(
             f"/api/rehabilitation/plans/{PLAN_ID}/items/{ITEM_ID}/events",
-            json={"event_id": "evt-1"}, headers=headers)
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertTrue(response.json()["created"])
-        self.structure_service.record_execution_event.assert_awaited_once()
+            json={"event_id": "evt-1"}, headers=self.auth())
+        # The GET history route remains; only the clinician write method was removed.
+        self.assertEqual(response.status_code, 405, response.text)
 
 
 if __name__ == "__main__":

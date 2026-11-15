@@ -444,7 +444,12 @@ class RehabPublicationService:
                      "status": {"$nin": ["cancelled", "canceled", "archived"]}}
             rows = await self.plans.find(query, session=session).sort([("published_at", -1), ("_id", -1)]).skip(skip).limit(limit).to_list(length=limit)
             values = [self._patient_projection(row, await self._published(row, session)) for row in rows]
-            return {"items": values, "total": await self.plans.count_documents(query, session=session), "skip": skip, "limit": limit}
+            status_counts = {
+                status: await self.plans.count_documents({**query, "status": status}, session=session)
+                for status in ("active", "completed")
+            }
+            return {"items": values, "total": await self.plans.count_documents(query, session=session),
+                    "status_counts": status_counts, "skip": skip, "limit": limit}
         return await run_rehab_transaction(self.db, read)
 
     def _signature(self, actor, stamp, snapshot, items, payload, declaration):

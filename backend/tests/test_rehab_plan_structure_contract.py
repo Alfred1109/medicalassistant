@@ -1,9 +1,9 @@
-"""REH01 康复方案域结构收敛契约测试。
+"""REH01 康复方案结构契约测试。
 
 覆盖：
 1. 方案版本：白名单快照、版本号递增、审核字段位留空；
 2. 处方项：服务端分配稳定 item_id、版本 item_ids 引用、_id 不入存储文档；
-3. 执行事件：(plan_id, event_id) 幂等——重复提交返回既有事件、并发冲突不双写；
+3. 处方项读取授权；训练记录通过独立的患者自报工作流写入；
 4. 对象级授权：患者归属校验复用 patient_access 内核，未归属 403、
    文档缺失/畸形 404、跨方案引用 404；
 5. 审核修改白名单：GeneratedPlanEdits.exercises 拒绝 _id 等身份字段；
@@ -19,13 +19,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from bson import ObjectId
-from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import AppBaseException
 from app.core.patient_access import PatientAccessError
 from app.schemas.rehab_plan_structure import (
     DietInterventionFields,
-    ExecutionEventCreate,
     MedicationInterventionFields,
     PlanVersionCreate,
     PrescriptionItemCreate,
@@ -301,73 +299,6 @@ class PrescriptionItemContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.rehab_prescription_items.docs, [])
 
 
-class ExecutionEventContractTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.service, self.db = make_service()
-        self.version = await self.service.create_plan_version(
-            PLAN_ID, PlanVersionCreate(), operator_id=OPERATOR_ID, operator_role="doctor")
-        self.item = await self.service.add_prescription_item(
-            PLAN_ID, self.version["_id"],
-            PrescriptionItemCreate(intervention_type="exercise", exercise_id="ex-1"),
-            operator_id=OPERATOR_ID, operator_role="doctor")
-
-    def event(self, event_id="evt-001"):
-        return ExecutionEventCreate(event_id=event_id, pain_level=2,
-                                    difficulty_rating=3)
-
-    async def test_duplicate_event_id_is_idempotent(self):
-        first = await self.service.record_execution_event(
-            PLAN_ID, self.item["item_id"], self.event(),
-            operator_id=OPERATOR_ID, operator_role="doctor")
-        self.assertTrue(first["created"])
-        replay = await self.service.record_execution_event(
-            PLAN_ID, self.item["item_id"], self.event(),
-            operator_id=OPERATOR_ID, operator_role="doctor")
-        self.assertFalse(replay["created"])
-        self.assertEqual(replay["event"]["_id"], first["event"]["_id"])
-        # 重复提交不产生第二条记录
-        self.assertEqual(len(self.db.rehab_execution_events.docs), 1)
-
-    async def test_concurrent_same_event_id_writes_once(self):
-        # 模拟并发：另一请求先落库成功，当前请求收到唯一键冲突后回读既有事件
-        winner_doc = {"_id": ObjectId(), "event_id": "evt-race", "plan_id": PLAN_ID,
-                      "prescription_item_id": self.item["item_id"],
-                      "patient_id": PATIENT_ID}
-        self.db.rehab_execution_events.insert_error = \
-            DuplicateKeyError("uniq_plan_event_id")
-        self.db.rehab_execution_events.insert_side_effect = winner_doc
-        result = await self.service.record_execution_event(
-            PLAN_ID, self.item["item_id"], self.event("evt-race"),
-            operator_id=OPERATOR_ID, operator_role="doctor")
-        self.assertFalse(result["created"])
-        self.assertEqual(result["event"]["event_id"], "evt-race")
-        # 并发冲突后不产生第二条记录
-        self.assertEqual(len(self.db.rehab_execution_events.docs), 1)
-
-    async def test_event_binds_item_version_and_patient(self):
-        result = await self.service.record_execution_event(
-            PLAN_ID, self.item["item_id"], self.event(),
-            operator_id=OPERATOR_ID, operator_role="doctor")
-        event = result["event"]
-        self.assertEqual(event["prescription_item_id"], self.item["item_id"])
-        self.assertEqual(event["version_id"], self.version["_id"])
-        self.assertEqual(event["patient_id"], PATIENT_ID)
-        self.assertEqual(event["recorded_by"], OPERATOR_ID)
-        # 计划训练实例与更正历史为字段位（口径待定 REH03）
-        self.assertIsNone(event["training_instance"])
-        self.assertEqual(event["correction_history"], [])
-
-    async def test_event_for_item_of_other_plan_returns_404(self):
-        other_plan = plan_doc(_id=ObjectId(), patient_id=PATIENT_ID)
-        self.db.rehab_plans.docs.append(other_plan)
-        with self.assertRaises(AppBaseException) as error:
-            await self.service.record_execution_event(
-                str(other_plan["_id"]), self.item["item_id"], self.event(),
-                operator_id=OPERATOR_ID, operator_role="doctor")
-        self.assertEqual(error.exception.status_code, 404)
-        self.assertEqual(self.db.rehab_execution_events.docs, [])
-
-
 class StructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
     """对象级授权：复用 patient_access 内核，未归属默认拒绝且零写入。"""
 
@@ -384,9 +315,6 @@ class StructureAccessContractTests(unittest.IsolatedAsyncioTestCase):
             lambda: service.add_prescription_item(PLAN_ID, str(ObjectId()),
                 PrescriptionItemCreate(), operator_id=OPERATOR_ID,
                 operator_role="doctor"),
-            lambda: service.record_execution_event(PLAN_ID, "item-x",
-                ExecutionEventCreate(event_id="evt-x"),
-                operator_id=OPERATOR_ID, operator_role="doctor"),
             lambda: service.list_execution_events(PLAN_ID,
                 operator_id=OPERATOR_ID, operator_role="doctor"),
         ):
@@ -461,7 +389,6 @@ if __name__ == "__main__":
 # ── 真实 Mongo（隔离副本集）验证：幂等唯一索引与嵌套 _id 不落库 ────────────
 # 与 test_generated_plan_approval_contract.py 相同的环境约定：
 # 仅在设置 REHAB_TEST_REPLICA_URI 时运行，库按 uuid 隔离、结束后丢弃。
-import asyncio
 import os
 from uuid import uuid4
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -486,27 +413,6 @@ class StructureMongoContractTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.drop_database(self.db.name)
         self.client.close()
-
-    async def test_execution_event_idempotent_under_real_unique_index(self):
-        item = await self.service.add_prescription_item(
-            PLAN_ID, self.version["_id"],
-            PrescriptionItemCreate(intervention_type="exercise", exercise_id="ex-1"),
-            operator_id=OPERATOR_ID, operator_role="doctor")
-        results = await asyncio.gather(*[
-            self.service.record_execution_event(
-                PLAN_ID, item["item_id"],
-                ExecutionEventCreate(event_id="evt-parallel", pain_level=2),
-                operator_id=OPERATOR_ID, operator_role="doctor")
-            for _ in range(8)])
-        # 8 个并发同 event_id：仅 1 条 created=True，其余幂等回放
-        self.assertEqual(sum(1 for r in results if r["created"]), 1)
-        self.assertEqual(sum(1 for r in results if not r["created"]), 7)
-        self.assertEqual(await self.db.rehab_execution_events.count_documents(
-            {"plan_id": PLAN_ID, "event_id": "evt-parallel"}), 1)
-        stored = await self.db.rehab_execution_events.find_one(
-            {"plan_id": PLAN_ID, "event_id": "evt-parallel"})
-        self.assertEqual(stored["patient_id"], PATIENT_ID)
-        self.assertIsNone(stored["training_instance"])
 
     async def test_version_and_item_have_no_id_leak_and_review_slots_empty(self):
         item = await self.service.add_prescription_item(

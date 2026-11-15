@@ -58,14 +58,8 @@ class RehabAgentAuthContractTests(unittest.IsolatedAsyncioTestCase):
             return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID})
         self.rehab_service.update_rehab_plan_phase = AsyncMock(
             return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID, "current_phase": "进步期"})
-        self.rehab_service.log_exercise_progress = AsyncMock(
-            return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID})
         self.rehab_service.apply_plan_adjustment = AsyncMock(
             return_value={"_id": PLAN_ID, "patient_id": PATIENT_ID})
-        self.rehab_service.calculate_plan_statistics = AsyncMock(
-            return_value={"plan_id": PLAN_ID, "completion_rate": 0.8})
-        self.rehab_service.get_exercise_trends = AsyncMock(
-            return_value={"plan_id": PLAN_ID, "trend": []})
         self.rehab_service.get_recommendations = AsyncMock(return_value=[])
         self.rehab_service.list_patient_assessments = AsyncMock(return_value=[])
         self.rehab_service.get_assessment_comparison = AsyncMock(
@@ -92,9 +86,9 @@ class RehabAgentAuthContractTests(unittest.IsolatedAsyncioTestCase):
             yield self.database
 
         app.dependency_overrides[get_database] = fake_database
-        # get_current_user 内部通过 UserService 查库；按既有契约测试模式打桩
+        # 认证边界映射操作者；患者归属查库仍使用本测试数据库。
         self.get_user_mock = AsyncMock(return_value=self.operator)
-        self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
+        self.lookup = patch("app.core.user_record.load_user_response", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 
@@ -270,13 +264,9 @@ class RehabAgentAuthContractTests(unittest.IsolatedAsyncioTestCase):
              {"json": {"notes": "合成备注"}}),
             ("put", f"/api/rehabilitation/plans/{PLAN_ID}/phase",
              {"json": {"phase": "进步期"}}),
-            ("post", f"/api/rehabilitation/plans/{PLAN_ID}/exercises/合成运动/progress",
-             {"json": {"completed": True}}),
             ("put", f"/api/rehabilitation/plans/{PLAN_ID}/adjustments/合成调整",
              {"json": {"apply": True}}),
             ("get", f"/api/rehabilitation/plans/{PLAN_ID}/detailed", {}),
-            ("get", f"/api/rehabilitation/plans/{PLAN_ID}/statistics", {}),
-            ("get", f"/api/rehabilitation/plans/{PLAN_ID}/trends", {}),
         ]
 
     def object_level_business_mocks(self):
@@ -288,10 +278,7 @@ class RehabAgentAuthContractTests(unittest.IsolatedAsyncioTestCase):
             self.rehab_service.add_exercises_to_plan,
             self.rehab_service.update_assessment,
             self.rehab_service.update_rehab_plan_phase,
-            self.rehab_service.log_exercise_progress,
             self.rehab_service.apply_plan_adjustment,
-            self.rehab_service.calculate_plan_statistics,
-            self.rehab_service.get_exercise_trends,
         ]
 
     async def test_object_level_endpoints_reject_unassigned_doctor(self):
@@ -360,11 +347,11 @@ class RehabAgentAuthContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["patient_id"], PATIENT_ID)
 
+    async def test_clinician_completion_endpoint_is_removed(self):
         response = await self.client.post(
-            f"/api/rehabilitation/plans/{PLAN_ID}/exercises/合成运动/progress",
-            json={"completed": True}, headers=headers)
-        self.assertEqual(response.status_code, 200, response.text)
-        self.rehab_service.log_exercise_progress.assert_awaited_once()
+            f"/api/rehabilitation/plans/{PLAN_ID}/exercises/exercise-1/progress",
+            json={"completed": True}, headers=self.auth())
+        self.assertEqual(response.status_code, 404, response.text)
 
     async def test_object_level_endpoints_require_authentication(self):
         # 未认证先 401，文档加载与归属校验均不触发

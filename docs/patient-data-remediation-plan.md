@@ -26,7 +26,7 @@
 | L4 | `followup_records` 等业务集合部分文档缺 `patient_id`（迁移映射表明确「缺失保持缺失，计数上报」） | 同上，「不映射项」段 |
 | L5 | 医护归属字段 `practitioners` / `health_managers` 双形态 + legacy 精确匹配漏配风险 | `backend/app/db/crud_services.py:97-103`（字面精确匹配） |
 | L6 | 日常记录真实集合名是带点号的 `patientmanager.daily_records`，患者字段是 `user_id` | `backend/app/api/routers/patient_router.py:92` |
-| L7 | `devices.patient_id` 可为 None（历史非患者绑定，设计内）；`rehab_progress.patient_id`；`external_patient_links.local_patient_id` 24-hex 硬约束 | `backend/app/db/indexes.py:50-56`；`backend/app/models/rehabilitation.py:217`；`backend/app/integrations/forms/patient_links.py:34,95-97` |
+| L7 | `devices.patient_id` 可为 None（历史非患者绑定，设计内）；`external_patient_links.local_patient_id` 24-hex 硬约束 | `backend/app/db/indexes.py:50-56`；`backend/app/integrations/forms/patient_links.py:34,95-97` |
 | L8 | 迁移保留原 `_id`、写 `legacy_user_id`、生成 `legacy_same_document` 审计链接、校验和、幂等语义 | `backend/app/patients/migration.py:66-95,114-128,155-276`；`backend/app/patients/README.md:19-29` |
 
 与第二波段切换（T10 波次计划，`docs/patient-domain-cutover-plan.md`）的关系：

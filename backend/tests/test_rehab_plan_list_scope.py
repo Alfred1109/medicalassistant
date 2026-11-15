@@ -93,7 +93,7 @@ class RehabPlanListScopeTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_database] = lambda: self.database
         app.dependency_overrides[get_rehabilitation_service] = lambda: self.service
         self.actor_lookup = AsyncMock()
-        self.lookup = patch.object(UserService, "get_user_by_id", new=self.actor_lookup)
+        self.lookup = patch("app.core.user_record.load_user_response", new=self.actor_lookup)
         self.lookup.start()
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
 

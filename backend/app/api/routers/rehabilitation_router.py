@@ -21,7 +21,6 @@ from app.schemas.rehabilitation import (
     AssessmentResponse
 )
 from app.schemas.rehab_plan_structure import (
-    ExecutionEventCreate,
     PlanVersionCreate,
     PrescriptionItemCreate,
 )
@@ -500,45 +499,6 @@ async def update_plan_phase(
         
     return updated_plan
 
-# 运动进度记录相关路由
-@router.post("/plans/{plan_id}/exercises/{exercise_id}/progress", response_model=Dict[str, Any])
-async def log_exercise_progress(
-    plan_id: str = Path(..., description="康复计划ID"),
-    exercise_id: str = Path(..., description="运动ID或名称"),
-    progress_data: Dict[str, Any] = Body(..., example={
-        "completed": True,
-        "difficulty_rating": 5,
-        "pain_level": 2,
-        "notes": "完成得很好，但感觉有点困难"
-    }),
-    current_user: Any = Depends(get_current_active_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-    rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
-):
-    """记录康复运动的完成情况和反馈"""
-    # AUTH01：对象级归属校验
-    await _check_plan_access(plan_id, current_user, rehab_service, db)
-
-    if "completed" not in progress_data:
-        raise HTTPException(status_code=400, detail="Missing 'completed' field")
-        
-    updated_plan = await rehab_service.log_exercise_progress(
-        plan_id=plan_id,
-        exercise_id=exercise_id,
-        completed=progress_data["completed"],
-        difficulty_rating=progress_data.get("difficulty_rating"),
-        pain_level=progress_data.get("pain_level"),
-        notes=progress_data.get("notes")
-    )
-    
-    if not updated_plan:
-        raise HTTPException(status_code=404, detail="Plan not found")
-    
-    if "error" in updated_plan:
-        raise HTTPException(status_code=400, detail=updated_plan["error"])
-        
-    return updated_plan
-
 # 计划调整相关路由
 @router.put("/plans/{plan_id}/adjustments/{adjustment_id}", response_model=Dict[str, Any])
 async def apply_plan_adjustment(
@@ -574,70 +534,15 @@ async def apply_plan_adjustment(
 @router.get("/plans/{plan_id}/detailed", response_model=Dict[str, Any])
 async def get_detailed_rehab_plan(
     plan_id: str = Path(..., description="康复计划ID"),
-    include_statistics: bool = Query(False, description="是否包含统计数据"),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
     rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
 ):
-    """获取康复计划详细信息，包括执行状态和调整历史"""
+    """获取康复计划详情与调整历史。"""
     # AUTH01：对象级归属校验（复用加载出的计划文档，避免重复取文档）
     plan = await _check_plan_access(plan_id, current_user, rehab_service, db)
 
-    if include_statistics:
-        # 计算进度统计信息
-        statistics = await rehab_service.calculate_plan_statistics(plan_id)
-        plan["statistics"] = statistics
-    
     return plan
-
-# 获取康复计划进度统计
-@router.get("/plans/{plan_id}/statistics", response_model=Dict[str, Any])
-async def get_plan_statistics(
-    plan_id: str = Path(..., description="康复计划ID"),
-    time_range: str = Query("all", pattern="^(all|week|month)$",
-                            description="时间范围：all/week/month"),
-    current_user: Any = Depends(get_current_active_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-    rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
-):
-    """获取康复计划的进度统计信息"""
-    # AUTH01：对象级归属校验
-    await _check_plan_access(plan_id, current_user, rehab_service, db)
-
-    statistics = await rehab_service.calculate_plan_statistics(plan_id, time_range)
-    
-    if not statistics:
-        raise HTTPException(status_code=404, detail="Plan statistics not found")
-    
-    return statistics
-
-# 获取运动完成趋势
-@router.get("/plans/{plan_id}/trends", response_model=Dict[str, Any])
-async def get_exercise_trends(
-    plan_id: str = Path(..., description="康复计划ID"),
-    exercise_id: Optional[str] = Query(None, description="特定运动ID，不提供则返回所有运动"),
-    metric: str = Query("difficulty", pattern="^(difficulty|pain|completion)$",
-                        description="趋势指标：difficulty/pain/completion"),
-    days: int = Query(30, ge=1, le=730, description="查看天数"),
-    current_user: Any = Depends(get_current_active_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-    rehab_service: RehabilitationService = Depends(get_rehabilitation_service)
-):
-    """获取康复运动的完成趋势数据"""
-    # AUTH01：对象级归属校验
-    await _check_plan_access(plan_id, current_user, rehab_service, db)
-
-    trends = await rehab_service.get_exercise_trends(
-        plan_id=plan_id,
-        exercise_id=exercise_id,
-        metric=metric,
-        days=days
-    )
-    
-    if not trends:
-        raise HTTPException(status_code=404, detail="Trend data not found")
-
-    return trends
 
 
 # ── REH01 方案结构化：方案版本 / 处方项 / 执行事件 ─────────────────────────
@@ -732,23 +637,6 @@ async def list_prescription_items(
         plan_id, version_id=version_id,
         operator_id=str(current_user.id), operator_role=current_user.role,
         skip=skip, limit=limit)
-
-
-@router.post("/plans/{plan_id}/items/{item_id}/events", response_model=Dict[str, Any])
-async def record_execution_event(
-    event_data: ExecutionEventCreate,
-    plan_id: str = Path(..., description="康复计划ID"),
-    item_id: str = Path(..., description="处方项ID（稳定 item_id）"),
-    current_user: Any = Depends(get_current_active_user),
-    rehab_service: RehabilitationService = Depends(get_rehabilitation_service),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-    structure_service: Any = Depends(get_rehab_plan_structure_service),
-):
-    """记录一次训练执行事件；(plan_id, event_id) 幂等，重复提交返回既有事件"""
-    await _check_plan_access(plan_id, current_user, rehab_service, db)
-    return await structure_service.record_execution_event(
-        plan_id, item_id, event_data,
-        operator_id=str(current_user.id), operator_role=current_user.role)
 
 
 @router.get("/plans/{plan_id}/items/{item_id}/events", response_model=List[Dict[str, Any]])

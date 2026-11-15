@@ -6,7 +6,6 @@ import {
   Exercise,
   RehabState,
   ExerciseFormValues,
-  ExerciseCompletionParams,
   RecommendationRequest
 } from '../../types/rehab';
 import { ThunkApiConfig } from '../types';
@@ -134,26 +133,6 @@ export const createExercise = createAsyncThunk<Exercise, ExerciseFormValues, Thu
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.detail || 'Failed to create exercise');
-    }
-  }
-);
-
-// 后端记录运动进度的接口是 POST /plans/{plan_id}/exercises/{exercise_id}/progress
-export const updateExerciseCompletion = createAsyncThunk<
-  RehabPlan,
-  ExerciseCompletionParams,
-  ThunkApiConfig
->(
-  'rehab/updateExerciseCompletion',
-  async ({ planId, exerciseId, completed }: ExerciseCompletionParams, { rejectWithValue }) => {
-    try {
-      const response = await httpClient.post(
-        `/rehabilitation/plans/${planId}/exercises/${exerciseId}/progress`,
-        { completed }
-      );
-      return response.data;
-    } catch (error: any) {
-      return rejectWithValue(error.response?.data?.message || '更新运动完成状态失败');
     }
   }
 );
@@ -373,30 +352,6 @@ const rehabSlice = createSlice({
         state.exercises.push(action.payload);
       })
       .addCase(createExercise.rejected, (state, action) => {
-        state.loading = false;
-        state.error = action.payload as string;
-      })
-      
-      // updateExerciseCompletion
-      .addCase(updateExerciseCompletion.pending, (state) => {
-        state.loading = true;
-        state.error = null;
-      })
-      .addCase(updateExerciseCompletion.fulfilled, (state, action) => {
-        state.loading = false;
-        
-        // Update the selected plan if it matches
-        if (state.selectedPlan?.id === action.payload.id) {
-          state.selectedPlan = action.payload;
-        }
-        
-        // Update in the plans array
-        const index = state.plans.findIndex((plan) => plan.id === action.payload.id);
-        if (index !== -1) {
-          state.plans[index] = action.payload;
-        }
-      })
-      .addCase(updateExerciseCompletion.rejected, (state, action) => {
         state.loading = false;
         state.error = action.payload as string;
       })

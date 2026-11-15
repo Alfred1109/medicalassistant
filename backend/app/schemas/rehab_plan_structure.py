@@ -157,21 +157,3 @@ class PlanVersionCreate(BaseModel):
     """创建方案版本入参；版本号由服务端递增分配。"""
     model_config = ConfigDict(extra="forbid")
     note: Optional[str] = None
-
-
-# ── 每次执行事件（幂等）──────────────────────────────────────────────────
-
-class ExecutionEventCreate(BaseModel):
-    """记录一次训练执行事件；event_id 由客户端提供，重复提交幂等。
-
-    事件粒度为"某次计划训练的执行"，与"训练处方项"分离（核查文档 §1
-    进度语义行）；完成率/依从性统计口径待定（REH03），本模型只承载记录。
-    """
-    model_config = ConfigDict(extra="forbid")
-    event_id: str = Field(..., min_length=1, description="幂等键，客户端生成，服务端按 (plan_id, event_id) 去重")
-    performed_at: Optional[datetime] = None
-    # 单次执行结果类别；枚举口径与统计语义待定 REH03，不做默认完成推断
-    status: Optional[str] = None
-    pain_level: Optional[int] = None
-    difficulty_rating: Optional[int] = None
-    notes: Optional[str] = None

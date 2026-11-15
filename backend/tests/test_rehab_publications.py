@@ -13,11 +13,10 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import ValidationError
-from pymongo.errors import OperationFailure
 
 from app.core.exceptions import AppBaseException
 from app.schemas.rehab_publication import PublicationItem, SavePublicationDraft, PublishDraft, WithdrawPublication
-from app.schemas.rehab_plan_structure import PrescriptionItemCreate, ExecutionEventCreate
+from app.schemas.rehab_plan_structure import PrescriptionItemCreate
 from app.services.rehab_publication_service import RehabPublicationService
 from app.services.rehab_plan_structure_service import RehabPlanStructureService
 from app.services.rehabilitation_service import RehabilitationService
@@ -43,18 +42,6 @@ class PublicationSchemaTests(unittest.TestCase):
             PublicationItem(intervention_type="exercise", name="x", guidance_video_url="javascript:alert(1)")
         self.assertEqual(PublicationItem(intervention_type="exercise", name="x",
             guidance_video_url="/api/rehabilitation/exercises/media/" + "ab" * 16 + ".mp4").guidance_video_url.endswith(".mp4"), True)
-
-
-class EventIndexSafetyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_index_failure_blocks_generic_event_writes(self):
-        from unittest.mock import AsyncMock
-        collection = SimpleNamespace(create_index=AsyncMock(side_effect=OperationFailure("index unavailable")))
-        service = object.__new__(RehabPlanStructureService)
-        service.events_collection, service._indexes_ready = collection, False
-        with self.assertRaises(AppBaseException) as caught:
-            await service._ensure_event_indexes()
-        self.assertEqual(caught.exception.error_code, "REHAB_EXECUTION_INDEX_UNAVAILABLE")
-        self.assertFalse(service._indexes_ready)
 
 
 @unittest.skipUnless(URI, "set REHAB_TEST_PUBLICATION_MONGO_URI to an isolated local replica set")
@@ -311,17 +298,13 @@ class PublicationMongoTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_patient_assignment_revocation_rechecks_authority(self):
         await self._race_publish(lambda: self.db.users.update_one({"_id": self.patient_id}, {"$set": {"practitioners": []}}))
 
-    async def test_old_item_write_cannot_modify_publication_workflow_and_reserved_event_is_rejected(self):
+    async def test_old_item_write_cannot_modify_publication_workflow(self):
         draft = await self.draft()
         structure = RehabPlanStructureService(self.db)
         with self.assertRaises(AppBaseException) as caught:
             await structure.add_prescription_item(self.plan, draft["draft"]["id"], PrescriptionItemCreate(name="bypass"),
                 operator_id=self.doctor.id, operator_role="doctor")
         self.assertEqual(caught.exception.error_code, "REHAB_VERSION_IMMUTABLE")
-        with self.assertRaises(AppBaseException) as caught:
-            await structure.record_execution_event(self.plan, "unknown", ExecutionEventCreate(event_id="patient-report:forged"),
-                operator_id=self.doctor.id, operator_role="doctor")
-        self.assertEqual(caught.exception.error_code, "REHAB_RESERVED_EVENT_ID")
 
     async def test_publish_wins_then_legacy_delete_cannot_remove_history(self):
         await self.published()

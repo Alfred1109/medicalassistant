@@ -85,7 +85,7 @@ MAX_EXAMPLES_DEFAULT = 20
 #   （app/api/routers/patient_router.py:92），患者字段是 user_id；
 # - follow_ups 为第一代遗留集合（归档只读保留），其第一代形状文档缺 patient_id，
 #   盘点仅作对照，缺失是已知历史形态而非异常。
-# - rehab_progress 的患者字段见 app/models/rehabilitation.py:217。
+# - 新康复执行事实使用 rehab_execution_events；旧进度集合不属于当前患者引用盘点。
 PATIENT_REFERENCES = (
     ("followup_records", "patient_id"),
     ("follow_ups", "patient_id"),
@@ -96,7 +96,6 @@ PATIENT_REFERENCES = (
     ("rehab_plan_versions", "patient_id"),
     ("rehab_prescription_items", "patient_id"),
     ("rehab_execution_events", "patient_id"),
-    ("rehab_progress", "patient_id"),
     ("patient_feedback_media", "patient_id"),
     ("devices", "patient_id"),
     ("integration_fill_tasks", "patient_id"),

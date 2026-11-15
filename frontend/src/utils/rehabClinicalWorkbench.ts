@@ -1,3 +1,4 @@
+import { formatAppDate } from './dateTime';
 import type { ClinicalPlan, ContraindicationFinding, ContraindicationReport, DraftContent, DraftItem } from '../services/rehabClinicalWorkbench';
 import { patientDomainErrorCopy } from '../services/patientErrors';
 
@@ -7,11 +8,7 @@ export type FormContent = { name: string; description: string; goal: string; sta
 export const emptyContent = (): FormContent => ({ name: '', description: '', goal: '', start_date: '',
   end_date: '', frequency: '', patient_instructions: '' });
 export function localDateInput(value?: string | null): string {
-  if (!value) return '';
-  const date = new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`);
-  if (!Number.isFinite(date.getTime())) return '';
-  const pad = (number: number) => String(number).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${String(date.getMilliseconds()).padStart(3, '0')}`;
+  return formatAppDate(value, "yyyy-MM-dd'T'HH:mm:ss.SSS", { assumeUtc: true, parse: 'native' });
 }
 export function contentForm(content: Partial<Record<keyof FormContent, string | null>> | ClinicalPlan): FormContent {
   return { name: content.name || '', description: content.description || '', goal: content.goal || '',

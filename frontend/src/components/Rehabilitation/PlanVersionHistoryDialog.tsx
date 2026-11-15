@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
@@ -52,9 +53,7 @@ const FIELD_LABELS: Record<string, string> = {
 const SNAPSHOT_FIELDS = Object.keys(FIELD_LABELS);
 
 const dateText = (value?: string | null) => {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+  return formatAppDate(value, 'localeZh24', { empty: '—', invalid: String(value) });
 };
 
 const itemName = (item?: PrescriptionItem) =>

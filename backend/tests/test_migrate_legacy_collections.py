@@ -145,15 +145,15 @@ class MigrateLegacyCollectionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["copied"], 2)
         self.assertEqual(set(db["rehab_plans"].docs), {"r1", "r2"})
 
-    async def test_progress_record_migration_targets_unique_name(self):
+    async def test_old_progress_records_are_reported_but_never_migrated(self):
         db = FakeDatabase()
         db["progress_records"].docs = {"g1": _doc("g1", plan_id="r1")}
 
         report = await run(db, apply=True)
 
-        item = next(i for i in report["migrations"] if i["legacy"] == "progress_records")
-        self.assertEqual(item["target"], "rehab_progress")
-        self.assertEqual(item["copied"], 1)
+        self.assertEqual(report["report_only"]["progress_records"], 1)
+        self.assertFalse(any(item["legacy"] == "progress_records" for item in report["migrations"]))
+        self.assertEqual(db["rehab_progress"].docs, {})
 
     async def test_report_only_collections_are_counted_not_copied(self):
         db = FakeDatabase()
@@ -171,7 +171,8 @@ class MigrateLegacyCollectionsTests(unittest.IsolatedAsyncioTestCase):
         targets = {(m["legacy"], m["target"]) for m in MIGRATIONS}
         self.assertIn(("follow_ups", "followup_records"), targets)
         self.assertIn(("rehabilitation_plans", "rehab_plans"), targets)
-        self.assertIn(("progress_records", "rehab_progress"), targets)
+        self.assertNotIn(("progress_records", "rehab_progress"), targets)
+        self.assertIn("progress_records", REPORT_ONLY)
         self.assertIn("patients", REPORT_ONLY)
         self.assertIn("doctors", REPORT_ONLY)
 

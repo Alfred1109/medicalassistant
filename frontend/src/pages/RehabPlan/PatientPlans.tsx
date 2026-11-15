@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, CircularProgress, Container, Divider, MenuItem, Paper, Stack, TextField, Typography } from '@mui/material';
 import { useSelector } from 'react-redux';
@@ -41,8 +42,7 @@ function dateText(value?: string | null): string {
   if (!value) return '未填写';
   // Dates may be calendar dates; preserve those without shifting time zones.
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-  const date = new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false });
+  return formatAppDate(value, 'localeZh24', { invalid: value, assumeUtc: true });
 }
 
 export function validPatientPlan(value: unknown, expectedId?: string): value is PublishedRehabPlan {

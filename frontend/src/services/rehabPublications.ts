@@ -39,6 +39,7 @@ export interface PublishedRehabPlan {
 export interface PublishedRehabPage {
   items: PublishedRehabPlan[];
   total: number;
+  status_counts: { active: number; completed: number };
   skip: number;
   limit: number;
 }

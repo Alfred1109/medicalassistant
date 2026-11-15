@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, Checkbox, Chip, CircularProgress, Container, Dialog,
   DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel, MenuItem, Paper, Stack,
@@ -5,7 +6,8 @@ import { Alert, Box, Button, Card, CardContent, Checkbox, Chip, CircularProgress
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import httpClient from '../../services/httpClient';
-import type { Patient } from '../../types/patient.types';
+import { usePatientOptions, type PatientOption } from '../../hooks/usePatientOptions';
+import PatientSelect from '../../components/common/PatientSelect';
 import { rehabClinicalWorkbench as api, type ClinicalPlan, type ClinicalFeedback, type ContraindicationReport,
   type DraftItem, type DraftState, type PublicationSignature, type SignatureDeclaration } from '../../services/rehabClinicalWorkbench';
 import { contentForm, contentPayload, emptyContent, findingLines, interventionLabels, operationId, validateItems,
@@ -16,8 +18,7 @@ import PlanVersionHistoryDialog from '../../components/Rehabilitation/PlanVersio
 type Actor = { id: string; role: string };
 const LIMIT = 20;
 const dateText = (value: string) => {
-  const date = new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '时间未识别';
+  return formatAppDate(value, 'localeZh24', { empty: '时间未识别', invalid: '时间未识别', assumeUtc: true });
 };
 
 export function ClinicalContentFields({ value, onChange, disabled = false, includePatientInstructions = true }: {
@@ -369,7 +370,7 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
   </Dialog>;
 }
 
-function PatientWorkspace({ actor, patient }: { actor: Actor; patient: Patient }) {
+function PatientWorkspace({ actor, patient }: { actor: Actor; patient: PatientOption }) {
   const [plans, setPlans] = useState<ClinicalPlan[]>([]);
   const [page, setPage] = useState(0);
   const [reload, setReload] = useState(0);
@@ -462,28 +463,17 @@ export default function ClinicianPlanWorkbench() {
   return <Workspace key={`${actor.id}:${actor.role}`} actor={actor} />;
 }
 function Workspace({ actor }: { actor: Actor }) {
-  const [patients, setPatients] = useState<Patient[]>([]);
   const [patientId, setPatientId] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [reload, setReload] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController(); setPatients([]); setPatientId(''); setLoading(true); setError('');
-    api.patients(actor.role, controller.signal).then(({ data }) => {
-      if (!controller.signal.aborted) { if (!Array.isArray(data)) throw new Error('invalid patients'); setPatients(data); }
-    }).catch(failure => { if (!controller.signal.aborted) setError(workbenchError(failure, '患者列表加载失败，请重试。')); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, [actor.id, actor.role, reload]);
+  const { patients, loading, error: patientFailure, reload } = usePatientOptions(actor.role, actor.id);
+  const error = patientFailure ? workbenchError(patientFailure, '患者列表加载失败，请重试。') : '';
   const patient = patients.find(item => item.id === patientId);
   return <Container maxWidth="lg" sx={{ py: 3 }}><Stack spacing={2.5}>
     <Typography variant="h4" component="h1">康复方案工作台</Typography>
     <Typography color="text.secondary">选择患者，填写并确认方案内容后发布。患者只能查看已发布内容，草稿调整不会直接改变患者看到的安排。</Typography>
-    {loading && <CircularProgress size={24} aria-label="正在加载患者" />}{error && <Alert severity="error" action={<Button onClick={() => setReload(value => value + 1)}>重试</Button>}>{error}</Alert>}
+    {loading && <CircularProgress size={24} aria-label="正在加载患者" />}{error && <Alert severity="error" action={<Button onClick={() => { setPatientId(''); reload(); }}>重试</Button>}>{error}</Alert>}
     {!loading && !error && !patients.length && <Alert severity="info">当前没有分配给您的患者。</Alert>}
-    <TextField select label="选择已授权患者" value={patientId} disabled={loading || !patients.length} onChange={event => setPatientId(event.target.value)} sx={{ maxWidth: 450 }}>
-      <MenuItem value="">请选择患者</MenuItem>{patients.map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}
-    </TextField>
+    <PatientSelect label="选择已授权患者" value={patientId} patients={patients} loading={loading}
+      disabled={!patients.length} onChange={setPatientId} sx={{ maxWidth: 450 }} />
     {patient && <PatientWorkspace key={`${actor.id}:${patient.id}`} actor={actor} patient={patient} />}
   </Stack></Container>;
 }

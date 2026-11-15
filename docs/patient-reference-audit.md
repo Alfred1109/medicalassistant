@@ -37,7 +37,7 @@ MONGODB_AUDIT_URI="mongodb://localhost:27017" \
 | followup_records | patient_id | 第二代随访集合 |
 | follow_ups | patient_id | 第一代遗留集合（FU01 D-4 决策归档只读、冻结写入）；第一代造数形状文档缺 patient_id 属历史既定（`scripts/migrate_legacy_collections.py` 映射表「不映射项：patient_id」），单独计 `legacy_missing`，详见下方「legacy_followups 对照段」 |
 | health_records / health_data / medical_timelines | patient_id | |
-| rehab_plans / rehab_plan_versions / rehab_prescription_items / rehab_execution_events / rehab_progress | patient_id | |
+| rehab_plans / rehab_plan_versions / rehab_prescription_items / rehab_execution_events | patient_id | |
 | patient_feedback_media | patient_id | |
 | devices | patient_id | 历史非患者绑定为 null |
 | integration_fill_tasks | patient_id | |
