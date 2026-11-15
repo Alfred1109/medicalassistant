@@ -66,9 +66,11 @@ test('the admin page, route and menu expose account bindings distinctly from pat
   const routes = fs.readFileSync(path.join(root, 'src/routes.tsx'), 'utf8');
   assert.match(routes, /account-bindings/);
   const layout = fs.readFileSync(path.join(root, 'src/components/Layout/Layout.tsx'), 'utf8');
-  assert.match(layout, /账号绑定管理/);
+  assert.match(layout, /config\/appRoutes/);
+  const menu = fs.readFileSync(path.join(root, 'src/config/appRoutes.ts'), 'utf8');
+  assert.match(menu, /账号绑定管理/);
   // 与 113.44 的外部问卷关联菜单分开
-  assert.match(layout, /患者与问卷来源/);
-  assert.match(layout, /\/app\/admin\/account-bindings/);
-  assert.match(layout, /\/app\/admin\/patient-links/);
+  assert.match(menu, /患者与问卷来源/);
+  assert.match(menu, /account-bindings/);
+  assert.match(menu, /patient-links/);
 });

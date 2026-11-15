@@ -44,6 +44,7 @@ def active_session(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     存量文档只有 `session`；新文档写入时两处镜像同步，故两条路径取到同一会话。
     """
+    # legacy-shape: 旧单会话字段是存量任务形态，不随患者域切换删除。
     legacy = doc.get("session")
     if isinstance(legacy, dict) and legacy.get("session_uuid"):
         return legacy

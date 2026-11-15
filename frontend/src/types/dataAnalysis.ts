@@ -26,9 +26,14 @@ export interface StatsOverview {
   doctorCount: number;
   totalDevices: number;
   activeDeviceRate: number;
-  avgTrainingTime: number;
+  avgTrainingTime: number | null;
   rehabilitationRate: number;
   patientSatisfaction: number;
+  dataAvailable?: {
+    avgTrainingTime?: boolean;
+    rehabilitationRate?: boolean;
+    patientSatisfaction?: boolean;
+  };
 }
 
 // 趋势数据结构
@@ -124,4 +129,4 @@ export interface PredictionResult {
 export interface ConfidenceInterval {
   lower: number;
   upper: number;
-} 
+}

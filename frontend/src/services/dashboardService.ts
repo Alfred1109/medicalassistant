@@ -24,26 +24,18 @@ export interface TodoItem {
   timestamp: string;
 }
 
-export interface Exercise {
-  name: string;
-  completed: boolean;
-}
-
-export interface RehabProgress {
-  id: string;
-  plan: string;
-  progress: number;
-  next_session: string;
-  user_id: string;
-  doctor_id: string;
-  exercises: Exercise[];
-  timestamp: string;
+export interface PublishedRehabPlans {
+  items: Array<{ id: string; content: { name: string; goal?: string }; published_at: string }>;
+  total: number;
+  status_counts: { active: number; completed: number };
+  skip: number;
+  limit: number;
 }
 
 export interface DashboardData {
   health_metrics: HealthMetric[];
   todo_items: TodoItem[];
-  rehab_progress: RehabProgress | null;
+  published_rehab_plans: PublishedRehabPlans;
 }
 
 export interface Notification {
@@ -85,13 +77,6 @@ const dashboardService = {
   },
   
   /**
-   * 获取康复进度
-   */
-  getRehabProgress: (): Promise<RehabProgress> => {
-    return apiClient.get<RehabProgress>('/patients/rehab-progress');
-  },
-  
-  /**
    * 获取通知列表
    */
   getNotifications: (limit: number = 5): Promise<Notification[]> => {
@@ -113,4 +98,4 @@ const dashboardService = {
   }
 };
 
-export default dashboardService; 
+export default dashboardService;

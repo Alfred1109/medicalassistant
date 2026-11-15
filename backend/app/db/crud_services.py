@@ -18,7 +18,7 @@ from app.patients.repository import ClinicalPatientRepository, PatientDomainErro
 from app.models.user import User, Doctor, Patient, HealthManager
 from app.models.organization import Organization
 from app.models.health_record import HealthRecord, FollowUpRecord
-from app.models.rehabilitation import RehabilitationPlan, Exercise, ProgressRecord
+from app.models.rehabilitation import RehabilitationPlan, Exercise
 from app.models.device import Device, DeviceData
 from app.models.agent import Agent
 # 注：原 Message/Conversation 模型类及其 CRUD（结构 A）已随 WS01 统一删除，
@@ -211,10 +211,6 @@ class ExerciseCRUD(CRUDBase[Exercise]):
     """锻炼CRUD服务"""
 
 
-class ProgressRecordCRUD(RecordBaseCRUD[ProgressRecord]):
-    """进度记录CRUD服务"""
-
-
 class DeviceRelatedCRUD(CRUDBase[TypeVar('T')]):
     """设备相关CRUD服务基类"""
 
@@ -252,7 +248,6 @@ def get_crud_services(db: AsyncIOMotorDatabase):
         "followup_record": FollowUpRecordCRUD(db, FollowUpRecord),
         "rehabilitation_plan": RehabilitationPlanCRUD(db, RehabilitationPlan),
         "exercise": ExerciseCRUD(db, Exercise),
-        "progress_record": ProgressRecordCRUD(db, ProgressRecord),
         "device": DeviceCRUD(db, Device),
         "device_data": DeviceDataCRUD(db, DeviceData),
         "agent": AgentCRUD(db, Agent),

@@ -12,10 +12,6 @@ import {
   Button,
   Chip,
   TextField,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
   Alert,
   CircularProgress,
 } from '@mui/material';
@@ -24,7 +20,9 @@ import FitnessCenterIcon from '@mui/icons-material/FitnessCenter';
 import { AppDispatch, RootState } from '../../store';
 import { getRecommendations } from '../../store/slices/rehabSlice';
 import { Exercise } from '../../types/rehab';
-import { apiService } from '../../services/api';
+import PatientSelect from '../../components/common/PatientSelect';
+import { usePatientOptions } from '../../hooks/usePatientOptions';
+import { patientDomainErrorCopy } from '../../services/patientErrors';
 import httpClient from '../../services/httpClient';
 
 /**
@@ -53,12 +51,15 @@ const ExerciseRecommendations: React.FC = () => {
   const loading = useSelector((state: RootState) => state.rehab?.loading || false);
   const error = useSelector((state: RootState) => state.rehab?.error);
 
-  // 患者：URL ?patientId= 优先，其次下拉选择（医生患者列表，患者角色 403 如实提示）
-  const [patients, setPatients] = useState<{ id: string; name: string }[]>([]);
-  const [patientsLoading, setPatientsLoading] = useState(false);
-  const [patientsError, setPatientsError] = useState<string | null>(null);
+  // URL ?patientId= 优先，医护也可从各自授权的患者目录中选择。
   const [patientId, setPatientId] = useState<string>(searchParams.get('patientId') || '');
-  const role = useSelector((state: RootState) => state.auth.user?.role);
+  const actor = useSelector((state: RootState) => state.auth.user);
+  const role = actor?.role;
+  const { patients, loading: patientsLoading, error: patientFailure } = usePatientOptions(role, actor?.id);
+  const medical = role === 'doctor' || role === 'health_manager';
+  const patientsError = patientFailure
+    ? patientDomainErrorCopy(patientFailure) || (patientFailure as Error).message || '获取患者列表失败'
+    : !medical ? '当前账号无患者管理权限，请通过链接参数 ?patientId= 指定患者' : null;
   const [draftNotice, setDraftNotice] = useState('');
 
   // 过滤条件（均为可选，后端对应可选查询参数）
@@ -70,40 +71,6 @@ const ExerciseRecommendations: React.FC = () => {
     if (!pid) return;
     dispatch(getRecommendations({ patientId: pid, condition: cond.trim(), goal: gol.trim() }));
   }, [dispatch]);
-
-  // 加载医生的患者列表（真实接口 GET /doctors/patients；患者角色 403 如实提示）
-  useEffect(() => {
-    let cancelled = false;
-    const loadPatients = async () => {
-      setPatientsLoading(true);
-      setPatientsError(null);
-      try {
-        const response = await apiService.doctor.getPatients();
-        const list: any[] = Array.isArray(response.data) ? response.data : [];
-        if (!cancelled) {
-          setPatients(list
-            .map((p) => ({ id: String(p?.id ?? p?._id ?? ''), name: String(p?.name ?? '未知患者') }))
-            .filter((p) => p.id));
-        }
-      } catch (err: any) {
-        if (!cancelled) {
-          setPatientsError(
-            err?.response?.status === 403
-              ? '当前账号无患者管理权限，请通过链接参数 ?patientId= 指定患者'
-              : err?.response?.data?.detail || err?.message || '获取患者列表失败'
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setPatientsLoading(false);
-        }
-      }
-    };
-    loadPatients();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   // 选中患者即以默认条件发起查询，并同步 URL
   const handlePatientChange = (pid: string) => {
@@ -139,20 +106,8 @@ const ExerciseRecommendations: React.FC = () => {
         {/* 查询控件：患者（必填，后端 patient_id 必填） + 病症/目标（可选过滤） */}
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={12} sm={4}>
-            <FormControl fullWidth disabled={patientsLoading}>
-              <InputLabel>选择患者</InputLabel>
-              <Select
-                value={patientId}
-                label="选择患者"
-                onChange={(e) => handlePatientChange(e.target.value as string)}
-              >
-                {patients.map((p) => (
-                  <MenuItem key={p.id} value={p.id}>
-                    {p.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <PatientSelect fullWidth label="选择患者" value={patientId} patients={patients}
+              loading={patientsLoading} disabled={!medical} onChange={handlePatientChange} />
           </Grid>
           <Grid item xs={12} sm={3}>
             <TextField

@@ -1,6 +1,5 @@
 // 同源部署前缀；浏览器路由与旧的 /api 拼接调用共用该前缀。
 export const API_PREFIX = (import.meta.env.VITE_API_PREFIX ?? '').replace(/\/+$/, '');
-export const API_ORIGIN = API_PREFIX;
 // API_BASE_URL 单属主在 config/api.ts，消费方直接从 '../config/api' 引入。
 
 // 文件上传限制大小（单位：字节）

@@ -15,19 +15,19 @@ class Collection:
     async def create_index(self, *args, **kwargs):
         return "index"
 
-    async def find_one(self, query, sort=None):
+    async def find_one(self, query, sort=None, **kwargs):
         rows = [doc for doc in self.docs if all(doc.get(key) == value for key, value in query.items())]
         if sort:
             rows.sort(key=lambda doc: doc.get(sort[0][0]) or "", reverse=sort[0][1] < 0)
         return rows[0] if rows else None
 
-    async def insert_one(self, document):
+    async def insert_one(self, document, **kwargs):
         if any(doc.get("issuer") == document.get("issuer") and doc.get("subject") == document.get("subject")
                and doc.get("status") == "pending" and document.get("status") == "pending" for doc in self.docs):
             raise type("DuplicateKeyError", (Exception,), {})("duplicate")
         self.docs.append(document)
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, **kwargs):
         for doc in self.docs:
             if all(doc.get(key) == value for key, value in query.items()):
                 doc.update(update["$set"])

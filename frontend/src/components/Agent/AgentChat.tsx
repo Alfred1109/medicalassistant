@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import {
@@ -145,7 +146,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ agentId, patientId, contextData, 
               </ListItemAvatar>
               <ListItemText
                 primary={message.content}
-                secondary={new Date(message.timestamp).toLocaleTimeString()}
+                secondary={formatAppDate(message.timestamp, 'localeTime', { invalid: 'Invalid Date' })}
                 primaryTypographyProps={{
                   component: 'div',
                   sx: {

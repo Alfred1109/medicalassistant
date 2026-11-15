@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box,
@@ -40,7 +41,7 @@ import {
   Clear as ClearIcon,
   VerifiedUser as VerifiedUserIcon
 } from '@mui/icons-material';
-import { endOfDay, format, isAfter, isValid, parseISO, startOfDay } from 'date-fns';
+import { endOfDay, isAfter, isValid, parseISO, startOfDay } from 'date-fns';
 import zhCN from 'date-fns/locale/zh-CN';
 import ReactJson from '@microlink/react-json-view';
 
@@ -233,7 +234,7 @@ const PermissionAuditLog: React.FC = () => {
             logs.map((log) => (
               <TableRow key={log.id} hover>
                 <TableCell>
-                  {format(parseISO(log.created_at), 'yyyy-MM-dd HH:mm:ss')}
+                  {formatAppDate(parseISO(log.created_at), 'yyyy-MM-dd HH:mm:ss')}
                 </TableCell>
                 <TableCell>{getUserName(log.user_id)}</TableCell>
                 <TableCell>
@@ -428,7 +429,7 @@ const PermissionAuditLog: React.FC = () => {
             <Grid item xs={12} md={6}>
               <Typography variant="subtitle2">操作时间</Typography>
               <Typography variant="body2">
-                {format(parseISO(selectedLog.created_at), 'yyyy-MM-dd HH:mm:ss')}
+                {formatAppDate(parseISO(selectedLog.created_at), 'yyyy-MM-dd HH:mm:ss')}
               </Typography>
             </Grid>
             <Grid item xs={12} md={6}>

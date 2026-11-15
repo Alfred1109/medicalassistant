@@ -355,7 +355,9 @@ class BusModeWriteSideTests(BusTestCase):
         ws = FakeWebSocket()
         await manager.connect_to_chat(ws, "alice", "conv1", "c1")
 
-        with patch("app.api.websockets.publish_event", side_effect=RuntimeError("mongo down")):
+        # ConnectionManager moved to app.realtime.ws_manager; patch the function
+        # at its actual lookup site while retaining the endpoint compatibility export.
+        with patch("app.realtime.ws_manager.publish_event", side_effect=RuntimeError("mongo down")):
             await manager.send_chat_message({"type": "message"}, "conv1")
 
         # broker 故障退路：本进程投递兜底（聊天域另有落库 + 离线同步）

@@ -1,9 +1,9 @@
 import React from 'react';
 import { formatAppDate } from '../../utils/dateTime';
-import axios from 'axios';
 import dashboardService from '../../services/dashboardService';
 import { deviceService, Device as DeviceInfo } from '../../services/deviceService';
 import { notificationApi, Notification } from '../../services/notificationService';
+import { rehabPublications, PublishedRehabPlan, PatientRehabFeedback } from '../../services/rehabPublications';
 import {
   Box,
   Typography,
@@ -21,7 +21,6 @@ import {
   Avatar,
   Chip,
   IconButton,
-  LinearProgress,
   Stack,
   CircularProgress
 } from '@mui/material';
@@ -31,7 +30,6 @@ const HeartIcon = () => <span>❤️</span>;
 const DirectionsWalkIcon = () => <span>🚶</span>;
 const DoctorIcon = () => <span>👨‍⚕️</span>;
 const NotificationsIcon = () => <span>🔔</span>;
-const EventIcon = () => <span>📅</span>;
 const ArrowForwardIcon = () => <span>➡️</span>;
 const CheckCircleIcon = () => <span>✅</span>;
 const DeviceIcon = () => <span>📱</span>;
@@ -51,6 +49,7 @@ interface RawHealthMetric {
   status?: string;
   trend?: string;
   timestamp?: string;
+  quality_flags?: string[];
   [key: string]: any;
 }
 
@@ -62,16 +61,6 @@ interface RawTodoItem {
   due?: string;
   completed?: boolean;
   important?: boolean;
-  [key: string]: any;
-}
-
-// 后端 rehab_progress 文档（404 时无数据，由调用方区分空态与错误）
-interface RawRehabProgress {
-  id?: string;
-  plan?: string;
-  progress?: number;
-  next_session?: string;
-  exercises?: { name?: string; completed?: boolean }[];
   [key: string]: any;
 }
 
@@ -143,9 +132,10 @@ const PatientMainDashboard: React.FC = () => {
   const [healthMetricsError, setHealthMetricsError] = React.useState(false);
   const [todoItems, setTodoItems] = React.useState<RawTodoItem[]>([]);
   const [todoError, setTodoError] = React.useState(false);
-  const [rehabProgress, setRehabProgress] = React.useState<RawRehabProgress | null>(null);
-  const [rehabProgressMissing, setRehabProgressMissing] = React.useState(false);
-  const [rehabProgressError, setRehabProgressError] = React.useState(false);
+  const [rehabPlans, setRehabPlans] = React.useState<PublishedRehabPlan[]>([]);
+  const [rehabPlansError, setRehabPlansError] = React.useState(false);
+  const [recentFeedback, setRecentFeedback] = React.useState<Array<{ plan: PublishedRehabPlan; feedback: PatientRehabFeedback }>>([]);
+  const [feedbackError, setFeedbackError] = React.useState(false);
   const [devices, setDevices] = React.useState<DeviceInfo[]>([]);
   const [devicesError, setDevicesError] = React.useState(false);
 
@@ -164,24 +154,7 @@ const PatientMainDashboard: React.FC = () => {
         if (response) {
           // 转换时间格式为更友好的显示形式
           const notificationsWithFormattedTime = response.map((notification: any) => {
-            const date = new Date(notification.time);
-            const now = new Date();
-            const diffInDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
-
-            let formattedTime;
-            if (diffInDays === 0) {
-              formattedTime = '今天 ' + date.getHours().toString().padStart(2, '0') + ':' +
-                date.getMinutes().toString().padStart(2, '0');
-            } else if (diffInDays === 1) {
-              formattedTime = '昨天 ' + date.getHours().toString().padStart(2, '0') + ':' +
-                date.getMinutes().toString().padStart(2, '0');
-            } else if (diffInDays < 7) {
-              formattedTime = diffInDays + '天前';
-            } else {
-              formattedTime = date.getFullYear() + '-' +
-                (date.getMonth() + 1).toString().padStart(2, '0') + '-' +
-                date.getDate().toString().padStart(2, '0');
-            }
+            const formattedTime = formatAppDate(notification.time, 'notification', { invalid: 'NaN-NaN-NaN' });
 
             return {
               ...notification,
@@ -208,15 +181,15 @@ const PatientMainDashboard: React.FC = () => {
     fetchNotifications();
   }, []);
 
-  // 一次性拉取主面板真实数据：健康指标 / 待办 / 康复进度 / 绑定设备，全部完成后统一关闭 loading
+  // 一次性拉取主面板事实：健康指标 / 待办 / 已发布康复方案 / 绑定设备。
   React.useEffect(() => {
     let cancelled = false;
 
     const loadData = async () => {
-      const [metricsRes, todosRes, progressRes, devicesRes] = await Promise.allSettled([
+      const [metricsRes, todosRes, plansRes, devicesRes] = await Promise.allSettled([
         dashboardService.getHealthMetrics() as unknown as Promise<RawHealthMetric[]>,
         dashboardService.getTodoItems() as unknown as Promise<RawTodoItem[]>,
-        dashboardService.getRehabProgress() as unknown as Promise<RawRehabProgress>,
+        rehabPublications.myPlans(0, 5),
         deviceService.getUserDevices(),
       ]);
 
@@ -240,19 +213,22 @@ const PatientMainDashboard: React.FC = () => {
         setTodoError(true);
       }
 
-      // 康复进度：后端无数据时返回 404，属于"暂无数据"而非错误
-      if (progressRes.status === 'fulfilled') {
-        setRehabProgress(progressRes.value);
-        setRehabProgressMissing(false);
-        setRehabProgressError(false);
-      } else if (axios.isAxiosError(progressRes.reason) && progressRes.reason.response?.status === 404) {
-        setRehabProgress(null);
-        setRehabProgressMissing(true);
-        setRehabProgressError(false);
+      if (plansRes.status === 'fulfilled' && Array.isArray(plansRes.value.data?.items)) {
+        const plans = plansRes.value.data.items;
+        setRehabPlans(plans);
+        setRehabPlansError(false);
+        const feedbackPages = await Promise.allSettled(plans.map(plan => rehabPublications.feedback(plan.id, 0, 5)));
+        if (cancelled) return;
+        setFeedbackError(feedbackPages.some(result => result.status === 'rejected'));
+        const reports = feedbackPages.flatMap((result, index) => result.status === 'fulfilled'
+          ? result.value.data.items.map(feedback => ({ plan: plans[index], feedback })) : []);
+        reports.sort((left, right) => Date.parse(right.feedback.performed_at) - Date.parse(left.feedback.performed_at));
+        setRecentFeedback(reports.slice(0, 3));
       } else {
-        setRehabProgress(null);
-        setRehabProgressMissing(false);
-        setRehabProgressError(true);
+        setRehabPlans([]);
+        setRecentFeedback([]);
+        setFeedbackError(false);
+        setRehabPlansError(true);
       }
 
       // 绑定设备
@@ -273,11 +249,6 @@ const PatientMainDashboard: React.FC = () => {
       cancelled = true;
     };
   }, []);
-
-  // 康复进度条数值防御：缺失按 0，并限制在 0~100
-  const rehabProgressValue = rehabProgress
-    ? Math.min(Math.max(typeof rehabProgress.progress === 'number' ? rehabProgress.progress : 0, 0), 100)
-    : 0;
 
   return (
     <Box>
@@ -344,6 +315,11 @@ const PatientMainDashboard: React.FC = () => {
                             </Typography>
                           )}
                         </Box>
+                        {!!metric.quality_flags?.length && (
+                          <Typography variant="caption" color="warning.main">
+                            数据质量标记：{metric.quality_flags.join('、')}
+                          </Typography>
+                        )}
                         {formatDateTime(metric.timestamp) && (
                           <Typography variant="caption" color="text.secondary">
                             {formatDateTime(metric.timestamp)}
@@ -531,87 +507,36 @@ const PatientMainDashboard: React.FC = () => {
             </Box>
           </Paper>
 
-          {/* 康复进度 */}
+          {/* 已发布方案与患者本人提交的执行自述 */}
           <Paper sx={{ p: 2 }}>
             <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
               <Typography variant="h6">
-                康复进度跟踪
+                我的康复方案与执行反馈
               </Typography>
-              {rehabProgress?.next_session && (
-                <Chip
-                  icon={<EventIcon />}
-                  label={`下次: ${rehabProgress.next_session}`}
-                  size="small"
-                  color="primary"
-                  variant="outlined"
-                />
-              )}
+              <Button size="small" component={Link} to="/app/rehab-plans">查看全部方案</Button>
             </Box>
 
             {loading ? (
               <PanelLoading />
-            ) : rehabProgressError ? (
-              <PanelError text="康复进度加载失败，请稍后重试" />
-            ) : rehabProgressMissing || !rehabProgress ? (
-              // 后端 /patients/rehab-progress 无数据时返回 404，这里如实显示空状态
-              <PanelEmpty text="暂无康复进度数据" />
+            ) : rehabPlansError ? (
+              <PanelError text="康复方案加载失败，请稍后重试" />
             ) : (
               <>
-                <Typography variant="subtitle1" gutterBottom>
-                  {rehabProgress.plan ?? '未命名计划'}
-                </Typography>
-
-                <Box sx={{ display: 'flex', alignItems: 'center', mt: 1, mb: 2 }}>
-                  <Box sx={{ width: '100%', mr: 1 }}>
-                    <LinearProgress
-                      variant="determinate"
-                      value={rehabProgressValue}
-                      sx={{ height: 10, borderRadius: 5 }}
-                    />
-                  </Box>
-                  <Box sx={{ minWidth: 35 }}>
-                    <Typography variant="body2" color="text.secondary">
-                      {`${Math.round(rehabProgressValue)}%`}
-                    </Typography>
-                  </Box>
-                </Box>
-
-                <Typography variant="subtitle2" gutterBottom>
-                  训练项目
-                </Typography>
-
-                {(rehabProgress.exercises ?? []).length > 0 ? (
-                  <List dense>
-                    {rehabProgress.exercises!.map((exercise, index) => (
-                      <ListItem key={index} sx={{ py: 0.5 }}>
-                        <ListItemIcon sx={{ minWidth: 36 }}>
-                          {exercise.completed ? (
-                            <CheckCircleIcon />
-                          ) : (
-                            <CircleIcon color="disabled" fontSize="small" />
-                          )}
-                        </ListItemIcon>
-                        <ListItemText primary={exercise.name ?? '未命名训练'} />
-                      </ListItem>
-                    ))}
-                  </List>
-                ) : (
-                  <Typography variant="body2" color="text.secondary">
-                    暂无训练项目
-                  </Typography>
-                )}
-
-                <Box textAlign="center" mt={2}>
-                  <Button
-                    variant="contained"
-                    size="small"
-                    color="primary"
-                    component={Link}
-                    to="/app/rehab-plans"
-                  >
-                    查看康复计划详情
-                  </Button>
-                </Box>
+                {rehabPlans.length === 0 ? <PanelEmpty text="暂无医护发布的康复方案" /> : <List dense>
+                  {rehabPlans.map(plan => <ListItem key={plan.id} alignItems="flex-start" divider>
+                    <ListItemText primary={plan.content.name || '康复方案'}
+                      secondary={`发布时间：${formatDateTime(plan.published_at) ?? '未提供'}`} />
+                    <Button size="small" component={Link} to={`/app/rehab-plans/${plan.id}`}>查看方案与反馈</Button>
+                  </ListItem>)}
+                </List>}
+                <Typography variant="subtitle2" sx={{ mt: 2 }}>最近的执行自述</Typography>
+                {feedbackError && <Typography variant="body2" color="error.main" sx={{ mt: 1 }}>部分自述记录暂时无法加载，请到方案详情重试。</Typography>}
+                {recentFeedback.length === 0 && !feedbackError ? <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                  暂无患者自述记录。方案详情页可提交执行情况；这里不推算训练完成率。
+                </Typography> : recentFeedback.length > 0 ? <List dense>{recentFeedback.map(({ plan, feedback }) => <ListItem key={`${plan.id}:${feedback.id}`} divider>
+                  <ListItemText primary={`${plan.content.name || '康复方案'} · ${feedback.execution_status === 'completed' ? '自述已执行' : feedback.execution_status === 'partial' ? '自述部分执行' : '自述未执行'}`}
+                    secondary={`${formatDateTime(feedback.performed_at) ?? '时间未提供'}${feedback.feelings ? ` · ${feedback.feelings}` : ''}`} />
+                </ListItem>)}</List> : null}
               </>
             )}
           </Paper>
@@ -682,22 +607,6 @@ const PatientMainDashboard: React.FC = () => {
         </Grid>
       </Grid>
     </Box>
-  );
-};
-
-// 用于未完成项目的空心圆图标
-const CircleIcon = ({ color, fontSize }: { color: 'disabled' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning', fontSize: 'small' | 'medium' | 'large' | 'inherit' }) => {
-  return (
-    <Box
-      component="span"
-      sx={{
-        display: 'inline-block',
-        width: fontSize === 'small' ? 16 : 24,
-        height: fontSize === 'small' ? 16 : 24,
-        borderRadius: '50%',
-        border: `2px solid ${color === 'disabled' ? '#bdbdbd' : ''}`,
-      }}
-    />
   );
 };
 

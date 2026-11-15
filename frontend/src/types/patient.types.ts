@@ -47,12 +47,12 @@ export interface Medication {
 
 // 生命体征接口
 export interface VitalSign {
-  date: string;
-  bp: string;
-  pulse: number;
-  temp: number;
-  respRate: number;
-  weight: number;
+  _id?: string;
+  data_type: string;
+  data?: Record<string, any>;
+  data_content?: Record<string, any>;
+  recorded_at?: string;
+  metadata?: Record<string, any>;
 }
 
 // 患者完整健康记录接口

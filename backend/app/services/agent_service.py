@@ -538,13 +538,10 @@ class AgentService:
                 
             plan_data["exercises"] = exercises
             
-            # 添加计划执行状态
+            # 仅保留方案阶段信息，不推测训练执行或依从性。
             plan_data["execution_status"] = {
                 "current_phase": "初始期",
                 "current_week": 1,
-                "adherence_rate": 0,  # 计划坚持率(0-100)
-                "completed_exercises": 0,
-                "total_exercises": len(exercises) * 3,  # 假设每个运动每周进行3次
                 "last_updated": datetime.utcnow().isoformat()
             }
             

@@ -8,14 +8,13 @@ const { buildSync } = require('esbuild');
 const { configureStore } = require('@reduxjs/toolkit');
 const axios = require('axios');
 
-const source = path.resolve(__dirname, '../src/store/slices/authSlice.ts');
 const compiled = new Map();
 
 function compile(apiRoot, prefix) {
   const key = JSON.stringify([apiRoot, prefix]);
   if (!compiled.has(key)) {
     compiled.set(key, buildSync({
-      entryPoints: [source],
+      stdin: { contents: `export * from './store/slices/authSlice'; export {default} from './store/slices/authSlice'; export {default as http} from './services/httpClient';`, resolveDir: path.resolve(__dirname, '../src'), loader: 'ts' },
       bundle: true,
       platform: 'node',
       format: 'cjs',
@@ -38,6 +37,7 @@ function fixture(token = 'token-A', apiRoot, prefix) {
     setItem: (key, value) => entries.set(key, String(value)),
     removeItem: key => entries.delete(key),
   };
+  global.window = { location: { origin: 'https://rehab.example.invalid', pathname: '/login', href: '' } };
   const filename = path.resolve(__dirname, '.auth-session-race.compiled.cjs');
   const loaded = new Module(filename, module);
   loaded.filename = filename;
@@ -46,15 +46,19 @@ function fixture(token = 'token-A', apiRoot, prefix) {
   let proxy;
   proxy = new Proxy(axios, { get(target, key) {
     if (key === 'default') return proxy;
-    if (key === 'get') return (url, ...args) => url.endsWith('/auth/config')
-      ? Promise.resolve({ data: { mode: 'legacy' } }) : axios.get(url, ...args);
+    if (key === 'get') return url => {
+      assert.ok(url.endsWith('/auth/config'), `Unexpected raw Axios request: ${url}`);
+      return Promise.resolve({ data: { mode: 'legacy' } });
+    };
     return Reflect.get(target, key);
   } });
   loaded.require = (name) => name === 'axios' ? proxy : inheritedRequire(name);
   loaded._compile(compile(apiRoot, prefix), filename);
   const actions = loaded.exports;
   const store = configureStore({ reducer: { auth: actions.default } });
-  return { store, actions, entries };
+  const f = { store, actions, entries, request: () => { throw new Error('Missing HTTP fixture'); } };
+  actions.http.defaults.adapter = config => f.request(axios.getUri(config), config);
+  return f;
 }
 
 function user(id, role = 'patient') {
@@ -78,17 +82,17 @@ function replaceSession(f, token, nextUser) {
 }
 
 test('session checks cannot mutate a replacement or logged-out session', async t => {
-  const originalGet = axios.get;
   const originalStorage = global.localStorage;
-  t.after(() => { axios.get = originalGet; global.localStorage = originalStorage; });
+  t.after(() => { global.localStorage = originalStorage; });
 
   for (const outcome of ['fulfilled', 'rejected']) {
     await t.test(`late A ${outcome} preserves completed B and its token`, async () => {
       const f = fixture();
       const a = deferred();
       const b = deferred();
-      axios.get = (_url, config) => config.headers.Authorization === 'Bearer token-A' ? a.promise : b.promise;
+      f.request = (_url, config) => config.headers.Authorization === 'Bearer token-A' ? a.promise : b.promise;
       const checkA = f.store.dispatch(f.actions.checkAuthStatus());
+      await new Promise(r => setImmediate(r));
       const userB = user('user-B', 'doctor');
       replaceSession(f, 'token-B', userB);
       const checkB = f.store.dispatch(f.actions.checkAuthStatus());
@@ -109,8 +113,9 @@ test('session checks cannot mutate a replacement or logged-out session', async t
     const f = fixture();
     const a = deferred();
     const b = deferred();
-    axios.get = (_url, config) => config.headers.Authorization === 'Bearer token-A' ? a.promise : b.promise;
+    f.request = (_url, config) => config.headers.Authorization === 'Bearer token-A' ? a.promise : b.promise;
     const checkA = f.store.dispatch(f.actions.checkAuthStatus());
+    await new Promise(r => setImmediate(r));
     replaceSession(f, 'token-B', user('user-B'));
     const checkB = f.store.dispatch(f.actions.checkAuthStatus());
     const requestB = f.store.getState().auth.sessionCheckRequestId;
@@ -128,8 +133,9 @@ test('session checks cannot mutate a replacement or logged-out session', async t
     await t.test(`logout ignores a late ${outcome} validation`, async () => {
       const f = fixture();
       const pending = deferred();
-      axios.get = () => pending.promise;
+      f.request = () => pending.promise;
       const check = f.store.dispatch(f.actions.checkAuthStatus());
+      await new Promise(r => setImmediate(r));
       f.store.dispatch(f.actions.logout());
       if (outcome === 'fulfilled') pending.resolve({ data: user('old-admin', 'admin') });
       else pending.reject(new Error('late error'));
@@ -147,7 +153,7 @@ test('session checks cannot mutate a replacement or logged-out session', async t
     const first = deferred();
     const second = deferred();
     let calls = 0;
-    axios.get = () => (++calls === 1 ? first.promise : second.promise);
+    f.request = () => (++calls === 1 ? first.promise : second.promise);
     const check1 = f.store.dispatch(f.actions.checkAuthStatus());
     const check2 = f.store.dispatch(f.actions.checkAuthStatus());
     second.resolve({ data: user('latest') });
@@ -162,7 +168,7 @@ test('session checks cannot mutate a replacement or logged-out session', async t
   await t.test('current expiry clears its own session and stored role', async () => {
     const f = fixture();
     f.entries.set('userRole', 'admin');
-    axios.get = async () => { throw { response: { data: { detail: 'expired' } } }; };
+    f.request = async () => { throw { response: { data: { detail: 'expired' } } }; };
     await f.store.dispatch(f.actions.checkAuthStatus());
     assert.equal(f.store.getState().auth.token, null);
     assert.equal(f.store.getState().auth.user, null);
@@ -174,8 +180,9 @@ test('session checks cannot mutate a replacement or logged-out session', async t
   await t.test('expiry in this tab does not erase a newer stored token', async () => {
     const f = fixture();
     const pending = deferred();
-    axios.get = () => pending.promise;
+    f.request = () => pending.promise;
     const check = f.store.dispatch(f.actions.checkAuthStatus());
+    await new Promise(r => setImmediate(r));
     f.entries.set('token', 'other-tab-token-B');
     f.entries.set('userRole', 'doctor');
     pending.reject(new Error('old tab expired'));
@@ -188,8 +195,9 @@ test('session checks cannot mutate a replacement or logged-out session', async t
   await t.test('registration result invalidates validation of the old session', async () => {
     const f = fixture();
     const pending = deferred();
-    axios.get = () => pending.promise;
+    f.request = () => pending.promise;
     const check = f.store.dispatch(f.actions.checkAuthStatus());
+    await new Promise(r => setImmediate(r));
     const registered = user('registered-patient');
     f.entries.set('token', 'registered-token');
     f.store.dispatch(f.actions.register.fulfilled(
@@ -205,15 +213,9 @@ test('session checks cannot mutate a replacement or logged-out session', async t
 });
 
 test('all identity requests share the configured API root', async t => {
-  const originalGet = axios.get;
-  const originalPost = axios.post;
-  const originalPut = axios.put;
   const originalStorage = global.localStorage;
   t.mock.timers.enable({ apis: ['setTimeout'] });
   t.after(() => {
-    axios.get = originalGet;
-    axios.post = originalPost;
-    axios.put = originalPut;
     global.localStorage = originalStorage;
     t.mock.timers.reset();
   });
@@ -228,17 +230,17 @@ test('all identity requests share the configured API root', async t => {
       const f = fixture(null, configured, prefix);
       const calls = [];
       const nextUser = user('api-root-patient');
-      axios.post = async url => {
+      f.request = async (url, config) => {
         calls.push(url);
         return {
-          status: 200,
-          data: url.endsWith('/register')
-            ? { user: nextUser, token: 'registered-token' }
-            : { user: nextUser, access_token: 'login-token' },
+          status: 200, statusText: 'OK', headers: {}, config,
+          data: config.method === 'post'
+            ? url.endsWith('/register')
+              ? { user: nextUser, token: 'registered-token' }
+              : { user: nextUser, access_token: 'login-token' }
+            : nextUser,
         };
       };
-      axios.get = async url => { calls.push(url); return { data: nextUser }; };
-      axios.put = async url => { calls.push(url); return { data: nextUser }; };
       await f.store.dispatch(f.actions.register({
         name: nextUser.name, email: nextUser.email, password: 'fixture-only',
       })).unwrap();

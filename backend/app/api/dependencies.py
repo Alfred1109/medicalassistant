@@ -20,8 +20,7 @@ from app.services.rehabilitation_service import RehabilitationService
 from app.services.rehab_plan_structure_service import RehabPlanStructureService
 from app.schemas.user import UserResponse
 from app.core.permissions import PermissionChecker
-from app.core.patient_access import PatientAccessError, ensure_patient_access
-from app.patients.legacy import LegacyPatientRepository
+from app.core.patient_access import PatientAccessError, ensure_patient_access, load_patient_doc
 from app.services.health_record_service import HealthRecordService
 from app.services.followup_service import FollowupService
 from app.services.health_alert_service import HealthAlertService
@@ -190,46 +189,18 @@ async def get_health_record_for_patient(
     patient_id: str,
     db: AsyncIOMotorDatabase
 ) -> Dict[str, Any]:
-    """获取或创建患者健康档案"""
-    try:
-        # 获取患者数据：读取收敛到 legacy 适配器（string/ObjectId 双字面兼容，
-        # 不再 ObjectId-only 直查 users）
-        patient = await LegacyPatientRepository(db).get(patient_id)
-
-        if not patient:
-            return {}
-
-        # 获取健康档案
-        health_records_collection = db["health_records"]
-        health_record = await health_records_collection.find_one({"patient_id": patient_id})
-
-        # 如果没有健康档案，创建基本结构
-        if not health_record:
-            # 将患者基本信息格式化为健康档案结构
-            return {
-                "id": patient_id,
-                "patient_id": patient_id,
-                "name": patient.get("name", "Unknown"),
-                "age": patient.get("age", 0),
-                "gender": patient.get("gender", "Unknown"),
-                "height": patient.get("height", 0),
-                "weight": patient.get("weight", 0),
-                "blood_type": patient.get("blood_type", "Unknown"),
-                "allergies": patient.get("allergies", []),
-                "emergency_contact": patient.get("emergency_contact", "None"),
-                "medical_history": [],
-                "rehab_history": [],
-                "medications": [],
-                "vital_signs": [],
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow()
-            }
-
-        # 格式化MongoDB对象
+    """读取患者所在域和档案；域状态不可用时保留原错误，不静默造空档案。"""
+    patient = await load_patient_doc(db, patient_id)
+    health_record = await db["health_records"].find_one({"patient_id": patient_id, "deleted": {"$ne": True}})
+    if health_record:
         return format_mongo_doc(health_record)
-    except Exception as e:
-        print(f"获取患者健康档案时出错: {str(e)}")
-        return {}
+    return {"id": patient_id, "patient_id": patient_id,
+            "name": patient.get("name", "Unknown"), "age": patient.get("age", 0),
+            "gender": patient.get("gender", "Unknown"), "height": patient.get("height", 0),
+            "weight": patient.get("weight", 0), "blood_type": patient.get("blood_type", "Unknown"),
+            "allergies": patient.get("allergies", []),
+            "emergency_contact": patient.get("emergency_contact", "None"),
+            "medical_history": [], "rehab_history": [], "medications": []}
 
 # MongoDB文档格式化函数
 def format_mongo_doc(doc: Dict[str, Any]) -> Dict[str, Any]:

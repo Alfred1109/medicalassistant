@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React from 'react';
 import { 
   ListItem, 
@@ -14,8 +15,6 @@ import {
   Healing as HealingIcon,
   Chat as MessageIcon
 } from '@mui/icons-material';
-import { formatDistanceToNow } from 'date-fns';
-import { zhCN } from 'date-fns/locale';
 import { NotificationType, Priority } from '../../constants/enums';
 import { STATUS_COLORS } from '../../constants/colors';
 import { StatusChip } from '../common';
@@ -69,10 +68,7 @@ const NotificationItem: React.FC<NotificationItemProps> = ({ notification, onCli
 
   // 格式化时间为相对时间
   const formatTime = (timestamp: string) => {
-    return formatDistanceToNow(new Date(timestamp), { 
-      addSuffix: true,
-      locale: zhCN 
-    });
+    return formatAppDate(timestamp, 'relative');
   };
 
   return (

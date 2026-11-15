@@ -1,3 +1,8 @@
+import { usePatientOptions, type PatientOption } from '../../hooks/usePatientOptions';
+import PatientSelect from '../../components/common/PatientSelect';
+import { apiErrorMessage } from '../../services/patientErrors';
+import { healthDataVitalDisplay, healthDataLabDisplay, healthDataType, healthDataQualityFlags, healthDataNumber, healthObservations, isTrendObservation, healthDataTimestamp, type HealthDataFact, type HealthObservation } from '../../utils/healthDataFacts';
+import HealthDataQualityNotice from '../../components/common/HealthDataQualityNotice';
 import React from 'react';
 import { formatAppDate } from '../../utils/dateTime';
 import {
@@ -10,15 +15,10 @@ import {
   Divider,
   Tabs,
   Tab,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
   Button,
   Chip,
   Alert,
   CircularProgress,
-  SelectChangeEvent,
 } from '@mui/material';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -35,7 +35,6 @@ import MonitorWeightIcon from '@mui/icons-material/MonitorWeight';
 import { Link } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { apiService, assignedPatientsApi } from '../../services/api';
-import { rehabilitationService, PlanStatisticsResponse } from '../../services/rehabilitationService';
 import AnalyticsChart from '../../components/Analytics/AnalyticsChart';
 import { RootState } from '../../store';
 
@@ -46,39 +45,7 @@ interface TabPanelProps {
   value: number;
 }
 
-// 后端健康数据文档形状（GET /health-records/health-data，见 HealthDataResponse）
-// data_type = "vital_sign" 时 data = { type, value, unit, notes }
-// data_type = "lab_result"  时 data = { test_name, result_value, reference_range, unit, interpretation }
-interface HealthDataDoc {
-  id?: string;
-  _id?: string;
-  patient_id?: string;
-  data_type: string;
-  data: {
-    type?: string;
-    value?: any;
-    unit?: string;
-    notes?: string;
-    test_name?: string;
-    result_value?: any;
-    reference_range?: string;
-    interpretation?: string;
-    [key: string]: any;
-  };
-  source?: string;
-  recorded_at?: string;
-  created_at?: string;
-}
-
-// 患者下拉选项（GET /doctors/patients）
-interface PatientOption {
-  id: string;
-  name: string;
-  age?: number;
-  gender?: string;
-  diagnosis?: string;
-}
-
+// 健康数据文档统一使用 HealthDataFact；字段兼容由 healthDataFacts 工具集中处理。
 // 生命体征摘要卡片
 interface VitalCard {
   type: string;
@@ -86,13 +53,14 @@ interface VitalCard {
   unit: string;
   value: string;
   time: string;
+  qualityFlags: string[];
 }
 
 // 血压趋势点
 interface BPTrendPoint {
   date: string;
-  systolic: number;
-  diastolic: number;
+  systolic?: number;
+  diastolic?: number;
 }
 
 // 血糖记录行
@@ -101,8 +69,10 @@ interface GlucoseRow {
   value: string;
   unit: string;
   time: string;
+  timestamp: string;
   reference?: string;
   interpretation?: string;
+  qualityFlags: string[];
 }
 
 // 用药记录行（来自医生健康档案 medications 字段）
@@ -126,17 +96,6 @@ interface RehabPlanSummary {
   startDate: string;
   endDate: string;
   exerciseCount: number;
-  progress: number | null; // 仅当 exercises 内含数值型 progress 时可计算
-}
-
-// 计划统计响应（GET /rehabilitation/plans/{id}/statistics，形状见 rehabilitationService.ts）
-// range_of_motion / muscle_strength 后端无对应字段，如实为 null（unsupported_metrics 列出）
-type PlanStatistics = PlanStatisticsResponse;
-
-// 疼痛趋势点（GET /rehabilitation/plans/{id}/trends?metric=pain，按天均值；无值日 value 为 null）
-interface PainTrendPoint {
-  date: string;
-  value: number;
 }
 
 // 生命体征类型定义（与后端 vital_type 约定一致，见 schemas/health_record.py:594）
@@ -144,8 +103,10 @@ const VITAL_TYPES: Array<{ type: string; label: string; unit: string }> = [
   { type: 'heart_rate', label: '心率', unit: 'bpm' },
   { type: 'body_temperature', label: '体温', unit: '°C' },
   { type: 'respiratory_rate', label: '呼吸频率', unit: '次/分钟' },
-  { type: 'blood_oxygen', label: '血氧饱和度', unit: '%' },
+  { type: 'oxygen_saturation', label: '血氧饱和度', unit: '%' },
   { type: 'weight', label: '体重', unit: 'kg' },
+  { type: 'blood_pressure_systolic', label: '收缩压（独立分量）', unit: 'mmHg' },
+  { type: 'blood_pressure_diastolic', label: '舒张压（独立分量）', unit: 'mmHg' },
 ];
 
 // 选项卡面板组件
@@ -171,39 +132,18 @@ function TabPanel(props: TabPanelProps) {
 
 // 将 ISO 时间格式化为展示字符串
 const formatTime = (iso?: string): string =>
-  formatAppDate(iso, 'minute', { empty: '未知时间', invalid: iso ? String(iso) : '未知时间' });
+  formatAppDate(iso, 'minute', { assumeUtc: true, empty: '未知时间', invalid: iso ? String(iso) : '未知时间' });
 
 // 图表 x 轴短标签
 const formatChartLabel = (iso?: string): string => {
-  if (!iso) return '';
-  const date = new Date(iso);
-  if (isNaN(date.getTime())) return String(iso);
-  const pad = (n: number) => n.toString().padStart(2, '0');
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-};
-
-// 解析血压值：支持 "135/85" 字符串与 { systolic, diastolic } 对象
-const parseBP = (value: any): { systolic: number; diastolic: number } | null => {
-  if (value && typeof value === 'object' && 'systolic' in value) {
-    const s = Number(value.systolic);
-    const d = Number(value.diastolic);
-    if (!isNaN(s) && !isNaN(d)) return { systolic: s, diastolic: d };
-    return null;
-  }
-  const parts = String(value ?? '').split('/');
-  if (parts.length === 2) {
-    const s = parseFloat(parts[0]);
-    const d = parseFloat(parts[1]);
-    if (!isNaN(s) && !isNaN(d)) return { systolic: s, diastolic: d };
-  }
-  return null;
+  return formatAppDate(iso, 'MM-dd HH:mm', { parse: 'native', assumeUtc: true, invalid: iso ? String(iso) : '' });
 };
 
 // 数值型体征值转字符串（血压等复合值单独处理）
 const vitalValueText = (value: any): string => {
   if (value === null || value === undefined || value === '') return '-';
   if (typeof value === 'number') return String(Math.round(value * 10) / 10);
-  return String(value);
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
 };
 
 // 患者下拉项展示文案
@@ -214,109 +154,32 @@ const patientLabel = (p: PatientOption): string => {
   return traits.length > 0 ? `${p.name} (${traits.join(', ')})` : p.name;
 };
 
-// 从康复计划 exercises 内的数值型 progress 计算平均完成率；无有效数据时返回 null（不伪造）
-const computePlanProgress = (exercises: any[]): number | null => {
-  if (!Array.isArray(exercises) || exercises.length === 0) return null;
-  const values = exercises
-    .map((ex: any) => {
-      const raw = ex?.progress ?? ex?.completion_rate ?? ex?.completion;
-      const num = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
-      return isNaN(num) ? null : num > 1 ? num : num * 100; // 0-1 归一为百分比
-    })
-    .filter((v): v is number => v !== null);
-  if (values.length === 0) return null;
-  return Math.round(values.reduce((a, b) => a + b, 0) / values.length);
-};
-
 const DataMonitoring: React.FC = () => {
-  const role = useSelector((state: RootState) => state.auth.user?.role);
+  const actor = useSelector((state: RootState) => state.auth.user);
+  const role = actor?.role;
   const recordsBase = role === 'health_manager' ? '/app/health-manager' : '/app/doctor';
   // 状态管理
   const [tabValue, setTabValue] = React.useState(0);
   const [selectedPatient, setSelectedPatient] = React.useState<string>('');
-  const [patients, setPatients] = React.useState<PatientOption[]>([]);
-  const [patientsLoading, setPatientsLoading] = React.useState(false);
-  const [patientsError, setPatientsError] = React.useState<string | null>(null);
+  const { patients, loading: patientsLoading, error: patientFailure, reload: loadPatients } = usePatientOptions(role, actor?.id);
+  const patientsError = patientFailure ? apiErrorMessage(patientFailure, '获取患者列表失败') : null;
 
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [vitals, setVitals] = React.useState<VitalCard[]>([]);
   const [heartRateTrend, setHeartRateTrend] = React.useState<Array<{ date: string; value: number }>>([]);
   const [temperatureTrend, setTemperatureTrend] = React.useState<Array<{ date: string; value: number }>>([]);
+  const [healthObservationsData, setHealthObservationsData] = React.useState<HealthObservation[]>([]);
   const [bpTrend, setBpTrend] = React.useState<BPTrendPoint[]>([]);
-  const [latestBP, setLatestBP] = React.useState<{ value: string; time: string } | null>(null);
+  const [latestBP, setLatestBP] = React.useState<{ value: string; time: string; qualityFlags: string[] } | null>(null);
   const [glucoseData, setGlucoseData] = React.useState<GlucoseRow[]>([]);
   const [medications, setMedications] = React.useState<MedicationRow[]>([]);
   const [rehabPlan, setRehabPlan] = React.useState<RehabPlanSummary | null>(null);
-  // 康复计划统计（statistics/trends 端点已真实实现）
-  const [planStatistics, setPlanStatistics] = React.useState<PlanStatistics | null>(null);
-  const [planStatsError, setPlanStatsError] = React.useState<string | null>(null);
-  const [painTrend, setPainTrend] = React.useState<PainTrendPoint[]>([]);
-
-  // 加载医生的患者列表（真实接口 GET /doctors/patients）
-  const loadPatients = React.useCallback(async () => {
-    setPatientsLoading(true);
-    setPatientsError(null);
-    try {
-      const response = await assignedPatientsApi(role).getPatients();
-      const list: any[] = Array.isArray(response.data) ? response.data : [];
-      // 后端已诚实化：空库如实返回 []，不再返回 mock_* 模拟患者
-      setPatients(list.map(p => ({
-        id: String(p?.id ?? p?._id ?? ''),
-        name: String(p?.name ?? '未知患者'),
-        age: typeof p?.age === 'number' ? p.age : undefined,
-        gender: p?.gender ? String(p.gender) : undefined,
-        diagnosis: p?.diagnosis ? String(p.diagnosis) : undefined,
-      })));
-    } catch (err: any) {
-      console.error('获取患者列表失败:', err);
-      setPatientsError(err?.response?.data?.detail || err?.message || '获取患者列表失败');
-    } finally {
-      setPatientsLoading(false);
-    }
-  }, [role]);
-
-  // 初始加载患者列表
-  React.useEffect(() => {
-    loadPatients();
-  }, [loadPatients]);
-
-  // 加载康复计划统计与疼痛趋势（真实端点：GET /rehabilitation/plans/{id}/statistics 与 /trends，
-  // plan_id 来自页面已加载的康复计划前置判断）
-  const loadRehabStats = async (planId: string) => {
-    setPlanStatsError(null);
-    try {
-      const [statsRes, painTrendRes] = await Promise.all([
-        rehabilitationService.getPlanStatistics(planId),
-        // 疼痛趋势（近30天，按天均值）；趋势失败不阻塞统计展示
-        rehabilitationService.getPlanTrends(planId, { metric: 'pain', days: 30 }).catch(() => null),
-      ]);
-      const stats = statsRes.data;
-      setPlanStatistics(stats);
-
-      const series = Array.isArray(painTrendRes?.data?.series) ? painTrendRes.data.series : [];
-      // 无值日 value 为 null，过滤后仅保留有效均值点
-      setPainTrend(
-        series
-          .filter(p => p?.value !== null && p?.value !== undefined && !isNaN(Number(p.value)))
-          .map(p => ({ date: String(p.date), value: Number(p.value) }))
-      );
-    } catch (err: any) {
-      console.error('获取康复计划统计失败:', err);
-      setPlanStatistics(null);
-      setPainTrend([]);
-      setPlanStatsError(err?.response?.data?.detail || err?.message || '获取康复计划统计失败');
-    }
-  };
-
   // 加载选中患者的监测数据
   const loadPatientData = async () => {
     if (!selectedPatient) return;
     setLoading(true);
     setError(null);
-    setPlanStatistics(null);
-    setPainTrend([]);
-    setPlanStatsError(null);
 
     try {
       const [vitalRes, labRes, plansRes, recordRes] = await Promise.all([
@@ -330,18 +193,20 @@ const DataMonitoring: React.FC = () => {
         assignedPatientsApi(role).getPatientHealthRecord(selectedPatient).catch(() => null),
       ]);
 
-      const vitalDocs: HealthDataDoc[] = Array.isArray(vitalRes.data) ? vitalRes.data : [];
-      const labDocs: HealthDataDoc[] = Array.isArray(labRes.data) ? labRes.data : [];
+      const vitalDocs: HealthDataFact[] = Array.isArray(vitalRes.data) ? vitalRes.data : [];
+      const labDocs: HealthDataFact[] = Array.isArray(labRes.data) ? labRes.data : [];
+      const observations = healthObservations(vitalDocs);
+      setHealthObservationsData(observations);
 
       // 按记录时间升序排列，便于取"最新值"与绘制趋势
       const sortedVitals = [...vitalDocs].sort((a, b) =>
-        new Date(a.recorded_at ?? a.created_at ?? 0).getTime() - new Date(b.recorded_at ?? b.created_at ?? 0).getTime()
+        healthDataTimestamp(a.recorded_at ?? a.created_at ?? '') - healthDataTimestamp(b.recorded_at ?? b.created_at ?? '')
       );
 
       // 生命体征摘要：每个类型取最新一条
-      const latestByType = new Map<string, HealthDataDoc>();
+      const latestByType = new Map<string, HealthDataFact>();
       sortedVitals.forEach(doc => {
-        const type = doc?.data?.type;
+        const type = healthDataType(doc);
         if (type) latestByType.set(type, doc);
       });
 
@@ -349,38 +214,40 @@ const DataMonitoring: React.FC = () => {
         .filter(v => latestByType.has(v.type))
         .map(v => {
           const doc = latestByType.get(v.type)!;
+          const display = healthDataVitalDisplay(doc);
           return {
             type: v.type,
             label: v.label,
-            unit: doc?.data?.unit || v.unit,
-            value: vitalValueText(doc?.data?.value),
+            unit: display.unit || v.unit,
+            value: vitalValueText(display.value),
             time: formatTime(doc?.recorded_at ?? doc?.created_at),
+            qualityFlags: healthDataQualityFlags(doc),
           };
         });
       setVitals(vitalCards);
 
       // 趋势：心率 / 体温历史
-      const trendOf = (type: string) =>
-        sortedVitals
-          .filter(doc => doc?.data?.type === type && !isNaN(Number(doc?.data?.value)))
-          .map(doc => ({ date: formatChartLabel(doc.recorded_at ?? doc.created_at), value: Number(doc.data.value) }));
+      const trendOf = (type: string) => observations
+        .filter(point => point.type === type && isTrendObservation(point))
+        .map(point => ({ date: formatChartLabel(point.timestamp), value: point.value! }));
       setHeartRateTrend(trendOf('heart_rate'));
       setTemperatureTrend(trendOf('body_temperature'));
 
       // 血压：最新值 + 趋势
-      const bpDocs = sortedVitals.filter(doc => doc?.data?.type === 'blood_pressure');
-      const bpPoints: BPTrendPoint[] = bpDocs
-        .map(doc => {
-          const parsed = parseBP(doc?.data?.value);
-          return parsed ? { date: formatChartLabel(doc.recorded_at ?? doc.created_at), ...parsed } : null;
-        })
-        .filter((p): p is BPTrendPoint => p !== null);
+      const bpDocs = sortedVitals.filter(doc => healthDataType(doc) === 'blood_pressure');
+      const bpPoints: BPTrendPoint[] = observations
+        .filter(point => ['blood_pressure_systolic', 'blood_pressure_diastolic'].includes(point.type)
+          && isTrendObservation(point))
+        .map(point => ({ date: formatChartLabel(point.timestamp),
+          [point.type === 'blood_pressure_systolic' ? 'systolic' : 'diastolic']: point.value! }));
       setBpTrend(bpPoints);
       if (bpDocs.length > 0) {
         const latestDoc = bpDocs[bpDocs.length - 1];
+        const display = healthDataVitalDisplay(latestDoc);
         setLatestBP({
-          value: vitalValueText(latestDoc?.data?.value),
+          value: vitalValueText(display.value),
           time: formatTime(latestDoc?.recorded_at ?? latestDoc?.created_at),
+          qualityFlags: healthDataQualityFlags(latestDoc),
         });
       } else {
         setLatestBP(null);
@@ -389,29 +256,35 @@ const DataMonitoring: React.FC = () => {
       // 血糖：体征类型 blood_glucose + 化验结果中含"血糖/葡萄糖"的记录
       const glucoseRows: GlucoseRow[] = [];
       sortedVitals
-        .filter(doc => doc?.data?.type === 'blood_glucose')
+        .filter(doc => healthDataType(doc) === 'blood_glucose')
         .forEach(doc => {
+          const display = healthDataVitalDisplay(doc);
           glucoseRows.push({
+            qualityFlags: healthDataQualityFlags(doc),
             id: String(doc.id ?? doc._id ?? Math.random()),
-            value: vitalValueText(doc?.data?.value),
-            unit: doc?.data?.unit || '',
+            value: vitalValueText(display.value),
+            unit: display.unit,
             time: formatTime(doc?.recorded_at ?? doc?.created_at),
+            timestamp: doc.recorded_at ?? doc.created_at ?? '',
           });
         });
       labDocs.forEach(doc => {
-        const testName = String(doc?.data?.test_name ?? '');
+        const display = healthDataLabDisplay(doc);
+        const testName = display.testName;
         if (testName.includes('血糖') || testName.includes('葡萄糖')) {
           glucoseRows.push({
+            qualityFlags: healthDataQualityFlags(doc),
             id: String(doc.id ?? doc._id ?? Math.random()),
-            value: vitalValueText(doc?.data?.result_value),
-            unit: doc?.data?.unit || '',
+            value: vitalValueText(display.value),
+            unit: display.unit,
             time: formatTime(doc?.recorded_at ?? doc?.created_at),
-            reference: doc?.data?.reference_range ? String(doc.data.reference_range) : undefined,
-            interpretation: doc?.data?.interpretation ? String(doc.data.interpretation) : undefined,
+            timestamp: doc.recorded_at ?? doc.created_at ?? '',
+            reference: display.reference,
+            interpretation: display.interpretation,
           });
         }
       });
-      glucoseRows.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+      glucoseRows.sort((a, b) => healthDataTimestamp(b.timestamp) - healthDataTimestamp(a.timestamp));
       setGlucoseData(glucoseRows);
 
       // 用药记录：来自医生健康档案（GET /doctors/health-records/{patient_id} 的 medications 字段）
@@ -445,13 +318,8 @@ const DataMonitoring: React.FC = () => {
           startDate: plan?.start_date ? formatTime(plan.start_date).split(' ')[0] : '-',
           endDate: plan?.end_date ? formatTime(plan.end_date).split(' ')[0] : '-',
           exerciseCount: Array.isArray(plan?.exercises) ? plan.exercises.length : 0,
-          progress: computePlanProgress(plan?.exercises ?? []),
         });
 
-        // 已有康复计划时加载计划统计与疼痛趋势（真实端点，失败仅提示不影响其余页签）
-        if (planId) {
-          await loadRehabStats(planId);
-        }
       } else {
         setRehabPlan(null);
       }
@@ -466,11 +334,6 @@ const DataMonitoring: React.FC = () => {
   // 处理选项卡变更
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
-  };
-
-  // 处理患者选择变更
-  const handlePatientChange = (event: SelectChangeEvent<string>) => {
-    setSelectedPatient(event.target.value as string);
   };
 
   // 化验结论标签（后端 interpretation 字段，无则不展示，不自行判定）
@@ -494,26 +357,8 @@ const DataMonitoring: React.FC = () => {
       <Paper sx={{ p: 3, mb: 3 }}>
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={12} sm={6} md={4}>
-            <FormControl fullWidth>
-              <InputLabel id="patient-select-label">选择患者</InputLabel>
-              <Select
-                labelId="patient-select-label"
-                id="patient-select"
-                value={selectedPatient}
-                label="选择患者"
-                onChange={handlePatientChange as any}
-                disabled={patientsLoading}
-              >
-                <MenuItem value="">
-                  <em>请选择</em>
-                </MenuItem>
-                {patients.map((patient) => (
-                  <MenuItem key={patient.id} value={patient.id}>
-                    {patientLabel(patient)}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <PatientSelect fullWidth label="选择患者" value={selectedPatient} onChange={setSelectedPatient}
+              patients={patients.map(patient => ({ ...patient, name: patientLabel(patient) }))} loading={patientsLoading} />
           </Grid>
           <Grid item xs={12} sm={6} md={8} textAlign="right">
             <Button
@@ -585,6 +430,8 @@ const DataMonitoring: React.FC = () => {
             数据非实时同步，可点击"刷新数据"获取最新记录。
           </Typography>
 
+          <HealthDataQualityNotice observations={healthObservationsData}
+            label={type => VITAL_TYPES.find(item => item.type === type)?.label || type} />
           {/* 生命体征选项卡 */}
           <TabPanel value={tabValue} index={0}>
             <Grid container spacing={3}>
@@ -610,6 +457,7 @@ const DataMonitoring: React.FC = () => {
                             {vital.unit}
                           </Typography>
                         </Box>
+                        {vital.qualityFlags.length > 0 && <Chip size="small" color="warning" label={`质量待核查：${vital.qualityFlags.join('、')}`} />}
                         <Typography variant="caption" color="text.secondary" component="div">
                           记录时间: {vital.time}
                         </Typography>
@@ -665,7 +513,7 @@ const DataMonitoring: React.FC = () => {
                     <Grid item xs={12} md={4}>
                       <Card variant="outlined">
                         <CardContent>
-                          <Typography variant="subtitle1" gutterBottom>当前血压</Typography>
+                          <Typography variant="subtitle1" gutterBottom>最近完整血压记录</Typography>
                           {latestBP ? (
                             <>
                               <Box display="flex" alignItems="baseline">
@@ -676,13 +524,14 @@ const DataMonitoring: React.FC = () => {
                                   mmHg
                                 </Typography>
                               </Box>
+                              {latestBP.qualityFlags.length > 0 && <Chip size="small" color="warning" label={`质量待核查：${latestBP.qualityFlags.join('、')}`} />}
                               <Typography variant="caption" color="text.secondary">
                                 记录于 {latestBP.time}
                               </Typography>
                             </>
                           ) : (
                             <Typography variant="body2" color="text.secondary">
-                              暂无血压记录
+                              暂无完整血压记录，独立分量见下表
                             </Typography>
                           )}
                         </CardContent>
@@ -700,6 +549,17 @@ const DataMonitoring: React.FC = () => {
                       />
                     </Grid>
                   </Grid>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>血压分量按各自测量时间展示，不将独立读数配对为一次完整血压。</Typography>
+                  <Table size="small">
+                    <TableHead><TableRow><TableCell>分量</TableCell><TableCell>原始数值</TableCell><TableCell>记录时间</TableCell><TableCell>质量标记</TableCell></TableRow></TableHead>
+                    <TableBody>{healthObservationsData.filter(point => ['blood_pressure_systolic', 'blood_pressure_diastolic'].includes(point.type)).map((point, index) =>
+                      <TableRow key={`${point.id}-${point.type}-${index}`}>
+                        <TableCell>{point.type === 'blood_pressure_systolic' ? '收缩压' : '舒张压'}</TableCell>
+                        <TableCell>{String(point.rawValue ?? '-')} {point.unit}</TableCell>
+                        <TableCell>{formatTime(point.timestamp)}</TableCell>
+                        <TableCell>{point.qualityFlags.length ? <Chip size="small" color="warning" label={point.qualityFlags.join('、')} /> : '未附质量标记'}</TableCell>
+                      </TableRow>)}</TableBody>
+                  </Table>
                 </Paper>
               </Grid>
 
@@ -732,7 +592,7 @@ const DataMonitoring: React.FC = () => {
                                   </Box>
                                 </TableCell>
                                 <TableCell>
-                                  {getInterpretationChip(row.interpretation) ?? (
+                                  {row.qualityFlags.length ? <Chip size="small" color="warning" label={`质量待核查：${row.qualityFlags.join('、')}`} /> : getInterpretationChip(row.interpretation) ?? (
                                     <Chip size="small" label="未判定" variant="outlined" />
                                   )}
                                 </TableCell>
@@ -747,7 +607,7 @@ const DataMonitoring: React.FC = () => {
                         <AnalyticsChart
                           type="line"
                           data={glucoseData
-                            .filter(row => !isNaN(Number(row.value)))
+                            .filter(row => row.qualityFlags.length === 0 && healthDataNumber(row.value) !== null)
                             .map(row => ({ date: row.time, value: Number(row.value) }))
                             .reverse()}
                           height={250}
@@ -887,156 +747,18 @@ const DataMonitoring: React.FC = () => {
                       </Grid>
 
                       <Grid item xs={12} md={6}>
-                        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                          计划完成率（按训练项目进度均值估算）
-                        </Typography>
-                        {rehabPlan.progress !== null ? (
-                          <Box sx={{ position: 'relative', display: 'inline-flex', mt: 1 }}>
-                            <CircularProgress
-                              variant="determinate"
-                              value={Math.min(100, rehabPlan.progress)}
-                              size={100}
-                              thickness={5}
-                              color="primary"
-                            />
-                            <Box
-                              sx={{
-                                top: 0,
-                                left: 0,
-                                bottom: 0,
-                                right: 0,
-                                position: 'absolute',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                              }}
-                            >
-                              <Typography variant="h6" component="div" color="text.secondary">
-                                {`${rehabPlan.progress}%`}
-                              </Typography>
-                            </Box>
-                          </Box>
-                        ) : (
-                          <Alert severity="info" sx={{ mt: 1 }}>
-                            计划内训练项目暂无进度记录，无法计算完成率
-                          </Alert>
-                        )}
+                        <Alert severity="info" action={<Button component={Link} to="/app/rehab-plans">查看患者自述</Button>}>
+                          可在新版已发布方案中查看患者自述及感受；训练完成率暂不可计算。
+                        </Alert>
                       </Grid>
                     </Grid>
                   </Paper>
                 </Grid>
 
                 <Grid item xs={12}>
-                  <Paper sx={{ p: 3 }}>
-                    <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-                      <Typography variant="h6">康复关键指标</Typography>
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        onClick={() => rehabPlan && loadRehabStats(rehabPlan.id)}
-                      >
-                        刷新统计
-                      </Button>
-                    </Box>
-
-                    {planStatsError && (
-                      <Alert severity="error" sx={{ mb: 2 }}>{planStatsError}</Alert>
-                    )}
-
-                    {!planStatistics ? (
-                      !planStatsError && (
-                        <Alert severity="info">暂无统计数据（点击"刷新统计"重新加载）</Alert>
-                      )
-                    ) : (
-                      <>
-                        {/* 统计摘要：statistics 真实聚合字段 */}
-                        <Grid container spacing={2} mb={3}>
-                          <Grid item xs={6} sm={3}>
-                            <Typography variant="caption" color="text.secondary">训练记录数</Typography>
-                            <Typography variant="h6">{planStatistics.total_records}</Typography>
-                          </Grid>
-                          <Grid item xs={6} sm={3}>
-                            <Typography variant="caption" color="text.secondary">已完成记录</Typography>
-                            <Typography variant="h6">{planStatistics.completed_records}</Typography>
-                          </Grid>
-                          <Grid item xs={6} sm={3}>
-                            <Typography variant="caption" color="text.secondary">完成率</Typography>
-                            <Typography variant="h6">
-                              {planStatistics.completion_rate !== null ? `${planStatistics.completion_rate}%` : '--'}
-                            </Typography>
-                          </Grid>
-                          <Grid item xs={6} sm={3}>
-                            <Typography variant="caption" color="text.secondary">平均疼痛等级</Typography>
-                            <Typography variant="h6">
-                              {planStatistics.avg_pain_level !== null ? planStatistics.avg_pain_level : '--'}
-                            </Typography>
-                          </Grid>
-                        </Grid>
-
-                        <Grid container spacing={3}>
-                          {/* 疼痛趋势：trends(metric=pain)，按天均值，无值日 value 为 null 已过滤 */}
-                          <Grid item xs={12} md={6}>
-                            <Typography variant="subtitle2" gutterBottom>
-                              疼痛趋势（近30天，按天均值）
-                            </Typography>
-                            {painTrend.length === 0 ? (
-                              <Alert severity="info">
-                                该计划暂无疼痛记录（训练进度中 pain_level 无非空值）
-                              </Alert>
-                            ) : (
-                              <AnalyticsChart
-                                type="line"
-                                data={painTrend}
-                                height={220}
-                                xKey="date"
-                                yKeys={['value']}
-                                title="疼痛等级趋势 (0-10)"
-                              />
-                            )}
-                          </Grid>
-
-                          {/* 每周训练完成率：statistics.weekly_completion[]（按自然周分桶） */}
-                          <Grid item xs={12} md={6}>
-                            <Typography variant="subtitle2" gutterBottom>
-                              每周训练完成率
-                            </Typography>
-                            {planStatistics.weekly_completion.length === 0 ? (
-                              <Alert severity="info">
-                                暂无周完成率数据（计划内无进度记录）
-                              </Alert>
-                            ) : (
-                              <AnalyticsChart
-                                type="bar"
-                                data={planStatistics.weekly_completion.map(w => ({
-                                  week: w.week_start,
-                                  rate: w.completion_rate,
-                                }))}
-                                height={220}
-                                xKey="week"
-                                yKeys={['rate']}
-                                title="每周完成率 (%)"
-                              />
-                            )}
-                          </Grid>
-                        </Grid>
-
-                        {/* 后端无对应数据字段的指标：如实保持"暂无数据源" */}
-                        <Alert severity="warning" sx={{ mt: 3 }}>
-                          暂无数据源：关节活动度（range_of_motion）与肌肉力量（muscle_strength）
-                          后端无对应数据字段，统计响应中如实为 null
-                          （unsupported_metrics: {planStatistics.unsupported_metrics.join('、')}），
-                          待后端补充数据采集后接入。
-                        </Alert>
-
-                        <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
-                          数据来源：{planStatistics.data_source}
-                          {planStatistics.data_notes.length > 0
-                            ? `；备注：${planStatistics.data_notes.join('；')}`
-                            : ''}
-                        </Typography>
-                      </>
-                    )}
-                  </Paper>
+                  <Alert severity="info" action={<Button component={Link} to="/app/rehab-plans">打开新版方案工作台</Button>}>
+                    本页保留计划和健康事实。训练状态来自患者自述，不再从旧计划进度数组推算完成率、训练次数或疼痛趋势。
+                  </Alert>
                 </Grid>
               </Grid>
             ) : (

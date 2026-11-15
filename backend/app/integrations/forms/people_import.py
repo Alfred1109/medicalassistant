@@ -142,6 +142,7 @@ async def import_project_people(db, client, actor, project_id, *, evidence_refer
     for _ in range(100):
         page = await load_people(client, project_id, limit=100, cursor=cursor)
         for person in page["data"]:
+            # domain-dispatch: 迁移完成后可删患者导入的 legacy users 分支；医护账号导入仍保留。
             if canonical and person["kind"] == "subject":
                 if await _import_canonical_subject(db, actor, project_id, origin,
                                                    person, evidence_reference):

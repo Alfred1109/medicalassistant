@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
@@ -160,11 +161,11 @@ const AgentDetail = () => {
             </Typography>
             
             <Typography variant="body1" gutterBottom>
-              <strong>创建时间：</strong> {new Date(selectedAgent.created_at).toLocaleString()}
+              <strong>创建时间：</strong> {formatAppDate(selectedAgent.created_at, 'locale', { invalid: 'Invalid Date' })}
             </Typography>
             
             <Typography variant="body1" gutterBottom>
-              <strong>更新时间：</strong> {new Date(selectedAgent.updated_at).toLocaleString()}
+              <strong>更新时间：</strong> {formatAppDate(selectedAgent.updated_at, 'locale', { invalid: 'Invalid Date' })}
             </Typography>
           </Paper>
           

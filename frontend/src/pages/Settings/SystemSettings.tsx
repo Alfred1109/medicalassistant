@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect } from 'react';
 import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
@@ -143,7 +144,7 @@ const SystemSettings: React.FC = () => {
         logLevel: data.log_level || 'info',
       });
       setSecuritySettings(current => ({ ...current, loginNotifications: data.login_notifications !== false, sessionTimeout: String(data.session_timeout_minutes ?? 480) }));
-      setLastBackup(data.last_scheduled_export_at ? new Date(data.last_scheduled_export_at).toLocaleString() : data.last_backup_at ? `旧记录（未区分手动与定时）：${new Date(data.last_backup_at).toLocaleString()}` : '');
+      setLastBackup(data.last_scheduled_export_at ? formatAppDate(data.last_scheduled_export_at, 'locale', { invalid: 'Invalid Date' }) : data.last_backup_at ? `旧记录（未区分手动与定时）：${formatAppDate(data.last_backup_at, 'locale', { invalid: 'Invalid Date' })}` : '');
     }).catch(() => undefined);
     httpClient.get('/integrations/forms/catalog/runs/summary').then(({ data }) => {
       const projects = Array.isArray(data?.projects) ? data.projects : [];

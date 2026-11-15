@@ -26,15 +26,10 @@ function fixture({ mode = 'oidc', session = { authenticated: true, identity_stat
         if (configError) throw configError;
         return { data: { mode, login_url: 'https://rehab.example.invalid/medical/api/auth/oidc/start' } };
       }
-      if (typeof session === 'function') return session(url, options);
-      if (session instanceof Error) throw session;
-      return { data: session };
+      throw new Error(`Unexpected raw Axios request: ${url}`);
     };
-    if (name === 'put') return async (url, data, options) => { calls.push({ method: 'put', url, data, options }); return { data: user }; };
-    if (name === 'post') return async (url, data, options) => {
-      calls.push({ method: 'post', url, data, options });
-      if (postError) throw postError;
-      return { status: 204 };
+    if (name === 'put' || name === 'post') return async url => {
+      throw new Error(`Unexpected raw Axios request: ${url}`);
     };
     return Reflect.get(target, name);
   } });
@@ -45,7 +40,20 @@ function fixture({ mode = 'oidc', session = { authenticated: true, identity_stat
   const api = loaded.exports;
   const store = configureStore({ reducer: { auth: api.reducer } });
   const httpCalls = [];
-  api.http.defaults.adapter = async config => { httpCalls.push(config); return { data: {}, status: 200, statusText: 'OK', headers: {}, config }; };
+  api.http.defaults.adapter = async config => {
+    httpCalls.push(config);
+    let response = { data: {}, status: 200, statusText: 'OK', headers: {}, config };
+    if (config.url === '/auth/session') {
+      if (session instanceof Error) throw session;
+      response = { ...response, ...(typeof session === 'function' ? await session(config.url, config) : { data: session }) };
+    } else if (config.url === '/users/me' && config.method === 'put') {
+      response.data = user;
+    } else if (config.url === '/auth/logout') {
+      if (postError) throw postError;
+      response.status = 204;
+    }
+    return response;
+  };
   return { ...api, store, entries, calls, httpCalls };
 }
 
@@ -56,9 +64,10 @@ test('OIDC bootstrap discards persisted bearer and accepts only a bound server s
   assert.equal(f.store.getState().auth.token, null);
   assert.deepEqual(f.store.getState().auth.user, user);
   assert.equal(f.entries.size, 0);
-  assert.deepEqual(f.calls.map(c => c.url), ['/medical/api/auth/config', '/medical/api/auth/session']);
-  assert.equal(f.calls.at(-1).options.withCredentials, true);
-  assert.equal(f.calls.at(-1).options.headers, undefined);
+  assert.deepEqual(f.calls.map(c => c.url), ['/medical/api/auth/config']);
+  assert.deepEqual(f.httpCalls.map(c => c.url), ['/auth/session']);
+  assert.equal(f.httpCalls[0].withCredentials, true);
+  assert.equal(f.httpCalls[0].headers.get('Authorization'), undefined);
 });
 
 test('pending binding and absent clinical access never create an authenticated business user', async () => {
@@ -110,10 +119,11 @@ test('OIDC logout posts CSRF and only clears local identity after server success
   const f = fixture();
   await f.store.dispatch(f.checkAuthStatus()).unwrap();
   await f.store.dispatch(f.signOut()).unwrap();
-  const call = f.calls.at(-1);
-  assert.equal(call.url, '/medical/api/auth/logout');
-  assert.equal(call.options.withCredentials, true);
-  assert.equal(call.options.headers['X-CSRF-Token'], 'csrf-proof');
+  const call = f.httpCalls.at(-1);
+  assert.equal(call.url, '/auth/logout');
+  assert.equal(call.withCredentials, true);
+  assert.equal(call.headers.get('X-CSRF-Token'), 'csrf-proof');
+  assert.equal(call.headers.get('Authorization'), undefined);
   assert.equal(f.store.getState().auth.user, null);
   const failed = fixture({ postError: new Error('offline') });
   await failed.store.dispatch(failed.checkAuthStatus()).unwrap();
@@ -136,6 +146,7 @@ test('OIDC credential thunks never call legacy login or registration', async () 
   await assert.rejects(f.store.dispatch(f.login({ email: 'a@example.invalid', password: 'never-send' })).unwrap(), /统一登录/);
   await assert.rejects(f.store.dispatch(f.register({ name: 'a', email: 'a@example.invalid', password: 'never-send' })).unwrap(), /统一登录/);
   assert.equal(f.calls.filter(c => c.method === 'post').length, 0);
+  assert.equal(f.httpCalls.length, 0);
 });
 
 test('logout invalidates a late cookie-session check', async () => {
@@ -154,11 +165,12 @@ test('logout invalidates a late cookie-session check', async () => {
 test('OIDC profile writes use current transport mode instead of a stale stored bearer', async () => {
   const f = fixture();
   await f.store.dispatch(f.updateUserProfile({ name: 'Doctor' })).unwrap();
-  const call = f.calls.at(-1);
+  const call = f.httpCalls.at(-1);
   assert.equal(call.method, 'put');
-  assert.equal(call.options.withCredentials, true);
-  assert.equal(call.options.headers['X-CSRF-Token'], 'csrf-proof');
-  assert.equal(call.options.headers.Authorization, undefined);
+  assert.equal(call.url, '/users/me');
+  assert.equal(call.withCredentials, true);
+  assert.equal(call.headers.get('X-CSRF-Token'), 'csrf-proof');
+  assert.equal(call.headers.get('Authorization'), undefined);
 });
 
 test('late profile response after logout cannot resurrect a cookie-authenticated user', async () => {

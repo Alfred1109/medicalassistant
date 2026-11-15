@@ -3,10 +3,10 @@
 覆盖 GET /api/doctors：
 - /patients：空库/无关联患者如实返回空列表（绝不返回 mock_i 模拟患者）；
   数据库异常如实 500；命中数据返回真实患者。
-- /statistics：真实聚合（患者数、康复计划状态分布、本月完成训练记录数），
+- /statistics：真实聚合（患者数、康复计划状态分布）；未定义训练场次口径时不返回完成数，
   空库返回真实 0 而非存根空对象。
-- /patient-monitoring/{id}：真实聚合快照（绑定设备数、康复计划状态分布、
-  近 30 天完成训练记录数）；患者不存在 404、不属于当前医生 403。
+- /patient-monitoring/{id}：真实聚合快照（绑定设备数、康复计划状态分布）；
+  患者不存在 404、不属于当前医生 403。
 
 全部内存打桩 + FastAPI 依赖覆盖，不触碰真实数据库。
 """
@@ -49,6 +49,8 @@ def _match(doc, filter_):
             for op, operand in cond.items():
                 try:
                     if op == "$gte" and not (value is not None and value >= operand):
+                        return False
+                    if op == "$lte" and not (value is not None and value <= operand):
                         return False
                     if op == "$lt" and not (value is not None and value < operand):
                         return False
@@ -228,10 +230,12 @@ class DoctorStatisticsContractTests(DoctorRouterContractTestBase):
         self.assertEqual(body["implemented"], True)
         self.assertEqual(body["patientCount"], 0)
         self.assertEqual(body["rehabPlans"], {"total": 0, "active": 0, "completed": 0})
-        self.assertEqual(body["completedSessionsThisMonth"], 0)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["total"], 0)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["periodStart"].split("T")[0],
+                         datetime.utcnow().strftime("%Y-%m-01"))
 
     async def test_seeded_statistics_aggregated(self):
-        """命中数据：患者数、计划状态分布、本月完成训练记录数按真实集合聚合。"""
+        """命中数据：患者数和计划状态按真实集合聚合，不读取旧执行集合。"""
         db = FakeDatabase()
         db.users.insert({"_id": ObjectId(DOCTOR_ID), "role": "doctor", "name": "医生",
                          "patients": [PATIENT_ID, OTHER_PATIENT_ID]})
@@ -243,15 +247,19 @@ class DoctorStatisticsContractTests(DoctorRouterContractTestBase):
         plans.insert({"_id": "r2", "practitioner_id": DOCTOR_ID, "status": "active"})
         plans.insert({"_id": "r3", "practitioner_id": DOCTOR_ID, "status": "completed"})
         plans.insert({"_id": "r4", "practitioner_id": str(ObjectId()), "status": "active"})
-        progress = db.rehab_progress
-        progress.insert({"_id": "pg1", "patient_id": PATIENT_ID, "completed": True,
-                         "date": datetime.utcnow() - timedelta(days=1)})
-        # 字符串日期不参与 datetime 范围比较（类型括号），不计入本月
-        progress.insert({"_id": "pg2", "patient_id": PATIENT_ID, "completed": True,
-                         "date": "2020-01-01T00:00:00"})
-        # 未完成的不计入
-        progress.insert({"_id": "pg3", "patient_id": PATIENT_ID, "completed": False,
-                         "date": datetime.utcnow()})
+        # 旧集合即使有记录，也不再冒充新架构中的患者自报。
+        db.rehab_progress.insert({"_id": "pg1", "patient_id": PATIENT_ID, "completed": True,
+                                  "date": datetime.utcnow() - timedelta(days=1)})
+        reports = db.rehab_execution_events
+        reports.insert({"_id": "ev1", "patient_id": PATIENT_ID, "event_type": "patient_report",
+                        "schema_version": 1, "source": "patient_self_report",
+                        "execution_status": "completed", "performed_at": datetime.utcnow() - timedelta(days=1)})
+        reports.insert({"_id": "ev2", "patient_id": PATIENT_ID, "event_type": "patient_report",
+                        "schema_version": 1, "source": "patient_self_report",
+                        "execution_status": "partial", "performed_at": datetime.utcnow()})
+        reports.insert({"_id": "ev3", "patient_id": str(ObjectId()), "event_type": "patient_report",
+                        "schema_version": 1, "source": "patient_self_report",
+                        "execution_status": "completed", "performed_at": datetime.utcnow()})
 
         self._setup(db, _make_user())
         response = await self._client.get("/api/doctors/statistics")
@@ -259,7 +267,10 @@ class DoctorStatisticsContractTests(DoctorRouterContractTestBase):
         body = response.json()
         self.assertEqual(body["patientCount"], 2)
         self.assertEqual(body["rehabPlans"], {"total": 3, "active": 2, "completed": 1})
-        self.assertEqual(body["completedSessionsThisMonth"], 1)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["total"], 2)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["completed"], 1)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["partial"], 1)
+        self.assertEqual(body["patientSelfReportsThisMonth"]["not_done"], 0)
 
     async def test_unknown_doctor_returns_404(self):
         db = FakeDatabase()
@@ -289,7 +300,7 @@ class PatientMonitoringContractTests(DoctorRouterContractTestBase):
         self.assertEqual(response.status_code, 403, response.text)
 
     async def test_monitoring_snapshot_aggregated(self):
-        """命中数据：绑定设备数、计划状态分布、近 30 天完成训练记录数为真实聚合。"""
+        """命中数据：绑定设备数和计划状态聚合，不把历史行当训练场次。"""
         db = FakeDatabase()
         self._seed_doctor(db)
         db.users.insert({"_id": ObjectId(PATIENT_ID), "role": "patient", "name": "张三", "practitioners": [DOCTOR_ID]})
@@ -298,8 +309,6 @@ class PatientMonitoringContractTests(DoctorRouterContractTestBase):
         db.rehab_plans.insert({"_id": "r1", "patient_id": PATIENT_ID, "status": "active"})
         db.rehab_progress.insert({"_id": "pg1", "patient_id": PATIENT_ID, "completed": True,
                                   "date": datetime.utcnow() - timedelta(days=2)})
-        db.rehab_progress.insert({"_id": "pg2", "patient_id": PATIENT_ID, "completed": True,
-                                  "date": datetime.utcnow() - timedelta(days=60)})
 
         self._setup(db, _make_user())
         response = await self._client.get(f"/api/doctors/patient-monitoring/{PATIENT_ID}")
@@ -309,7 +318,7 @@ class PatientMonitoringContractTests(DoctorRouterContractTestBase):
         self.assertEqual(body["patientId"], PATIENT_ID)
         self.assertEqual(body["boundDevices"], 2)
         self.assertEqual(body["rehabPlans"], {"total": 1, "active": 1, "completed": 0})
-        self.assertEqual(body["completedSessionsLast30Days"], 1)
+        self.assertNotIn("completedSessionsLast30Days", body)
 
     async def test_invalid_patient_id_returns_404(self):
         db = FakeDatabase()

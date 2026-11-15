@@ -1,9 +1,10 @@
+import { formatAppDate } from '../utils/dateTime';
 import { useState, useEffect } from 'react';
 import dashboardService, { 
   DashboardData, 
   HealthMetric, 
   TodoItem, 
-  RehabProgress,
+  PublishedRehabPlans,
   Notification
 } from '../services/dashboardService';
 
@@ -12,7 +13,7 @@ interface DashboardState {
   error: string | null;
   healthMetrics: HealthMetric[];
   todoItems: TodoItem[];
-  rehabProgress: RehabProgress | null;
+  publishedRehabPlans: PublishedRehabPlans | null;
   notifications: Notification[];
   notificationsLoading: boolean;
   notificationsError: string | null;
@@ -24,7 +25,7 @@ export const useDashboard = () => {
     error: null,
     healthMetrics: [],
     todoItems: [],
-    rehabProgress: null,
+    publishedRehabPlans: null,
     notifications: [],
     notificationsLoading: true,
     notificationsError: null
@@ -40,7 +41,7 @@ export const useDashboard = () => {
         loading: false,
         healthMetrics: data.health_metrics,
         todoItems: data.todo_items,
-        rehabProgress: data.rehab_progress
+        publishedRehabPlans: data.published_rehab_plans
       }));
     } catch (error) {
       console.error('获取仪表盘数据失败:', error);
@@ -60,24 +61,7 @@ export const useDashboard = () => {
       
       // 处理通知时间格式
       const processedNotifications = notifications.map(notification => {
-        const date = new Date(notification.time);
-        const now = new Date();
-        const diffInDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
-        
-        let formattedTime;
-        if (diffInDays === 0) {
-          formattedTime = '今天 ' + date.getHours().toString().padStart(2, '0') + ':' + 
-            date.getMinutes().toString().padStart(2, '0');
-        } else if (diffInDays === 1) {
-          formattedTime = '昨天 ' + date.getHours().toString().padStart(2, '0') + ':' + 
-            date.getMinutes().toString().padStart(2, '0');
-        } else if (diffInDays < 7) {
-          formattedTime = diffInDays + '天前';
-        } else {
-          formattedTime = date.getFullYear() + '-' + 
-            (date.getMonth() + 1).toString().padStart(2, '0') + '-' + 
-            date.getDate().toString().padStart(2, '0');
-        }
+        const formattedTime = formatAppDate(notification.time, 'notification', { invalid: 'NaN-NaN-NaN' });
         
         return {
           ...notification,
@@ -145,4 +129,4 @@ export const useDashboard = () => {
   };
 };
 
-export default useDashboard; 
+export default useDashboard;

@@ -42,6 +42,8 @@ class SelfProfileContractTests(unittest.IsolatedAsyncioTestCase):
         self.get_user_by_id_mock = AsyncMock(return_value=self.user)
         self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_by_id_mock)
         self.lookup.start()
+        self.auth_lookup = patch("app.core.user_record.load_user_response", new=self.get_user_by_id_mock)
+        self.auth_lookup.start()
         # 任何触达密码哈希逻辑的路径都应使测试失败，作为"密码不变"的显式证据
         self.hash_guard = patch.object(
             UserService, "_get_password_hash",
@@ -55,6 +57,7 @@ class SelfProfileContractTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.aclose()
         self.lookup.stop()
+        self.auth_lookup.stop()
         self.hash_guard.stop()
         self.update_user.stop()
         app.dependency_overrides.clear()
@@ -221,7 +224,7 @@ class SelfProfileContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_can_read_and_update_users(self):
         # 管理员：user:update/user:read 权限检查通过，端点真实可用（200，非 422）
         admin = self.user.model_copy(update={"role": "admin"})
-        UserService.get_user_by_id.return_value = admin
+        self.get_user_by_id_mock.return_value = admin
 
         # GET /users/{id}
         response = await self.client.get(
@@ -242,7 +245,7 @@ class SelfProfileContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_can_list_users(self):
         admin = self.user.model_copy(update={"role": "admin"})
-        UserService.get_user_by_id.return_value = admin
+        self.get_user_by_id_mock.return_value = admin
         with patch.object(UserService, "list_users", new=AsyncMock(return_value=[admin])):
             response = await self.client.get("/api/users/", headers=self.auth_headers())
         self.assertEqual(response.status_code, 200, response.text)
@@ -250,7 +253,7 @@ class SelfProfileContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_can_create_and_deactivate_users(self):
         admin = self.user.model_copy(update={"role": "admin"})
-        UserService.get_user_by_id.return_value = admin
+        self.get_user_by_id_mock.return_value = admin
 
         # POST /users/create（user:create 权限）。路由声明 200（/register 才是 201）。
         created = admin.model_copy(update={"email": "new@example.com", "name": "New User"})
@@ -272,7 +275,7 @@ class SelfProfileContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_can_update_permissions_and_operator_id_is_passed(self):
         # POST /users/permissions 走通（不再 500）：operator_id 必须来自当前管理员
         admin = self.user.model_copy(update={"role": "admin"})
-        UserService.get_user_by_id.return_value = admin
+        self.get_user_by_id_mock.return_value = admin
         target = self.user.model_copy(update={"id": self.other_user_id, "role": "patient"})
         update_perms_mock = AsyncMock(return_value=target)
         with patch.object(UserService, "update_user_permissions", new=update_perms_mock):
@@ -289,7 +292,7 @@ class SelfProfileContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_can_activate_accounts(self):
         admin = self.user.model_copy(update={"role": "admin"})
-        UserService.get_user_by_id.return_value = admin
+        self.get_user_by_id_mock.return_value = admin
         with patch.object(UserService, "activate_user", new=AsyncMock(return_value=True)):
             response = await self.client.post(
                 f"/api/users/activate/{self.other_user_id}", headers=self.auth_headers()

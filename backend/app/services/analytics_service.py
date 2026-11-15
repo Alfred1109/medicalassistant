@@ -36,8 +36,8 @@ class AnalyticsService:
     """数据分析和可视化服务
 
     诚实数据约定（2026-11-08 修复）：
-    - 所有指标均来自真实集合聚合；当前无数据源支撑的指标返回 0 / 空序列，
-      并通过 dataAvailable 标记显式声明不可用，绝不返回随机模拟值；
+    - 可用指标均来自真实集合聚合；没有当前数据源的指标返回 None，
+      并通过 dataAvailable 标记显式声明不可用，绝不伪装成真实 0 或模拟值；
     - 任何异常如实上抛（由路由层转 500），不再回退模拟数据。
     """
 
@@ -53,17 +53,6 @@ class AnalyticsService:
         # （users 按 role 区分），不在患者读取收敛范围内
         self.doctors_collection = db.users
         self.devices_collection = db.devices
-        # TODO(orphan-read, 待业务决策): rehabilitation_records 是无写入方的孤儿集合
-        # （BASE03 集合收敛 9133342 已确认全库（含历史提交 65e990b 引入时）不存在任何
-        # 写入路径；migrate_legacy_collections.py 将其列为 REPORT_ONLY 待人工决策）。
-        # 此处读取期望的文档形状：含数值型 duration（分钟）的训练记录，仅支撑
-        # get_stats_overview 的 avgTrainingTime 指标（消费端点 GET /system/visualization/overview）。
-        # 现存唯一集合 rehab_plans / rehab_progress / rehab_assessments 的字段形状
-        # 均不匹配（无每文档数值 duration），不做猜测映射。
-        # 空集合时下方循环不执行，avgTrainingTime 安全回退为 0，端点返回 200。
-        # 待决策项：新建"训练记录"写入域后改指唯一集合；或改由 rehab_plans 的
-        # exercises[].progress 聚合计算；或确认废弃该指标后删除此引用。
-        self.rehabilitation_collection = db.rehabilitation_records
 
     # 趋势/对比聚合的数据源：data_type -> (集合名, 附加过滤条件)
     # patient 条目是 legacy 域口径（users + role，逐字保留）；canonical 域的
@@ -206,30 +195,19 @@ class AnalyticsService:
         active_devices = await self.devices_collection.count_documents({"status": "active"})
         active_device_rate = (active_devices / device_count * 100) if device_count > 0 else 0
 
-        # 计算平均训练时间（分钟）
-        rehab_records = self.rehabilitation_collection.find({})
-        total_duration = 0
-        record_count = 0
-
-        async for record in rehab_records:
-            if "duration" in record:
-                total_duration += record.get("duration", 0)
-                record_count += 1
-
-        avg_training_time = total_duration / record_count if record_count > 0 else 0
-
         result = {
             "patientCount": patient_count,
             "weekPatientChange": week_patient_change,
             "doctorCount": doctor_count,
             "totalDevices": device_count,
             "activeDeviceRate": round(active_device_rate, 1),
-            "avgTrainingTime": round(avg_training_time, 1),
+            "avgTrainingTime": None,
             # 康复有效率/患者满意度：全库无疗效评定与满意度评价的写入路径，
             # 无真实数据源，如实返回 0 并显式标记不可用（此前为硬编码模拟值 68/92）
             "rehabilitationRate": 0,
             "patientSatisfaction": 0,
             "dataAvailable": {
+                "avgTrainingTime": False,
                 "rehabilitationRate": False,
                 "patientSatisfaction": False,
             },

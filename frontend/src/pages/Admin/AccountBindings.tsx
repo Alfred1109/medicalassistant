@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState } from 'react';
 import {
   Alert,
@@ -29,9 +30,7 @@ import {
 // 语义不同：本页管理的是临床患者 ↔ 登录账号的显式绑定。
 
 const dateText = (value?: string | null) => {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+  return formatAppDate(value, 'localeZh24', { empty: '—', invalid: String(value) });
 };
 
 const STATUS_COLOR = (status?: string): 'success' | 'default' =>

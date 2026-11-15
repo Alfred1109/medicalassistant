@@ -234,10 +234,12 @@ const DataVisualization: React.FC = () => {
                 平均训练时长
               </Typography>
               <Typography variant="h4" component="div">
-                {statsData?.avgTrainingTime || 0}分钟
+                {statsData?.dataAvailable?.avgTrainingTime === false || statsData?.avgTrainingTime == null
+                  ? '暂无数据源'
+                  : `${statsData.avgTrainingTime}分钟`}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                {(statsData as any)?.dataAvailable?.rehabilitationRate === false
+                {statsData?.dataAvailable?.rehabilitationRate === false
                   ? '康复有效率: 暂无数据源（无疗效评定数据）'
                   : `康复有效率: ${statsData?.rehabilitationRate || 0}%`}
               </Typography>
@@ -423,4 +425,4 @@ const DataVisualization: React.FC = () => {
   );
 };
 
-export default DataVisualization; 
+export default DataVisualization;

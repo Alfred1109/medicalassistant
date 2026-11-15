@@ -68,6 +68,7 @@ async def domain_mode(db, *, session=None):
     always yields a collection proxy there; only in-memory test doubles that do
     not model the switch at all yield None, and those stay legacy by definition.
     """
+    # domain-dispatch: 以下 legacy 默认/显式回拨分支随旧患者域退役删除。
     state_collection = getattr(db, STATE, None)
     if state_collection is None:
         return "legacy"
@@ -155,6 +156,7 @@ class ClinicalPatientRepository:
         """
         await require_canonical(self.db, session=session)
         identifier = str(account_id)
+        # legacy-shape: 迁移产生的同文档来源链接在 canonical 域仍承载身份，不随域切换删除。
         link = await self.db[ACCOUNT_LINKS].find_one({"account_id": identifier,
             "status": "verified", "source": LEGACY_SAME_DOCUMENT}, session=session)
         audit = link.get("audit") if link else None

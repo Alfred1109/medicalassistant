@@ -35,8 +35,7 @@ class AuthenticatedUserModelContractTests(unittest.IsolatedAsyncioTestCase):
         self.user.role = "patient"
         cases = (("dashboard-data", "get_all_dashboard_data", {}),
                  ("health-metrics", "get_health_metrics", []),
-                 ("todo-items", "get_todo_items", []),
-                 ("rehab-progress", "get_rehab_progress", {"progress": 5}))
+                 ("todo-items", "get_todo_items", []))
         for path, method, value in cases:
             with self.subTest(path=path), patch("app.api.routers.patient_router.DashboardService." + method,
                                                new=AsyncMock(return_value=value)) as domain:

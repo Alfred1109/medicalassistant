@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, CircularProgress, Divider, Grid, IconButton,
   List, ListItem, ListItemText, Paper, TextField, Typography } from '@mui/material';
@@ -28,7 +29,7 @@ interface RecordForm {
 }
 const freshForm = (): RecordForm => ({ date: new Date(), painLevel: '0', mood: '', sleep: '', exerciseCompleted: false, note: '' });
 const validDate = (date: Date | null): date is Date => date !== null && Number.isFinite(date.getTime());
-const dayKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const dayKey = (date: Date) => formatAppDate(date, 'day');
 // Calendar dates stay local; legacy timestamps retain their original local display behavior.
 const recordDate = (value: string): Date | null => {
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00`) : new Date(value);
@@ -172,7 +173,7 @@ const DailyRecords: React.FC = () => {
                   <IconButton aria-label="删除记录" onClick={() => void handleDeleteRecord(record.id)} disabled={busy}><DeleteIcon /></IconButton>
                 </Box>}>
                   <ListItemText secondaryTypographyProps={{ component: 'div' }}
-                    primary={`${recordDate(record.date)?.toLocaleDateString() ?? `日期无效（${record.date}）`} 记录`}
+                    primary={`${formatAppDate(recordDate(record.date), 'localeDay', { empty: `日期无效（${record.date}）` })} 记录`}
                     secondary={<Box>
                       <Typography component="span" variant="body2">疼痛程度: {record.pain_level === undefined ? '未记录' : `${record.pain_level}/10`} | 心情: {record.mood ?? '未记录'} | 睡眠: {record.sleep ?? '未记录'} | 完成训练: {record.exercise_completed === undefined ? '未记录' : record.exercise_completed ? '是' : '否'}</Typography>
                       <Typography component="p" variant="body2" sx={{ mt: 1 }}>{record.note ?? '未记录备注'}</Typography>

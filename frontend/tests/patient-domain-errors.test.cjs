@@ -22,6 +22,8 @@ function loadModule(name, dir = 'services', cache) {
     module, exports: module.exports, localStorage, window, console, Date,
     require(specifier) {
       if (specifier === 'axios') return { create: axios.create, get: async () => ({ data: { mode: 'legacy' } }) };
+      // Shared date formatting is a real utility dependency, not an HTTP mock.
+      if (specifier === 'date-fns' || specifier === 'date-fns/locale') return require(specifier);
       if (specifier === '../config/apiPaths') return { API_COLLECTION_PATHS: { AGENTS: '/agents/', NOTIFICATIONS: '/notifications/', DEVICES: '/devices/' } };
       if (specifier === '../config/api') return { API_BASE_URL: '/deployment/api' };
       if (specifier === '../config/constants') return { API_BASE_URL: '/deployment/api', API_PREFIX: '/deployment', STORAGE_KEYS: { TOKEN: 'token', REFRESH_TOKEN: 'refresh_token', USER: 'user', TOKEN_EXPIRY: 'token_expiry' } };

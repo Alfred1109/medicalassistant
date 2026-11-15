@@ -87,6 +87,7 @@ def project_legacy_patient(document):
         result.setdefault(key, [])
     for key in ("medical_info", "demographic_info", "emergency_contact"):
         result[key] = result.get(key) or {}
+    # legacy-shape: 历史时间戳字段别名用于忠实投影存量记录，不随域切换删除。
     for key, legacy in (("created_at", "createdAt"), ("updated_at", "updatedAt")):
         value = document.get(key, document.get(legacy))
         if value is not None and not isinstance(value, datetime):

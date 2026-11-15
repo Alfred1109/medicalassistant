@@ -1,3 +1,4 @@
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect } from 'react';
 import { 
   Box, 
@@ -36,7 +37,7 @@ import {
   Search as SearchIcon,
   Clear as ClearIcon
 } from '@mui/icons-material';
-import { endOfDay, format, isAfter, isValid, parseISO, startOfDay } from 'date-fns';
+import { endOfDay, isAfter, isValid, parseISO, startOfDay } from 'date-fns';
 import zhCN from 'date-fns/locale/zh-CN';
 
 import { AuditService } from '../../services/audit-service';
@@ -193,7 +194,7 @@ const AuditLogList: React.FC = () => {
             logs.map((log) => (
               <TableRow key={log.id}>
                 <TableCell>
-                  {format(parseISO(log.created_at), 'yyyy-MM-dd HH:mm:ss')}
+                  {formatAppDate(parseISO(log.created_at), 'yyyy-MM-dd HH:mm:ss')}
                 </TableCell>
                 <TableCell>{log.user_id}</TableCell>
                 <TableCell>
@@ -379,7 +380,7 @@ const AuditLogList: React.FC = () => {
             <Grid item xs={12} md={6}>
               <Typography variant="subtitle2" color="text.secondary">时间</Typography>
               <Typography variant="body2">
-                {format(parseISO(selectedLog.created_at), 'yyyy-MM-dd HH:mm:ss')}
+                {formatAppDate(parseISO(selectedLog.created_at), 'yyyy-MM-dd HH:mm:ss')}
               </Typography>
             </Grid>
             <Grid item xs={12} md={6}>
@@ -486,14 +487,14 @@ const AuditLogList: React.FC = () => {
               {filter.start_date && (
                 <Chip 
                   size="small" 
-                  label={`开始日期: ${format(parseISO(filter.start_date), 'yyyy-MM-dd')}`} 
+                  label={`开始日期: ${formatAppDate(parseISO(filter.start_date), 'yyyy-MM-dd')}`}
                   onDelete={() => setFilter({ ...filter, start_date: undefined })} 
                 />
               )}
               {filter.end_date && (
                 <Chip 
                   size="small" 
-                  label={`结束日期: ${format(parseISO(filter.end_date), 'yyyy-MM-dd')}`} 
+                  label={`结束日期: ${formatAppDate(parseISO(filter.end_date), 'yyyy-MM-dd')}`}
                   onDelete={() => setFilter({ ...filter, end_date: undefined })} 
                 />
               )}

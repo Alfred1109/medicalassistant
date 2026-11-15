@@ -87,6 +87,21 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, '{"synthetic":true}')
             self.assertEqual(constructor.call_args.kwargs["api_key"], "synthetic-test-only-secret")
 
+    async def test_recommendations_use_shared_transport_and_close_provider(self):
+        with patch.object(settings, "LLM_API_KEY", SecretStr("synthetic-test-only-secret")), \
+                patch("openai.OpenAI") as constructor:
+            client = constructor.return_value
+            client.chat.completions.create.return_value.choices[0].message.content = (
+                '[{"name":"踝泵","description":"卧位勾脚","difficulty":"easy",'
+                '"duration_minutes":5,"body_part":"踝"}]')
+            result = await self.rehab.get_recommendations("synthetic", condition="测试")
+            self.assertEqual(result[0]["name"], "踝泵")
+            request = client.chat.completions.create.call_args.kwargs
+            self.assertEqual(request["model"], settings.LLM_API_MODEL)
+            self.assertEqual(request["temperature"], 0.2)
+            self.assertIn("测试", request["messages"][0]["content"])
+            client.close.assert_called_once()
+
     async def test_real_routes_return_actionable_503_instead_of_generated_content(self):
         previous = app.dependency_overrides.copy()
         app.dependency_overrides[get_agent_service] = lambda: self.base
@@ -111,7 +126,7 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
         try:
             app.dependency_overrides[get_database] = fake_database
             with patch.object(settings, "LLM_API_KEY", None), patch("openai.OpenAI") as client, \
-                    patch.object(UserService, "get_user_by_id", new=get_user_mock):
+                    patch("app.core.user_record.load_user_response", new=get_user_mock):
                 token = jwt.encode({"sub": operator.id, "token_type": "access",
                                     "exp": datetime.utcnow() + timedelta(minutes=5)},
                                    settings.SECRET_KEY, algorithm=settings.ALGORITHM)

@@ -1,3 +1,4 @@
+import { formatAppDate } from '../utils/dateTime';
 import {
   ChartDataType,
   StatsOverview,
@@ -50,14 +51,8 @@ interface RawComparisonRow {
 
 // 将后端 timestamp 格式化为图表 x 轴标签
 const formatTrendLabel = (timestamp: string, timeRange: TimeRange): string => {
-  const date = new Date(timestamp);
-  if (isNaN(date.getTime())) return String(timestamp);
-  const pad = (n: number) => n.toString().padStart(2, '0');
-  if (timeRange === 'year') return `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
-  if (timeRange === 'day') {
-    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:00`;
-  }
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const pattern = timeRange === 'year' ? 'yyyy-MM' : timeRange === 'day' ? "MM-dd HH':00'" : 'MM-dd';
+  return formatAppDate(timestamp, pattern, { parse: 'native', invalid: String(timestamp) });
 };
 
 const toNumber = (value: number | string | undefined): number => {

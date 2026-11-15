@@ -15,6 +15,15 @@ async def complete_text(*, messages: list[dict[str, str]], model: str, **paramet
     key = require_llm_api_key()
     base_url = settings.LLM_API_BASE_URL
 
+    return await _complete(messages=messages, model=model, key=key, base_url=base_url, **parameters)
+
+
+async def complete_vision(*, messages: list[dict[str, Any]], configuration, **parameters: Any) -> Any:
+    key, base_url, model = configuration
+    return await _complete(messages=messages, model=model, key=key, base_url=base_url, **parameters)
+
+
+async def _complete(*, messages, model, key, base_url, **parameters):
     def request():
         from openai import OpenAI
         client = OpenAI(base_url=base_url, api_key=key)

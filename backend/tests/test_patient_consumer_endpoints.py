@@ -125,7 +125,7 @@ class PatientConsumerEndpointTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_database] = fake_database
         self.operator = make_operator()
         self.get_user_mock = AsyncMock(return_value=self.operator)
-        self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
+        self.lookup = patch("app.core.user_record.load_user_response", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 

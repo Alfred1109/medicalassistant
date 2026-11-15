@@ -79,3 +79,32 @@ async def ensure_patient_scope_indexes(db: Any) -> bool:
         logger.error("Patient scope indexes could not be established: %s", error)
         return False
     return True
+
+
+TIMELINE_SOURCE_COLLECTIONS = ("health_records", "followup_records", "health_data",
+                               "rehab_assessments", "icf_assessments", "medical_timelines")
+
+
+async def ensure_timeline_indexes(db: Any) -> bool:
+    """Ordinary patient filters only; never create collections or touch unique keys.
+
+    Reuse an existing full index with a patient_id prefix, even under a different
+    name. A partial/sparse index cannot cover retained legacy/malformed records.
+    Index failures remain visible in logs and do not disable historical reads.
+    """
+    try:
+        names = set(await db.list_collection_names())
+        for collection in TIMELINE_SOURCE_COLLECTIONS:
+            if collection not in names:
+                continue
+            indexes = await db[collection].index_information()
+            if any(info.get("key", [])[:1] in ([('patient_id', 1)], [('patient_id', -1)])
+                   and not info.get("partialFilterExpression") and not info.get("sparse")
+                   and not info.get("collation") for info in indexes.values()):
+                continue
+            await db[collection].create_index([("patient_id", ASCENDING)],
+                name="timeline_patient_query", unique=False)
+    except Exception as error:
+        logger.error("Timeline source indexes could not be established: %s", error)
+        return False
+    return True

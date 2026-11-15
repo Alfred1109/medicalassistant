@@ -13,8 +13,8 @@ _update_next_run_time，无原子领取，启用即复刻 T34 发现的 D1 缺�
 
 报表生成与发送的执行链（_process_schedule → _generate_report → _export_report /
 _send_report_email）与 nextRunTime 计算保留：它们被领域收敛文档引用
-（orphan-read TODO 登记于 _get_rehabilitation_stats，患者集合名登记于
-PATIENTS_COLLECTION_NAME，见 docs/patient-domain-cutover-plan.md），且属待业务
+（患者集合名登记于 PATIENTS_COLLECTION_NAME，见
+docs/patient-domain-cutover-plan.md），且属待业务
 决策的潜在复用件。但它们当前没有任何调度入口（死代码）——未来若要恢复后台
 报表调度，必须先参照 T37 备份调度的 find_one_and_update 原子领取重写扫描领取
 逻辑（filter 含到点条件、领取成功者才执行），再接入应用启动，否则会原样复刻
@@ -246,9 +246,6 @@ class ReportSchedulerService:
         elif data_type == "device":
             # 获取设备相关数据
             return await self._get_device_stats(days)
-        elif data_type == "rehabilitation":
-            # 获取康复训练相关数据
-            return await self._get_rehabilitation_stats(days)
         else:
             # 默认返回空数据
             return []
@@ -328,43 +325,6 @@ class ReportSchedulerService:
                 "date": doc["_id"],
                 "count": doc["count"],
                 "average": doc["avg_value"]
-            })
-        
-        return result
-    
-    async def _get_rehabilitation_stats(self, days: int) -> List[Dict[str, Any]]:
-        """获取康复训练统计数据"""
-        # TODO(orphan-read, 待业务决策): rehabilitation_sessions 是无写入方的孤儿集合
-        # （BASE03 集合收敛 9133342 已确认全库（含历史提交 dac0330 引入时）不存在任何
-        # 写入路径；migrate_legacy_collections.py 将其列为 REPORT_ONLY 待人工决策）。
-        # 此处聚合期望的文档形状：created_at(datetime) + duration(数值) + score(数值)
-        # 的逐次训练记录，仅被后台报表调度消费（report_schedules 调度循环 ->
-        # _process_schedule -> _generate_report -> _get_chart_data("rehabilitation")），
-        # 无直接 HTTP 端点。现存唯一集合 rehab_plans / rehab_progress / rehab_assessments
-        # 的字段形状均不匹配，不做猜测映射。
-        # 空集合时聚合无输出，本方法安全返回 []，报表该图表为空、调度不报错。
-        # 待决策项：新建"训练记录"写入域后改指唯一集合并修正字段映射；
-        # 或改由 rehab_progress（date/completed）按天统计完成次数；或删除该图表类型。
-        start_date = datetime.utcnow() - timedelta(days=days)
-        
-        pipeline = [
-            {"$match": {"created_at": {"$gte": start_date}}},
-            {"$group": {
-                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
-                "count": {"$sum": 1},
-                "avg_duration": {"$avg": "$duration"},
-                "avg_score": {"$avg": "$score"}
-            }},
-            {"$sort": {"_id": 1}}
-        ]
-        
-        result = []
-        async for doc in self.db.rehabilitation_sessions.aggregate(pipeline):
-            result.append({
-                "date": doc["_id"],
-                "count": doc["count"],
-                "avgDuration": doc["avg_duration"],
-                "avgScore": doc["avg_score"]
             })
         
         return result

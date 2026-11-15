@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
+import json
 from app.schemas.user import UserResponse
 from app.schemas.followup import FollowUpRecordCreate, FollowUpRecordResponse, FollowUpStatus
 from app.api.dependencies import get_current_user, get_database, format_mongo_doc, get_health_record_for_patient, get_followup_service
@@ -16,10 +17,21 @@ from bson.objectid import ObjectId
 router = APIRouter()
 
 
+def _emergency_contact(value):
+    if isinstance(value, str):
+        return value or "未设置"
+    if isinstance(value, dict) and value:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return "未设置"
+
+
 async def load_provider_health_record(db, patient_id, operator_id, role):
     """医护查看一名归属患者的健康档案。医生与健康管理师共用这一份读取。"""
     patient = await ensure_patient_access(db, patient_id, str(operator_id), role)
     record = await get_health_record_for_patient(patient_id, db)
+    cursor = db["health_data"].find({"patient_id": patient_id, "data_type": "vital_sign", "deleted": {"$ne": True}})
+    facts = await cursor.sort("recorded_at", -1).limit(100).to_list(length=100)
+    vital_signs = [format_mongo_doc(fact) for fact in facts]
     if not record:
         return {
             "id": patient_id,
@@ -30,26 +42,26 @@ async def load_provider_health_record(db, patient_id, operator_id, role):
             "weight": patient.get("weight", 0),
             "bloodType": patient.get("blood_type", "未知"),
             "allergies": patient.get("allergies", []),
-            "emergencyContact": patient.get("emergency_contact", "未设置"),
+            "emergencyContact": _emergency_contact(patient.get("emergency_contact")),
             "medicalHistory": [],
             "rehabHistory": [],
             "medications": [],
-            "vitalSigns": []
+            "vitalSigns": vital_signs
         }
     return {
         "id": record.get("id") or record.get("_id") or patient_id,
-        "name": record.get("name", "未知患者"),
+        "name": record.get("name", patient.get("name", "未知患者")),
         "age": record.get("age", 0),
         "gender": record.get("gender", "未知"),
         "height": record.get("height", 0),
         "weight": record.get("weight", 0),
         "bloodType": record.get("blood_type", "未知"),
         "allergies": record.get("allergies", []),
-        "emergencyContact": record.get("emergency_contact", "未设置"),
+        "emergencyContact": _emergency_contact(record.get("emergency_contact", patient.get("emergency_contact"))),
         "medicalHistory": record.get("medical_history", []),
         "rehabHistory": record.get("rehab_history", []),
         "medications": record.get("medications", []),
-        "vitalSigns": record.get("vital_signs", [])
+        "vitalSigns": vital_signs
     }
 
 
@@ -64,12 +76,6 @@ async def load_provider_monitoring(db, patient_id, operator_id, role):
         {"patient_id": patient_id, "status": "active"})
     completed_plans = await plans_collection.count_documents(
         {"patient_id": patient_id, "status": "completed"})
-    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-    completed_sessions = await db["rehab_progress"].count_documents({
-        "patient_id": patient_id,
-        "completed": True,
-        "date": {"$gte": thirty_days_ago},
-    })
     return {
         "implemented": True,
         "patientId": patient_id,
@@ -79,7 +85,6 @@ async def load_provider_monitoring(db, patient_id, operator_id, role):
             "active": active_plans,
             "completed": completed_plans,
         },
-        "completedSessionsLast30Days": completed_sessions,
     }
 
 
@@ -204,9 +209,6 @@ async def get_patient_monitoring_data(
     字段语义（均来自真实集合，无数据时如实为 0）：
     - boundDevices:  绑定到该患者的设备数（devices.patient_id）
     - rehabPlans:    该患者的康复计划总数/进行中/已完成（rehab_plans.patient_id）
-    - completedSessionsLast30Days: 近 30 天完成的训练进度记录数
-                    （rehab_progress，completed=true 且 date 在近 30 天内；
-                    该集合当前无写入方，通常为 0 —— 是真实空数据而非存根）
     - implemented:   显式标记端点已实现真实聚合
     - start_date/end_date 参数为历史签名保留，当前快照类指标不按时间切片
     """
@@ -296,7 +298,9 @@ async def collect_work_statistics(
 
     返回值均来自真实集合，无数据时如实为 0：
     patientCount / rehabPlans{total,active,completed} /
-    completedSessionsThisMonth /（可选）followUps{total,completed,pending}
+    patientSelfReportsThisMonth{total,completed,partial,not_done} /
+    （可选）followUps{total,completed,pending}。患者自报按 performed_at 统计，
+    只表示自报条数，不代表已核验训练场次或依从性。
     """
     operator = await db["users"].find_one(
         {"_id": ObjectId(str(operator_id)), "role": operator_role})
@@ -321,14 +325,23 @@ async def collect_work_statistics(
     completed_plans = await plans_collection.count_documents(
         {**plan_filter, "status": "completed"})
 
-    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    completed_sessions = 0
-    if patient_keys:
-        completed_sessions = await db["rehab_progress"].count_documents({
-            "patient_id": {"$in": patient_keys},
-            "completed": True,
-            "date": {"$gte": month_start},
-        })
+    now = datetime.utcnow()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    report_scope = {
+        "patient_id": {"$in": patient_keys},
+        "event_type": "patient_report",
+        "schema_version": 1,
+        "source": "patient_self_report",
+        "performed_at": {"$gte": month_start, "$lte": now},
+    }
+    reports = db["rehab_execution_events"]
+    report_counts = {
+        state: await reports.count_documents({**report_scope, "execution_status": state})
+        for state in ("completed", "partial", "not_done")
+    } if patient_keys else {"completed": 0, "partial": 0, "not_done": 0}
+    patient_reports = {"total": sum(report_counts.values()), **report_counts,
+                       "periodStart": month_start.isoformat() + "Z",
+                       "periodEnd": now.isoformat() + "Z"}
 
     statistics: Dict[str, Any] = {
         "implemented": True,
@@ -338,7 +351,7 @@ async def collect_work_statistics(
             "active": active_plans,
             "completed": completed_plans,
         },
-        "completedSessionsThisMonth": completed_sessions,
+        "patientSelfReportsThisMonth": patient_reports,
     }
 
     if followup_service is not None:
@@ -361,9 +374,8 @@ async def get_doctor_statistics(
     - patientCount: 患者 practitioners 中关联该医生的真实患者数
     - rehabPlans:   该医生作为 practitioner_id 的康复计划总数/进行中/已完成
                     （rehab_plans 集合，status: active/completed）
-    - completedSessionsThisMonth: 该医生患者本月完成的训练进度记录数
-                    （rehab_progress，completed=true 且 date 不早于本月；
-                    该集合当前无写入方，通常为 0 —— 是真实空数据而非存根）
+    - patientSelfReportsThisMonth: 所属患者本月患者自报条数及状态分布；
+                    按 performed_at、UTC 月初至当前时间统计，表示自述，不代表已核验场次
     - implemented:  显式标记端点已实现真实聚合
 
     聚合实现与健康管理师端共用 collect_work_statistics（唯一实现）。

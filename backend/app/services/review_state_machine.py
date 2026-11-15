@@ -63,6 +63,30 @@ def append_review_history(row, event):
     return deepcopy(row.get("review_history") or []) + [event]
 
 
+async def commit_versioned_change(collection, row, *, expected_version, changes,
+                                  conflict_error, version_field="mutation_version",
+                                  history_field=None, event=None, session=None,
+                                  allow_missing_version=False):
+    """Single-document CAS shared by review and disposition workflows.
+
+    Each domain owns its states, authorization and operation receipts. Missing legacy
+    versions can explicitly opt into zero-compatible missing/null first writes.
+    """
+    stored = row.get(version_field)
+    current = 0 if stored is None else stored
+    if (type(current) is not int or current < 0 or type(expected_version) is not int
+            or expected_version != current):
+        raise conflict_error()
+    selector = {"_id": row["_id"], version_field: stored if allow_missing_version else expected_version}
+    update = {"$set": {**changes, version_field: expected_version + 1}}
+    if history_field is not None and event is not None:
+        update["$push"] = {history_field: event}
+    options = {"session": session} if session is not None else {}
+    result = await collection.update_one(selector, update, **options)
+    if result.matched_count != 1:
+        raise conflict_error()
+
+
 async def commit_review(collection, row, *, expected_version, accepted, note,
                         actor_id, now, code, message,
                         snapshot_of=None, history_event=None, extra_set=None):
@@ -89,11 +113,8 @@ async def commit_review(collection, row, *, expected_version, accepted, note,
         values["review_history"] = history_event
     if extra_set:
         values.update(extra_set)
-    result = await collection.update_one(
-        {"_id": row["_id"], "mutation_version": expected_version},
-        {"$set": values})
-    if result.matched_count != 1:
-        raise review_conflict(code, message)
+    await commit_versioned_change(collection, row, expected_version=expected_version,
+        changes=values, conflict_error=lambda: review_conflict(code, message))
     return values
 
 

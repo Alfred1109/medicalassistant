@@ -1,3 +1,4 @@
+import { formatAppDate } from './dateTime';
 import type { Notification } from '../services/notificationService';
 
 const FOLLOWUP_ROLES = new Set(['patient', 'doctor', 'health_manager', 'admin']);
@@ -30,11 +31,5 @@ export function formatFollowUpSchedule(value: string, timeZone?: string): string
   if (!value) return '未提供';
   const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$/i;
   if (!iso.test(value)) return `${value}（原始时间，未转换）`;
-  const withZone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`;
-  const date = new Date(withZone);
-  if (Number.isNaN(date.getTime())) return `${value}（原始时间，未转换）`;
-  return new Intl.DateTimeFormat('zh-CN', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-    second: '2-digit', hourCycle: 'h23', timeZoneName: 'longOffset',
-  }).format(date).replace(/GMT/g, 'UTC');
+  return formatAppDate(value, 'zoned', { assumeUtc: true, timeZone, invalid: `${value}（原始时间，未转换）` });
 }

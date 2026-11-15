@@ -1534,6 +1534,7 @@ class DeadCodeRemovalTests(unittest.TestCase):
         factory = crud_services.get_crud_services(FakeDB())
         self.assertNotIn("message", factory)
         self.assertNotIn("conversation", factory)
+        self.assertNotIn("progress_record", factory)
 
     def test_dead_api_aggregator_file_is_removed(self):
         self.assertFalse(os.path.exists(

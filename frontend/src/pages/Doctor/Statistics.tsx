@@ -19,12 +19,14 @@ import { RootState } from '../../store';
 // 医护工作统计（医生 GET /doctors/statistics；健康管理师 GET /health-managers/statistics，
 // 后端均为真实聚合，见 doctor_router.py / health_manager_router.py）
 // patientCount: 关联患者数；rehabPlans: 康复方案总数/进行中/已完成；
-// completedSessionsThisMonth: 患者本月完成的训练进度记录数（rehab_progress 当前无写入方，通常为 0，真实空数据）
 // followUps: 仅健康管理师端返回（随访总数/已完成/待完成）
 interface WorkStatistics {
   patientCount: number;
   rehabPlans: { total: number; active: number; completed: number };
-  completedSessionsThisMonth: number;
+  patientSelfReportsThisMonth: {
+    total: number; completed: number; partial: number; not_done: number;
+    periodStart: string; periodEnd: string;
+  };
   followUps?: { total: number; completed: number; pending: number };
 }
 
@@ -54,6 +56,14 @@ const Statistics: React.FC = () => {
 
       // 工作统计（医生 / 健康管理师各自端点）
       const statsRes = await api.get(statisticsPath);
+      const reportStats = statsRes.data?.patientSelfReportsThisMonth;
+      const reportCounts = ['total', 'completed', 'partial', 'not_done']
+        .map(key => Number(reportStats?.[key]));
+      if (!reportStats || reportCounts.some(value => !Number.isInteger(value) || value < 0)
+          || typeof reportStats.periodStart !== 'string' || !reportStats.periodStart
+          || typeof reportStats.periodEnd !== 'string' || !reportStats.periodEnd) {
+        throw new Error('患者自报统计响应缺少有效计数或时间范围');
+      }
       setWorkStats({
         patientCount: Number(statsRes.data?.patientCount ?? 0),
         rehabPlans: {
@@ -61,7 +71,14 @@ const Statistics: React.FC = () => {
           active: Number(statsRes.data?.rehabPlans?.active ?? 0),
           completed: Number(statsRes.data?.rehabPlans?.completed ?? 0),
         },
-        completedSessionsThisMonth: Number(statsRes.data?.completedSessionsThisMonth ?? 0),
+        patientSelfReportsThisMonth: {
+          total: reportCounts[0],
+          completed: reportCounts[1],
+          partial: reportCounts[2],
+          not_done: reportCounts[3],
+          periodStart: reportStats.periodStart,
+          periodEnd: reportStats.periodEnd,
+        },
         followUps: statsRes.data?.followUps
           ? {
             total: Number(statsRes.data.followUps.total ?? 0),
@@ -72,6 +89,7 @@ const Statistics: React.FC = () => {
       });
     } catch (err: any) {
       console.error('获取患者统计数据失败:', err);
+      setWorkStats(null);
       setError(apiErrorMessage(err, '获取患者统计数据失败'));
     } finally {
       setLoading(false);
@@ -154,23 +172,30 @@ const Statistics: React.FC = () => {
           </Card>
         </Grid>
 
-        {/* 本月完成训练（统计端点 completedSessionsThisMonth；rehab_progress 当前无写入方，通常为 0） */}
+        {/* 统计患者自报条数，不将其解释为已核验训练场次。 */}
         <Grid item xs={12} md={6} lg={3}>
           <Card>
             <CardContent>
               <Typography variant="subtitle1">
-                本月完成训练
+                本月患者自报
               </Typography>
               {loading ? (
                 <CircularProgress size={24} sx={{ my: 1.5 }} />
               ) : (
                 <Typography variant="h5" color="primary">
-                  {workStats?.completedSessionsThisMonth ?? 0} 次
+                  {workStats ? `${workStats.patientSelfReportsThisMonth.total} 条` : '--'}
                 </Typography>
               )}
               <Divider sx={{ my: 1 }} />
               <Typography variant="body2" color="text.secondary">
-                本月完成的训练进度记录数（来源：{statisticsPath}；训练进度记录当前无写入方，通常为 0，系真实空数据）
+                {workStats ? <>自报完成 {workStats.patientSelfReportsThisMonth.completed}，
+                  部分完成 {workStats.patientSelfReportsThisMonth.partial}，
+                  未完成 {workStats.patientSelfReportsThisMonth.not_done}。按执行时间统计：
+                  {workStats.patientSelfReportsThisMonth.periodStart} 至 {workStats.patientSelfReportsThisMonth.periodEnd}。</>
+                  : '自报统计暂不可用。'}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" component="div">
+                来源：{statisticsPath}；计数代表患者自述，不代表已核验训练场次。
               </Typography>
             </CardContent>
           </Card>
@@ -218,7 +243,7 @@ const Statistics: React.FC = () => {
                   {metric.desc}
                 </Typography>
                 <Typography variant="caption" color="warning.main" component="div" sx={{ mt: 1 }}>
-                  暂无数据源：后端无疗效评定类数据，待后端补充后接入。
+                  暂无数据源：后端尚无经确认的训练场次统计口径。
                 </Typography>
               </CardContent>
             </Card>
@@ -235,7 +260,7 @@ const Statistics: React.FC = () => {
             </Typography>
             <Box sx={{ mt: 2 }}>
               <Alert severity="info">
-                患者总数、康复计划数、本月完成训练数已接入真实统计端点（{statisticsPath}）；
+                患者总数、康复计划数、本月患者自报数已接入真实统计端点（{statisticsPath}），自报不等同于已核验训练场次；
                 平均康复时间、康复成功率等指标依赖疗效评定类数据，后端补齐前保持"暂无数据源"，不展示演示数据。
               </Alert>
             </Box>

@@ -14,18 +14,17 @@ export function assignedPatientsApi(role?: string | null) {
 
 export const apiService = {
   // 设备相关API
-  // 后端 GET /api/devices 返回当前登录用户有权访问的患者设备，
-  // 不存在 GET /devices/user/{userId} 路由；userId 参数仅保留兼容旧调用方。
-  getUserDevices: (userId?: string) => api.get(API_COLLECTION_PATHS.DEVICES),
+  // 后端 GET /api/devices 返回当前登录用户有权访问的患者设备。
+  getUserDevices: () => api.get(API_COLLECTION_PATHS.DEVICES),
   getPatientDevices: (patientId: string) => api.get(API_COLLECTION_PATHS.DEVICES, { params: { patient_id: patientId } }),
   // 后端 POST /api/devices/bind 以患者为绑定主体（body 为 DeviceCreate，
   // device_type 必填），不再在 body 中传 user_id。
-  bindUserDevice: (userId: string, deviceData: any) => {
+  bindUserDevice: (deviceData: any) => {
     const { type, ...rest } = deviceData || {};
     return api.post('/devices/bind', { ...rest, device_type: rest.device_type ?? type });
   },
   // 后端为 DELETE /api/devices/{device_id}/unbind，没有 POST /devices/unbind
-  unbindUserDevice: (userId: string, deviceId: string) => api.delete(`/devices/${deviceId}/unbind`),
+  unbindUserDevice: (deviceId: string) => api.delete(`/devices/${deviceId}/unbind`),
   // 后端查询参数为 start_date / end_date / data_type / limit
   getDeviceData: (deviceId: string, params: any) => api.get(`/devices/${deviceId}/data`, {
     params: params ? {
@@ -77,8 +76,8 @@ export const apiService = {
       return params ? api.get('/doctors/patients', { params }) : api.get('/doctors/patients');
     },
     
-    getPatientHealthRecord: (patientId: string): Promise<AxiosResponse<PatientHealthRecord>> => 
-      api.get(`/doctors/health-records/${patientId}`),
+    getPatientHealthRecord: (patientId: string, signal?: AbortSignal): Promise<AxiosResponse<PatientHealthRecord>> =>
+      api.get(`/doctors/health-records/${encodeURIComponent(patientId)}`, signal ? { signal } : undefined),
     
     getPatientMonitoring: (patientId: string, startDate?: string, endDate?: string): Promise<AxiosResponse<any>> =>
       api.get(`/doctors/patient-monitoring/${patientId}`, {
@@ -93,8 +92,8 @@ export const apiService = {
         : undefined;
       return params ? api.get('/health-managers/patients', { params }) : api.get('/health-managers/patients');
     },
-    getPatientHealthRecord: (patientId: string): Promise<AxiosResponse<PatientHealthRecord>> =>
-      api.get(`/health-managers/health-records/${patientId}`),
+    getPatientHealthRecord: (patientId: string, signal?: AbortSignal): Promise<AxiosResponse<PatientHealthRecord>> =>
+      api.get(`/health-managers/health-records/${encodeURIComponent(patientId)}`, signal ? { signal } : undefined),
     getPatientMonitoring: (patientId: string, startDate?: string, endDate?: string): Promise<AxiosResponse<any>> =>
       api.get(`/health-managers/patient-monitoring/${patientId}`, {
         params: { start_date: startDate, end_date: endDate }
@@ -119,39 +118,9 @@ export const apiService = {
       api.delete(`/rehabilitation/plans/${planId}`),
   },
   
-  // 健康记录接口
-  healthRecord: {
-    getRecords: (patientId: string): Promise<AxiosResponse<any[]>> =>
-      api.get(`/health-records`, { params: { patient_id: patientId } }),
-
-    getRecordById: (recordId: string): Promise<AxiosResponse<any>> =>
-      api.get(`/health-records/${recordId}`),
-
-    createRecord: (recordData: any): Promise<AxiosResponse<any>> =>
-      api.post('/health-records', recordData),
-
-    updateRecord: (recordId: string, recordData: any): Promise<AxiosResponse<any>> =>
-      api.put(`/health-records/${recordId}`, recordData),
-
-    deleteRecord: (recordId: string): Promise<AxiosResponse<any>> =>
-      api.delete(`/health-records/${recordId}`),
-  },
-
   // 健康档案(健康管理师页面直接调用这些方法)
   getHealthRecords: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<any[]>> =>
     api.get('/health-records', { params: { patient_id: patientId, ...(params || {}) } }),
-
-  getHealthRecordStats: (patientId: string): Promise<AxiosResponse<any>> =>
-    api.get(`/health-records/stats/${patientId}`),
-
-  createHealthRecord: (recordData: any): Promise<AxiosResponse<any>> =>
-    api.post('/health-records', recordData),
-
-  updateHealthRecord: (recordId: string, recordData: any): Promise<AxiosResponse<any>> =>
-    api.put(`/health-records/${recordId}`, recordData),
-
-  deleteHealthRecord: (recordId: string): Promise<AxiosResponse<any>> =>
-    api.delete(`/health-records/${recordId}`),
 
   // 随访记录
   getFollowUps: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<FollowUpRecord[]>> =>

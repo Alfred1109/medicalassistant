@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 from jose import jwt
 
-from app.core import auth, dependencies
+from app.core import auth
+from app.api import dependencies
 from app.core.config import settings
 from app.db.mongodb import get_database
 from app.main import app
@@ -25,7 +26,8 @@ class AuthenticationContractTests(unittest.IsolatedAsyncioTestCase):
             yield MagicMock()
 
         app.dependency_overrides[get_database] = fake_database
-        self.lookup = patch.object(UserService, "get_user_by_id", new=AsyncMock(return_value=self.user))
+        self.get_user_mock = AsyncMock(return_value=self.user)
+        self.lookup = patch("app.core.user_record.load_user_response", new=self.get_user_mock)
         self.lookup.start()
         self.client = httpx.AsyncClient(app=app, base_url="http://test")
 
@@ -61,11 +63,11 @@ class AuthenticationContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await self.request(token)).status_code, 401)
 
     async def test_disabled_account_is_rejected(self):
-        UserService.get_user_by_id.return_value = self.user.model_copy(update={"is_active": False})
+        self.get_user_mock.return_value = self.user.model_copy(update={"is_active": False})
         self.assertEqual((await self.request(self.token())).status_code, 403)
 
     async def test_database_failure_is_not_reported_as_invalid_token(self):
-        UserService.get_user_by_id.side_effect = RuntimeError("database unavailable")
+        self.get_user_mock.side_effect = RuntimeError("database unavailable")
         response = await self.request(self.token())
         self.assertEqual(response.status_code, 500)
 

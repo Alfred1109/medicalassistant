@@ -7,7 +7,7 @@
 from app.api.websockets import setup_websockets
 from app.core.config import settings
 from app.core.logging import app_logger as logger
-from app.db.indexes import ensure_communication_indexes, ensure_patient_scope_indexes
+from app.db.indexes import ensure_communication_indexes, ensure_patient_scope_indexes, ensure_timeline_indexes
 from app.db.mongodb import db as mongodb_state
 from app.integrations.identity.config import oidc_settings
 from app.integrations.identity.service import ensure_identity_indexes
@@ -21,6 +21,7 @@ async def start_background_services(app) -> None:
     logger.info("WebSocket服务已初始化")
     await ensure_communication_indexes(mongodb_state.db)
     await ensure_patient_scope_indexes(mongodb_state.db)
+    await ensure_timeline_indexes(mongodb_state.db)
     if oidc_settings.enabled:
         await ensure_identity_indexes(mongodb_state.db)
     await reminder_runtime.start(

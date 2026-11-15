@@ -1,5 +1,7 @@
+import { usePatientOptions } from '../../hooks/usePatientOptions';
+import PatientSelect from '../../components/common/PatientSelect';
 import React, { useEffect, useState } from 'react';
-import { Alert, Box, Button, MenuItem, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
 import { useSelector } from 'react-redux';
 import httpClient from '../../services/httpClient';
 import { patientDomainErrorCopy } from '../../services/patientErrors';
@@ -42,7 +44,7 @@ async function sendFile(url: string, body: FormData) {
 
 export default function ClinicalWorkbench() {
   const actor = useSelector((state: RootState) => state.auth.user);
-  const [patients, setPatients] = useState<Array<{ id: string; name: string }>>([]);
+  const { patients, loading: patientsLoading, error: patientFailure } = usePatientOptions(actor?.role, actor?.id);
   const [patientId, setPatientId] = useState('');
   const [tab, setTab] = useState('portrait');
   const [error, setError] = useState('');
@@ -71,12 +73,7 @@ export default function ClinicalWorkbench() {
   useEffect(() => {
     if (!actor) return;
     if (actor.role === 'patient') { setPatientId(actor.id); return; }
-    if (actor.role !== 'doctor' && actor.role !== 'health_manager') return;
-    const path = actor.role === 'doctor' ? '/doctors/patients' : '/health-managers/patients';
-    httpClient.get(path).then(({ data }) => {
-      const rows = Array.isArray(data) ? data : [];
-      setPatients(rows.map((row: { id?: string; _id?: string; name?: string }) => ({ id: String(row.id || row._id), name: row.name || '未命名患者' })));
-    }).catch(error => setError(patientDomainErrorCopy(error) ?? '患者名单没有加载出来。'));
+
   }, [actor]);
 
   const load = async (id: string) => {
@@ -114,11 +111,9 @@ export default function ClinicalWorkbench() {
   return <Box>
     <Typography variant="h5" gutterBottom>患者记录</Typography>
     <Alert severity="info" sx={{ mb: 2 }}>带文字的报告会抽出原文里的数字，扫描页在配置了视觉模型时才摘录。抽出的数字要人工审核后才参与对照。浏览器能识别语音时会给出待确认文字，听原声保存后才算人工转写。</Alert>
-    {clinical && actor.role !== 'admin' && <TextField select size="small" label="患者" value={selected} sx={{ mb: 2, minWidth: 240 }}
-      onChange={event => setPatientId(event.target.value)}>
-      <MenuItem value="">选择患者</MenuItem>
-      {patients.map(patient => <MenuItem key={patient.id} value={patient.id}>{patient.name}</MenuItem>)}
-    </TextField>}
+    {clinical && actor.role !== 'admin' && <PatientSelect size="small" label="患者" value={selected} sx={{ mb: 2, minWidth: 240 }}
+      patients={patients} loading={patientsLoading} onChange={setPatientId} emptyLabel="选择患者" />}
+    {Boolean(patientFailure) && <Alert severity="warning" sx={{ mb: 2 }}>{patientDomainErrorCopy(patientFailure) ?? '患者名单没有加载出来。'}</Alert>}
     {actor.role === 'admin' && <TextField size="small" label="患者编号" value={patientId} sx={{ mb: 2 }}
       onChange={event => setPatientId(event.target.value)} />}
     {error && <Alert severity="warning" sx={{ mb: 2 }}>{error}</Alert>}

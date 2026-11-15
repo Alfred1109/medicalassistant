@@ -192,7 +192,8 @@ class StatsOverviewContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["totalDevices"], 0)
         self.assertEqual(stats["activeDeviceRate"], 0)
         self.assertEqual(stats["weekPatientChange"], 0)
-        self.assertEqual(stats["avgTrainingTime"], 0)
+        self.assertIsNone(stats["avgTrainingTime"])
+        self.assertFalse(stats["dataAvailable"]["avgTrainingTime"])
         self.assertNotEqual(stats, {
             "patientCount": 1248, "weekPatientChange": 4.2, "doctorCount": 86,
             "totalDevices": 152, "activeDeviceRate": 82, "avgTrainingTime": 45,
@@ -425,7 +426,7 @@ class PatientDomainDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["doctorCount"], 1)
         # 成功路径不出现降级标记键（响应形状逐字不变）
         self.assertEqual(set(stats["dataAvailable"]),
-                         {"rehabilitationRate", "patientSatisfaction"})
+                         {"rehabilitationRate", "patientSatisfaction", "avgTrainingTime"})
 
     async def test_explicit_legacy_state_behaves_identically(self):
         """显式 {mode:"legacy"} 回拨载体：行为与无文档 legacy 完全一致。"""
@@ -459,7 +460,7 @@ class PatientDomainDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["patientCount"], 2)  # cp1 + cp2，停用 cp3 不计
         self.assertEqual(stats["doctorCount"], 1)
         self.assertEqual(set(stats["dataAvailable"]),
-                         {"rehabilitationRate", "patientSatisfaction"})
+                         {"rehabilitationRate", "patientSatisfaction", "avgTrainingTime"})
 
     async def test_canonical_patient_trend_and_comparison_count_accountless(self):
         """canonical 患者趋势/对比：无账号患者按 created_at 计入，

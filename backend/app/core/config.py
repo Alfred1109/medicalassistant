@@ -61,6 +61,14 @@ def _apply_local_text_model() -> None:
 
 _apply_local_text_model()
 
+
+def vision_configuration():
+    """Return the independent vision provider configuration when complete."""
+    key, base_url, model = (os.getenv(name) for name in
+                            ("VISION_API_KEY", "VISION_API_BASE_URL", "VISION_API_MODEL"))
+    return (key, base_url, model) if key and base_url and model else None
+
+
 class Settings(BaseSettings):
     # API Settings
     API_V1_STR: str = "/api"

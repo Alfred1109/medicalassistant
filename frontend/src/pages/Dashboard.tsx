@@ -47,41 +47,21 @@ const Dashboard: React.FC = () => {
   }, [dispatch]);
 
   const getActivePlans = () => {
-    return plans.filter(plan => !plan.completed);
+    return plans.filter(plan => plan.status !== 'completed');
   };
 
   const getCompletedPlans = () => {
-    return plans.filter(plan => plan.completed);
+    return plans.filter(plan => plan.status === 'completed');
   };
 
   const getActiveExercisesCount = () => {
     let count = 0;
     plans.forEach(plan => {
-      if (!plan.completed && plan.exercises) {
+      if (plan.status !== 'completed' && plan.exercises) {
         count += plan.exercises.length;
       }
     });
     return count;
-  };
-
-  const getCompletedExercisesCount = () => {
-    let count = 0;
-    plans.forEach(plan => {
-      if (plan.exercises) {
-        count += plan.exercises.filter(ex => ex.completed).length;
-      }
-    });
-    return count;
-  };
-
-  const getOverallProgress = () => {
-    const totalExercises = plans.reduce((total, plan) => 
-      total + (plan.exercises ? plan.exercises.length : 0), 0);
-    
-    if (totalExercises === 0) return 0;
-    
-    const completedExercises = getCompletedExercisesCount();
-    return (completedExercises / totalExercises) * 100;
   };
 
   return (
@@ -96,11 +76,11 @@ const Dashboard: React.FC = () => {
       </Box>
 
       {/* Progress Summary Section */}
-      <Paper 
+      <Paper
         elevation={0}
-        sx={{ 
-          p: 3, 
-          mb: 4, 
+        sx={{
+          p: 3,
+          mb: 4,
           borderRadius: 2,
           backgroundColor: 'primary.main',
           color: 'white',
@@ -115,32 +95,17 @@ const Dashboard: React.FC = () => {
               You have {getActivePlans().length} active rehabilitation plans with {getActiveExercisesCount()} exercises.
               Keep up the good work!
             </Typography>
-            <Box sx={{ mt: 2 }}>
-              <Box display="flex" justifyContent="space-between" mb={1}>
-                <Typography variant="body2">Overall Progress</Typography>
-                <Typography variant="body2">{Math.round(getOverallProgress())}%</Typography>
-              </Box>
-              <LinearProgress 
-                variant="determinate" 
-                value={getOverallProgress()} 
-                sx={{ 
-                  height: 10, 
-                  borderRadius: 5,
-                  backgroundColor: 'rgba(255, 255, 255, 0.3)',
-                  '& .MuiLinearProgress-bar': {
-                    backgroundColor: 'white',
-                  }
-                }} 
-              />
-            </Box>
+            <Typography variant="body2" sx={{ mt: 2 }}>
+              Exercise completion is recorded through patient self-reports.
+            </Typography>
           </Grid>
           <Grid item xs={12} md={4} sx={{ textAlign: 'center' }}>
-            <Button 
-              variant="contained" 
+            <Button
+              variant="contained"
               size="large"
               color="secondary"
               onClick={() => navigate('/app/rehab-plans')}
-              sx={{ 
+              sx={{
                 py: 1.5,
                 px: 4,
                 borderRadius: 2,
@@ -161,9 +126,9 @@ const Dashboard: React.FC = () => {
       <Grid container spacing={3}>
         {/* Active Plans Widget */}
         <Grid item xs={12} md={6} lg={4}>
-          <Card 
+          <Card
             elevation={2}
-            sx={{ 
+            sx={{
               borderRadius: 2,
               height: '100%',
               display: 'flex',
@@ -185,7 +150,7 @@ const Dashboard: React.FC = () => {
               ) : getActivePlans().length > 0 ? (
                 <List>
                   {getActivePlans().slice(0, 3).map((plan) => (
-                    <ListItem 
+                    <ListItem
                       key={plan._id}
                       secondaryAction={
                         <IconButton edge="end" onClick={() => navigate(`/app/rehab-plans/${plan._id}`)}>
@@ -196,9 +161,9 @@ const Dashboard: React.FC = () => {
                       <ListItemIcon>
                         <PendingIcon color="primary" />
                       </ListItemIcon>
-                      <ListItemText 
-                        primary={plan.name} 
-                        secondary={`${plan.exercises?.length || 0} exercises`} 
+                      <ListItemText
+                        primary={plan.name}
+                        secondary={`${plan.exercises?.length || 0} exercises`}
                       />
                     </ListItem>
                   ))}
@@ -217,8 +182,8 @@ const Dashboard: React.FC = () => {
               )}
             </CardContent>
             <CardActions>
-              <Button 
-                size="small" 
+              <Button
+                size="small"
                 startIcon={<FitnessCenterIcon />}
                 onClick={() => navigate('/app/rehab-plans')}
                 sx={{ ml: 1, mb: 1 }}
@@ -231,9 +196,9 @@ const Dashboard: React.FC = () => {
 
         {/* Agents Widget */}
         <Grid item xs={12} md={6} lg={4}>
-          <Card 
+          <Card
             elevation={2}
-            sx={{ 
+            sx={{
               borderRadius: 2,
               height: '100%',
               display: 'flex',
@@ -255,12 +220,12 @@ const Dashboard: React.FC = () => {
               ) : agents.length > 0 ? (
                 <List>
                   {agents.slice(0, 3).map((agent) => (
-                    <ListItem 
+                    <ListItem
                       key={agent._id}
                       secondaryAction={
-                        <Button 
-                          size="small" 
-                          variant="outlined" 
+                        <Button
+                          size="small"
+                          variant="outlined"
                           onClick={() => navigate(`/app/agents/${agent._id}`)}
                         >
                           Chat
@@ -270,9 +235,9 @@ const Dashboard: React.FC = () => {
                       <ListItemIcon>
                         <PsychologyIcon color="secondary" />
                       </ListItemIcon>
-                      <ListItemText 
-                        primary={agent.name} 
-                        secondary={agent.model} 
+                      <ListItemText
+                        primary={agent.name}
+                        secondary={agent.model}
                       />
                     </ListItem>
                   ))}
@@ -291,8 +256,8 @@ const Dashboard: React.FC = () => {
               )}
             </CardContent>
             <CardActions>
-              <Button 
-                size="small" 
+              <Button
+                size="small"
                 startIcon={<PsychologyIcon />}
                 onClick={() => navigate('/app/agents')}
                 sx={{ ml: 1, mb: 1 }}
@@ -305,9 +270,9 @@ const Dashboard: React.FC = () => {
 
         {/* Stats Widget */}
         <Grid item xs={12} md={6} lg={4}>
-          <Card 
+          <Card
             elevation={2}
-            sx={{ 
+            sx={{
               borderRadius: 2,
               height: '100%',
               display: 'flex',
@@ -326,10 +291,10 @@ const Dashboard: React.FC = () => {
               <Divider sx={{ mb: 3 }} />
               <Grid container spacing={2}>
                 <Grid item xs={6}>
-                  <Paper 
-                    elevation={0} 
-                    sx={{ 
-                      p: 2, 
+                  <Paper
+                    elevation={0}
+                    sx={{
+                      p: 2,
                       textAlign: 'center',
                       backgroundColor: 'primary.light',
                       color: 'white',
@@ -345,29 +310,10 @@ const Dashboard: React.FC = () => {
                   </Paper>
                 </Grid>
                 <Grid item xs={6}>
-                  <Paper 
-                    elevation={0} 
-                    sx={{ 
-                      p: 2, 
-                      textAlign: 'center',
-                      backgroundColor: 'secondary.light',
-                      color: 'white',
-                      borderRadius: 2
-                    }}
-                  >
-                    <Typography variant="h4" fontWeight="bold">
-                      {getCompletedExercisesCount()}
-                    </Typography>
-                    <Typography variant="body2">
-                      Completed Exercises
-                    </Typography>
-                  </Paper>
-                </Grid>
-                <Grid item xs={6}>
-                  <Paper 
-                    elevation={0} 
-                    sx={{ 
-                      p: 2, 
+                  <Paper
+                    elevation={0}
+                    sx={{
+                      p: 2,
                       textAlign: 'center',
                       backgroundColor: 'success.light',
                       color: 'white',
@@ -383,10 +329,10 @@ const Dashboard: React.FC = () => {
                   </Paper>
                 </Grid>
                 <Grid item xs={6}>
-                  <Paper 
-                    elevation={0} 
-                    sx={{ 
-                      p: 2, 
+                  <Paper
+                    elevation={0}
+                    sx={{
+                      p: 2,
                       textAlign: 'center',
                       backgroundColor: 'info.light',
                       color: 'white',
@@ -404,8 +350,8 @@ const Dashboard: React.FC = () => {
               </Grid>
             </CardContent>
             <CardActions>
-              <Button 
-                size="small" 
+              <Button
+                size="small"
                 startIcon={<CalendarIcon />}
                 onClick={() => navigate('/app/calendar')}
                 sx={{ ml: 1, mb: 1 }}
@@ -418,11 +364,11 @@ const Dashboard: React.FC = () => {
 
         {/* Quick Actions Widget */}
         <Grid item xs={12}>
-          <Paper 
+          <Paper
             elevation={2}
-            sx={{ 
-              p: 3, 
-              borderRadius: 2 
+            sx={{
+              p: 3,
+              borderRadius: 2
             }}
           >
             <Typography variant="h6" gutterBottom>
@@ -431,8 +377,8 @@ const Dashboard: React.FC = () => {
             <Divider sx={{ mb: 2 }} />
             <Grid container spacing={2}>
               <Grid item xs={6} sm={3}>
-                <Button 
-                  variant="outlined" 
+                <Button
+                  variant="outlined"
                   size="large"
                   fullWidth
                   startIcon={<FitnessCenterIcon />}
@@ -443,8 +389,8 @@ const Dashboard: React.FC = () => {
                 </Button>
               </Grid>
               <Grid item xs={6} sm={3}>
-                <Button 
-                  variant="outlined" 
+                <Button
+                  variant="outlined"
                   size="large"
                   fullWidth
                   startIcon={<PsychologyIcon />}
@@ -455,8 +401,8 @@ const Dashboard: React.FC = () => {
                 </Button>
               </Grid>
               <Grid item xs={6} sm={3}>
-                <Button 
-                  variant="outlined" 
+                <Button
+                  variant="outlined"
                   size="large"
                   fullWidth
                   startIcon={<CheckCircleIcon />}
@@ -467,8 +413,8 @@ const Dashboard: React.FC = () => {
                 </Button>
               </Grid>
               <Grid item xs={6} sm={3}>
-                <Button 
-                  variant="outlined" 
+                <Button
+                  variant="outlined"
                   size="large"
                   fullWidth
                   startIcon={<PersonIcon />}
@@ -486,4 +432,4 @@ const Dashboard: React.FC = () => {
   );
 };
 
-export default Dashboard; 
+export default Dashboard;

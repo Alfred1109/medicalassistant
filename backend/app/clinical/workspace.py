@@ -374,36 +374,24 @@ def _pdf_first_page_bytes(content: bytes) -> bytes:
 
 async def _image_excerpt(content: bytes, content_type: str):
     """Ask the configured vision model to copy visible text. Failure leaves the report unparsed."""
-    import asyncio
-    import os
-    import app.core.config  # load the questionnaire vision settings into the environment
-    key = os.getenv("VISION_API_KEY")
-    base = os.getenv("VISION_API_BASE_URL")
-    model = os.getenv("VISION_API_MODEL")
-    if not key or not base or not model:
-        return None
-    return await asyncio.to_thread(_image_excerpt_sync, content, content_type, key, base, model)
-
-
-def _image_excerpt_sync(content, content_type, key, base, model):
-    """Keep synchronous SDK work and client cleanup outside the request event loop."""
     import base64
+    from app.core.config import vision_configuration
+    from app.core.llm_transport import complete_vision
+
+    configuration = vision_configuration()
+    if not configuration:
+        return None
     try:
-        from openai import OpenAI
-        client = OpenAI(base_url=base, api_key=key)
-        try:
-            encoded = base64.b64encode(content).decode()
-            completion = client.chat.completions.create(
-                model=model,
-                temperature=0,
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": "只摘录图片上能看清的文字，不要补充图片里没有的数值。看不清就只回复看不清。不超过800字。"},
-                    {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{encoded}"}},
-                ]}],
-            )
-            text = (completion.choices[0].message.content or "").strip()
-        finally:
-            client.close()
+        encoded = base64.b64encode(content).decode()
+        completion = await complete_vision(
+            configuration=configuration,
+            temperature=0,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "只摘录图片上能看清的文字，不要补充图片里没有的数值。看不清就只回复看不清。不超过800字。"},
+                {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{encoded}"}},
+            ]}],
+        )
+        text = (completion.choices[0].message.content or "").strip()
     except Exception:
         return None
     if not text or text == "看不清":
@@ -426,6 +414,7 @@ def _report_public(row, *, include_findings, include_history=False):
         history = [{key: event.get(key) for key in
                     ("action", "at", "actor_id", "note", "accepted", "content_revision")}
                    for event in (row.get("review_history") or [])]
+        # legacy-shape: 存量审核历史，不随患者域切换删除。
         legacy = row.get("legacy_review")
         if not legacy and "mutation_version" not in row and row.get("review_status") in {"reviewed", "rejected"}:
             legacy = row
@@ -438,6 +427,7 @@ def _report_public(row, *, include_findings, include_history=False):
 
 
 def _report_version(row):
+    # legacy-shape: 无版本存量报告从 0 开始参与并发校验，不随域切换删除。
     value = row.get("mutation_version", 0)
     if type(value) is not int or value < 0:
         raise HTTPException(409, detail={"code": "REPORT_VERSION_INVALID"})
@@ -541,7 +531,7 @@ async def review_report(db, actor, report_id, *, accepted, note, expected_versio
               "reviewed_content_revision": revision if accepted else None,
               "reviewed_snapshot": snapshot if accepted else None,
               "review_history": deepcopy(row.get("review_history") or []) + [event]}
-    # Preserve an unversioned legacy review as history rather than treating it as attestation.
+    # legacy-shape: 保留无版本存量审核为历史，不当作当前鉴证，不随域切换删除。
     if "mutation_version" not in row and row.get("review_status") in {"reviewed", "rejected"}:
         values["legacy_review"] = {key: deepcopy(row.get(key)) for key in ("review_status", "review_note", "reviewer_id", "reviewed_at")}
     updated = await _write_report(db, actor, row, expected_version, values)

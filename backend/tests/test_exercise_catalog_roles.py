@@ -24,7 +24,7 @@ class ExerciseCatalogRoleTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_rehabilitation_service] = lambda: self.service
         app.dependency_overrides[get_database] = lambda: SimpleNamespace(users=None, audit_logs=None)
         self.lookup = AsyncMock()
-        self.patcher = patch.object(UserService, "get_user_by_id", new=self.lookup)
+        self.patcher = patch("app.core.user_record.load_user_response", new=self.lookup)
         self.patcher.start()
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
 
