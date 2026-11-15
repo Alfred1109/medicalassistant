@@ -14,8 +14,8 @@ verified 链接补关联（legacy_same_document 载体替位；面向全新源�
 覆盖：
 1. 迁移患者（有账号同文档 verified 链接）：草稿→发布→本人读取/列表→
    反馈提交/医护历史→撤回归档全链路走通；recorded_by 经链接解析落账号 ID；
-   栅栏双载体（account_fences 账号计数 + clinical_patients._fence_access
-   患者计数）落位，且发布事务失败时与版本指针一同回滚。
+   栅栏双载体（account_fences 账号计数 + clinical_patients._fence_rehab_publish
+   患者计数，T67 缺陷 1 后栅栏名域化 "rehab_publish"）落位，且发布事务失败时与版本指针一同回滚。
 2. 无账号患者：医护发布走通；无链接账号（迁移患者账号）代反馈被拒
    403 REHAB_PATIENT_FORBIDDEN；医护历史查询因身份锚点不可解析 fail-closed
    503 REHAB_PATIENT_ACCOUNT_UNAVAILABLE；补关联后反馈走通。
@@ -167,12 +167,12 @@ class CanonicalPublicationLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published["version_id"], draft["draft"]["id"])
 
         # 栅栏双载体落位：医护发布的账号侧 account_fences 计数（从 1 起算）
-        # 与患者侧 clinical_patients._fence_access 计数。患者账号侧计数器在
+        # 与患者侧 clinical_patients._fence_rehab_publish 计数。患者账号侧计数器在
         # 患者本人的栅栏化操作（反馈提交）后才出现。
-        doctor_fence = await self.db.account_fences.find_one({"account_id": DOCTOR, "fence_name": "access"})
+        doctor_fence = await self.db.account_fences.find_one({"account_id": DOCTOR, "fence_name": "rehab_publish"})
         self.assertGreaterEqual(doctor_fence["count"], 1)
         clinical = await self.db[PATIENTS].find_one({"patient_id": str(self.legacy_patient_id)})
-        self.assertGreaterEqual(clinical.get("_fence_access", 0), 1)
+        self.assertGreaterEqual(clinical.get("_fence_rehab_publish", 0), 1)
         # users 载体在 canonical 下停止递增（迁移窗口约束）
         legacy_doc = await self.db.users.find_one({"_id": self.legacy_patient_id})
         self.assertNotIn("_access_fence", legacy_doc)
@@ -196,7 +196,7 @@ class CanonicalPublicationLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.feedback.list(plan["_id"], doctor_actor)).total, 1)
         # 患者本人栅栏化操作后：患者账号侧计数器亦落位
         patient_fence = await self.db.account_fences.find_one(
-            {"account_id": str(self.legacy_patient_id), "fence_name": "access"})
+            {"account_id": str(self.legacy_patient_id), "fence_name": "rehab_publish"})
         self.assertGreaterEqual(patient_fence["count"], 1)
 
         # 发布事务失败：版本指针与双载体栅栏计数一同回滚。
@@ -204,7 +204,7 @@ class CanonicalPublicationLoopTests(unittest.IsolatedAsyncioTestCase):
         draft2 = await self.svc.save_draft(plan["_id"], doctor_actor, self.draft_request())
         before_account = await self.db.account_fences.find({"account_id": {"$in": [DOCTOR, str(self.legacy_patient_id)]}}).to_list(2)
         before_patient_fence = (await self.db[PATIENTS].find_one(
-            {"patient_id": str(self.legacy_patient_id)})).get("_fence_access")
+            {"patient_id": str(self.legacy_patient_id)})).get("_fence_rehab_publish")
         with patch.object(self.svc, "_record_operation", side_effect=RuntimeError("injected failure")):
             with self.assertRaises(RuntimeError):
                 await self.svc.publish(plan["_id"], doctor_actor, self.publish_request(draft2, published["version_id"]))
@@ -216,7 +216,7 @@ class CanonicalPublicationLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({(row["account_id"], row["count"]) for row in before_account},
                          {(row["account_id"], row["count"]) for row in after_account})
         clinical = await self.db[PATIENTS].find_one({"patient_id": str(self.legacy_patient_id)})
-        self.assertEqual(clinical.get("_fence_access", 0), before_patient_fence)
+        self.assertEqual(clinical.get("_fence_rehab_publish", 0), before_patient_fence)
 
         # 撤回归档：本人列表归零，反馈历史保留
         await self.svc.withdraw(plan["_id"], doctor_actor, WithdrawPublication(
@@ -235,7 +235,7 @@ class CanonicalPublicationLoopTests(unittest.IsolatedAsyncioTestCase):
         draft = await self.svc.save_draft(plan["_id"], doctor_actor, self.draft_request())
         published = await self.svc.publish(plan["_id"], doctor_actor, self.publish_request(draft))
         clinical = await self.db[PATIENTS].find_one({"patient_id": patient_id})
-        self.assertGreaterEqual(clinical.get("_fence_access", 0), 1)
+        self.assertGreaterEqual(clinical.get("_fence_rehab_publish", 0), 1)
 
         # 无链接账号（迁移患者账号）对无账号患者方案提交反馈：本人解析经
         # resolve_self 未通过 → 403，绝不按同 ID 假设放行

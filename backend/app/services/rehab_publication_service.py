@@ -14,6 +14,13 @@ from pydantic import ValidationError
 from app.core.exceptions import AppBaseException
 from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump
 from app.core.patient_access import patient_assignment_field, patient_domain_mode
+
+# 栅栏名域化（T67 缺陷 1）：康复发布域的并发授权栅栏不与质控等域共用泛化名
+# "access"——同名栅栏会让同一账号（account_fences 复合键）与同一患者文档
+# （clinical_patients._fence_{name} 字段）的跨域计数互相污染 CAS 复核。
+# 取 "rehab_publish"：该栅栏守护的是发布域的草稿/发布/撤回写授权（账号态 +
+# 患者归属态两次复核），命名直指被守护的写域。
+REHAB_PUBLISH_FENCE = "rehab_publish"
 from app.db.transactions import run_transaction
 from app.patients.legacy import LegacyPatientRepository
 from app.patients.repository import ClinicalPatientRepository, PatientDomainError
@@ -202,8 +209,10 @@ class RehabPublicationService:
             raise error("REHAB_CLINICIAN_REQUIRED", "需要医护确认权限", 403)
         if fence:
             # 栅栏双载体（cutover plan §3.2/3.3）：账号态 → account_fences
-            # 独立集合计数；患者归属态 → clinical_patients 文档 _fence_access
-            # 字段。迁移窗口约束：存量计数不迁移（仅 CAS 复核用），双载体从
+            # 独立集合计数；患者归属态 → clinical_patients 文档
+            # _fence_rehab_publish 字段（栅栏名域化，T67 缺陷 1：不与质控等
+            # 域共用泛化名，避免同账号/同患者文档跨域计数互相污染 CAS 复核）。
+            # 迁移窗口约束：存量计数不迁移（仅 CAS 复核用），双载体从
             # 空白起算，且旧载体（users._access_fence）在切换窗口内停止递增。
             # 两次复核必须在同一事务内（session 透传），任一跳失败整体
             # 回滚；并发归属撤写与患者载体 $inc 写冲突触发事务重试，重试后
@@ -212,8 +221,8 @@ class RehabPublicationService:
             # 写集冲突，进行中的快照授权写照常提交，停用对其后续写入立即
             # 生效；撤权路径参与账号载体计数后可进一步对账关闭该窗口。
             await dual_bump(
-                (AccountFenceStore(self.db), str(account["_id"]), "access"),
-                (PatientFenceStore(self.db), patient_id, "access"),
+                (AccountFenceStore(self.db), str(account["_id"]), REHAB_PUBLISH_FENCE),
+                (PatientFenceStore(self.db), patient_id, REHAB_PUBLISH_FENCE),
                 session=session)
         return patient
 

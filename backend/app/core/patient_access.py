@@ -76,8 +76,51 @@ def resolve_self_patient_id(actor, patient_id=None) -> str:
 
     与域模式无关：任何模式下患者账号都只能显式请求本人 ID，医疗角色不得借
     该入口获得本人患者访问；canonical 的链接核验在其后的异步路径完成。
+    T67 后本函数是 legacy 同文档语义的逐字载体：域分派的异步解析
+    （resolve_self_patient_entity）的 legacy 分支与冻结消费方
+    （clinical/workspace.py）仍经此处；canonical 分支不再使用同文档假设。
     """
     identifier = self_patient_id(getattr(actor, "id", None), getattr(actor, "role", None), patient_id)
+    if identifier is None:
+        raise PatientAccessError("无权访问该患者的数据")
+    return identifier
+
+
+async def resolve_self_patient_entity(db, actor, patient_id=None, *, session=None) -> str:
+    """Domain-dispatched entity resolution for a patient-role self request.
+
+    患者角色「自取」的对象级实体解析（T67 缺陷 2：T64 登记的内核缺口收口）。
+    canonical 的账号 ID 与临床患者 ID 是两个主键（显式绑定下必然不同），
+    绝不能再按 legacy 同文档假设把账号 ID 当患者实体 ID 前置比较：
+
+    - canonical：先做域无关的角色/标识校验（任何域都只有患者角色可自取），
+      随后经 repo.resolve_self（verified 链接 + 账号反向复核 + active 临床
+      记录）解析临床患者实体 ID；显式目标参数存在时必须与解析结果一致
+      （目标缺失即本人实体）。显式绑定（账号 ID≠患者 ID）的对象级自取由此
+      打通，且无链接账号绝不因 ID 巧合被放行。
+    - legacy：原 self_patient_id 同文档语义逐字不变（账号 ID 即患者实体 ID，
+      显式目标必须同 ID）。
+
+    注意：目标一致性比较必须发生在域模式读取之后——同一目标在不同域的
+    合法性不同，域状态不可用（503）因此优先于「显式拒绝他人 ID」（403）
+    呈现，与「域状态不可用必须拒绝请求、绝不静默降级」的 fail-closed 口径
+    一致。legacy 的角色/标识域无关校验仍先于域读取（任何域语义相同）。
+    """
+    account_id = getattr(actor, "id", None)
+    role = getattr(actor, "role", None)
+    if role != "patient" or not isinstance(account_id, (str, ObjectId)) or not str(account_id):
+        raise PatientAccessError("无权访问该患者的数据")
+    if await patient_domain_mode(db, session=session) == "canonical":
+        patient = await _canonical_patient_read(
+            lambda: ClinicalPatientRepository(db).resolve_self(str(account_id), session=session))
+        if patient is None:
+            raise PatientAccessError("无权访问该患者的数据")
+        resolved = str(patient["patient_id"])
+        if patient_id is not None and (
+                not isinstance(patient_id, (str, ObjectId)) or str(patient_id) != resolved):
+            raise PatientAccessError("无权访问该患者的数据")
+        return resolved
+    identifier = self_patient_id(account_id, role, patient_id)
     if identifier is None:
         raise PatientAccessError("无权访问该患者的数据")
     return identifier
@@ -88,15 +131,12 @@ async def ensure_self_patient_access(db, actor, patient_id=None, *, session=None
 
     legacy：同一文档关系即患者实体（保持现状语义）。canonical：必须存在经
     迁移核验的 verified 账号链接（repo.resolve_self），账号 ID 不再被假定即
-    患者 ID；链接缺失、停用或临床记录不可用一律拒绝。
+    患者 ID；链接缺失、停用或临床记录不可用一律拒绝。canonical 分支的
+    resolve_self 已含 active 临床记录与账号反向复核，无需二次 load_patient_doc。
     """
-    identifier = resolve_self_patient_id(actor, patient_id)
+    identifier = await resolve_self_patient_entity(db, actor, patient_id, session=session)
     if await patient_domain_mode(db, session=session) == "canonical":
-        patient = await _canonical_patient_read(
-            lambda: ClinicalPatientRepository(db).resolve_self(identifier, session=session))
-        if patient is None:
-            raise PatientAccessError("无权访问该患者的数据")
-        return str(patient["patient_id"])
+        return identifier
     await load_patient_doc(db, identifier, session=session)
     return identifier
 

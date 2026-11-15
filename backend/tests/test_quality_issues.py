@@ -423,7 +423,8 @@ class QualityIssueCanonicalReplicaTests(unittest.IsolatedAsyncioTestCase):
 
     造数手法复用 test_canonical_accountless_loop.py：legacy 最小数据 →
     migrate_legacy_patients → canonical 模式 → 质控全生命周期；断言栅栏
-    双载体（account_fences + clinical_patients._fence_access，users 不再
+    双载体（account_fences + clinical_patients._fence_quality_access，栅栏名
+    域化 "quality_access"（T67 缺陷 1），users 不再
     承担栅栏计数）与 patient_id 引用一致性语义（迁移保留主键值不变）。
     """
 
@@ -480,14 +481,14 @@ class QualityIssueCanonicalReplicaTests(unittest.IsolatedAsyncioTestCase):
 
     async def fence_state(self):
         return {"account": await self.db.account_fences.find_one(
-                    {"account_id": self.doctor, "fence_name": "access"}),
-                "patient": (await self.repo.get(self.patient_id)).get("_fence_access"),
+                    {"account_id": self.doctor, "fence_name": "quality_access"}),
+                "patient": (await self.repo.get(self.patient_id)).get("_fence_quality_access"),
                 "users_doctor": (await self.db.users.find_one({"_id": ObjectId(self.doctor)})).get("_access_fence"),
                 "users_patient": (await self.db.users.find_one({"_id": self.patient})).get("_access_fence")}
 
     async def test_full_lifecycle_scope_and_dual_carrier_fence(self):
         # 创建即双载体复核：账号跳 account_fences（count=1）、患者跳
-        # clinical_patients._fence_access（=1）；users 文档零栅栏写入。
+        # clinical_patients._fence_quality_access（=1）；users 文档零栅栏写入。
         issue = await self.issue()
         state = await self.fence_state()
         self.assertEqual(state["patient"], 1)

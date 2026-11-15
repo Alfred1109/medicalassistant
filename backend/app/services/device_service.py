@@ -11,7 +11,9 @@ from ..models.device_data_standard import DeviceType, DeviceStatus, ConnectionTy
 from .device_adapters import get_device_adapter
 from .device_data_validator_service import device_data_validator_service
 from ..db.mongodb import get_db
+from ..core.patient_access import patient_domain_mode
 from ..patients.legacy import LegacyPatientRepository
+from ..patients.repository import ClinicalPatientRepository
 
 
 # ── 设备域角色语义统一（缺陷 B 盘点后收敛）─────────────────────────────────
@@ -72,12 +74,28 @@ class DeviceService:
                                      error_message="设备绑定事务未能确认，请核查状态后重试")
 
     async def _insert_device(self, user_id: str, device_data: Dict, *, session):
-        """绑定新设备到已存在的患者；账号角色不能替代患者实体。"""
+        """绑定新设备到已存在的患者；账号角色不能替代患者实体。
+
+        患者存在性复核按域分派（波次 5）：legacy 走 legacy 适配器（users，
+        is_active 语义逐字不变）；canonical 走 ClinicalPatientRepository.get
+        （clinical_patients，users 只读约定——canonical 患者实体不在 users，
+        无账号患者由此可绑定设备）。canonical 文档没有 is_active 字段，
+        status != "active"（迁移自 legacy 停用患者）按不可用处理，与
+        内核 load_patient_doc 的 canonical 404 语义对齐。绑定后设备文档的
+        patient_id 落所在域的患者主键（canonical 为 clinical_patients.
+        patient_id，迁移保留主键值不变）。
+        """
         db = await self._database()
-        patient = await LegacyPatientRepository(db).get(user_id, session=session)
-        if not patient or patient.get("is_active", True) is not True:
-            return {"error": "设备只能绑定有效的患者档案"}
-        user_id = str(patient["_id"])
+        if await patient_domain_mode(db, session=session) == "canonical":
+            patient = await ClinicalPatientRepository(db).get(user_id, session=session)
+            if not patient or patient.get("status") != "active":
+                return {"error": "设备只能绑定有效的患者档案"}
+            user_id = str(patient["patient_id"])
+        else:
+            patient = await LegacyPatientRepository(db).get(user_id, session=session)
+            if not patient or patient.get("is_active", True) is not True:
+                return {"error": "设备只能绑定有效的患者档案"}
+            user_id = str(patient["_id"])
         
         # 验证设备类型和固件版本
         if "device_type" in device_data and device_data["device_type"] not in [d.value for d in DeviceType]:

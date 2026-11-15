@@ -26,29 +26,28 @@ patient_account_links 显式关联（可选）。本演练证明一个没有登�
    clinical_patients._fence_reminder）。
 4. 康复方案：方案创建/列表走通（list_rehab_plans 经 assigned_scope_ids 域感知）；
    波次 2 门闩移除后发布走通（canonical 双载体栅栏落在 account_fences +
-   clinical_patients._fence_access）；无账号患者本人不能读取/反馈
-   （无 verified 链接，账号不可达=预期形态）。
-5. 设备：对象授权读路径（resolve_device_patient/device_patient_scope）走通；
-   绑定与手工读数被 users 载体并发栅栏挡住（device_access.py 栅栏写
-   users 文档，canonical 患者文档不在 users，matched_count=0 → 403；
-   §3 栅栏载体拆分为波次项）。设备读数读路径以合成设备文档验证。
+   clinical_patients._fence_rehab_publish，T67 缺陷 1 后栅栏名域化）；
+   无账号患者本人不能读取/反馈（无 verified 链接，账号不可达=预期形态）。
+5. 设备：波次 5 后绑定与手工读数走通（canonical 双载体栅栏落在
+   account_fences("device") + clinical_patients._fence_device，users 文档
+   不再承担栅栏计数；T55 演练的「写阻」缺口闭合）；对象授权读路径
+   （resolve_device_patient/device_patient_scope）与设备读数读路径同步验证。
 6. 质控：T63 波次 2/3 门闩移除后 canonical 全流程走通（问题全生命周期、
-   list/assignees、栅栏双载体 account_fences + clinical_patients._fence_access、
-   过程监测 scope/overview）；引用核验聚合仍 $lookup users（波次 3 换源
-   登记项），无账号患者引用如实按 not_found 计数、issue_eligible=False。
+   list/assignees、栅栏双载体 account_fences +
+   clinical_patients._fence_quality_access、过程监测 scope/overview）；
+   波次 3/4 换源落地后引用核验直查 clinical_patients（T66）：无账号患者的
+   随访引用如实按 valid 计数、issue_eligible=True（不再经 users 误判
+   not_found）。
 7. 统计：analytics 患者聚合源仍是 users（analytics_service.py
    PATIENTS_COLLECTION_NAME），无账号患者不被统计（波次 4 缺口，如实断言）。
 8. 账号补关联（T64 显式绑定工作流）：管理员人工核实（reviewer + evidence）
    后经 repo.bind_account 建立独立 explicit_binding origin 的 verified 链接
    （账号 ID 与临床患者 ID 不同，无需 legacy_user_id/ID 对齐），resolve_self
-   打通，患者范围解析自取（followup/device scope）、医患通信与康复发布读取/
-   反馈通路打开——「账号可选」的正向证明；末尾以管理员停用链接（verified→
-   disabled 状态机）验证通路如实关闭、停用链接为终态文档。登记缺口：患者
-   角色的 device 内核（resolve_device_patient 直接 load_patient_doc(账号 ID)）
-   与指定目标患者的对象级自取（ensure_*_patient_access 带 patient_id）在内核
-   同步前置 self_patient_id 仍按 same-document 假设把账号 ID 当患者实体 ID，
-   显式绑定下被前置拒绝（canonical resolve_self 未及执行），需内核波次把患者
-   角色实体解析改走 repo.resolve_self。
+   打通，患者范围解析自取（followup/device scope）、随访/健康档案/设备的
+   对象级自取（T67 缺陷 2 后内核患者角色实体解析经 repo.resolve_self 域分派，
+   带目标参数的自取不再被同文档前置假设拒绝）、医患通信与康复发布读取/
+   反馈通路全部打开——「账号可选」的正向证明；末尾以管理员停用链接
+   （verified→disabled 状态机）验证通路如实关闭、停用链接为终态文档。
 """
 import os
 import tempfile
@@ -59,7 +58,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from bson import ObjectId
-from fastapi import HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.core.device_access import device_patient_scope, resolve_device_patient
@@ -262,7 +260,8 @@ class CanonicalAccountlessLoopTests(unittest.IsolatedAsyncioTestCase):
             actor_id=DOCTOR, actor_role="doctor")
         self.assertIn(plan["_id"], {item["_id"] for item in plans})
         # 波次 2 门闩移除后：canonical 发布走通。栅栏双载体落位——账号侧
-        # account_fences 计数、患者侧 clinical_patients._fence_access 计数。
+        # account_fences 计数、患者侧 clinical_patients._fence_rehab_publish
+        # 计数（T67 缺陷 1 后栅栏名域化，不与质控 "quality_access" 共名）。
         from app.core.fences import create_account_fence_indexes
         await create_account_fence_indexes(self.db)
         publication = RehabPublicationService(self.db)
@@ -277,10 +276,11 @@ class CanonicalAccountlessLoopTests(unittest.IsolatedAsyncioTestCase):
             expected_draft_revision=draft["draft"]["revision"],
             expected_publication_id=None, confirmed=True, confirmation_note="演练"))
         self.assertEqual(published["version_id"], draft["draft"]["id"])
-        fence_row = await self.db.account_fences.find_one({"account_id": DOCTOR, "fence_name": "access"})
+        fence_row = await self.db.account_fences.find_one(
+            {"account_id": DOCTOR, "fence_name": "rehab_publish"})
         self.assertGreaterEqual(fence_row["count"], 1)
         clinical = await self.db[PATIENTS].find_one({"patient_id": patient_id})
-        self.assertGreaterEqual(clinical.get("_fence_access", 0), 1)
+        self.assertGreaterEqual(clinical.get("_fence_rehab_publish", 0), 1)
         # 无账号患者本人：账号不存在（canonical 账号层仍在 users）→ 账号不可用
         with self.assertRaises(AppBaseException) as reader_gate:
             await publication.patient_detail(plan["_id"], actor(patient_id, "patient"))
@@ -294,44 +294,47 @@ class CanonicalAccountlessLoopTests(unittest.IsolatedAsyncioTestCase):
                 actor(patient_id, "patient"))
         self.assertEqual(feedback_gate.exception.status_code, 403)
 
-        # -- 步骤 5：设备（读路径走通；写路径被 users 载体栅栏挡住）--
+        # -- 步骤 5：设备（波次 5：读路径与写路径全走通，双载体栅栏落位）--
         self.assertEqual(await resolve_device_patient(self.db, doctor_actor, patient_id),
                          patient_id)
         self.assertIn(patient_id, await device_patient_scope(self.db, doctor_actor))
         device_service = DeviceService(self.db)
-        with self.assertRaises(HTTPException) as bind_denied:
-            await device_service.bind_device(patient_id, {
-                "device_type": "血压计", "name": "loop-device"}, actor=doctor_actor)
-        self.assertEqual(bind_denied.exception.status_code, 403)  # users 载体栅栏
-        device_id = str(ObjectId())
-        await self.db.devices.insert_one({
-            "_id": ObjectId(device_id), "device_id": "loop-device-1", "device_type": "血压计",
-            "name": "合成绑定设备", "patient_id": patient_id, "status": "active",
-            "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)})
+        # 绑定走通：canonical 双载体栅栏落 account_fences("device") +
+        # clinical_patients._fence_device，users 文档零栅栏写入——T55 演练的
+        # 「写阻」缺口（无账号患者设备绑定被 users 载体 matched_count=0 挡住）
+        # 随栅栏载体拆分闭合。
+        bound = await device_service.bind_device(patient_id, {
+            "device_type": "血压计", "name": "loop-device"}, actor=doctor_actor)
+        self.assertIsNone(bound.get("error"))
+        self.assertEqual(bound["patient_id"], patient_id)
+        device_id = bound["_id"]
         device = await device_service.get_device(device_id)
         from app.core.device_access import ensure_device_access
         from app.services.device_service import DEVICE_READ_ROLES
         await ensure_device_access(self.db, device, doctor_actor, list(DEVICE_READ_ROLES))
-        await self.db.device_data.insert_one({
-            "_id": ObjectId(), "device_id": device_id, "timestamp": datetime.now(timezone.utc),
-            "data_type": "systolic", "value": "118", "unit": "mmHg",
-            "metadata": {"source": "手工登记"}, "created_at": datetime.now(timezone.utc)})
+        # 手工读数走通（同一双载体栅栏第二次递增）
+        reading = await device_service.record_manual_reading(
+            device_id, "systolic", "118", "mmHg", datetime.now(timezone.utc),
+            actor=doctor_actor)
+        self.assertEqual(reading["metadata"]["source"], "手工登记")
         readings = await device_service.get_device_data(device_id)
         self.assertEqual(len(readings), 1)
-        with self.assertRaises(HTTPException) as reading_denied:
-            await device_service.record_manual_reading(
-                device_id, "diastolic", "76", "mmHg", datetime.now(timezone.utc),
-                actor=doctor_actor)
-        self.assertEqual(reading_denied.exception.status_code, 403)  # 同一 users 载体栅栏
+        device_account_fence = await self.db.account_fences.find_one(
+            {"account_id": DOCTOR, "fence_name": "device"})
+        self.assertGreaterEqual(device_account_fence["count"], 2)  # 绑定 + 手工读数
+        self.assertGreaterEqual((await self.repo.get(patient_id)).get("_fence_device", 0), 2)
+        self.assertIsNone((await self.db.users.find_one({"_id": ObjectId(DOCTOR)}))
+                          .get("_device_access_fence"))
 
         # -- 步骤 6：质控（T63 波次 2/3 门闩移除：canonical 全流程走通）--
         issue_service = QualityIssueService(self.db)
-        # 栅栏双载体：账号跳 account_fences、患者跳 clinical_patients._fence_access；
-        # users 文档不再承担并发栅栏计数（canonical 只读约定）。此前步骤的
-        # 设备/随访域 canonical 栅栏跳可能已推进同载体计数，故断言相对增量。
+        # 栅栏双载体：账号跳 account_fences、患者跳
+        # clinical_patients._fence_quality_access（T67 缺陷 1 后栅栏名域化，
+        # 与康复 "rehab_publish"/设备 "device" 各自独立计数）；users 文档
+        # 不再承担并发栅栏计数（canonical 只读约定）。断言按本域名取相对增量。
         fence_before = (await self.db.account_fences.find_one(
-            {"account_id": DOCTOR, "fence_name": "access"}) or {}).get("count", 0)
-        patient_fence_before = (await self.repo.get(patient_id)).get("_fence_access", 0)
+            {"account_id": DOCTOR, "fence_name": "quality_access"}) or {}).get("count", 0)
+        patient_fence_before = (await self.repo.get(patient_id)).get("_fence_quality_access", 0)
         issue, created = await issue_service.create(QualityIssueCreate(
             request_id="loop-qc-create-1", patient_id=patient_id,
             source_type="followup", source_id=followup.id,
@@ -340,8 +343,9 @@ class CanonicalAccountlessLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(created)
         self.assertEqual(issue["status"], "open")
         self.assertEqual((await self.db.account_fences.find_one(
-            {"account_id": DOCTOR, "fence_name": "access"}))["count"], fence_before + 1)
-        self.assertEqual((await self.repo.get(patient_id))["_fence_access"], patient_fence_before + 1)
+            {"account_id": DOCTOR, "fence_name": "quality_access"}))["count"], fence_before + 1)
+        self.assertEqual((await self.repo.get(patient_id))["_fence_quality_access"],
+                         patient_fence_before + 1)
         self.assertIsNone((await self.db.users.find_one({"_id": ObjectId(DOCTOR)})).get("_access_fence"))
         # 全生命周期：指派（责任人=本人）→ 确认 → 处置 → 复核关闭
         issue = await issue_service.mutate(issue["id"], "assign", AssignQualityIssue(
@@ -351,8 +355,9 @@ class CanonicalAccountlessLoopTests(unittest.IsolatedAsyncioTestCase):
         # assign 两跳栅栏：_patient 双载体复核（账号跳 + 患者跳）+ _assignee
         # 账号跳 → 账号 +2、患者栅栏 +1。
         self.assertEqual((await self.db.account_fences.find_one(
-            {"account_id": DOCTOR, "fence_name": "access"}))["count"], fence_before + 3)
-        self.assertEqual((await self.repo.get(patient_id))["_fence_access"], patient_fence_before + 2)
+            {"account_id": DOCTOR, "fence_name": "quality_access"}))["count"], fence_before + 3)
+        self.assertEqual((await self.repo.get(patient_id))["_fence_quality_access"],
+                         patient_fence_before + 2)
         issue = await issue_service.mutate(issue["id"], "confirm", ConfirmQualityIssue(
             request_id="loop-qc-confirm-1", expected_version=1, note="确认核实"), doctor_actor)
         self.assertEqual(issue["status"], "in_progress")
@@ -380,19 +385,20 @@ class CanonicalAccountlessLoopTests(unittest.IsolatedAsyncioTestCase):
         directory = await issue_service.assignees(patient_id, doctor_actor)
         self.assertEqual({item["id"] for item in directory["items"]}, {DOCTOR, MANAGER})
         # 过程监测：范围解析走 clinical_patients（含存量迁移患者），选定患者
-        # 统计走通；引用核验聚合仍 $lookup users（波次 3 换源登记项），
-        # 无账号患者的随访引用如实按 not_found 计数、不具备开单资格。
+        # 统计走通；引用核验经波次 3/4 换源直查 clinical_patients（T66），
+        # 无账号患者的随访引用如实按 valid 计数、具备开单资格（不再被
+        # users 载体误判 not_found）。
         monitoring = QualityMonitoringService(self.db)
         self.assertEqual(set(await monitoring.scope(doctor_actor)),
                          {patient_id, str(self.legacy_patient_id)})
         overview = await monitoring.overview(doctor_actor, patient_id=patient_id)
         self.assertEqual(overview.scope_kind, "selected_patient")
         self.assertEqual(overview.followups.selected_total, 1)
-        self.assertEqual(overview.followups.unresolved_patient_count, 1)
+        self.assertEqual(overview.followups.unresolved_patient_count, 0)
         page = await monitoring.details("followup", doctor_actor, patient_id=patient_id)
         self.assertEqual(page.total, 1)
-        self.assertFalse(page.items[0].issue_eligible)
-        self.assertEqual(page.items[0].patient_reference_state, "not_found")
+        self.assertTrue(page.items[0].issue_eligible)
+        self.assertEqual(page.items[0].patient_reference_state, "valid")
 
         # -- 步骤 7：统计（波次 4 换源后 canonical 聚合读 clinical_patients）--
         overview = await AnalyticsService(self.db).get_stats_overview()
@@ -423,22 +429,17 @@ class CanonicalAccountlessLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await ensure_self_patient_access(self.db, patient_actor),
                          patient_id)
         self.assertEqual(await followup_patient_scope(self.db, patient_actor), [patient_id])
-        # 内核缺口（登记项，不属本波次可改文件）：患者角色走 device 内核
-        # （device_access.resolve_device_patient）与指定目标患者的对象级自取
-        # （ensure_*_patient_access(db, patient_id, actor)）共用同步前置
-        # self_patient_id（patients/legacy.py），仍按 same-document 假设把
-        # 账号 ID 当患者实体 ID；显式绑定下两者不同——device 分支直接
-        # load_patient_doc(账号 ID) 报「患者不存在」，对象级自取前置即 403，
-        # canonical 的 resolve_self 核验根本未执行。范围解析型自取（无目标
-        # 参数：followup scope、publication patient_list、workbench）与反馈
-        # 提交通路已由上方断言证明打通；内核需把患者角色的实体解析改走
-        # repo.resolve_self（账号 ID→链接→患者 ID）后再做对象校验（波次登记）。
-        with self.assertRaises(HTTPException) as targeted_gate:
-            await ensure_followup_patient_access(self.db, patient_id, patient_actor)
-        self.assertEqual(targeted_gate.exception.status_code, 403)
-        with self.assertRaises(PatientAccessError) as device_gate:
-            await device_patient_scope(self.db, patient_actor)
-        self.assertEqual(device_gate.exception.error_code, "PATIENT_NOT_FOUND")
+        # 对象级自取全通（T67 缺陷 2 修复后行为）：患者角色实体解析经内核
+        # 域分派先走 repo.resolve_self（账号 ID→verified 链接→临床患者 ID）
+        # 再做目标一致性比对与对象校验——显式绑定下账号 ID≠患者 ID 不再被
+        # 同文档前置假设在 canonical resolve_self 之前拒绝（原登记缺口收口）。
+        # 覆盖三条对象级路径：随访/健康档案的 ensure_*_patient_access 带目标
+        # 形态与 device 内核（resolve_device_patient / device_patient_scope）。
+        await ensure_followup_patient_access(self.db, patient_id, patient_actor)
+        await ensure_health_record_patient_access(self.db, patient_id, patient_actor)
+        self.assertEqual(await device_patient_scope(self.db, patient_actor), [patient_id])
+        self.assertEqual(await resolve_device_patient(self.db, patient_actor, patient_id),
+                         patient_id)
         # 康复发布读取与反馈通路打开（波次 2）：本人列表经 resolve_self 解析；
         # 反馈 recorded_by 经 verified 链接解析落账号 ID（显式绑定下账号 ID
         # 与临床患者 ID 不同——反馈身份锚定账号，临床归属锚定患者）。

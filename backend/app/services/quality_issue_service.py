@@ -29,9 +29,12 @@ READ_ROLES = CLINICAL_ROLES | {"admin"}
 # 的 patient_id 字符串在 canonical 模式下与 clinical_patients 主键一一对应，
 # 切换无需改写历史文档；canonical 下新建质控同样引用当前域的患者 ID
 # （新建档患者为 create_from_source 生成的 ObjectId 字符串）。
-# 栅栏载体名（波次 2）：canonical 账号跳落 account_fences、患者跳落
-# clinical_patients 的 _fence_access 字段（core/fences.py 命名约定）。
-ACCESS_FENCE = "access"
+# 栅栏载体名（波次 2；T67 缺陷 1 域化命名）：canonical 账号跳落
+# account_fences（复合键含 fence_name）、患者跳落 clinical_patients 的
+# _fence_quality_access 字段（core/fences.py 命名约定）。不与康复发布等域
+# 共用泛化名 "access"——同名栅栏会让同一账号/同一患者文档的跨域计数互相
+# 污染 CAS 复核，命名直指质控域。
+QUALITY_ACCESS_FENCE = "quality_access"
 
 
 def fail(code, message, status=409):
@@ -91,8 +94,8 @@ class QualityIssueService:
     async def _fence(self, document, session):
         # legacy 载体（行为不变）：账号与患者实体同文档，users 上一次 $inc
         # 同时覆盖"账号态"与"患者归属"两种语义。canonical 的双载体栅栏
-        # （account_fences + clinical_patients._fence_access）在 _patient/
-        # _assignee 的栅栏跳里按域分派，不经过本方法。
+        # （account_fences + clinical_patients._fence_quality_access）在
+        # _patient/_assignee 的栅栏跳里按域分派，不经过本方法。
         value = document.get("_access_fence", 0)
         if type(value) is not int or value < 0:
             raise fail("QUALITY_ACCESS_FENCE_INVALID", "账号并发状态异常", 503)
@@ -134,14 +137,14 @@ class QualityIssueService:
             if not isinstance(values, list) or str(account["_id"]) not in {str(value) for value in values}:
                 raise fail("QUALITY_PATIENT_NOT_ASSIGNED", "当前未分配管理该患者", 403)
         if fence:
-            # 栅栏载体按域分派（T63 波次 2）：legacy 双跳仍写 users 载体
-            # （行为不变）；canonical 切换双载体——账号跳 account_fences、
-            # 患者跳 clinical_patients._fence_access，同一事务内经 dual_bump
-            # 先后复核，任一跳失败由外层事务整体回滚。
+            # 栅栏载体按域分派（T63 波次 2；T67 命名域化）：legacy 双跳仍写
+            # users 载体（行为不变）；canonical 切换双载体——账号跳
+            # account_fences、患者跳 clinical_patients._fence_quality_access，
+            # 同一事务内经 dual_bump 先后复核，任一跳失败由外层事务整体回滚。
             if await patient_domain_mode(self.db, session=session) == "canonical":
                 await dual_bump(
-                    (AccountFenceStore(self.db), str(account["_id"]), ACCESS_FENCE),
-                    (PatientFenceStore(self.db), str(patient["patient_id"]), ACCESS_FENCE),
+                    (AccountFenceStore(self.db), str(account["_id"]), QUALITY_ACCESS_FENCE),
+                    (PatientFenceStore(self.db), str(patient["patient_id"]), QUALITY_ACCESS_FENCE),
                     session=session)
             else:
                 await self._fence(account, session)
@@ -216,9 +219,10 @@ class QualityIssueService:
         if not isinstance(assigned, list) or str(account["_id"]) not in {str(item) for item in assigned}:
             raise fail("QUALITY_ASSIGNEE_NOT_ASSIGNED", "责任医护当前未分配管理该患者", 422)
         # 栅栏只有账号跳（无患者侧写入），载体随域分派：canonical 落
-        # account_fences，不写 users（保持其 canonical 只读约定）。
+        # account_fences（QUALITY_ACCESS_FENCE），不写 users（保持其
+        # canonical 只读约定）。
         if await patient_domain_mode(self.db, session=session) == "canonical":
-            await AccountFenceStore(self.db).bump(str(account["_id"]), ACCESS_FENCE, session=session)
+            await AccountFenceStore(self.db).bump(str(account["_id"]), QUALITY_ACCESS_FENCE, session=session)
         else:
             await self._fence(account, session)
         return str(account["_id"])

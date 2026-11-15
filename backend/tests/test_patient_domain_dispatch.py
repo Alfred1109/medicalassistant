@@ -499,15 +499,21 @@ class DomainStateUnavailablePassthroughTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_unavailable_passthrough(
             lambda: _resolve_scoped_patient_id(self.broken_state_db(), self.patient(), None))
 
-    async def test_patient_router_explicit_other_patient_keeps_403(self):
+    async def test_patient_router_explicit_other_patient_with_broken_state_fails_closed(self):
+        # T67 缺陷 2 后的语义重排序：目标一致性比较必须发生在域模式读取之后
+        # （同一目标在不同域的合法性不同），因此「显式请求他人 ID」的 403
+        # 不再先于域读取——域状态不可用时按 fail-closed 503 透传（合法状态
+        # 下的显式他人拒绝仍为 403，见 test_legacy_forbidden_still_degrades_to_403）。
         db = self.broken_state_db()
-        with self.assertRaises(HTTPException) as denied:
+        with self.assertRaises(PatientAccessError) as rejected:
             await _resolve_scoped_patient_id(db, self.patient(), str(ObjectId()))
-        self.assertEqual(denied.exception.status_code, 403)
+        self.assertEqual(rejected.exception.status_code, 503)
+        self.assertEqual(rejected.exception.error_code, "PATIENT_DOMAIN_STATE_UNAVAILABLE")
 
     async def test_legacy_forbidden_still_degrades_to_403(self):
         # 域状态正常（legacy）时，三处 catch-all 的原 403 语义逐字不变：
-        # 患者账号显式请求他人患者 ID（显式拒绝先于域模式读取）
+        # 患者账号显式请求他人患者 ID（T67 后拒绝发生在域模式读取之后的
+        # legacy 分支内，合法 legacy 状态下结果与原行为一致）
         db = FakeDatabase(users=FakeCollection([legacy_user(PATIENT_ID)]))
         other_id = str(ObjectId())
         with self.assertRaises(HTTPException) as followup_denied:
