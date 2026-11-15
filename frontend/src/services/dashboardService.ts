@@ -1,6 +1,6 @@
 import { API_COLLECTION_PATHS } from '../config/apiPaths';
 import apiClient from './apiClient';
-import { API_BASE_URL } from '../config/constants';
+import { API_BASE_URL } from '../config/api';
 
 export interface HealthMetric {
   id: string;

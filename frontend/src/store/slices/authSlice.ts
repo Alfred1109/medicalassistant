@@ -4,20 +4,10 @@ import type { ThunkApiConfig } from '../types';
 import { API_BASE_URL } from '../../config/api';
 import { AuthMode, authRequestOptions, clearLegacyCredentials, getAuthConfig } from '../../services/authSession';
 
-// User interface
-export interface User {
-  id: string;
-  email: string;
-  name: string;
-  role: 'patient' | 'doctor' | 'health_manager' | 'admin';
-  createdAt: string;
-  updatedAt: string;
-  avatar?: string;
-  phone?: string;
-  bio?: string;
-  has_avatar?: boolean;
-  local_password?: boolean;
-}
+// 用户类型单属主在 types/api.types（含 permissions/is_active 等完整后端契约字段），
+// authSlice 仅 re-export，历史本地定义已删除。
+import type { User } from '../../types/api.types';
+export type { User };
 
 // Auth state interface
 export interface AuthState {

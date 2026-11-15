@@ -38,6 +38,20 @@ export function patientDomainErrorCopy(error: unknown): string | null {
 // 在 axios 响应拦截器里就地改写 error.message，保持错误对象身份不变
 // （httpClient 现有测试断言 error === failure）。非患者域错误原样返回。
 // 用 message 字段的存在性而不是 instanceof 判断，避免跨执行环境（如 vm 沙箱）失效。
+// 通用 API 错误 → 展示文案的统一入口：患者域 503 统一文案 → 后端 detail（字符串）→
+// error.message → 兜底文案。原 Doctor/FollowUpManagement、Patient/DeviceBinding、
+// components/Device/DeviceConnectionTest 三份本地 getApiErrorMessage 的收敛实现。
+export function apiErrorMessage(error: unknown, fallback: string): string {
+  const copy = patientDomainErrorCopy(error);
+  if (copy) return copy;
+  const shape = error as { response?: { data?: { detail?: unknown } }; message?: unknown } | null;
+  const detail = shape?.response?.data?.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  const message = shape?.message;
+  if (typeof message === 'string' && message) return message;
+  return fallback;
+}
+
 export function applyPatientDomainErrorCopy<T>(error: T): T {
   const copy = patientDomainErrorCopy(error);
   const target = error as { message?: unknown } | null;

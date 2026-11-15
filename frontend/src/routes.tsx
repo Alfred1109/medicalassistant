@@ -10,9 +10,6 @@ import Layout from './components/Layout/Layout';
 // IndexPage - 新添加的入口页面
 import IndexPage from './pages/IndexPage';
 
-// 测试页面
-import TestPage from './pages/TestPage';
-
 // Auth Pages
 import AuthPage from './pages/Auth/AuthPage';
 import Login from './pages/Auth/Login';
@@ -110,9 +107,6 @@ import RehabProgress from './pages/Assessment/RehabProgress';
 
 // 训练推荐相关页面
 import ExerciseRecommendations from './pages/Recommendations/ExerciseRecommendations';
-
-// 功能开发演示页面
-import FeatureDemoPage from './pages/Common/FeatureDemoPage';
 
 // 系统设置页面
 import SystemSettings from './pages/Settings/SystemSettings';
@@ -270,15 +264,9 @@ const AppRoutes: React.FC = () => (
       {/* 首页/导航页面 */}
       <Route index element={<IndexPage />} />
 
-      {/* 测试路由 */}
-      <Route path="test" element={<TestPage />} />
-
       {/* Dashboard route - 主面板 */}
       <Route path="dashboard" element={<Dashboard />} />
-      
-      {/* 功能演示页面 */}
-      <Route path="feature-demo" element={<FeatureDemoPage />} />
-      
+
       {/* 通知中心路由 */}
       <Route path="notifications" element={<NotificationsPage />} />
       <Route path="follow-ups/:followUpId" element={<FollowUpDetailPage />} />

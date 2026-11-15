@@ -45,7 +45,7 @@ import { Link } from 'react-router-dom';
 import DeviceDataDisplay from '../../components/Device/DeviceDataDisplay';
 import DeviceConnectionTest from '../../components/Device/DeviceConnectionTest';
 import { deviceService, Device, DeviceCreatePayload, DeviceStatus } from '../../services/deviceService';
-import { patientDomainErrorCopy } from '../../services/patientErrors';
+import { apiErrorMessage } from '../../services/patientErrors';
 
 // 绑定表单状态接口
 interface BindFormState {
@@ -88,11 +88,6 @@ function TabPanel(props: TabPanelProps) {
     </div>
   );
 }
-
-// 提取后端返回的错误消息；患者域错误（如 503 PATIENT_IDENTITY_AMBIGUOUS）使用统一提示文案
-const getApiErrorMessage = (err: any, fallback: string): string => {
-  return patientDomainErrorCopy(err) || err?.response?.data?.detail || err?.message || fallback;
-};
 
 // 时间格式化
 const formatDateTime = (value?: string | null): string => {
@@ -187,7 +182,7 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
       setDevices(list);
     } catch (err: any) {
       if (generation !== listRequest.current) return;
-      setLoadError(getApiErrorMessage(err, '获取设备列表失败，请稍后再试'));
+      setLoadError(apiErrorMessage(err, '获取设备列表失败，请稍后再试'));
     } finally {
       if (generation === listRequest.current) setLoading(false);
     }
@@ -240,7 +235,7 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
     } catch (err: any) {
       setSnackbar({
         open: true,
-        message: `绑定失败: ${getApiErrorMessage(err, '请检查设备信息后重试')}`,
+        message: `绑定失败: ${apiErrorMessage(err, '请检查设备信息后重试')}`,
         severity: 'error'
       });
     } finally {
@@ -296,7 +291,7 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
     } catch (err: any) {
       setSnackbar({
         open: true,
-        message: `数据同步失败: ${getApiErrorMessage(err, '请稍后再试')}`,
+        message: `数据同步失败: ${apiErrorMessage(err, '请稍后再试')}`,
         severity: 'error'
       });
     } finally {
@@ -322,7 +317,7 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
     } catch (err: any) {
       setSnackbar({
         open: true,
-        message: `解绑失败: ${getApiErrorMessage(err, '请稍后再试')}`,
+        message: `解绑失败: ${apiErrorMessage(err, '请稍后再试')}`,
         severity: 'error'
       });
     } finally {
@@ -731,7 +726,7 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
                         setReadingVersion(value => value + 1);
                         setSnackbar({ open: true, message: '已保存手工登记的读数', severity: 'success' });
                       } catch (err: any) {
-                        setSnackbar({ open: true, message: getApiErrorMessage(err, '读数没有保存'), severity: 'error' });
+                        setSnackbar({ open: true, message: apiErrorMessage(err, '读数没有保存'), severity: 'error' });
                       }
                     }}>登记读数</Button>
                   </Stack>

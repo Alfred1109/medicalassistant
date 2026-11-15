@@ -27,7 +27,7 @@ import { zhCN } from 'date-fns/locale';
 import { format } from 'date-fns';
 import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
-import { patientDomainErrorCopy } from '../../services/patientErrors';
+import { apiErrorMessage } from '../../services/patientErrors';
 import type { Patient } from '../../types/patient.types';
 
 // 导入组件
@@ -41,19 +41,6 @@ import type { FollowUpFilters, FollowUpRecord } from '../../types/followup';
 import { followUpTypes, getFollowUpStatusInfo, manualEntryText } from '../../constants/followup';
 import { canReEvaluateFollowUp, canReviewFollowUp } from '../../utils/followupReview';
 import { useFollowUpWorkbench } from '../../hooks/useFollowUpWorkbench';
-
-// 从 axios 错误中提取可读信息；患者域错误（如 503 PATIENT_IDENTITY_AMBIGUOUS）使用统一提示文案
-const getApiErrorMessage = (err: unknown, fallback: string): string => {
-  const patientCopy = patientDomainErrorCopy(err);
-  if (patientCopy) {
-    return patientCopy;
-  }
-  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  if (typeof detail === 'string' && detail) {
-    return detail;
-  }
-  return fallback;
-};
 
 const ALL_PATIENTS = 'all';
 
@@ -160,7 +147,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         setPatientsError(null);
       } catch (err) {
         if (cancelled) return;
-        setPatientsError(getApiErrorMessage(err, '加载患者列表失败'));
+        setPatientsError(apiErrorMessage(err, '加载患者列表失败'));
       } finally {
         if (!cancelled) {
           setPatientsLoading(false);
@@ -210,7 +197,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
       showSnackbar('随访创建成功', 'success');
       await loadFollowUps();
     } catch (err) {
-      showSnackbar(getApiErrorMessage(err, '创建随访失败'), 'error');
+      showSnackbar(apiErrorMessage(err, '创建随访失败'), 'error');
     } finally {
       setSubmitting(false);
     }
@@ -241,7 +228,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
       showSnackbar('随访更新成功', 'success');
       await loadFollowUps();
     } catch (err) {
-      showSnackbar(getApiErrorMessage(err, '更新随访失败'), 'error');
+      showSnackbar(apiErrorMessage(err, '更新随访失败'), 'error');
     } finally {
       setSubmitting(false);
     }
@@ -272,7 +259,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
       showSnackbar('随访已取消', 'success');
       await loadFollowUps();
     } catch (err) {
-      showSnackbar(getApiErrorMessage(err, '操作失败'), 'error');
+      showSnackbar(apiErrorMessage(err, '操作失败'), 'error');
     } finally {
       setSubmitting(false);
     }
@@ -301,7 +288,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
       showSnackbar('随访已重新安排', 'success');
       await loadFollowUps();
     } catch (err) {
-      showSnackbar(getApiErrorMessage(err, '操作失败'), 'error');
+      showSnackbar(apiErrorMessage(err, '操作失败'), 'error');
     } finally {
       setSubmitting(false);
     }
@@ -325,7 +312,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         'success');
       await loadFollowUps();
     } catch (err) {
-      showSnackbar(getApiErrorMessage(err, '操作失败'), 'error');
+      showSnackbar(apiErrorMessage(err, '操作失败'), 'error');
     } finally {
       setSubmitting(false);
     }

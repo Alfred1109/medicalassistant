@@ -3,7 +3,7 @@
 // 所有临床口径（类目字典、指标阈值、判定结论）均为后端可配置默认值，
 // 待临床确认；本文件不做任何本地判定。
 import api from './httpClient';
-import { API_BASE_URL } from '../config/constants';
+import { API_BASE_URL } from '../config/api';
 
 export interface IcfCategory {
   id: string;

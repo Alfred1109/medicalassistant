@@ -1,9 +1,8 @@
-import { API_COLLECTION_PATHS } from '../../config/apiPaths';
 import React from 'react';
 import axios from 'axios';
-import api from '../../services/api';
 import dashboardService from '../../services/dashboardService';
 import { deviceService, Device as DeviceInfo } from '../../services/deviceService';
+import { notificationApi, Notification } from '../../services/notificationService';
 import {
   Box,
   Typography,
@@ -76,15 +75,7 @@ interface RawRehabProgress {
 }
 
 // 设备列表直接复用 deviceService 的 Device 类型（与后端 DeviceResponse 字段对齐，snake_case）
-
-// 定义通知数据类型
-interface Notification {
-  id: string;
-  title: string;
-  sender_name: string;
-  time: string;
-  read: boolean;
-}
+// 通知数据类型复用 notificationService 的 Notification（与后端 Notification 模型对齐）
 
 // 获取状态颜色
 const getStatusColor = (status: string) => {
@@ -167,13 +158,13 @@ const PatientMainDashboard: React.FC = () => {
         setNotificationsLoading(true);
         console.log('开始获取通知数据...');
 
-        const response = await api.get(API_COLLECTION_PATHS.NOTIFICATIONS, { params: { limit: 5 } });
+        const response = await notificationApi.getNotifications({ limit: 5 });
 
-        console.log('通知数据API响应:', response.data);
+        console.log('通知数据API响应:', response);
 
-        if (response.data) {
+        if (response) {
           // 转换时间格式为更友好的显示形式
-          const notificationsWithFormattedTime = response.data.map((notification: any) => {
+          const notificationsWithFormattedTime = response.map((notification: any) => {
             const date = new Date(notification.time);
             const now = new Date();
             const diffInDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));

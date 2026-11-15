@@ -3,6 +3,10 @@
 // 临床口径说明：类目字典、指标阈值与判定均为后端可配置默认值，统一标注
 // 「待临床确认，可后台维护」；本文件只做展示与校验，不硬编码临床判定。
 import type { AxiosError } from 'axios';
+// 类目/条目/指标行类型单属主在 services/icfService（与后端契约对齐），此处仅 re-export。
+import type { IcfCategory, IcfItem, IcfMetricRow } from '../services/icfService';
+
+export type { IcfCategory, IcfItem, IcfMetricRow };
 
 export const ICF_DOMAINS = ['body', 'activity', 'participation'] as const;
 export type IcfDomain = typeof ICF_DOMAINS[number];
@@ -23,40 +27,10 @@ export const ICF_QUALIFIER_LABELS: Record<number, string> = {
 
 export const ICF_PENDING_CONFIRMATION_NOTE = '字典口径待临床确认，可后台维护。';
 
-export interface IcfCategory {
-  id: string;
-  code: string;
-  name: string;
-  domain: string;
-  description?: string;
-  enabled: boolean;
-  source: string;
-  note?: string;
-}
-
 export interface IcfItemInput {
   code: string;
   qualifier: number | string;
   note?: string;
-}
-
-export interface IcfItem {
-  code: string;
-  name: string;
-  domain: string;
-  qualifier: number | string;
-  qualifier_kind: 'numeric' | 'text';
-  note?: string;
-}
-
-export interface IcfMetricRow {
-  metric_key: string;
-  name?: string;
-  state: string;
-  value: number | null;
-  threshold: number | null;
-  detail?: unknown[];
-  message?: string;
 }
 
 // 限定值展示：数值 0-4 用固定中文标签，定性按录入原样。

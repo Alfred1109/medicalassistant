@@ -23,6 +23,7 @@ import DevicesIcon from '@mui/icons-material/Devices';
 import StorageIcon from '@mui/icons-material/Storage';
 
 import { deviceService } from '../../services/deviceService';
+import { apiErrorMessage } from '../../services/patientErrors';
 
 // 测试项类型
 interface TestItem {
@@ -69,11 +70,6 @@ const buildInitialTests = (): TestItem[] => [
     icon: <StorageIcon />
   }
 ];
-
-// 提取后端返回的错误消息
-const getApiErrorMessage = (err: any, fallback: string): string => {
-  return err?.response?.data?.detail || err?.message || fallback;
-};
 
 const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
   deviceId,
@@ -183,7 +179,7 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
       } catch (err: any) {
         const failure = {
           status: 'failure' as const,
-          message: getApiErrorMessage(err, '检查失败'),
+          message: apiErrorMessage(err, '检查失败'),
         };
         updateTest(index, failure);
         finished.push({ ...tests[index], ...failure } as TestItem);
@@ -231,7 +227,7 @@ const DeviceConnectionTest: React.FC<DeviceConnectionTestProps> = ({
         await runTests();
       }
     } catch (err: any) {
-      setRepairError(getApiErrorMessage(err, '修复请求失败'));
+      setRepairError(apiErrorMessage(err, '修复请求失败'));
     } finally {
       setRepairing(false);
     }

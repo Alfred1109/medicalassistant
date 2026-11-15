@@ -1,5 +1,6 @@
 import axios from 'axios';
-import { API_BASE_URL, STORAGE_KEYS } from '../config/constants';
+import { API_BASE_URL } from '../config/api';
+import { STORAGE_KEYS } from '../config/constants';
 import { assertSameOrigin, csrfHeaders, getAuthConfig, loginPageUrl } from './authSession';
 import { applyPatientDomainErrorCopy } from './patientErrors';
 
