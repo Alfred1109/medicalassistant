@@ -28,6 +28,65 @@ requires the explicit verified link, an unambiguous active local patient account
 and active canonical clinical patient; it never repairs missing/disabled links. Unknown/malformed legacy data causes rejection rather than guessed data.
 Review any legacy assignments before exposing them through new business policy.
 
+## Link origins and the explicit binding workflow (T64)
+
+`patient_account_links` documents carry a `source` (origin) field. Two origins
+exist and both follow the same paradigm: human reviewer + evidence reference +
+time audit, atomic verified writes, and a live reverse check on every
+`resolve_self` (exactly one active `role: "patient"` account document, active
+canonical clinical record):
+
+- `legacy_same_document` — written only by the migration tool for the intrinsic
+  relation inside one legacy patient document. Requires full ID alignment
+  (account ID == patient ID == clinical `legacy_user_id`); that alignment is
+  specific to this origin and is never a general rule. These documents are
+  migration artifacts: they are part of the rerun baseline-coverage inference
+  and must not be rewritten or replaced by other origins.
+- `explicit_binding` — written only by the reviewed binding workflow
+  (`ClinicalPatientRepository.bind_account`) for patients without a
+  same-document history (new source patients). The account ID and patient ID
+  are independent; `resolve_self` resolves the clinical patient through the
+  link's own `patient_id` and still reverse-checks account and clinical
+  liveness. No `legacy_user_id` is written or required.
+
+Binding semantics (`bind_account(patient_id, *, account_id, reviewer,
+evidence_reference, session)`):
+
+- Mutual exclusion is reject-only, never an implicit replace. The existing
+  unique indexes (`patient_account_unique` on `account_id`,
+  `patient_self_link_unique` on `patient_id`) admit at most one link document
+  per account and per patient across all origins — verified or disabled. A
+  patient or account with any existing link, including a disabled
+  `legacy_same_document` artifact, is rejected with
+  `PATIENT_ACCOUNT_LINK_CONFLICT`; a concurrent race is closed to the same
+  error by the unique indexes. Disabled links are terminal documents that keep
+  occupying their unique slots, so rebinding requires the reviewed manual
+  reconciliation described above — never an automatic revive. Patients whose
+  legacy account was inactive at migration time (disabled legacy link) are
+  therefore not bindable through this workflow either.
+- Preconditions, all fail-closed: canonical domain mode, an active clinical
+  patient (`PATIENT_NOT_FOUND` otherwise), exactly one active local
+  `role: "patient"` account addressed by its ObjectId
+  (`INVALID_PATIENT_ACCOUNT` otherwise), and non-empty reviewer/evidence
+  (`PATIENT_REVIEW_REQUIRED`, over-length references
+  `INVALID_PATIENT_REVIEW_REFERENCE`). The caller must perform the human
+  identity review before invoking; the repository cannot attest it.
+- Unbinding (`disable_account_link`) reuses the existing verified→disabled
+  state machine through one atomic conditional update that appends the disable
+  audit entry; the document is never deleted and never revived. It applies to
+  `explicit_binding` links only (`PATIENT_ACCOUNT_LINK_NOT_FOUND` when the
+  patient has no link, `PATIENT_ACCOUNT_LINK_CONFLICT` for legacy-origin or
+  already-disabled links). Disabling the linked account in `users` also closes
+  self access through the live reverse check, without touching the link.
+
+Admin API: `POST /patients/account-bindings` (create, reviewer/evidence
+required) and `POST /patients/account-bindings/{patient_id}/disable` in
+`app/api/routers/patient_account_binding_router.py`, admin-only, mapping the
+repository errors to 404/409/422/503. The router is not yet mounted in
+`app.main`; mounting is part of route integration. Repository-level semantics
+are covered by `tests/test_patient_account_binding.py` (replica-set gated) and
+the HTTP contract by `tests/test_patient_account_binding_api.py`.
+
 ## Controlled migration
 
 Use a reviewed environment with the exact Mongo URL and DB explicitly loaded.
@@ -162,8 +221,10 @@ stay legacy by definition.
 Switch clinical patient loading, physician lists, follow-up scope, clinical
 records, devices, rehabilitation plans and statistics to one repository and
 authorization policy together. Patient-account self access must resolve an
-explicitly verified association through `resolve_self`; other manual link origins
-require their own reviewed workflow. It must not infer a relation from matching IDs.
+explicitly verified association through `resolve_self`; besides the migrated
+same-document links, only the reviewed `explicit_binding` workflow above may
+create links — no other manual origin exists, and none may infer a relation
+from matching IDs.
 Communication participant IDs and audit actor IDs remain account identities.
 Do not bulk-rewrite every `user_id` as a clinical patient ID.
 

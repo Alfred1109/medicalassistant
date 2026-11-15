@@ -283,6 +283,8 @@ app.include_router(agent_router, prefix="/api/agents", tags=["agent"])
 app.include_router(doctor_router, prefix="/api/doctors", tags=["doctors"])
 app.include_router(health_manager_router, prefix="/api/health-managers", tags=["health-managers"])
 app.include_router(patient_router, prefix="/api/patients", tags=["patients"])
+from app.api.routers.patient_account_binding_router import router as patient_account_binding_router
+app.include_router(patient_account_binding_router, prefix="/api", tags=["patient-account-bindings"])
 app.include_router(system_admin_router, prefix="/api/admin", tags=["admin"])
 # 健康档案 / 随访记录 / 健康数据(路由自带 /health-records 前缀)
 app.include_router(followup_reminder_router, prefix="/api")

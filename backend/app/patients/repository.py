@@ -1,8 +1,12 @@
 """Canonical patient storage with a durable, fail-closed cutover boundary.
 
-Self access resolves only an explicit legacy account link. Callers must apply their
-authenticated object policy. Do not add users fallback after canonical cutover:
-an absent or inactive clinical record must never revive a legacy relationship.
+Self access resolves only an explicitly audited account link, through one of
+two origins: the migrated `legacy_same_document` relation (ID-aligned) or a
+reviewed `explicit_binding` created by `bind_account` (independent IDs; see
+bind_account for the reject-only mutual-exclusion rules). Callers must apply
+their authenticated object policy. Do not add users fallback after canonical
+cutover: an absent or inactive clinical record must never revive a legacy
+relationship.
 """
 import hashlib
 import json
@@ -20,6 +24,10 @@ ACCOUNT_LINKS = "patient_account_links"
 STATE = "patient_domain_state"
 STATE_ID = "clinical-patients-v1"
 SCHEMA_VERSION = 1
+# 链接 origin 载体：legacy_same_document 由迁移工具写入（同文档内在关系）；
+# explicit_binding 由人工核实后的管理端点写入（T64 显式绑定工作流）。
+LEGACY_SAME_DOCUMENT = "legacy_same_document"
+EXPLICIT_BINDING = "explicit_binding"
 
 
 class PatientDomainError(RuntimeError):
@@ -125,36 +133,71 @@ class ClinicalPatientRepository:
         return await self.collection.find_one(query, session=session)
 
     async def resolve_self(self, account_id, *, session=None):
-        """Resolve only an explicit migrated same-document account relation.
+        """Resolve a verified account relation through its audited link origin.
 
-        The caller supplies its authenticated local account ID. Other binding
-        origins require a separately reviewed binding workflow.
+        The caller supplies its authenticated local account ID. Two origins are
+        supported, both requiring reviewer + evidence audit and a live reverse
+        check (active local patient account, active canonical clinical record):
+
+        - `legacy_same_document`: the migrated intrinsic same-document relation.
+          Requires ID alignment (account ID == patient ID == legacy_user_id);
+          that alignment is specific to this origin, never a general rule.
+        - `explicit_binding`: a separately reviewed binding created through
+          `bind_account` for patients without a same-document history. The
+          clinical patient is resolved by the link's own patient_id; no
+          legacy_user_id or ID alignment is required.
         """
         await require_canonical(self.db, session=session)
         identifier = str(account_id)
         link = await self.db[ACCOUNT_LINKS].find_one({"account_id": identifier,
-            "status": "verified", "source": "legacy_same_document"}, session=session)
+            "status": "verified", "source": LEGACY_SAME_DOCUMENT}, session=session)
         audit = link.get("audit") if link else None
-        if (not link or not isinstance(audit, dict)
+        if (link and isinstance(audit, dict)
+                and link.get("schema_version") == SCHEMA_VERSION
+                and link.get("patient_id") == identifier
+                and str(link.get("account_document_id")) == identifier
+                and audit.get("reviewer") and audit.get("evidence_reference")
+                and audit.get("operation") == "legacy_same_document_migration"
+                and isinstance(audit.get("at"), datetime)):
+            ids = [identifier]
+            if ObjectId.is_valid(identifier):
+                ids.append(ObjectId(identifier))
+            accounts = await self.db.users.find({"_id": {"$in": ids}}, session=session).to_list(length=2)
+            if (len(accounts) == 1 and accounts[0]["_id"] == link["account_document_id"]
+                    and accounts[0].get("role") == "patient"
+                    and accounts[0].get("is_active", True) is True):
+                patient = await self.get(identifier, active_only=True, session=session)
+                if patient and patient.get("legacy_user_id") == identifier and patient["_id"] == accounts[0]["_id"]:
+                    return patient
+        # legacy 载体未命中或校验失败时才探测显式绑定；account_id 全局唯一
+        # 索引保证同一账号不可能同时存在两种 origin 的链接，互斥由库承担。
+        return await self._resolve_explicit_binding(identifier, session=session)
+
+    async def _resolve_explicit_binding(self, identifier, *, session=None):
+        """Reverse-check an explicit binding link without same-document rules."""
+        link = await self.db[ACCOUNT_LINKS].find_one({"account_id": identifier,
+            "status": "verified", "source": EXPLICIT_BINDING}, session=session)
+        audit = link.get("audit") if link else None
+        # 显式绑定的审计是追加式 list：首条为绑定（explicit_binding），停用追加
+        # explicit_binding_disable。任何条目缺凭证/时间/操作即整体 fail-closed。
+        if (not link or not isinstance(audit, list) or not audit
+                or not all(isinstance(entry, dict) and entry.get("reviewer")
+                           and entry.get("evidence_reference")
+                           and entry.get("operation")
+                           and isinstance(entry.get("at"), datetime)
+                           for entry in audit)
+                or audit[0].get("operation") != "explicit_binding"
                 or link.get("schema_version") != SCHEMA_VERSION
-                or link.get("patient_id") != identifier
+                or not ObjectId.is_valid(identifier)
                 or str(link.get("account_document_id")) != identifier
-                or not audit.get("reviewer") or not audit.get("evidence_reference")
-                or audit.get("operation") != "legacy_same_document_migration"
-                or not isinstance(audit.get("at"), datetime)):
+                or not isinstance(link.get("patient_id"), str)):
             return None
-        ids = [identifier]
-        if ObjectId.is_valid(identifier):
-            ids.append(ObjectId(identifier))
-        accounts = await self.db.users.find({"_id": {"$in": ids}}, session=session).to_list(length=2)
-        if (len(accounts) != 1 or accounts[0]["_id"] != link["account_document_id"]
-                or accounts[0].get("role") != "patient"
-                or accounts[0].get("is_active", True) is not True):
+        account = await self.db.users.find_one({"_id": ObjectId(identifier)}, session=session)
+        if (not account or str(account["_id"]) != identifier
+                or account.get("role") != "patient"
+                or account.get("is_active", True) is not True):
             return None
-        patient = await self.get(identifier, active_only=True, session=session)
-        if patient and patient.get("legacy_user_id") == identifier and patient["_id"] == accounts[0]["_id"]:
-            return patient
-        return None
+        return await self.get(link["patient_id"], active_only=True, session=session)
 
     async def get_response(self, patient_id, *, active_only=False):
         document = await self.get(patient_id, active_only=active_only)
@@ -241,3 +284,108 @@ class ClinicalPatientRepository:
             # Inactive existing records are conflicts too; never reactivate.
             raise PatientDomainError("SOURCE_PATIENT_ALREADY_EXISTS") from None
         return document
+
+    @staticmethod
+    def _binding_review(reviewer, evidence_reference):
+        """Shared human-review validation for the explicit binding workflow."""
+        if (not isinstance(reviewer, str) or not reviewer.strip()
+                or not isinstance(evidence_reference, str) or not evidence_reference.strip()):
+            raise PatientDomainError("PATIENT_REVIEW_REQUIRED")
+        reviewer = reviewer.strip()
+        evidence_reference = evidence_reference.strip()
+        if len(reviewer) > 200 or len(evidence_reference) > 1024:
+            raise PatientDomainError("INVALID_PATIENT_REVIEW_REFERENCE")
+        return reviewer, evidence_reference
+
+    async def bind_account(self, patient_id, *, account_id, reviewer,
+                           evidence_reference, session=None):
+        """Create an explicitly reviewed verified account↔patient link.
+
+        Human review is a precondition, not something this primitive can attest:
+        the caller must verify that the local account really belongs to this
+        clinical patient before invoking. The link carries an independent
+        `explicit_binding` origin with reviewer/evidence/time audit and the
+        bound account document ID.
+
+        Mutual exclusion is reject-only, never an implicit replace: the
+        existing unique indexes (`patient_account_unique`, `patient_self_link_unique`)
+        admit at most one link document per account and per patient across all
+        origins, verified or disabled. A patient or account with any existing
+        link (including a disabled `legacy_same_document` artifact, which is
+        part of the migration baseline coverage and must not be rewritten) is
+        rejected with `PATIENT_ACCOUNT_LINK_CONFLICT`; `DuplicateKeyError` on
+        the insert closes concurrent races to the same error. Disabled links
+        are terminal documents that keep occupying their unique slots —
+        rebinding requires the reviewed manual reconciliation described in the
+        module README, never an automatic revive.
+
+        The clinical patient must exist and be active, and the account must be
+        exactly one active local `role: "patient"` document addressed by its
+        ObjectId; account activity is re-checked on every `resolve_self`, so a
+        later deactivation takes effect without touching the link.
+        """
+        await require_canonical(self.db, session=session)
+        reviewer, evidence_reference = self._binding_review(reviewer, evidence_reference)
+        if not isinstance(account_id, str) or not ObjectId.is_valid(account_id):
+            raise PatientDomainError("INVALID_PATIENT_ACCOUNT")
+        identifier = str(patient_id)
+        if not identifier:
+            raise PatientDomainError("PATIENT_NOT_FOUND")
+        patient = await self.get(identifier, active_only=True, session=session)
+        if patient is None:
+            raise PatientDomainError("PATIENT_NOT_FOUND")
+        account_oid = ObjectId(account_id)
+        account = await self.db.users.find_one({"_id": account_oid}, session=session)
+        if (not account or account.get("role") != "patient"
+                or account.get("is_active", True) is not True):
+            raise PatientDomainError("INVALID_PATIENT_ACCOUNT")
+        existing = await self.db[ACCOUNT_LINKS].find_one(
+            {"$or": [{"patient_id": identifier}, {"account_id": account_id}]},
+            session=session)
+        if existing is not None:
+            raise PatientDomainError("PATIENT_ACCOUNT_LINK_CONFLICT")
+        now = datetime.now(timezone.utc)
+        link = {"_id": f"explicit:{identifier}", "account_id": account_id,
+                "account_document_id": account_oid, "patient_id": identifier,
+                "source": EXPLICIT_BINDING, "schema_version": SCHEMA_VERSION,
+                "status": "verified", "bound_at": now,
+                # 追加式审计 list（与 legacy_same_document 的单条 dict 不同）：
+                # 绑定首条 + 后续状态变更逐条追加，停用经 $push 原子写入。
+                "audit": [{"reviewer": reviewer, "evidence_reference": evidence_reference,
+                           "operation": "explicit_binding", "at": now}]}
+        try:
+            await self.db[ACCOUNT_LINKS].insert_one(link, session=session)
+        except DuplicateKeyError:
+            raise PatientDomainError("PATIENT_ACCOUNT_LINK_CONFLICT") from None
+        return link
+
+    async def disable_account_link(self, patient_id, *, reviewer,
+                                   evidence_reference, session=None):
+        """Disable the explicit verified link; reuse the verified→disabled state machine.
+
+        Atomic conditional update: only a currently verified `explicit_binding`
+        link for this patient transitions, with the disable audit appended to
+        the same document. The link document is never deleted and never revived.
+        `legacy_same_document` links are migration artifacts and stay outside
+        this workflow (`PATIENT_ACCOUNT_LINK_CONFLICT`); an absent link is
+        `PATIENT_ACCOUNT_LINK_NOT_FOUND`.
+        """
+        await require_canonical(self.db, session=session)
+        reviewer, evidence_reference = self._binding_review(reviewer, evidence_reference)
+        identifier = str(patient_id)
+        now = datetime.now(timezone.utc)
+        updated = await self.db[ACCOUNT_LINKS].update_one(
+            {"patient_id": identifier, "source": EXPLICIT_BINDING, "status": "verified"},
+            {"$set": {"status": "disabled", "disabled_at": now},
+             "$push": {"audit": {"operation": "explicit_binding_disable",
+                                 "reviewer": reviewer,
+                                 "evidence_reference": evidence_reference, "at": now}}},
+            session=session)
+        if updated.modified_count == 1:
+            return await self.db[ACCOUNT_LINKS].find_one(
+                {"patient_id": identifier, "source": EXPLICIT_BINDING}, session=session)
+        existing = await self.db[ACCOUNT_LINKS].find_one(
+            {"patient_id": identifier}, session=session)
+        if existing is None:
+            raise PatientDomainError("PATIENT_ACCOUNT_LINK_NOT_FOUND")
+        raise PatientDomainError("PATIENT_ACCOUNT_LINK_CONFLICT")
