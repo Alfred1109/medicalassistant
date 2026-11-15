@@ -17,7 +17,7 @@
 
 全部协议字段假设见 JMD540_PROTOCOL_ASSUMPTIONS（逐条含核实方式）。
 
-模拟回放器说明（REM02 红线）：
+模拟回放器说明（REM02 约定）：
 - JMD540SimulatedReplayer 输出完全确定性（无 random），帧值来自固定
   常量表 JMD540_SIMULATED_FRAMES，仅用于测试与演示链路；
 - 每帧强制携带 {"simulated": true}，入库 metadata.source 为

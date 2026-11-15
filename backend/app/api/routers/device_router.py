@@ -490,7 +490,7 @@ async def replay_simulated_data(
 ):
     """模拟数据回放（仅 admin，测试/演示用）。
 
-    REM02 红线：回放读数强制携带 simulated 标记，metadata.source=
+    REM02 约定：回放读数强制携带 simulated 标记，metadata.source=
     "automated_simulated_replay"，绝不冒充真实设备采集；除来源标记外，
     质量校验/幂等/分析链与真实上报完全一致。
     """

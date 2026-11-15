@@ -47,7 +47,7 @@
 
 ## 批次 4：需设计决策（不动手，先拍板）
 
-1. **ConfigStore 统一**：6+ 配置模式收敛为参数化 ConfigStore（fail 语义刻意分化必须保留为参数）；icf 读时播种违反启动红线，外迁到维护脚本/首写路径。
+1. **ConfigStore 统一**：6+ 配置模式收敛为参数化 ConfigStore（fail 语义刻意分化必须保留为参数）；icf 读时播种违反启动期不隐式建集合的约定，外迁到维护脚本/首写路径。
 2. **legacy is_active 精化上提**（R1-L2）：会改变 legacy 停用患者可见性契约，涉及与 C1 业务决策（停用患者可见性口径）联动。
 3. **双域分支清理登记**：给每个 legacy 分支打两类标签——①域分派分支（迁移完可删）②legacy 数据形态兼容（legacy_user_id/submission_history 等，**永不删除**）——R5 指出目前无标注是清理最大执行风险。
 4. **device_data 幂等唯一索引**：先跑盘点（沿 label_uniqueness_audit 流程）再建。

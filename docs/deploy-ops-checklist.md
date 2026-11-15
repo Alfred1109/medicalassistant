@@ -10,7 +10,7 @@
 
 ## 一、首次部署
 
-### 1. MongoDB：nofile ulimit 必须配置（红线级）
+### 1. MongoDB：nofile ulimit 必须配置
 
 - **要点**：数据卷内孤儿 `.wt` 文件堆积 + 容器默认 `nofile=1024` 会导致
   mongod 文件描述符耗尽 crash-loop（`epoll: Too many open files`）。
@@ -127,7 +127,7 @@
   计数与索引清单、`patient_domain_state` 存在性与 mode）。
 - **调度频率建议（RPO）**：≤ 24h 每日全量；高频写入期可收紧至 ≤ 1h；
   备份窗口选低峰（`docs/backup-restore-plan.md` §2.1，建议值待业务确认）。
-- **告警红线**：备份失败需可见，不能静默失败——现有 `backup_schedule`
+- **告警要求**：备份失败需可见，不能静默失败——现有 `backup_schedule`
   的 except-日志模式即静默失败反例（`docs/backup-restore-plan.md` §6）。
 - **验证命令**（单次手工备份，本机 2026-11-14 演练已验证；本机无
   mongodump 二进制，经 docker 包装执行）：
@@ -205,7 +205,7 @@
     均由**部署流程**排除（工具无法证明不存在未知外部 Mongo 写者）。
 - **波次结构**：波次 0（门槛核验）→ 波次 1（授权内核与读取面）→
   波次 2–6（写路径/提醒/统计/集成/新患者创建），每波回滚方式为「域开关
-  回拨」（见下文红线）。波次 1 启用前还有业务决策项（停用患者的统一 404
+  回拨」（见下文硬性约束）。波次 1 启用前还有业务决策项（停用患者的统一 404
   口径）。
 
 ### 3. 显式回拨载体未落地前 canonical 不得启用
@@ -304,9 +304,9 @@
 
 ---
 
-## 五、已知限制与红线
+## 五、硬性约束与已知限制
 
-| # | 红线/限制 | 依据 |
+| # | 约束/限制 | 依据 |
 |---|---|---|
 | 1 | **不得删除 `patient_domain_state` 文档**。删除会静默降级回 legacy：无 503、无告警，canonical 数据仍在但不再被消费，fail-closed 保障整体失效；回拨必须以显式域开关状态变更执行并留痕（变更单+复核人）。 | `docs/patient-domain-cutover-plan.md` §5.1；`backend/app/patients/repository.py:38-62` |
 | 2 | **显式回拨载体落地前 canonical 不得启用**（显式 `mode:"legacy"` 当前也被 fail-closed 拒绝，无安全回拨路径）。 | 同上 §5.1 第 3 条 |

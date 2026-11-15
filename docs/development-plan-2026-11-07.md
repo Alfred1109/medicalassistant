@@ -653,7 +653,7 @@ M1中的API05可先通过契约测试客户端验证初始化、并发变更与�
 ### 运行与运维整合
 
 - 数据导出域感知与死代码处置（`b39866c`）：导出 manifest 记录 `patient_domain_mode`（fail-safe unknown），canonical 清单调整留待波次；报告调度 `start()`/`_scheduler_loop` 起源即未接入属死代码，删除并登记恢复条件「先加原子领取」（[处置记录](./t53-dead-code-disposal-report-scheduler.md)同步）。
-- 新增[部署运维检查单](./deploy-ops-checklist.md)（`9b8b262`）：首次部署 7 项（nofile ulimit 红线、副本集事务验收、密钥、源端反代与限流 workers=1、填报默认关闭、canonical 未启用默认态）、日常运行（全库备份由应用外调度器执行）、版本升级与迁移、灾难恢复、已知限制与红线 14 条及验证状态汇总；`deploy/mongodb/README.md` 同步。
+- 新增[部署运维检查单](./deploy-ops-checklist.md)（`9b8b262`）：首次部署 7 项（nofile ulimit 必须项、副本集事务验收、密钥、源端反代与限流 workers=1、填报默认关闭、canonical 未启用默认态）、日常运行（全库备份由应用外调度器执行）、版本升级与迁移、灾难恢复、已知限制与硬性约束 14 条及验证状态汇总；`deploy/mongodb/README.md` 同步。
 - 备份调度原子领取（`ee0a9a6`）与备份恢复实机演练（`71f9c5c`）已在 §16 记录，此处引用不重复。
 
 ### 跨系统闭环与源端会话失效边界

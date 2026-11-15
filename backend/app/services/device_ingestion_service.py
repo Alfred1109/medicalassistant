@@ -9,7 +9,7 @@
 职责边界：
 - 协议解析在 device_protocol 适配器内；本服务只做设备无关的质量校验
   （必填、数值范围按指标可配置、时间戳合理性、重复剔除）；
-- 去模拟化红线（REM02）继续有效：唯一"造数"入口是模拟回放器
+- 去模拟化约定（REM02）继续有效：唯一"造数"入口是模拟回放器
   （device_protocol.jmd540.JMD540SimulatedReplayer），其输出强制携带
   simulated 标记，入库 metadata.source="automated_simulated_replay"，
   仅用于测试与演示，绝不冒充真实采集；
