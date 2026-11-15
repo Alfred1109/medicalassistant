@@ -273,6 +273,23 @@ class DeviceService:
             return {"success": True, "message": "设备配置已更新"}
         return await self._device_mutation(device_id, actor, DEVICE_MUTATE_ROLES, persist)
 
+    async def set_gateway_credential(self, device_id: str, *, actor=None,
+                                     device_key: Optional[str] = None) -> Dict:
+        """登记/轮换设备网关凭证（T74 自动采集接入）。
+
+        设备侧采集端以 device_key 作为共享凭证上报网关；生成值仅在响应中
+        透出一次（库内留存用于比对，厂商正式鉴权方案到位后替换）。
+        走既有设备变更事务与角色围栏（doctor/admin）。
+        """
+        from .device_ingestion_service import device_ingestion_service
+        key = device_key or device_ingestion_service.generate_device_key()
+        async def persist(db, device, session):
+            await db.devices.update_one({"_id": ObjectId(device_id)}, {"$set": {
+                "device_key": key, "updated_at": datetime.utcnow()}}, session=session)
+            return {"success": True, "message": "设备网关凭证已登记",
+                    "device_key": key}
+        return await self._device_mutation(device_id, actor, DEVICE_MUTATE_ROLES, persist)
+
     async def get_supported_data_types(self, device_type: Optional[str] = None) -> Dict:
         """
         获取支持的数据类型

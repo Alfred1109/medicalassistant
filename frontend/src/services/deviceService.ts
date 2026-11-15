@@ -1,4 +1,5 @@
 import { apiService } from './api';
+import api from './api';
 
 // 设备类型定义（与后端 DeviceResponse 字段对齐，snake_case）
 export interface Device {
@@ -179,3 +180,140 @@ const deviceService = {
 };
 
 export { deviceService };
+
+// ══ T74 设备数据接入网关（自动采集）══════════════════════════════════════
+
+// 自动采集读数条目（对齐网关入库的 device_data 文档）
+export interface AutomatedReading {
+  id?: string;
+  timestamp: string;
+  data_type: string;
+  value: number;
+  unit: string;
+  quality_flags?: string[] | null;
+  metadata?: {
+    source?: string; // automated / automated_simulated_replay / 手工登记
+    session_id?: string | null;
+    simulated?: boolean;
+  } | null;
+}
+
+// 质量报告（GET /devices/{id}/quality-report）
+export interface DeviceQualityReport {
+  device_id: string;
+  window: { start: string | null; end: string | null };
+  total_automated: number;
+  passed: number;
+  flagged: number;
+  pass_rate: number | null;
+  flags: Record<string, number>;
+  out_of_range_count: number;
+}
+
+// 采集会话（POST/GET /devices/{id}/sessions）
+export interface CollectionSession {
+  _id: string;
+  device_id: string;
+  device_sn?: string | null;
+  patient_id: string;
+  status: string; // active / ended / cancelled
+  plan_id?: string | null;
+  exercise_id?: string | null;
+  linkage_status: 'linked' | 'registered' | 'none';
+  linkage_error?: string | null;
+  started_at: string;
+  ended_at?: string | null;
+  summary?: Record<string, any> | null;
+  notes?: string | null;
+}
+
+// 协议假设条目（GET /devices/{id}/gateway/protocol-assumptions）
+export interface ProtocolAssumption {
+  claim: string;
+  verify: string;
+  impact: string;
+}
+
+export interface ProtocolAssumptionsResponse {
+  device_id: string;
+  model: string | null;
+  adapter_id: string | null;
+  message?: string;
+  assumptions: ProtocolAssumption[];
+}
+
+// 网关上报响应（readings 数组含逐条 written/duplicate/rejected 结果）
+export interface GatewayIngestResult {
+  success: boolean;
+  device: { id: string; device_sn: string };
+  accepted_count: number;
+  duplicate_count: number;
+  rejected_count: number;
+  readings: Array<{
+    action: 'written' | 'duplicate' | 'rejected';
+    frame_index: number;
+    data_type: string;
+    timestamp: string;
+    quality_flags: string[];
+    reason?: string;
+    error?: string;
+  }>;
+}
+
+const deviceGateway = {
+  // 自动采集数据（复用 GET /devices/{id}/data，前端按来源过滤展示）
+  getAutomatedReadings: async (deviceId: string, limit = 50): Promise<AutomatedReading[]> => {
+    const response = await api.get(`/devices/${deviceId}/data`, {
+      params: { limit },
+    });
+    const rows: AutomatedReading[] = Array.isArray(response.data) ? response.data : [];
+    return rows.filter(
+      (row) => row.metadata?.source === 'automated' || row.metadata?.source === 'automated_simulated_replay',
+    );
+  },
+
+  getQualityReport: async (
+    deviceId: string,
+    params?: { start?: string; end?: string },
+  ): Promise<DeviceQualityReport> => {
+    const response = await api.get(`/devices/${deviceId}/quality-report`, { params });
+    return response.data;
+  },
+
+  startCollectionSession: async (
+    deviceId: string,
+    body: { plan_id?: string; exercise_id?: string; notes?: string },
+  ): Promise<CollectionSession> => {
+    const response = await api.post(`/devices/${deviceId}/sessions`, body);
+    return response.data;
+  },
+
+  endCollectionSession: async (deviceId: string, sessionId: string, cancel = false): Promise<CollectionSession> => {
+    const response = await api.post(`/devices/${deviceId}/sessions/${sessionId}/end`, null, {
+      params: { cancel },
+    });
+    return response.data;
+  },
+
+  listCollectionSessions: async (deviceId: string, limit = 50): Promise<CollectionSession[]> => {
+    const response = await api.get(`/devices/${deviceId}/sessions`, { params: { limit } });
+    return Array.isArray(response.data) ? response.data : [];
+  },
+
+  getProtocolAssumptions: async (deviceId: string): Promise<ProtocolAssumptionsResponse> => {
+    const response = await api.get(`/devices/${deviceId}/gateway/protocol-assumptions`);
+    return response.data;
+  },
+
+  // 模拟数据回放（仅 admin，测试/演示；读数带 simulated 标记）
+  replaySimulated: async (deviceId: string, frameCount = 4): Promise<GatewayIngestResult> => {
+    const response = await api.post(
+      `/devices/${deviceId}/gateway/replay-simulated`,
+      null,
+      { params: { frame_count: frameCount } },
+    );
+    return response.data;
+  },
+};
+
+export { deviceGateway };

@@ -18,6 +18,7 @@ import {
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import apiClient from '../../services/api';
+import DeviceIngestionPanel from './DeviceIngestionPanel';
 
 // 设备管理：数据来自真实接口 GET /api/devices（admin 在设备读取角色白名单内）
 // 设备生命周期由绑定/解绑流程管理，后端不存在管理员侧设备增删接口，故不提供添加/删除入口
@@ -41,6 +42,8 @@ const DeviceManagement: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
+  // T74：自动采集详情面板（时序/质量/会话/协议假设）
+  const [panelDevice, setPanelDevice] = useState<DeviceRow | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -198,12 +201,13 @@ const DeviceManagement: React.FC = () => {
               <TableCell>电量</TableCell>
               <TableCell>最后连接时间</TableCell>
               <TableCell>状态</TableCell>
+              <TableCell>自动采集</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {filteredDevices.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8}>
+                <TableCell colSpan={9}>
                   <Box sx={{ p: 4, textAlign: 'center' }}>
                     <Typography variant="body1" color="text.secondary">
                       暂无设备数据
@@ -232,12 +236,30 @@ const DeviceManagement: React.FC = () => {
                       size="small"
                     />
                   </TableCell>
+                  <TableCell>
+                    <Button
+                      size="small"
+                      onClick={() => setPanelDevice(device)}
+                    >
+                      详情
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
       </TableContainer>
+
+      {/* T74：自动采集详情（时序列表/简图、质量标记、会话管理、协议假设） */}
+      {panelDevice && (
+        <DeviceIngestionPanel
+          deviceId={panelDevice.id}
+          deviceName={panelDevice.name}
+          open={!!panelDevice}
+          onClose={() => setPanelDevice(null)}
+        />
+      )}
     </Box>
   );
 };

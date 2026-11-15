@@ -4,7 +4,7 @@ import api from './httpClient';
 import type { LoginCredentials, TokenResponse, User } from '../types/api.types';
 import type { Patient, PatientHealthRecord } from '../types/patient.types';
 import type { Doctor } from '../types/doctor.types';
-import type { FollowUpRecord, FollowUpWorkbenchQuery, FollowUpWorkbenchPage, ReviewFollowUpRequest, ReEvaluateFollowUpRequest } from '../types/followup';
+import type { FollowUpRecord, FollowUpWorkbenchQuery, FollowUpWorkbenchPage, ReviewFollowUpRequest, ReEvaluateFollowUpRequest, FollowUpSummaryPayload } from '../types/followup';
 
 // API服务方法
 export const apiService = {
@@ -173,6 +173,14 @@ export const apiService = {
 
   markFollowUpLost: (followUpId: string, data: { reason: string }): Promise<AxiosResponse<FollowUpRecord>> =>
     api.post(`/health-records/followups/${followUpId}/lost`, data),
+
+  // T73 人工恢复失访（lost -> awaiting_fill，原因入审计）
+  restoreFollowUpLost: (followUpId: string, data: { reason: string }): Promise<AxiosResponse<FollowUpRecord>> =>
+    api.post(`/health-records/followups/${followUpId}/restore`, data),
+
+  // T73 随访小结（待审阅/已完成节点可写，重复提交覆盖并留审计）
+  setFollowUpSummary: (followUpId: string, data: FollowUpSummaryPayload): Promise<AxiosResponse<FollowUpRecord>> =>
+    api.post(`/health-records/followups/${followUpId}/summary`, data),
 
   // 健康数据(体征、化验结果等)
   getHealthData: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<any[]>> =>

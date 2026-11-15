@@ -2,7 +2,7 @@
 设备路由器
 处理设备管理相关API请求
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from bson import ObjectId
@@ -19,6 +19,15 @@ from ...services.device_service import (
     DEVICE_MUTATE_ROLES,
 )
 from ...core.auth import get_current_active_user
+from ...services.device_ingestion_service import (
+    device_ingestion_service,
+    DeviceIngestionError,
+)
+
+
+def get_device_ingestion_service() -> Any:
+    """网关服务依赖（测试可 dependency_overrides 替换）。"""
+    return device_ingestion_service
 
 
 async def _get_device_or_404(device_id: str, device_api) -> Dict:
@@ -320,3 +329,256 @@ async def configure_device(
 
     result = await device_api.configure_device(device_id, config.dict(exclude_unset=True), actor=current_user)
     return result
+
+
+# ══ T74 设备数据接入网关 ══════════════════════════════════════════════════
+# 设备侧（采集端）推送通道：以 device_sn + device_key 设备凭证鉴权（非用户
+# JWT）；协议解析在 device_protocol 适配器包内（JMD-540 为骨架+假设清单），
+# 质量校验与幂等在 device_ingestion_service 统一管道，分析/预警复用
+# device_analysis_service。
+#
+# 协议假设核实清单见 GET /devices/{device_id}/gateway/protocol-assumptions，
+# 全部假设集中在 backend/app/services/device_protocol/jmd540.py。
+
+
+class GatewayIngestRequest(BaseModel):
+    """设备上报载荷（帧结构由适配器假设定义，此处不做字段白名单）。"""
+    device_sn: str = Field(min_length=1, max_length=80, description="设备序列号")
+    readings: List[Dict[str, Any]] = Field(..., description="原始上报帧列表（1..500）")
+    device_key: Optional[str] = Field(None, description="设备凭证（亦可经 X-Device-Key 头传递）")
+
+
+class GatewayHeartbeatRequest(BaseModel):
+    device_sn: str = Field(min_length=1, max_length=80, description="设备序列号")
+    device_key: Optional[str] = Field(None, description="设备凭证（亦可经 X-Device-Key 头传递）")
+
+
+async def _authenticate_gateway(
+    device_sn: str, device_key: Optional[str],
+    ingestion: Any,
+) -> Dict:
+    """网关设备凭证鉴权 → 设备文档；失败转对应 4xx。"""
+    try:
+        return await ingestion.authenticate_device(device_sn, device_key)
+    except DeviceIngestionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@router.post("/gateway/ingest")
+async def gateway_ingest(
+    payload: GatewayIngestRequest,
+    request: Request,
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """设备数据上报端点（单条与批上报统一：readings 列表 1..500 帧）。
+
+    链路：凭证鉴权 → 适配器解析 → 质量管道（必填/范围/时序/幂等去重）
+    → device_data 入库（来源 automated、原始载荷留存）→ 触发既有分析预警链。
+    纯失败帧不入库，逐条 error 在 rejected 中返回。
+    """
+    device_key = payload.device_key or request.headers.get("X-Device-Key")
+    device = await _authenticate_gateway(payload.device_sn, device_key, ingestion)
+    try:
+        return await ingestion.ingest(device, payload.readings)
+    except DeviceIngestionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@router.post("/gateway/heartbeat")
+async def gateway_heartbeat(
+    payload: GatewayHeartbeatRequest,
+    request: Request,
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """设备心跳：刷新 last_connected（真实到达才更新），返回当前采集会话。"""
+    device_key = payload.device_key or request.headers.get("X-Device-Key")
+    device = await _authenticate_gateway(payload.device_sn, device_key, ingestion)
+    return await ingestion.heartbeat(device)
+
+
+# ── 网关管理端点（用户鉴权）──────────────────────────────────────────────
+
+
+class GatewayCredentialResponse(BaseModel):
+    success: bool
+    message: str
+    device_key: str = Field(..., description="设备凭证（仅本次响应透出，请即保存）")
+
+
+class CollectionSessionStartRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    plan_id: Optional[str] = Field(None, description="关联康复方案ID（可选）")
+    exercise_id: Optional[str] = Field(None, description="关联方案内运动项ID/名称（可选）")
+    notes: Optional[str] = Field(None, max_length=500)
+
+
+class CollectionSessionResponse(BaseModel):
+    id: str = Field(..., alias="_id")
+    device_id: str
+    device_sn: Optional[str] = None
+    patient_id: str
+    status: str
+    plan_id: Optional[str] = None
+    exercise_id: Optional[str] = None
+    linkage_status: str
+    linkage_error: Optional[str] = None
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    summary: Optional[Dict] = None
+    notes: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+@router.put("/{device_id}/gateway-credential", response_model=GatewayCredentialResponse)
+async def set_gateway_credential(
+    device_id: str,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+):
+    """登记/轮换设备网关凭证（变更围栏：doctor/admin 或属主患者）。
+
+    厂商正式鉴权方案（token/证书）到位前，device_key 为过渡共享凭证；
+    假设清单见 device_protocol/jmd540.py（凭证机制假设条目）。
+    """
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_MUTATE_ROLES, write=True)
+    result = await device_api.set_gateway_credential(device_id, actor=current_user)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "凭证登记失败"))
+    return result
+
+
+@router.get("/{device_id}/gateway/protocol-assumptions")
+async def get_protocol_assumptions(
+    device_id: str,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """协议假设核实清单：该设备型号适配器全部待核实协议字段假设。"""
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES)
+    adapter = ingestion._select_adapter(device)
+    if adapter is None:
+        return {
+            "device_id": device_id,
+            "model": device.get("model"),
+            "adapter_id": None,
+            "message": f"设备型号 {device.get('model')!r} 未登记协议适配器",
+            "assumptions": [],
+        }
+    return {
+        "device_id": device_id,
+        "model": device.get("model"),
+        "adapter_id": adapter.adapter_id,
+        "assumptions": adapter.describe_assumptions(),
+    }
+
+
+@router.post("/{device_id}/gateway/replay-simulated")
+async def replay_simulated_data(
+    device_id: str,
+    frame_count: int = Query(4, ge=1, le=500),
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """模拟数据回放（仅 admin，测试/演示用）。
+
+    REM02 红线：回放读数强制携带 simulated 标记，metadata.source=
+    "automated_simulated_replay"，绝不冒充真实设备采集；除来源标记外，
+    质量校验/幂等/分析链与真实上报完全一致。
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="模拟回放仅管理员可用（演示数据隔离）")
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_MUTATE_ROLES, write=True)
+    try:
+        return await ingestion.replay_simulated(device, frame_count)
+    except DeviceIngestionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@router.get("/{device_id}/quality-report")
+async def get_device_quality_report(
+    device_id: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """自动采集数据质量报告：按设备/时段的合格率与质量标记统计。"""
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES)
+    return await ingestion.quality_report(device_id, start=start, end=end)
+
+
+# ── 采集会话 ─────────────────────────────────────────────────────────────
+
+
+@router.post("/{device_id}/sessions", response_model=CollectionSessionResponse, status_code=201)
+async def start_collection_session(
+    device_id: str,
+    payload: CollectionSessionStartRequest,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """开始采集会话：关联患者与（可选）康复方案执行项（能核实则打通，
+    否则登记 linkage=registered 待人工关联）。"""
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES, write=True)
+    patient_id = str(device.get("patient_id")) if device.get("patient_id") else None
+    if not patient_id:
+        raise HTTPException(status_code=409, detail="设备未绑定患者，无法开始采集会话")
+    try:
+        session = await ingestion.start_collection_session(
+            device, patient_id, plan_id=payload.plan_id,
+            exercise_id=payload.exercise_id, notes=payload.notes)
+    except DeviceIngestionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return session
+
+
+@router.post("/{device_id}/sessions/{session_id}/end", response_model=CollectionSessionResponse)
+async def end_collection_session(
+    device_id: str,
+    session_id: str,
+    cancel: bool = Query(False, description="true = 取消会话（而非正常结束）"),
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """结束/取消采集会话：写会话摘要（读数/质量计数），linked 会话登记
+    康复方案执行进度（completed=False，不替患者虚报训练完成）。"""
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES, write=True)
+    session = await ingestion.end_collection_session(
+        device, session_id, cancel=cancel)
+    if not session:
+        raise HTTPException(status_code=404, detail="采集会话不存在或已结束")
+    return session
+
+
+@router.get("/{device_id}/sessions", response_model=List[CollectionSessionResponse])
+async def list_collection_sessions(
+    device_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """采集会话列表（最近优先）。"""
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES)
+    return await ingestion.list_collection_sessions(device_id, limit=limit)
