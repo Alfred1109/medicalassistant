@@ -2,7 +2,7 @@
 import json
 from datetime import datetime, timezone
 
-from app.patients.repository import domain_mode as read_patient_domain_mode
+from app.core.patient_access import patient_domain_mode_safe
 
 # T53（域感知导出）：集合清单本身仍按 legacy 全量形态保留——canonical 模式下
 # patients 读取分派与集合清单调整属患者域波次工作（users 将只承载账号，
@@ -39,13 +39,11 @@ async def _patient_domain_mode(db) -> str:
     导出是只读运维操作，域状态不可用绝不阻断导出：状态文档缺失/显式 legacy
     如实返回 legacy；状态损坏（未知 mode、错误 schema_version）或传输层读取
     失败一律标注 unknown，由 manifest 诚实披露，而不是猜测域或让导出失败。
-    （域状态损坏走 PatientDomainError，传输层失败走 PyMongoError，均由
-    repository.domain_mode 抛出，此处统一降级为 unknown。）
+    fail-safe unknown 包装已收敛进 core/patient_access.patient_domain_mode_safe
+    （redundancy review 批次 1，原 analytics/data_export 双份包装合一），此处
+    保留具名转发维持模块内调用面与历史语义注释。
     """
-    try:
-        return await read_patient_domain_mode(db)
-    except Exception:
-        return "unknown"
+    return await patient_domain_mode_safe(db)
 
 
 async def data_export_bytes(db) -> bytes:

@@ -55,6 +55,46 @@ def is_domain_state_unavailable(error: PatientAccessError) -> bool:
     return error.error_code == "PATIENT_DOMAIN_STATE_UNAVAILABLE"
 
 
+async def patient_domain_mode_safe(db, *, fallback: str = "unknown") -> str:
+    """观察域开关的 fail-safe 口径（统计聚合/只读导出等展示类路径专用）。
+
+    读取失败或观察到不可用状态时返回 fallback（默认 "unknown"），绝不猜测
+    域回退。与 patient_domain_mode 的 fail-closed（503 拒绝请求）刻意分化：
+    只读展示路径域状态不可用不应 500 阻断页面，但 unknown ≠ legacy——消费方
+    收到 unknown 必须把患者类指标降级为不可用并如实标记，不得按 legacy 聚合
+    （canonical 患者会漏算、legacy 停用患者会误算）。
+
+    收敛自 analytics_service.observe_patient_domain_state 与
+    operations/data_export._patient_domain_mode 的逐字相同包装（批次 1，
+    redundancy-review-2026-11-15）；前者保留为具名转发以维持既有导入面。
+    """
+    try:
+        return await patient_domain_mode(db)
+    except Exception:
+        return fallback
+
+
+def reraise_or_domain_error(error: PatientAccessError, factory) -> None:
+    """is_domain_state_unavailable 分流助手：域状态不可用（503）原样透传，
+    其余归属类失败交给 factory(error) 构造调用方域错误后抛出。
+
+    收敛自消费方的 catch-all 五连模板（followup_access / patient_router /
+    quality_issue_service / forms 集成侧等）：
+
+        except PatientAccessError as error:
+            if is_domain_state_unavailable(error):
+                raise
+            raise factory(error)
+
+    factory 收到原始 PatientAccessError，可按 error_code 细分（如
+    PATIENT_NOT_FOUND 与 PATIENT_NOT_ASSIGNED 分支）。批次 1 仅提供助手，
+    既有调用点随后续波段迁移（相关服务文件属并行任务在途，禁改）。
+    """
+    if is_domain_state_unavailable(error):
+        raise error
+    raise factory(error)
+
+
 async def _canonical_patient_read(operation):
     """canonical 对象读取的异常包装（与 patient_domain_mode 同款 fail-closed）。
 

@@ -19,7 +19,7 @@ from fastapi import HTTPException
 from pymongo import ASCENDING
 from pymongo.errors import DuplicateKeyError
 
-from app.core.patient_access import patient_domain_mode
+from app.core.patient_access import patient_assignment_field, patient_domain_mode
 from app.db.transactions import run_transaction
 from app.patients.repository import (PATIENTS, ClinicalPatientRepository,
                                      PatientDomainError, source_key)
@@ -265,7 +265,10 @@ async def set_imported_care(db, actor, patient_id, practitioner_id, *, assigned,
         raise HTTPException(409, detail={"code": "CARE_ROLE_MISMATCH"})
     if practitioner.get("role") not in {"doctor", "health_manager"}:
         raise HTTPException(409, detail={"code": "CARE_ROLE_MISMATCH"})
-    field = "practitioners" if practitioner["role"] == "doctor" else "health_managers"
+    # 角色输入域已由上方守卫限定为 {"doctor", "health_manager"}，
+    # patient_assignment_field 的未知角色抛错收紧在此不可达，行为逐字等价
+    # （redundancy review 批次 1）
+    field = patient_assignment_field(practitioner["role"])
     patient_links = list(clinical.get(field) or [])
     clinician_links = list(practitioner.get("patients") or [])
     practitioner_ref, patient_ref = str(practitioner["_id"]), (

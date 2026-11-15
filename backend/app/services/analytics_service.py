@@ -2,7 +2,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from pymongo.database import Database
 
-from ..core.patient_access import patient_domain_mode
+from ..core.patient_access import patient_domain_mode_safe
 from ..patients.repository import PATIENTS as CANONICAL_PATIENTS_COLLECTION_NAME
 
 # 患者域唯一集合名（legacy 模式：患者统一存于 users 集合，按 role 区分）。
@@ -18,19 +18,18 @@ CANONICAL_PATIENT_MATCH = {"status": "active"}
 
 
 async def observe_patient_domain_state(db) -> str:
-    """观察患者域开关（core/patient_access.patient_domain_mode）；读取失败或
-    观察到未知状态 fail-safe 降级为 "unknown"，绝不猜测域回退。
+    """观察患者域开关（core/patient_access.patient_domain_mode_safe）；读取
+    失败或观察到未知状态 fail-safe 降级为 "unknown"，绝不猜测域回退。
 
-    与 operations/data_export 的 fail-safe unknown 口径一致：统计聚合是只读
+    fail-safe unknown 口径已收敛进 patient_domain_mode_safe（redundancy
+    review 批次 1，原 analytics/data_export 双份包装合一）；本具名转发保留
+    以维持既有导入面（report_scheduler_service 等消费方）。统计聚合是只读
     展示路径，域状态不可用不应 500 阻断页面；但 unknown ≠ legacy——静默回退
     legacy 会把 canonical 患者漏算、把 legacy 停用患者误算，因此 unknown 时
     患者类指标降级为不可用（patientCount=None / 空序列）并由 dataAvailable
     如实标记，非患者指标（医生/设备）照常输出。
     """
-    try:
-        return await patient_domain_mode(db)
-    except Exception:
-        return "unknown"
+    return await patient_domain_mode_safe(db)
 
 
 class AnalyticsService:
@@ -49,10 +48,9 @@ class AnalyticsService:
             db: MongoDB数据库连接
         """
         self.db = db
-        # 患者集合来源按域分派（legacy: PATIENTS_COLLECTION_NAME=users，见
-        # 文件头与 observe_patient_domain_state 注释）；doctors 仍属医生域
+        # 患者集合来源按域分派，见 _patient_source（legacy: users + role 过滤；
+        # canonical: clinical_patients + status=="active"）；doctors 仍属医生域
         # （users 按 role 区分），不在患者读取收敛范围内
-        self.patients_collection = db[PATIENTS_COLLECTION_NAME]
         self.doctors_collection = db.users
         self.devices_collection = db.devices
         # TODO(orphan-read, 待业务决策): rehabilitation_records 是无写入方的孤儿集合
@@ -119,6 +117,26 @@ class AnalyticsService:
         "year": timedelta(days=365),
     }
 
+    # 患者聚合源 legacy 域口径（users + role 过滤，与 _TREND_SOURCES /
+    # _DISTRIBUTION_SOURCES / _COMPARISON_SOURCES 的 patient 条目同源）；
+    # canonical 域口径见 _patient_source。
+    _LEGACY_PATIENT_SOURCE = (PATIENTS_COLLECTION_NAME, {"role": "patient"})
+
+    async def _patient_source(self):
+        """患者聚合源按域分派（四处重复分派段的提取，redundancy review 批次 1）。
+
+        返回 (集合名, match 过滤条件)；域状态 unknown 返回 None——消费方不得
+        猜测域：统计概览降级为指标不可用（None + dataAvailable 标记），纯列表
+        响应返回空序列（无 unknown 通道，属已知限制）。fail-safe unknown 口径
+        见 observe_patient_domain_state / patient_domain_mode_safe。
+        """
+        mode = await observe_patient_domain_state(self.db)
+        if mode == "canonical":
+            return (CANONICAL_PATIENTS_COLLECTION_NAME, CANONICAL_PATIENT_MATCH)
+        if mode == "legacy":
+            return self._LEGACY_PATIENT_SOURCE
+        return None
+
     @classmethod
     def _trend_bucket_starts(cls, time_range: str) -> List[datetime]:
         """按 time_range 计算趋势序列各桶的起始时间（升序，含当前桶）。"""
@@ -160,18 +178,12 @@ class AnalyticsService:
         # 域切换瞬间该指标存在口径漂移（已知限制，T12 审计登记）。
         # 域状态 unknown：不猜测域，患者指标降级为 None 并由 dataAvailable
         # 标记不可用（非患者指标照常聚合，见 observe_patient_domain_state）。
-        mode = await observe_patient_domain_state(self.db)
-        if mode == "legacy":
-            match = {"role": "patient"}
-            collection = self.patients_collection
-        elif mode == "canonical":
-            match = CANONICAL_PATIENT_MATCH
-            collection = self.db[CANONICAL_PATIENTS_COLLECTION_NAME]
-
-        if mode in ("legacy", "canonical"):
-            patient_count = await collection.count_documents(match)
+        patient_source = await self._patient_source()
+        if patient_source is not None:
+            collection_name, match = patient_source
+            patient_count = await self.db[collection_name].count_documents(match)
             one_week_ago = datetime.utcnow() - timedelta(days=7)
-            previous_patient_count = await collection.count_documents(
+            previous_patient_count = await self.db[collection_name].count_documents(
                 {**match, "created_at": {"$lt": one_week_ago}}
             )
             week_patient_change = ((patient_count - previous_patient_count) / previous_patient_count * 100) if previous_patient_count > 0 else 0
@@ -255,12 +267,10 @@ class AnalyticsService:
 
         collection_name, extra_match = source
         if data_type == "patient":
-            mode = await observe_patient_domain_state(self.db)
-            if mode == "unknown":
+            patient_source = await self._patient_source()
+            if patient_source is None:
                 return []
-            if mode == "canonical":
-                collection_name, extra_match = (
-                    CANONICAL_PATIENTS_COLLECTION_NAME, CANONICAL_PATIENT_MATCH)
+            collection_name, extra_match = patient_source
         _count, _unit, fmt = self._TREND_BUCKETS[time_range]
         starts = self._trend_bucket_starts(time_range)
 
@@ -308,12 +318,10 @@ class AnalyticsService:
 
         collection_name, match, field_expr = source
         if data_type == "patient":
-            mode = await observe_patient_domain_state(self.db)
-            if mode == "unknown":
+            patient_source = await self._patient_source()
+            if patient_source is None:
                 return []
-            if mode == "canonical":
-                collection_name, match = (
-                    CANONICAL_PATIENTS_COLLECTION_NAME, CANONICAL_PATIENT_MATCH)
+            collection_name, match = patient_source
         pipeline = [
             {"$match": match},
             {"$group": {
@@ -360,12 +368,10 @@ class AnalyticsService:
 
         collection_name, extra_match, label = source
         if data_type == "patient":
-            mode = await observe_patient_domain_state(self.db)
-            if mode == "unknown":
+            patient_source = await self._patient_source()
+            if patient_source is None:
                 return []
-            if mode == "canonical":
-                collection_name, extra_match = (
-                    CANONICAL_PATIENTS_COLLECTION_NAME, CANONICAL_PATIENT_MATCH)
+            collection_name, extra_match = patient_source
         window = self._COMPARISON_WINDOW[time_range]
         now = datetime.utcnow()
         current_start = now - window

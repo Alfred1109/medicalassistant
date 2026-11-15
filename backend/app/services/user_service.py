@@ -11,6 +11,7 @@ import math
 from fastapi import HTTPException, status, Request
 
 from app.core.config import settings
+from app.core.patient_access import patient_assignment_field
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, Token, PermissionAssignment, TokenResponse
 from app.core.permissions import ROLE_PERMISSIONS, Permission
 from app.db.mongodb import get_database
@@ -615,9 +616,11 @@ class UserService:
         if not patient or not practitioner or patient.role != "patient" or practitioner.role not in ["doctor", "health_manager"]:
             return None
         
-        # 确定应该更新的字段
-        field_to_update = "practitioners" if practitioner.role == "doctor" else "health_managers"
-        
+        # 确定应该更新的字段（角色输入域已由上方守卫限定为
+        # {"doctor", "health_manager"}，patient_assignment_field 的未知角色
+        # 抛错收紧在此不可达，行为逐字等价——redundancy review 批次 1）
+        field_to_update = patient_assignment_field(practitioner.role)
+
         # Update patient record with practitioner ID
         await self.collection.update_one(
             {"_id": ObjectId(patient_id)},
@@ -649,9 +652,15 @@ class UserService:
         if not patient or not practitioner or patient.role != "patient":
             return None
         
-        # 确定应该更新的字段
+        # 确定应该更新的字段。
+        # 登记待收敛（redundancy review 批次 1）：与 assign_practitioner 不同，
+        # 本方法未校验 practitioner.role（上方守卫只验证 patient.role），角色
+        # 输入域含非标角色（admin/patient/任意账号都可被传入）——改调
+        # patient_assignment_field 会把「未知角色静默落在 health_managers 的
+        # no-op pull」变成抛 PatientAccessError，属行为收紧且输入域不安全，
+        # 故保留原裸三元；待路由/服务层补齐 practitioner 角色校验后再收敛。
         field_to_update = "practitioners" if practitioner.role == "doctor" else "health_managers"
-        
+
         # 从患者记录中移除医生/健管师ID
         await self.collection.update_one(
             {"_id": ObjectId(patient_id)},

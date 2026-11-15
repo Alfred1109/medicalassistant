@@ -1,4 +1,5 @@
 """Pure Mongo query construction for process facts; no clinical scoring rules."""
+from app.core.patient_access import patient_domain_mode
 from app.patients.repository import PATIENTS
 
 FOLLOWUP_STATUSES = ("pending_schedule", "scheduled", "awaiting_fill", "in_review",
@@ -26,10 +27,14 @@ async def resolve_patient_domain(db, *, session=None):
     传入。域状态读取失败/未知状态按 core/patient_access.patient_domain_mode
     原语义 fail-closed 上抛（503）——引用判定结果直接进入质控问题生成/
     复核决策，猜域回退会产出错误的 valid/not_found 结论，与统计展示类
-    fail-safe unknown（analytics_service.observe_patient_domain_state）口径
-    刻意不同。
+    fail-safe unknown（analytics 口径，见 patient_domain_mode_safe）刻意不同。
+
+    评估结论（redundancy review 批次 1）：本入口已是 patient_domain_mode 的
+    直调薄层（fail-closed 语义保持，无重复包装可删）；仅把原函数内延迟
+    import 收敛为模块级（core.patient_access 只依赖 patients/exceptions，
+    无环）。函数本身保留为管道构造链路的具名域解析入口（调用方在
+    followup_service / rehab_publication_service，属禁改在途文件）。
     """
-    from app.core.patient_access import patient_domain_mode
     return await patient_domain_mode(db, session=session)
 
 
