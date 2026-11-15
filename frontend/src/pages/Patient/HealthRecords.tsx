@@ -16,6 +16,8 @@ import {
 import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
 import apiClient from '../../services/apiClient';
+import type { FollowUpRecord } from '../../types/followup';
+import { getFollowUpStatusBadge, getFollowUpSummaryRows, getFollowUpTypeLabel } from '../../constants/followup';
 
 // GET /api/health-records 返回的 HealthRecordResponse 关键字段
 // （见 backend/app/schemas/health_record.py，content 为字符串，tags / attachments 为数组）
@@ -39,6 +41,9 @@ interface HealthTimelineItem {
   description?: string | null;
   occurred_at?: string;
 }
+
+// 患者端随访只读呈现（T73）：状态与小结均为后端 FollowUpRecordResponse 投影
+const formatFollowUpDate = (value?: string | null) => formatDateTime(value) ?? '时间未知';
 
 // 时间显示：无效或缺失时间返回 null，避免渲染出 NaN/Invalid Date
 const formatDateTime = (value?: string | null) => {
@@ -80,11 +85,12 @@ const HealthRecords: React.FC = () => {
   const [tabValue, setTabValue] = useState(0);
   const currentUser = useSelector((state: RootState) => state.auth.user);
 
-  // 真实数据状态：健康档案列表与医疗时间线
+  // 真实数据状态：健康档案列表、医疗时间线与随访安排（T73 患者端只读）
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [records, setRecords] = useState<HealthRecordItem[]>([]);
   const [timeline, setTimeline] = useState<HealthTimelineItem[]>([]);
+  const [followUps, setFollowUps] = useState<FollowUpRecord[]>([]);
 
   const patientId = currentUser?.id;
 
@@ -94,6 +100,7 @@ const HealthRecords: React.FC = () => {
       // 未登录 / 用户信息未就绪时不发请求，如实提示
       setRecords([]);
       setTimeline([]);
+      setFollowUps([]);
       setError(false);
       setLoading(false);
       return;
@@ -104,9 +111,10 @@ const HealthRecords: React.FC = () => {
     setError(false);
 
     const loadData = async () => {
-      const [recordsRes, timelineRes] = await Promise.allSettled([
+      const [recordsRes, timelineRes, followUpsRes] = await Promise.allSettled([
         apiService.getHealthRecords(patientId),
         apiClient.get<HealthTimelineItem[]>(`/health-records/timeline/${patientId}`),
+        apiService.getFollowUps(patientId),
       ]);
 
       if (cancelled) return;
@@ -122,6 +130,13 @@ const HealthRecords: React.FC = () => {
         setTimeline(timelineRes.value);
       } else {
         setTimeline([]);
+        setError(true);
+      }
+
+      if (followUpsRes.status === 'fulfilled' && Array.isArray(followUpsRes.value?.data)) {
+        setFollowUps(followUpsRes.value.data);
+      } else {
+        setFollowUps([]);
         setError(true);
       }
 
@@ -161,6 +176,7 @@ const HealthRecords: React.FC = () => {
           >
             <Tab label="健康档案" />
             <Tab label="健康时间线" />
+            <Tab label="随访安排" />
           </Tabs>
 
           <Box sx={{ p: 3 }}>
@@ -168,6 +184,62 @@ const HealthRecords: React.FC = () => {
               <PanelLoading />
             ) : error ? (
               <PanelError text="健康档案数据加载失败，请稍后重试" />
+            ) : tabValue === 2 ? (
+              // 随访安排（只读，T73）：状态徽章区分系统自动/手工来源，含随访小结
+              followUps.length === 0 ? (
+                <PanelEmpty text="暂无随访安排" />
+              ) : (
+                <List>
+                  {followUps.map((item, index) => {
+                    const summaryRows = getFollowUpSummaryRows(item.followup_summary);
+                    return (
+                      <React.Fragment key={item.id ?? `followup-${index}`}>
+                        <ListItem alignItems="flex-start" sx={{ px: 0 }}>
+                          <ListItemText
+                            primary={
+                              <Box display="flex" justifyContent="space-between" alignItems="center" flexWrap="wrap">
+                                <Box display="flex" alignItems="center">
+                                  <Typography variant="subtitle1">{getFollowUpTypeLabel(item.follow_up_type)}</Typography>
+                                  <Chip
+                                    label={getFollowUpStatusBadge(item).label}
+                                    size="small"
+                                    color={getFollowUpStatusBadge(item).color}
+                                    sx={{ ml: 1 }}
+                                  />
+                                </Box>
+                                <Typography variant="body2" color="text.secondary">
+                                  计划：{formatFollowUpDate(item.scheduled_date)}
+                                  {item.actual_date ? ` · 完成：${formatFollowUpDate(item.actual_date)}` : ''}
+                                </Typography>
+                              </Box>
+                            }
+                            secondary={
+                              <>
+                                {item.description && (
+                                  <Typography variant="body2" component="span" color="text.primary" sx={{ display: 'block', mt: 0.5, whiteSpace: 'pre-wrap' }}>
+                                    {item.description}
+                                  </Typography>
+                                )}
+                                {summaryRows.length > 0 && (
+                                  <Box mt={1}>
+                                    <Typography variant="caption" color="text.secondary">随访小结</Typography>
+                                    {summaryRows.map(row => (
+                                      <Typography key={row.label} variant="body2" component="span" color="text.primary" sx={{ display: 'block', whiteSpace: 'pre-wrap' }}>
+                                        {row.label}：{row.value}
+                                      </Typography>
+                                    ))}
+                                  </Box>
+                                )}
+                              </>
+                            }
+                          />
+                        </ListItem>
+                        {index < followUps.length - 1 && <Divider variant="inset" component="li" />}
+                      </React.Fragment>
+                    );
+                  })}
+                </List>
+              )
             ) : tabValue === 0 ? (
               // 健康档案列表（真实数据）
               records.length === 0 ? (

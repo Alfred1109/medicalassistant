@@ -48,6 +48,7 @@ from app.schemas.followup import (
     CompleteFollowUpRequest, CancelFollowUpRequest, RescheduleFollowUpRequest,
     ReviewDecision, ReviewFollowUpRequest, ReEvaluateFollowUpRequest,
     FollowUpWorkbenchItem, FollowUpWorkbenchPage,
+    FollowUpSummaryPayload, FollowUpDispositionRulesUpdate,
 )
 
 
@@ -67,9 +68,55 @@ _FOLLOWUP_FORMAL_FIELDS = (
     "mutation_version", "cancellation_operation", "completion_operation", "reschedule_operation",
     "review_operation", "re_evaluate_operation",
     "current_evidence", "submission_history",
+    "followup_summary",  # T73 随访小结（结论/下次计划建议/异常记录），增量字段兼容存量文档
     "_reminder_fence",  # Internal concurrency fence, never a clinical revision.
     "_access_fence",  # Internal source/authorization fence, not patient content.
 )
+
+
+# -------- T73：逾期自动标记 / 失访自动判定（规则可配置，口径待临床确认） --------
+
+# 提醒投递台账集合名（followup_reminder_service.DELIVERIES 从本模块导入同一常量，
+# 避免服务域依赖成环：reminder service -> followup_service 单向）。
+FOLLOWUP_REMINDER_DELIVERIES = "followup_reminder_deliveries"
+
+# 规则配置集合与单例文档（followup_rule_configs._id="automated_disposition"）。
+DISPOSITION_RULES_COLLECTION = "followup_rule_configs"
+DISPOSITION_RULES_DOC_ID = "automated_disposition"
+
+# 默认阈值（全部「口径待临床确认」，可经 update_disposition_rules 调整）：
+# overdue_days=计划日过后 N 天仍未完成即自动置 overdue（默认 1）；
+# lost_days=逾期后（按计划日算超 N 天）仍无响应（默认 30）；
+# lost_reminders=期间患者侧提醒已投递至少 M 次仍未响应（默认 3）；
+# scan_batch=单轮扫描处理上限（游标模式防止大集合长事务）；
+# enabled=自动标记总开关。
+DEFAULT_DISPOSITION_RULES = {
+    "enabled": True,
+    "overdue_days": 1,
+    "lost_days": 30,
+    "lost_reminders": 3,
+    "scan_batch": 200,
+}
+# 整数阈值合法性边界（越界/非整数一律回退默认值，fail-safe）
+_DISPOSITION_RULE_INT_BOUNDS = {
+    "overdue_days": (0, None), "lost_days": (1, None),
+    "lost_reminders": (0, None), "scan_batch": (1, 1000),
+}
+# 自动逾期标记允许的来源状态（与 _require_open 的 open 集一致）
+_AUTOMATED_OVERDUE_SOURCE_STATUSES = ("scheduled", "awaiting_fill", "rescheduled")
+
+
+def validated_disposition_rules(raw):
+    """规则文档 -> 生效规则；缺省回退默认值，非法值不抛错（fail-safe 回默认）。"""
+    rules = dict(DEFAULT_DISPOSITION_RULES)
+    if isinstance(raw, dict):
+        rules["enabled"] = raw.get("enabled") is not False
+        for key, (low, high) in _DISPOSITION_RULE_INT_BOUNDS.items():
+            value = raw.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) \
+                    and value >= low and (high is None or value <= high):
+                rules[key] = value
+    return rules
 
 
 # 填报任务集合名（与 integrations/forms/models.COLLECTION_NAME 一致；
@@ -151,6 +198,14 @@ def followup_submission_fields(doc, values, *, source, submitted_by, submitted_a
         entry["confirmation"] = deepcopy(confirmation)
     return {"current_evidence": marker,
             "submission_history": [*submission_history_with_legacy(doc), entry]}
+
+
+def _summary_storage(summary: FollowUpSummaryPayload, operator_id, now):
+    """随访小结落库形状（T73）：结构化增量字段，供响应层原样透出。"""
+    return {"conclusion": summary.conclusion,
+            "next_plan_suggestion": summary.next_plan_suggestion,
+            "abnormal_findings": summary.abnormal_findings,
+            "recorded_by": operator_id, "recorded_at": now}
 
 
 def select_effective_response(fill_task_docs):
@@ -283,6 +338,8 @@ def map_followup_record_to_response(followup_record: FollowUpRecord) -> FollowUp
             "current_evidence": getattr(followup_record, "current_evidence", None),
         }) if followup_record.status in {"in_review", "completed"} else None,
         submission_history=getattr(followup_record, "submission_history", None) or [],
+        # T73 随访小结：存量文档无该顶层字段时映射为 None（增量兼容，无 metadata 回退键）
+        followup_summary=formal_or_meta("followup_summary", "followup_summary"),
     )
 
 
@@ -418,7 +475,9 @@ class FollowupService:
             {"$match": query},
             {"$sort": {"scheduled_date": direction, "_id": direction}},
             {"$facet": {"items": [{"$skip": skip}, {"$limit": limit}],
-                        "count": [{"$count": "total"}]}}
+                        "count": [{"$count": "total"}],
+                        # T73 状态统计（同一过滤流）：工作台状态徽章/失访过滤的计数呈现
+                        "statuses": [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]}}
         ]).to_list(length=1)
         batch = result[0] if result else {"items": [], "count": []}
         documents = batch["items"]
@@ -429,7 +488,9 @@ class FollowupService:
             patient_name=names.get(str(row["patient_id"]))) for row in documents]
         return FollowUpWorkbenchPage(items=items,
             total=batch["count"][0]["total"] if batch["count"] else 0,
-            skip=skip, limit=limit)
+            skip=skip, limit=limit,
+            status_counts={row["_id"]: row["count"]
+                           for row in (batch.get("statuses") or []) if row.get("_id")})
 
     async def _list_records(
         self, query: Dict[str, Any], *, skip: int = 0, limit: int = 100,
@@ -821,6 +882,9 @@ class FollowupService:
                 "follow_up_result": data.follow_up_result, "completion_operation": fingerprint,
                 "effective_response": None,
             }
+            # T73 随访小结：录入时可一并提交结构化小结（增量字段，存量文档无此键不受影响）
+            if data.summary is not None:
+                values["followup_summary"] = _summary_storage(data.summary, operator_id, now)
             values.update(followup_submission_fields(doc, values, source="manual_entry",
                 submitted_by=operator_id, submitted_at=now))
             # 更新父节点获得写冲突保护后，才建立后继及时间线；全部同一事务。
@@ -1053,7 +1117,9 @@ class FollowupService:
             self._require_open(doc)
             now = datetime.utcnow()
             metadata = deepcopy(doc.get("metadata") or {})
-            metadata["overdue"] = {"marked_at": now, "operator_id": operator_id}
+            # source=manual 区别于自动标记（run_automated_disposition_scan 落
+            # source=automated）；存量手工标记无 source，前端按 operator_id 视为手工
+            metadata["overdue"] = {"marked_at": now, "operator_id": operator_id, "source": "manual"}
             if isinstance(reason, str) and reason.strip():
                 metadata["overdue"]["reason"] = reason.strip()
             updated = await self._write_node(
@@ -1074,7 +1140,9 @@ class FollowupService:
                 raise followup_conflict("只有逾期(overdue)节点可以认定失访(lost)")
             now = datetime.utcnow()
             metadata = deepcopy(doc.get("metadata") or {})
-            metadata["lost"] = {"recognized_at": now, "recognized_by": operator_id}
+            # source=manual 区别于自动认定（见 _automated_lost_mark）；存量认定无
+            # source，前端按 recognized_by 视为人工认定
+            metadata["lost"] = {"recognized_at": now, "recognized_by": operator_id, "source": "manual"}
             if isinstance(reason, str) and reason.strip():
                 metadata["lost"]["reason"] = reason.strip()
             updated = await self._write_node(
@@ -1107,3 +1175,178 @@ class FollowupService:
                 continue  # 跨访视答卷不可互相污染（设计稿 §4.4）
             tasks.append(task)
         return select_effective_response(tasks)
+
+    # -------- T73：逾期自动标记 / 失访自动判定 / 失访恢复 / 随访小结 --------
+
+    async def get_disposition_rules(self) -> Dict[str, Any]:
+        """读取自动逾期/失访规则（followup_rule_configs 单例文档；缺省回默认值）。
+
+        默认阈值「口径待临床确认」：overdue_days=1、lost_days=30、lost_reminders=3。
+        """
+        doc = await self.db[DISPOSITION_RULES_COLLECTION].find_one(
+            {"_id": DISPOSITION_RULES_DOC_ID})
+        return validated_disposition_rules(doc)
+
+    async def update_disposition_rules(
+            self, patch: FollowUpDispositionRulesUpdate) -> Dict[str, Any]:
+        """更新自动规则（整体校验后 upsert 单例文档，返回生效规则）。"""
+        current = await self.db[DISPOSITION_RULES_COLLECTION].find_one(
+            {"_id": DISPOSITION_RULES_DOC_ID}) or {}
+        merged = validated_disposition_rules(
+            {**current, **{k: v for k, v in patch.model_dump(exclude_unset=True).items()
+                           if v is not None}})
+        if current:
+            await self.db[DISPOSITION_RULES_COLLECTION].update_one(
+                {"_id": DISPOSITION_RULES_DOC_ID}, {"$set": merged})
+        else:
+            # 配置单例文档并发更新为 last-write-wins（非临床数据，无需事务）
+            await self.db[DISPOSITION_RULES_COLLECTION].insert_one(
+                {"_id": DISPOSITION_RULES_DOC_ID, **merged})
+        return merged
+
+    def automated_overdue_cursor(self, now, rules: Dict[str, Any]):
+        """逾期自动标记候选游标：open 状态且计划日已过 overdue_days 天。
+
+        复用提醒扫描的 reminder_due_scan (status, scheduled_date) 索引与游标模式
+        （见 ensure_reminder_scan_index）；批量上限 scan_batch 防止大集合长扫描。
+        """
+        cutoff = now - timedelta(days=rules["overdue_days"])
+        return self.followup_records.find(
+            {"deleted": {"$ne": True},
+             "status": {"$in": list(_AUTOMATED_OVERDUE_SOURCE_STATUSES)},
+             "scheduled_date": {"$lte": cutoff}},
+        ).sort([("scheduled_date", 1), ("_id", 1)]).limit(rules["scan_batch"])
+
+    def automated_lost_cursor(self, now, rules: Dict[str, Any]):
+        """失访自动判定候选游标（宽筛）：overdue 且计划日超 lost_days。
+
+        观察窗口精确判定（以逾期标记时间起算，见 _lost_overdue_since）在扫描
+        循环内完成；恢复过的节点再次逾期后获得全新窗口（marked_at 重置）。
+        """
+        cutoff = now - timedelta(days=rules["lost_days"])
+        return self.followup_records.find(
+            {"deleted": {"$ne": True}, "status": "overdue",
+             "scheduled_date": {"$lte": cutoff}},
+        ).sort([("scheduled_date", 1), ("_id", 1)]).limit(rules["scan_batch"])
+
+    async def count_delivered_patient_reminders(self, followup_id) -> int:
+        """患者侧提醒已投递次数（DELIVERIES 台账 persisted 记录数）。"""
+        return await self.db[FOLLOWUP_REMINDER_DELIVERIES].count_documents(
+            {"followup_id": str(followup_id), "slot": "patient", "status": "persisted"})
+
+    async def _automated_overdue_mark(self, doc, now, rules) -> bool:
+        """原子置 overdue：条件更新内联全部前置条件，多 worker 竞争只有一个赢家。
+
+        不用事务（无多文档写入），matched_count==1 即本 worker 完成标记；
+        metadata.overdue 以 dotted path 整体覆写——open 状态节点正常不含手工
+        逾期标记（手工标记必然已置 overdue），残留覆盖仅影响异常脏数据。
+        """
+        cutoff = now - timedelta(days=rules["overdue_days"])
+        result = await self.followup_records.update_one(
+            {"_id": doc["_id"],
+             "status": {"$in": list(_AUTOMATED_OVERDUE_SOURCE_STATUSES)},
+             "deleted": {"$ne": True},
+             "scheduled_date": {"$lte": cutoff}},
+            {"$set": {"status": "overdue", "updated_at": now,
+                      "metadata.overdue": {"marked_at": now, "operator_id": None,
+                                           "source": "automated",
+                                           "rule_overdue_days": rules["overdue_days"]}}})
+        return result.matched_count == 1
+
+    async def _automated_lost_mark(self, doc, now, rules, delivered) -> bool:
+        """原子置 lost（仅 overdue 来源；手工 metadata.overdue 保留不动）。"""
+        result = await self.followup_records.update_one(
+            {"_id": doc["_id"], "status": "overdue", "deleted": {"$ne": True}},
+            {"$set": {"status": "lost", "updated_at": now,
+                      "metadata.lost": {"recognized_at": now, "recognized_by": None,
+                                        "source": "automated", "rule_lost_days": rules["lost_days"],
+                                        "delivered_reminders": delivered}}})
+        return result.matched_count == 1
+
+    @staticmethod
+    def _lost_overdue_since(doc):
+        """失访观察窗口起点：逾期标记时间优先，缺省回退计划日期
+        （兼容无 metadata.overdue 的存量 overdue 节点）。恢复过的节点再次
+        逾期时 marked_at 重置，获得全新的失访观察窗口。"""
+        return ((doc.get("metadata") or {}).get("overdue") or {}).get("marked_at") \
+            or doc.get("scheduled_date")
+
+    async def run_automated_disposition_scan(self, now=None,
+                                             rules: Optional[Dict[str, Any]] = None):
+        """后台扫描入口：逾期自动标记 + 失访自动判定（游标模式，逐条原子标记）。
+
+        每轮重读规则文档（含 enabled 总开关）；两个阶段都为幂等条件更新，
+        多 worker 并发扫描安全，失败重扫不会重复计数（matched_count 判定）。
+        失访窗口从逾期标记时间起算（见 _lost_overdue_since），游标仅按
+        计划日期做宽筛（scan_batch 兜底），窗口判定在应用侧完成。
+        """
+        now = now or datetime.utcnow()
+        if rules is None:
+            rules = await self.get_disposition_rules()
+        result = {"enabled": bool(rules.get("enabled")),
+                  "overdue_marked": 0, "lost_marked": 0}
+        if not rules.get("enabled"):
+            return result
+        async for doc in self.automated_overdue_cursor(now, rules):
+            if await self._automated_overdue_mark(doc, now, rules):
+                result["overdue_marked"] += 1
+                await self._write_timeline({**doc, "status": "overdue"}, None)
+        lost_cutoff = now - timedelta(days=rules["lost_days"])
+        async for doc in self.automated_lost_cursor(now, rules):
+            # 宽筛游标命中但逾期观察窗口未满（如恢复后重新逾期）：跳过
+            overdue_since = self._lost_overdue_since(doc)
+            if isinstance(overdue_since, datetime) and overdue_since > lost_cutoff:
+                continue
+            delivered = await self.count_delivered_patient_reminders(doc["_id"])
+            if delivered < rules["lost_reminders"]:
+                continue
+            if await self._automated_lost_mark(doc, now, rules, delivered):
+                result["lost_marked"] += 1
+                await self._write_timeline({**doc, "status": "lost"}, None)
+        return result
+
+    async def restore_lost(self, followup_id, *, operator_id=None, reason=None):
+        """失访人工恢复（T73）：lost -> awaiting_fill（回到待填写，可继续补填）。
+
+        恢复是失访终态唯一的人工出口；恢复后节点回到 open 集合，若患者继续
+        无响应将按规则再次进入 overdue -> lost 流转。恢复动作写审计
+        （action=followup_lost_restore），恢复信息记入 metadata.lost
+        （restored_at / restored_by / restore_reason）。
+        """
+        async def operation(doc, session):
+            if doc["status"] != "lost":
+                raise followup_conflict("只有失访(lost)节点可以人工恢复")
+            now = datetime.utcnow()
+            metadata = deepcopy(doc.get("metadata") or {})
+            lost = dict(metadata.get("lost") or {})
+            lost.update({"restored_at": now, "restored_by": operator_id})
+            if isinstance(reason, str) and reason.strip():
+                lost["restore_reason"] = reason.strip()
+            metadata["lost"] = lost
+            values = {"status": "awaiting_fill", "metadata": metadata, "updated_at": now}
+            updated = await self._write_node(doc, values, session)
+            await self._write_audit(
+                followup_id, operator_id, "followup_lost_restore",
+                {"restored_to": "awaiting_fill", "reason": (reason or "").strip() or None},
+                session)
+            await self._write_timeline(updated, session)
+            return map_followup_record_to_response(followup_from_mongo(updated))
+        return await self._mutate(followup_id, operation)
+
+    async def set_followup_summary(self, followup_id, summary: FollowUpSummaryPayload,
+                                   *, operator_id=None):
+        """随访小结（T73）：对待审阅/已完成节点写结构化小结（结论、下次计划建议、
+        异常记录）。重复提交覆盖旧小结（audit 留痕），非 in_review/completed 拒绝。
+        """
+        async def operation(doc, session):
+            if doc["status"] not in {"in_review", "completed"}:
+                raise followup_conflict("随访小结只能在待审阅或已完成的随访上填写")
+            now = datetime.utcnow()
+            values = {"followup_summary": _summary_storage(summary, operator_id, now),
+                      "updated_at": now}
+            updated = await self._write_node(doc, values, session)
+            await self._write_audit(
+                followup_id, operator_id, "followup_summary_update",
+                {"recorded_at": now}, session)
+            return map_followup_record_to_response(followup_from_mongo(updated))
+        return await self._mutate(followup_id, operation)

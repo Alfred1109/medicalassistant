@@ -79,7 +79,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
   const today = format(new Date(), 'yyyy-MM-dd');
   const hasFilters = Object.values(filters).some(value => Boolean(value));
   const identity = currentUser ? `${currentUser.id}:${currentUser.role}` : '';
-  const { records: followUps, total, loading, error, reload: loadFollowUps } = useFollowUpWorkbench(
+  const { records: followUps, total, loading, error, statusCounts, reload: loadFollowUps } = useFollowUpWorkbench(
     identity, selectedPatientId, filters, page, pageSize, setPage);
   const applyFilters = (next: FollowUpFilters) => { setPage(0); setFilters(next); };
   const changePageSize = (size: number) => { setPage(0); setPageSize(size); };
@@ -93,7 +93,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
   const [editTarget, setEditTarget] = useState<FollowUpRecord | null>(null);
   const [cancelTarget, setCancelTarget] = useState<FollowUpRecord | null>(null);
   const [rescheduleTarget, setRescheduleTarget] = useState<FollowUpRecord | null>(null);
-  const [disposition, setDisposition] = useState<{ id: string; kind: 'overdue' | 'lost' } | null>(null);
+  const [disposition, setDisposition] = useState<{ id: string; kind: 'overdue' | 'lost' | 'restore' } | null>(null);
   const [dispositionReason, setDispositionReason] = useState('');
 
   // 新建随访表单
@@ -316,9 +316,13 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
       setSubmitting(true);
       const payload = { reason: dispositionReason.trim() };
       if (disposition.kind === 'overdue') await apiService.markFollowUpOverdue(disposition.id, payload);
-      else await apiService.markFollowUpLost(disposition.id, payload);
+      else if (disposition.kind === 'lost') await apiService.markFollowUpLost(disposition.id, payload);
+      else await apiService.restoreFollowUpLost(disposition.id, payload);
       setDisposition(null);
-      showSnackbar(disposition.kind === 'overdue' ? '随访已标记为逾期' : '随访已认定为失访', 'success');
+      showSnackbar(
+        disposition.kind === 'overdue' ? '随访已标记为逾期'
+          : disposition.kind === 'lost' ? '随访已认定为失访' : '失访随访已恢复为待填写',
+        'success');
       await loadFollowUps();
     } catch (err) {
       showSnackbar(getApiErrorMessage(err, '操作失败'), 'error');
@@ -359,9 +363,16 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
       </Typography>
       <Typography variant="body2" color="text.secondary" paragraph>
         查看并管理患者的随访计划。手工录入后进入待审阅，责任医护审阅通过后完成随访。
-        仍待填写的随访可以由医护写明原因后标记逾期；已经逾期的可以认定失访。系统不会按固定天数自动判断。
+        系统会按后台规则自动标记逾期并在满足失访判定条件时自动认定失访（阈值口径待临床确认）；
+        医护仍可写明原因手工标记逾期、认定失访，或恢复已失访的随访。
         删除功能待随访领域收敛后开放。
       </Typography>
+      {statusCounts && Object.keys(statusCounts).length > 0 && (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          当前范围统计：
+          {['in_review', 'overdue', 'lost'].map(status => statusCounts[status] ? ` ${getFollowUpStatusInfo(status).label} ${statusCounts[status]}` : '').filter(Boolean).join(' ·') || ' 无逾期/失访/待审阅随访'}
+        </Typography>
+      )}
       <Divider sx={{ mb: 2 }} />
 
       {/* 患者选项只用于筛选和创建；列表由工作台接口统一授权并分页。 */}
@@ -421,6 +432,7 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         onReschedule={handleRescheduleFollowUp}
         onMarkOverdue={id => { setDispositionReason(''); setDisposition({ id, kind: 'overdue' }); }}
         onMarkLost={id => { setDispositionReason(''); setDisposition({ id, kind: 'lost' }); }}
+        onRestoreLost={id => { setDispositionReason(''); setDisposition({ id, kind: 'restore' }); }}
         onDelete={handleDeleteFollowUp}
         onFilterChange={applyFilters}
         onRefresh={loadFollowUps}
@@ -454,14 +466,19 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         onReviewed={async () => { setReviewId(null); showSnackbar('审阅结果已保存', 'success'); await loadFollowUps(); }}
       />
       <Dialog open={!!disposition} onClose={() => setDisposition(null)} fullWidth maxWidth="sm">
-        <DialogTitle>{disposition?.kind === 'lost' ? '认定失访' : '标记逾期'}</DialogTitle>
+        <DialogTitle>
+          {disposition?.kind === 'lost' ? '认定失访'
+            : disposition?.kind === 'restore' ? '恢复失访随访' : '标记逾期'}
+        </DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             {disposition?.kind === 'lost'
-              ? '只有已经逾期的随访可以认定失访。认定后不能再复评。系统不会按固定天数自动认定。'
-              : '用于仍待填写、且医护确认已经超过应访时间的随访。系统不会按固定天数自动标记。'}
+              ? '只有已经逾期的随访可以认定失访。认定后不能再复评，但可人工恢复。系统也会按后台规则自动认定（口径待临床确认）。'
+              : disposition?.kind === 'restore'
+                ? '恢复后随访回到待填写状态，可继续补填或催办；若患者继续无响应，将按后台规则再次进入逾期/失访流转。'
+                : '用于仍待填写、且医护确认已经超过应访时间的随访。系统也会按后台规则自动标记逾期（口径待临床确认）。'}
           </Typography>
-          <TextField fullWidth label="原因" value={dispositionReason} onChange={event => setDispositionReason(event.target.value)} />
+          <TextField fullWidth required label="原因（入审计）" value={dispositionReason} onChange={event => setDispositionReason(event.target.value)} />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDisposition(null)}>取消</Button>

@@ -52,6 +52,14 @@ export interface FollowUpRecord {
   fill_task_ids?: string[];
   previous_visit_id?: string | null;
   next_visit_id?: string | null;
+  // T73 随访小结（存量文档缺省为 null）
+  followup_summary?: {
+    conclusion: string;
+    next_plan_suggestion?: string | null;
+    abnormal_findings?: string | null;
+    recorded_by?: string | null;
+    recorded_at?: string | null;
+  } | null;
   // Local display enrichment; never used as an identity or authorization key.
   patient_name?: string;
 }
@@ -80,6 +88,14 @@ export interface FollowUpWorkbenchPage {
   total: number;
   skip: number;
   limit: number;
+  status_counts?: Record<string, number>;
+}
+
+// T73 随访小结提交（结论必填，后端 FollowUpSummaryPayload）
+export interface FollowUpSummaryPayload {
+  conclusion: string;
+  next_plan_suggestion?: string;
+  abnormal_findings?: string;
 }
 
 export interface ReviewFollowUpRequest {

@@ -21,10 +21,11 @@ from app.core.patient_access import patient_domain_mode
 from app.db.transactions import run_followup_transaction
 from app.patients.legacy import LegacyPatientRepository
 from app.patients.repository import ACCOUNT_LINKS, ClinicalPatientRepository
-from app.services.followup_service import FollowupService
+from app.services.followup_service import FollowupService, FOLLOWUP_REMINDER_DELIVERIES
 
 logger = logging.getLogger(__name__)
-DELIVERIES = "followup_reminder_deliveries"
+# 提醒投递台账集合名唯一来源在 followup_service（T73 失访判定统计投递次数需同源）
+DELIVERIES = FOLLOWUP_REMINDER_DELIVERIES
 STATUSES = ["scheduled", "awaiting_fill"]
 POLICY = "inapp-24h-v1"
 
@@ -333,3 +334,62 @@ class ReminderRuntime:
 
 
 reminder_runtime = ReminderRuntime()
+
+
+class FollowupDispositionRuntime:
+    """逾期自动标记/失访自动判定的后台循环（T73）。
+
+    独立于提醒运行时（不依赖 FOLLOWUP_REMINDERS_ENABLED）：每轮调用
+    FollowupService.run_automated_disposition_scan（内部重读规则文档，含
+    enabled 总开关与阈值，全部口径待临床确认）。单轮失败只记状态，循环继续。
+    """
+
+    def __init__(self):
+        self.task = None
+        self.status = {"enabled": False, "running": False, "state": "disabled",
+                       "last_checked_at": None, "last_success_at": None,
+                       "last_result": None, "last_error_code": None}
+
+    async def start(self, db, *, interval):
+        await self.stop()
+        self.status.update(enabled=True, state="starting", last_error_code=None)
+        try:
+            await FollowupService(db).ensure_reminder_scan_index()
+        except Exception:
+            self.status.update(state="error", last_error_code="FOLLOWUP_DISPOSITION_STORAGE_UNAVAILABLE")
+            logger.exception("Follow-up disposition scan disabled: storage requirements not met")
+            return
+        self.task = asyncio.create_task(self._run(db, interval))
+
+    async def _run(self, db, interval):
+        self.status.update(running=True)
+        service = FollowupService(db)
+        try:
+            while True:
+                self.status["last_checked_at"] = utc_now()
+                try:
+                    result = await service.run_automated_disposition_scan()
+                    self.status.update(state="ready", last_success_at=utc_now(),
+                                       last_result=result, last_error_code=None)
+                except Exception as error:
+                    self.status.update(state="error", last_error_code=(
+                        error.error_code if isinstance(error, AppBaseException)
+                        else "FOLLOWUP_DISPOSITION_SCAN_FAILED"))
+                    logger.exception("Follow-up disposition scan failed; will retry")
+                await asyncio.sleep(interval)
+        finally:
+            self.status["running"] = False
+
+    async def stop(self):
+        self.status.update(enabled=False)
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+            self.task = None
+        self.status["running"] = False
+
+
+disposition_runtime = FollowupDispositionRuntime()

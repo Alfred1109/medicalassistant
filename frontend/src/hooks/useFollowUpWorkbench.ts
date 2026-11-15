@@ -52,6 +52,7 @@ export function useFollowUpWorkbench(identity: string, patientId: string, filter
   }, [identity, key, queryKey, refresh, page, pageSize, setPage, validationError]);
 
   const reload = useCallback(() => { setRefresh(value => value + 1); }, []);
-  const visible = state.key === key ? state : { key, items: [], total: 0, skip: page * pageSize, limit: pageSize, loading: Boolean(identity && !validationError), error: validationError };
-  return { records: visible.items, total: visible.total, loading: visible.loading, error: visible.error, reload };
+  const visible = state.key === key ? state : { key, items: [], total: 0, skip: page * pageSize, limit: pageSize, status_counts: undefined, loading: Boolean(identity && !validationError), error: validationError };
+  // T73 同一过滤流的状态计数（工作台统计呈现；旧响应无 status_counts 时为空对象）
+  return { records: visible.items, total: visible.total, statusCounts: visible.status_counts ?? {}, loading: visible.loading, error: visible.error, reload };
 }

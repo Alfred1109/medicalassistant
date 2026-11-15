@@ -47,7 +47,7 @@ import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 
 import type { FollowUpFilters, FollowUpRecord } from '../../types/followup';
 import {
-  followUpTypes, followUpStatuses, getFollowUpStatusInfo, getFollowUpTypeLabel, manualEntryText,
+  followUpTypes, followUpStatuses, getFollowUpStatusBadge, getFollowUpTypeLabel, manualEntryText,
 } from '../../constants/followup';
 
 // 组件属性
@@ -72,6 +72,7 @@ interface FollowUpListProps {
   onReschedule?: (id: string) => void;
   onMarkOverdue?: (id: string) => void;
   onMarkLost?: (id: string) => void;
+  onRestoreLost?: (id: string) => void;
   onDelete?: (id: string) => void;
   onFilterChange?: (filters: FollowUpFilters) => void;
   onRefresh?: () => void;
@@ -101,6 +102,7 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   onReschedule,
   onMarkOverdue,
   onMarkLost,
+  onRestoreLost,
   onDelete,
   onFilterChange,
   onRefresh,
@@ -243,10 +245,12 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
         );
       case 'overdue':
         return onMarkLost ? <Button size="small" color="warning" onClick={() => onMarkLost(record.id)}>认定失访</Button> : null;
+      case 'lost':
+        // T73 失访人工恢复出口：恢复原因在确认对话框填写（原因入审计）
+        return onRestoreLost ? <Button size="small" onClick={() => onRestoreLost(record.id)}>恢复随访</Button> : null;
       case 'completed':
       case 'canceled':
       case 'missed':
-      case 'lost':
         if (onView) return null;
         return (
           <Stack direction="row" spacing={1}>
@@ -452,8 +456,8 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
                 </TableHead>
                 <TableBody>
                   {records.map((record) => {
-                    const statusInfo = getFollowUpStatusInfo(record.status);
-                    
+                    const statusInfo = getFollowUpStatusBadge(record);
+
                     return (
                       <TableRow key={record.id}>
                         <TableCell>{record.patient_name || record.patient_id}</TableCell>

@@ -30,7 +30,10 @@ from app.schemas.health_record import (
 )
 from app.core.permissions import Permission
 from app.core.health_record_access import ensure_health_record_patient_access
-from app.schemas.followup import FollowUpDispositionRequest, FollowUpWorkbenchPage
+from app.schemas.followup import (
+    FollowUpDispositionRequest, FollowUpWorkbenchPage,
+    FollowUpSummaryPayload, FollowUpDispositionRules, FollowUpDispositionRulesUpdate,
+)
 
 router = APIRouter(prefix="/health-records", tags=["健康档案"])
 
@@ -501,6 +504,75 @@ async def mark_followup_lost(
     if not result:
         raise HTTPException(status_code=404, detail="随访记录不存在")
     return result
+
+
+@router.post("/followups/{followup_id}/restore", response_model=FollowUpRecordResponse)
+async def restore_followup_lost(
+    data: FollowUpDispositionRequest,
+    followup_id: str = Path(..., description="随访记录ID"),
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
+):
+    """人工恢复失访（T73）：lost -> awaiting_fill（回到待填写，可继续补填）。
+
+    - **只有医疗人员可以恢复**；恢复原因必填并写审计（followup_lost_restore）
+    - 恢复后节点回到待填写；若患者继续无响应，将按自动规则再次进入逾期/失访流转
+    """
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+    result = await followup_service.restore_lost(followup_id, operator_id=current_user.id, reason=data.reason)
+    if not result:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    return result
+
+
+@router.post("/followups/{followup_id}/summary", response_model=FollowUpRecordResponse)
+async def set_followup_summary(
+    data: FollowUpSummaryPayload,
+    followup_id: str = Path(..., description="随访记录ID"),
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
+):
+    """随访小结（T73）：对待审阅/已完成的随访写结构化小结（结论、下次计划建议、
+    异常记录）。重复提交覆盖旧小结（审计留痕）。
+    """
+    followup = await followup_service.get_followup_record(followup_id)
+    if not followup:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    await ensure_followup_patient_access(followup_service.db, followup.patient_id, current_user, write=True)
+    result = await followup_service.set_followup_summary(
+        followup_id, data, operator_id=current_user.id)
+    if not result:
+        raise HTTPException(status_code=404, detail="随访记录不存在")
+    return result
+
+
+@router.get("/followup-disposition-rules", response_model=FollowUpDispositionRules)
+async def get_followup_disposition_rules(
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+    _: bool = Depends(is_medical_staff())
+):
+    """读取自动逾期/失访规则当前生效值（默认阈值口径待临床确认）。"""
+    rules = await followup_service.get_disposition_rules()
+    return FollowUpDispositionRules(**rules)
+
+
+@router.put("/followup-disposition-rules", response_model=FollowUpDispositionRules)
+async def update_followup_disposition_rules(
+    data: FollowUpDispositionRulesUpdate,
+    current_user: User = Depends(get_current_user),
+    followup_service: FollowupService = Depends(get_followup_service),
+):
+    """更新自动逾期/失访规则（仅管理员）。缺省字段保持原值；阈值口径待临床确认。"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="只有管理员可以修改随访自动规则")
+    rules = await followup_service.update_disposition_rules(data)
+    return FollowUpDispositionRules(**rules)
 
 
 @router.post("/followups/{followup_id}/cancel", response_model=FollowUpRecordResponse)

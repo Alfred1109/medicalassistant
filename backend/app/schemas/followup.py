@@ -106,6 +106,16 @@ class FollowUpRecordUpdate(BaseModel):
     reminder_before: Optional[int] = None
 
 
+# 随访小结（T73）：单次随访的结构化小结，落 followup_records 顶层增量字段
+# followup_summary（存量文档缺省为 None，无 metadata 回退键）
+class FollowUpSummaryPayload(BaseModel):
+    """随访小结请求体：结论必填，下次计划建议与异常记录可选。"""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    conclusion: str = Field(min_length=1, max_length=2000)
+    next_plan_suggestion: Optional[str] = Field(default=None, max_length=2000)
+    abnormal_findings: Optional[str] = Field(default=None, max_length=2000)
+
+
 class CompleteFollowUpRequest(BaseModel):
     """完成随访请求"""
     expected_version: int = Field(..., ge=0, description="读取到的节点 mutation_version；旧节点为0")
@@ -114,6 +124,7 @@ class CompleteFollowUpRequest(BaseModel):
     notes: Optional[str] = None
     follow_up_result: str = "completed"
     next_follow_up_date: Optional[datetime] = None
+    summary: Optional[FollowUpSummaryPayload] = None  # T73 随访小结（可选一并提交）
 
 
 class CancelFollowUpRequest(BaseModel):
@@ -151,9 +162,33 @@ class ReviewFollowUpRequest(BaseModel):
 
 
 class FollowUpDispositionRequest(BaseModel):
-    """医护手工标记逾期或认定失访。不按未确认的天数自动判断。"""
+    """医护手工标记逾期 / 认定失访 / 人工恢复失访（写明原因，入审计）。
+
+    自动逾期标记与失访判定由后台扫描按规则配置执行
+    （followup_rule_configs，默认阈值口径待临床确认），本请求是人工通道。
+    """
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     reason: str = Field(min_length=1, max_length=500)
+
+
+# 自动逾期/失访规则（T73，默认阈值口径待临床确认：1 天 / 30 天 / 3 次提醒）
+class FollowUpDispositionRules(BaseModel):
+    """自动逾期/失访规则当前生效值。"""
+    enabled: bool = True
+    overdue_days: int = Field(ge=0)          # 计划日过后 N 天未完成 -> overdue
+    lost_days: int = Field(ge=1)             # 计划日超 N 天仍无响应 -> lost 候选
+    lost_reminders: int = Field(ge=0)        # 患者侧提醒已投递 >= M 次仍未响应
+    scan_batch: int = Field(ge=1, le=1000)   # 单轮扫描处理上限
+
+
+class FollowUpDispositionRulesUpdate(BaseModel):
+    """规则更新请求（PUT，仅 admin）：缺省字段保持原值。"""
+    model_config = ConfigDict(extra="forbid")
+    enabled: Optional[bool] = None
+    overdue_days: Optional[int] = Field(default=None, ge=0)
+    lost_days: Optional[int] = Field(default=None, ge=1)
+    lost_reminders: Optional[int] = Field(default=None, ge=0)
+    scan_batch: Optional[int] = Field(default=None, ge=1, le=1000)
 
 
 class ReEvaluateFollowUpRequest(BaseModel):
@@ -214,6 +249,7 @@ class FollowUpRecordDB(FollowUpBase, TimestampModel):
     re_evaluate_operation: Optional[str] = None   # S6 复评请求幂等指纹
     current_evidence: Optional[Dict[str, Any]] = None
     submission_history: List[Dict[str, Any]] = []
+    followup_summary: Optional[Dict[str, Any]] = None  # T73 随访小结（增量字段）
 
 
 class FollowUpRecordResponse(FollowUpBase, TimestampModel):
@@ -241,6 +277,7 @@ class FollowUpRecordResponse(FollowUpBase, TimestampModel):
     next_visit_id: Optional[str] = None                   # 复评链后继
     current_evidence: Optional[Dict[str, Any]] = None
     submission_history: List[Dict[str, Any]] = []
+    followup_summary: Optional[Dict[str, Any]] = None  # T73 随访小结（存量文档为 None）
 
     model_config = ConfigDict(
         from_attributes=True,
@@ -258,3 +295,4 @@ class FollowUpWorkbenchPage(BaseModel):
     total: int = Field(ge=0)
     skip: int = Field(ge=0)
     limit: int = Field(ge=1, le=100)
+    status_counts: Dict[str, int] = {}  # T73 同一过滤流的状态计数（工作台统计呈现）
