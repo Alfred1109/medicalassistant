@@ -17,12 +17,16 @@ from app.services.followup_reminder_service import (
 )
 from app.services.followup_service import followup_from_mongo, map_followup_record_to_response
 from app.core.exceptions import AppBaseException
+from app.patients.repository import ACCOUNT_LINKS, PATIENTS, STATE_ID
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from app.api.routers.followup_reminder_router import router, get_current_user, get_database
 
-URI = os.environ.get("REHAB_TEST_REMINDER_MONGO_URI")
+# 独立变量优先；未提供时回退患者域演练副本集（同一本机隔离实例惯例，
+# 对照 test_background_scheduling_replica.py 的回退写法）。
+URI = (os.environ.get("REHAB_TEST_REMINDER_MONGO_URI")
+       or os.environ.get("REHAB_TEST_PATIENT_E2E_URI"))
 
 
 class ReminderRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -142,15 +146,92 @@ class ReminderReplicaTests(unittest.IsolatedAsyncioTestCase):
         await self.db.users.update_one({"_id": self.patient}, {"$set": {"practitioners": [self.doctor]}})
         self.assertEqual((await self.service.dispatch_one(str(self.followup)))["generated"], 1)
 
-    async def test_canonical_domain_stops_dispatch_without_users_fallback(self):
+    # ---- canonical 模式（波次 3：收件人解析经 patient_account_links）----
+
+    async def go_canonical(self, *, linked=True, link_status="verified",
+                           clinical_active=True):
+        """在既有 legacy 夹具上叠加 canonical 域（迁移保留 legacy _id 语义）。"""
         await self.db.patient_domain_state.insert_one(
-            {"_id": "clinical-patients-v1", "mode": "canonical", "schema_version": 1})
-        with self.assertRaises(AppBaseException) as caught:
-            await self.service.scan()
-        self.assertEqual(caught.exception.error_code, "REMINDER_PATIENT_DOMAIN_UNSUPPORTED")
-        with self.assertRaises(AppBaseException):
-            await self.service.dispatch_one(str(self.followup))
+            {"_id": STATE_ID, "mode": "canonical", "schema_version": 1})
+        await self.db[PATIENTS].insert_one({
+            "_id": self.patient, "patient_id": str(self.patient), "schema_version": 1,
+            "status": "active" if clinical_active else "inactive",
+            "practitioners": [str(self.doctor)], "health_managers": []})
+        if linked:
+            await self.db[ACCOUNT_LINKS].insert_one({
+                "_id": "legacy:" + str(self.patient), "account_id": str(self.patient),
+                "account_document_id": self.patient, "patient_id": str(self.patient),
+                "source": "legacy_same_document", "schema_version": 1,
+                "status": link_status})
+
+    async def test_canonical_scan_dispatches_linked_patient_over_dual_carrier_fences(self):
+        await self.go_canonical()
+        self.assertEqual(await self.service.scan(), 2)
+        notices = await self.db.notifications.find({}).to_list(None)
+        self.assertEqual({row["recipient_id"] for row in notices},
+                         {str(self.patient), str(self.doctor)})
+        # users 载体不再被 canonical 打点（切换窗口硬约束：canonical 期 users 只读）
+        patient = await self.db.users.find_one({"_id": self.patient})
+        self.assertNotIn("_reminder_fence", patient)
+        # 账号侧计数落 account_fences，患者侧落 clinical_patients._fence_reminder
+        for account in (str(self.patient), str(self.doctor)):
+            row = await self.db.account_fences.find_one(
+                {"account_id": account, "fence_name": "reminder"})
+            self.assertGreater(row["count"], 0)
+        clinical = await self.db[PATIENTS].find_one({"patient_id": str(self.patient)})
+        self.assertGreater(clinical["_fence_reminder"], 0)
+        # ledger patient_id 仍取随访文档 patient_id 字符串（legacy ID 主键不变）
+        rows = await self.db[DELIVERIES].find({"status": "persisted"}).to_list(None)
+        self.assertEqual({row["patient_id"] for row in rows}, {str(self.patient)})
+        # 幂等：同事件不重投
+        self.assertEqual((await self.service.dispatch_one(str(self.followup)))["generated"], 0)
+        self.assertEqual(await self.db.notifications.count_documents({}), 2)
+
+    async def test_canonical_patient_without_verified_link_skips_patient_slot_only(self):
+        await self.go_canonical(linked=False)
+        self.assertEqual((await self.service.dispatch_one(str(self.followup)))["generated"], 1)
+        notices = await self.db.notifications.find({}).to_list(None)
+        self.assertEqual([row["recipient_id"] for row in notices], [str(self.doctor)])
+        patient_entry = await self.db[DELIVERIES].find_one(
+            {"slot": "patient", "reason": "PATIENT_ACCOUNT_UNAVAILABLE"})
+        self.assertIsNotNone(patient_entry)
+        self.assertEqual(patient_entry["status"], "skipped")
+        # 患者账号不可用 → 无患者账号栅栏计数；provider 槽位照常栅栏化
+        self.assertIsNone(await self.db.account_fences.find_one(
+            {"account_id": str(self.patient), "fence_name": "reminder"}))
+        self.assertGreater((await self.db.account_fences.find_one(
+            {"account_id": str(self.doctor), "fence_name": "reminder"}))["count"], 0)
+        clinical = await self.db[PATIENTS].find_one({"patient_id": str(self.patient)})
+        self.assertGreater(clinical["_fence_reminder"], 0)
+
+    async def test_canonical_disabled_link_and_inactive_account_skip_patient_slot(self):
+        await self.go_canonical(link_status="disabled")
+        self.assertEqual((await self.service.dispatch_one(str(self.followup)))["generated"], 1)
+        self.assertEqual(await self.db.notifications.count_documents(
+            {"recipient_id": str(self.doctor)}), 1)
+        # 链接补验通过但账号已停用：同样只投医护（各自独立到期事件）
+        await self.db[DELIVERIES].delete_many({})
+        await self.db.notifications.delete_many({})
+        await self.db[ACCOUNT_LINKS].update_one(
+            {"patient_id": str(self.patient)}, {"$set": {"status": "verified"}})
+        await self.db.users.update_one(
+            {"_id": self.patient}, {"$set": {"is_active": False}})
+        self.assertEqual((await self.service.dispatch_one(str(self.followup)))["generated"], 1)
+        self.assertEqual(await self.db.notifications.count_documents(
+            {"recipient_id": str(self.doctor)}), 1)
+        self.assertIsNotNone(await self.db[DELIVERIES].find_one(
+            {"slot": "patient", "reason": "PATIENT_ACCOUNT_UNAVAILABLE"}))
+
+    async def test_canonical_inactive_clinical_patient_skips_both_slots_without_fences(self):
+        await self.go_canonical(clinical_active=False)
+        self.assertEqual((await self.service.dispatch_one(str(self.followup)))["generated"], 0)
         self.assertEqual(await self.db.notifications.count_documents({}), 0)
+        self.assertEqual(await self.db[DELIVERIES].distinct("reason"),
+                         ["PATIENT_ACCOUNT_UNAVAILABLE"])
+        # 两个槽位均不可用 → 不产生任何栅栏写入（与 legacy 同构）
+        self.assertEqual(await self.db.account_fences.count_documents({}), 0)
+        clinical = await self.db[PATIENTS].find_one({"patient_id": str(self.patient)})
+        self.assertNotIn("_fence_reminder", clinical)
 
     async def test_fences_do_not_change_public_user_or_clinical_revision(self):
         before = await self.db.users.find_one({"_id": self.patient})
@@ -171,9 +252,9 @@ class ReminderReplicaTests(unittest.IsolatedAsyncioTestCase):
         original = self.service._recipients
         read, resume = asyncio.Event(), asyncio.Event()
         first = True
-        async def gate(record, session):
+        async def gate(record, session, mode):
             nonlocal first
-            result = await original(record, session)
+            result = await original(record, session, mode)
             if first:
                 first = False
                 read.set()

@@ -1,6 +1,10 @@
 """Fixed 24-hour in-app reminders with durable, transactional deduplication.
 
 Legacy reminder_before/days_before fields are deliberately not consulted.
+波次 3（T65）：收件人解析与栅栏载体按患者域分派——legacy 走 users 同文档
+（LegacyPatientRepository + _reminder_fence），canonical 走 patient_account_links
+verified 链接 + 双载体栅栏（AccountFenceStore + PatientFenceStore）；
+显式 legacy 状态文档（回拨 SOP 载体）与无文档 legacy 行为完全一致。
 """
 import asyncio
 import hashlib
@@ -12,9 +16,11 @@ from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import AppBaseException
+from app.core.fences import AccountFenceStore, PatientFenceStore
 from app.core.patient_access import patient_domain_mode
 from app.db.transactions import run_followup_transaction
 from app.patients.legacy import LegacyPatientRepository
+from app.patients.repository import ACCOUNT_LINKS, ClinicalPatientRepository
 from app.services.followup_service import FollowupService
 
 logger = logging.getLogger(__name__)
@@ -60,9 +66,10 @@ class FollowupReminderService:
         self.followups = FollowupService(db)
 
     async def _account(self, identifier, session):
-        # 账号层读取（本服务内仅用于医护侧 provider）：doctor/health_manager
-        # 账号的存在性与启停判断沿用双键直查语义，不是患者资料读取。
-        # 患者账号读取已收敛到 LegacyPatientRepository（见 _recipients）。
+        # 账号层读取（医护 provider 与 canonical 患者链接账号共用）：双键直查
+        # users 的存在性与启停判断是账号语义，不是患者资料读取。
+        # legacy 患者账号读取仍收敛到 LegacyPatientRepository（见 _recipients）；
+        # canonical 患者账号读取经 patient_account_links（见 _canonical_recipients）。
         if not isinstance(identifier, str) or not identifier:
             return None
         keys = [identifier]
@@ -72,6 +79,7 @@ class FollowupReminderService:
         return rows[0] if len(rows) == 1 else None
 
     async def _fence(self, collection, document, session):
+        """legacy 专属 users 载体栅栏（canonical 走双载体 fence store，见 dispatch_one）。"""
         value = document.get("_reminder_fence", 0)
         if type(value) is not int or value < 0:
             raise AppBaseException("提醒并发字段无效", status_code=503,
@@ -81,8 +89,10 @@ class FollowupReminderService:
         await collection.update_one({"_id": document["_id"]},
                                     {"$inc": {"_reminder_fence": 1}}, session=session)
 
-    async def _recipients(self, record, session):
-        # 患者账号读取收敛到 legacy 患者适配器（LegacyPatientRepository.get）：
+    async def _recipients(self, record, session, mode):
+        if mode == "canonical":
+            return await self._canonical_recipients(record, session)
+        # legacy：患者账号读取收敛到 legacy 患者适配器（LegacyPatientRepository.get）：
         # ObjectId/字符串双字面兼容，同键多文档由适配器 fail-closed
         # （PATIENT_IDENTITY_AMBIGUOUS），role=patient 由适配器保证；is_active
         # 判断按既有语义保留。账号缺失仍维持 PATIENT_ACCOUNT_UNAVAILABLE 兜底，
@@ -93,6 +103,44 @@ class FollowupReminderService:
         if not patient or patient.get("is_active") is not True:
             return [("patient", None, "PATIENT_ACCOUNT_UNAVAILABLE"),
                     ("provider", None, "PATIENT_ACCOUNT_UNAVAILABLE")], []
+        slots, provider_accounts = await self._provider_slots(record, patient, session)
+        return [("patient", patient, None)] + slots, [patient] + provider_accounts
+
+    async def _canonical_recipients(self, record, session):
+        # canonical（波次 3）：患者收件人解析经 patient_account_links——
+        # clinical_patients 文档（可用性载体是 status 字段，不是 users.is_active）
+        # → verified 链接 → 账号 is_active 校验。无链接、链接禁用、账号缺失或
+        # 停用一律跳过患者收件人槽位，复用 legacy 的 PATIENT_ACCOUNT_UNAVAILABLE
+        # 兜底语义（不新增错误码：该 reason 只进 DELIVERIES ledger 的诊断字段，
+        # 收件人不可用的根因在两种域下对外语义一致）。
+        # 患者临床文档缺失/停用时两个槽位一并跳过：legacy 语义下 provider 通知
+        # 以患者上下文为前提，canonical 保持同构。
+        identifier = record.get("patient_id")
+        patient = (await ClinicalPatientRepository(self.db).get(identifier, session=session)
+                   if isinstance(identifier, str) and identifier else None)
+        if not patient or patient.get("status") != "active":
+            return [("patient", None, "PATIENT_ACCOUNT_UNAVAILABLE"),
+                    ("provider", None, "PATIENT_ACCOUNT_UNAVAILABLE")], []
+        link = await self.db[ACCOUNT_LINKS].find_one(
+            {"patient_id": str(identifier), "status": "verified"}, session=session)
+        account = None
+        if link:
+            # 账号校验对齐 legacy is_active 语义（is_active 必须显式为 True）；
+            # role=patient 防御校验：verified 链接只应指向患者账号。
+            candidate = await self._account(str(link.get("account_id")), session)
+            if (candidate and candidate.get("is_active") is True
+                    and candidate.get("role") == "patient"):
+                account = candidate
+        slots, provider_accounts = await self._provider_slots(record, patient, session)
+        if account is None:
+            return [("patient", None, "PATIENT_ACCOUNT_UNAVAILABLE")] + slots, provider_accounts
+        return [("patient", account, None)] + slots, [account] + provider_accounts
+
+    async def _provider_slots(self, record, patient, session):
+        """医护收件人槽位（两种域同构）：provider 是账号身份（users 直查），
+        归属校验读患者文档的归属字段——legacy 读 users 同文档归属列表，
+        canonical 读 clinical_patients 迁移保留的同名归属列表。返回除患者槽位
+        外的槽位与账号列表（患者账号由调用方按域补齐）。"""
         provider = await self._account(record.get("provider_id"), session)
         reason = None
         if not provider or provider.get("is_active") is not True or provider.get("role") not in {"doctor", "health_manager"}:
@@ -102,8 +150,8 @@ class FollowupReminderService:
             assignments = patient.get(field)
             if not isinstance(assignments, list) or str(provider["_id"]) not in {str(item) for item in assignments}:
                 reason = "PROVIDER_NOT_ASSIGNED"
-        slots = [("patient", patient, None), ("provider", provider if not reason else None, reason)]
-        return slots, [patient] + ([provider] if not reason else [])
+        return [("provider", provider if not reason else None, reason)], \
+            [provider] if not reason else []
 
     async def dispatch_one(self, followup_id):
         async def transaction(session):
@@ -114,14 +162,13 @@ class FollowupReminderService:
             planned = as_utc(record.get("scheduled_date"))
             if not planned or planned > now + timedelta(hours=24):
                 return {"outcome": "not_due", "notifications": []}
-            # 域门闩按显式开关判定（canonical 才拒绝）：显式 legacy 状态文档
-            # {mode:"legacy"} 是回拨 SOP 载体，行为必须与无文档 legacy 完全一致，
-            # 不得误伤 503。canonical 患者无法按 ID 映射回账号，仍 fail-closed；
-            # 状态读取失败/未知状态时 patient_domain_mode 自然传播 503。
-            if await patient_domain_mode(self.db, session=session) == "canonical":
-                raise AppBaseException("当前患者域尚未接入提醒账号解析", status_code=503,
-                                       error_code="REMINDER_PATIENT_DOMAIN_UNSUPPORTED")
-            slots, accounts = await self._recipients(record, session)
+            # 域分派（波次 3 落地，T38 门闩已移除）：模式读取一次并贯穿本事务
+            # （收件人解析与栅栏载体选择同源，避免两次读取间的状态翻转歧义）。
+            # 显式 legacy 状态文档 {mode:"legacy"} 是回拨 SOP 载体，行为与无文档
+            # legacy 完全一致；canonical 走链接解析 + 双载体栅栏；状态读取失败/
+            # 未知状态时 patient_domain_mode 自然传播 503（fail-closed）。
+            mode = await patient_domain_mode(self.db, session=session)
+            slots, accounts = await self._recipients(record, session, mode)
             now = as_utc(self.clock())
             if planned <= now:
                 slots, accounts = [(slot, None, "PLAN_PASSED") for slot, _, _ in slots], []
@@ -134,10 +181,32 @@ class FollowupReminderService:
                 pending.append((key, slot, account, reason))
             if any(account is not None for _, _, account, _ in pending):
                 await self.followups.fence_reminder_source(record, session)
-                for account in accounts:
-                    await self._fence(self.db.users, account, session)
+                if mode == "canonical":
+                    # 栅栏双载体（canonical）：随访来源文档自身的栅栏不动（载体
+                    # 不是 users），账号侧计数落 account_fences（AccountFenceStore），
+                    # 患者侧落 clinical_patients._fence_reminder
+                    # （PatientFenceStore）。两跳在同一事务内整体提交/回滚，先后
+                    # 顺序不承载语义。栅栏计数不迁移（core/fences.py §为什么栅栏
+                    # 计数不迁移）：切换窗口内 legacy users 载体必须停止递增，
+                    # canonical 载体从 0 重新起算——回拨后旧计数即失效，这是
+                    # 切换窗口的硬约束（用户文档在 canonical 期保持只读）。
+                    await PatientFenceStore(self.db).bump(
+                        str(record["patient_id"]), "reminder", session=session)
+                    for account in accounts:
+                        await AccountFenceStore(self.db).bump(
+                            str(account["_id"]), "reminder", session=session)
+                else:
+                    for account in accounts:
+                        await self._fence(self.db.users, account, session)
             notifications = []
             for key, slot, account, reason in pending:
+                # DELIVERIES ledger 的 patient_id 语义：取随访来源文档的
+                # patient_id 字符串（legacy ID 主键），不是账号 ID——legacy 域
+                # 二者同文档同值；canonical 域迁移患者的 clinical patient_id
+                # 保留 legacy _id 字面量，无账号患者则是 clinical 主键本身。
+                # 随访计划文档 patient_id 主键跨域不变（见
+                # followup_service.py 扫描区声明），ledger 键随之一致，历史
+                # 记录无需迁移。
                 entry = {"policy": POLICY, "followup_id": str(record["_id"]),
                          "patient_id": str(record["patient_id"]), "slot": slot,
                          "planned_at": planned, "checked_at": now,
@@ -179,10 +248,10 @@ class FollowupReminderService:
 
     async def scan(self):
         now = as_utc(self.clock())
-        # 同 dispatch_one：显式 legacy 与无文档 legacy 行为一致，不得误伤。
-        if await patient_domain_mode(self.db) == "canonical":
-            raise AppBaseException("当前患者域尚未接入提醒账号解析", status_code=503,
-                                   error_code="REMINDER_PATIENT_DOMAIN_UNSUPPORTED")
+        # 域分派逐记录进行：scan 本身只负责窗口游标与失败记账，canonical/
+        # legacy 的收件人解析与栅栏载体差异全部收敛在 dispatch_one 事务内
+        # （T38 的 scan 门闩已随波次 3 链接解析落地移除）。显式 legacy 状态
+        # 文档 {mode:"legacy"} 是回拨 SOP 载体，行为与无文档 legacy 完全一致。
         count = 0
         failed = False
         # Future only: startup never catches up reminders after their plan time.

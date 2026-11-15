@@ -335,12 +335,26 @@ class FollowupService:
         return await self.followup_records.find_one({"_id": ObjectId(followup_id)}, session=session)
 
     def reminder_candidate_cursor(self, now):
+        # 提醒扫描窗口（reminder_due_scan 索引）与患者域分派无关：
+        # followup_records.patient_id 的主键语义跨域不变（legacy ID 字符串，
+        # 见下方 fence_reminder_source 处声明），扫描游标无需按域分支。
         return self.followup_records.find({"deleted": {"$ne": True},
             "status": {"$in": ["scheduled", "awaiting_fill"]},
             "scheduled_date": {"$gt": now, "$lte": now + timedelta(hours=24)}}).sort(
                 [("scheduled_date", 1), ("_id", 1)])
 
     async def fence_reminder_source(self, document, session):
+        """随访来源文档自身的 _reminder_fence 栅栏（载体不是 users，跨域不变）。
+
+        patient_id 语义声明（患者域切换波次 3）：随访计划文档（followup_records）
+        的 patient_id 主键跨域不变——legacy 域即患者账号同文档 ID；canonical 域
+        经迁移保留同一字面量（clinical_patients.patient_id = legacy _id），无账号
+        新患者则使用 clinical 主键本身。切换不做任何 ID 改写，提醒扫描/派发与
+        DELIVERIES ledger 的 patient_id 读写随随访文档原样保留。提醒的账号侧/
+        患者侧复核栅栏载体按域分派（legacy: users._reminder_fence；canonical:
+        AccountFenceStore + PatientFenceStore），仅由
+        followup_reminder_service.dispatch_one 写入；本方法只负责来源文档栅栏。
+        """
         value = document.get("_reminder_fence", 0)
         if type(value) is not int or value < 0:
             raise AppBaseException("提醒并发字段无效", status_code=503,
