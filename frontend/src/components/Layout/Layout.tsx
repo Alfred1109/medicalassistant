@@ -46,6 +46,7 @@ import {
   Business as BusinessIcon,
   Folder as FolderIcon,
   MonitorHeart as MonitorHeartIcon,
+  MenuBook as MenuBookIcon,
   EventNote as EventNoteIcon,
   QueryStats as QueryStatsIcon,
   Chat as ChatIcon,
@@ -268,16 +269,24 @@ const Layout: React.FC = () => {
         { name: '练习库', path: '/app/exercises', icon: <DirectionsRunIcon /> },
       ]
     },
-    { 
-      name: '智能助手', 
+    {
+      name: '智能助手',
       path: '/app/ai-assistant',
       icon: <PsychologyIcon />,
       children: [
-        { name: '智能问答', path: '/app/agents', icon: <StarIcon /> },
+        // 动态 Agent 平台仅医疗角色可用（与后端 agent_router 角色守卫对齐），
+        // 患者角色不展示该入口（T75 安全缺口收口）。
+        { name: '智能问答', path: '/app/agents', icon: <StarIcon />, roles: ['doctor', 'health_manager', 'admin'] },
         { name: '训练推荐', path: '/app/exercise-recommendations', icon: <FavoriteIcon /> },
-      ] 
+      ]
     },
   ];
+
+  // 基础菜单按当前角色过滤子项：无 roles 的子项对所有角色可见。
+  const visibleBaseMenuItems: MenuItem[] = baseMenuItems.map(item => ({
+    ...item,
+    children: item.children?.filter(child => !child.roles || child.roles.includes(userRole)),
+  }));
   
   // 角色模块菜单 (Corrected)
   const roleMenuItems: MenuItem[] = [
@@ -313,6 +322,7 @@ const Layout: React.FC = () => {
         { name: '随访管理', path: '/app/doctor/follow-ups', icon: <EventNoteIcon /> },
         { name: '问卷填报', path: '/app/doctor/form-fill', icon: <AssignmentIcon /> },
         { name: '患者记录', path: '/app/doctor/clinical', icon: <FolderIcon /> },
+        { name: 'ICF 评估', path: '/app/doctor/icf', icon: <AccessibilityIcon /> },
         { name: '患者设备', path: '/app/doctor/devices', icon: <DevicesIcon /> },
         { name: '质量监管', path: '/app/quality-control', icon: <AssessmentIcon /> },
         { name: '数据监测', path: '/app/doctor/monitoring', icon: <MonitorHeartIcon /> },
@@ -335,6 +345,10 @@ const Layout: React.FC = () => {
         { name: '设备绑定', path: '/app/patient/devices', icon: <DevicesIcon /> },
         { name: '医患沟通', path: '/app/patient/communications', icon: <ChatIcon /> },
         { name: '数据统计', path: '/app/patient/statistics', icon: <QueryStatsIcon /> },
+        // 患者端临床功能面（T75）：宣教消费 / 随访自助视图 / 健康指标与预警
+        { name: '宣教材料', path: '/app/patient/education', icon: <MenuBookIcon /> },
+        { name: '我的随访', path: '/app/patient/follow-ups', icon: <EventNoteIcon /> },
+        { name: '健康指标与预警', path: '/app/patient/health-status', icon: <MonitorHeartIcon /> },
         { name: '知情同意文档', path: '/app/patient/documents', icon: <AssignmentIcon /> },
       ]
     },
@@ -351,6 +365,7 @@ const Layout: React.FC = () => {
         { name: '随访管理', path: '/app/health-manager/follow-ups', icon: <EventNoteIcon /> },
         { name: '问卷填报', path: '/app/health-manager/form-fill', icon: <AssignmentIcon /> },
         { name: '患者记录', path: '/app/health-manager/clinical', icon: <FolderIcon /> },
+        { name: 'ICF 评估', path: '/app/health-manager/icf', icon: <AccessibilityIcon /> },
         { name: '患者设备', path: '/app/health-manager/devices', icon: <DevicesIcon /> },
         { name: '质量监管', path: '/app/quality-control', icon: <AssessmentIcon /> },
         { name: '数据监测', path: '/app/health-manager/monitoring', icon: <MonitorHeartIcon /> },
@@ -380,8 +395,8 @@ const Layout: React.FC = () => {
     setRecentPages(prevPages => {
       // 所有菜单项平铺 (Calculation moved inside functional update)
       const allMenuItems: MenuItem[] = [
-        ...baseMenuItems,
-        ...baseMenuItems.flatMap(item => item.children || []),
+        ...visibleBaseMenuItems,
+        ...visibleBaseMenuItems.flatMap(item => item.children || []),
         ...filteredRoleMenuItems,
         ...filteredRoleMenuItems.flatMap(item => item.children || [])
       ];
@@ -403,7 +418,7 @@ const Layout: React.FC = () => {
         return prevPages;
       }
     });
-  }, [baseMenuItems, filteredRoleMenuItems]); 
+  }, [visibleBaseMenuItems, filteredRoleMenuItems]); 
   
   const handleDrawerToggle = () => {
     dispatch(toggleSidebar());
@@ -460,7 +475,7 @@ const Layout: React.FC = () => {
     return allMenuItems.filter(item => 
       item.name.toLowerCase().includes(query)
     ).slice(0, 5);
-  }, [searchQuery, baseMenuItems, filteredRoleMenuItems]);
+  }, [searchQuery, visibleBaseMenuItems, filteredRoleMenuItems]);
   
   // 新增：角色个性化配置
   const roleConfig = {
@@ -761,7 +776,7 @@ const Layout: React.FC = () => {
         }}
       >
         <List component="nav" aria-label="main navigation menu" sx={{ py: 1 }}>
-          {renderMenuItems(baseMenuItems)}
+          {renderMenuItems(visibleBaseMenuItems)}
         
           {filteredRoleMenuItems.length > 0 && (
             <>

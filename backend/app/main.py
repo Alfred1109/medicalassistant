@@ -196,6 +196,11 @@ async def startup_db_client():
             await ensure_identity_indexes(mongodb_state.db)
         await reminder_runtime.start(mongodb_state.db, enabled=settings.FOLLOWUP_REMINDERS_ENABLED,
                                      interval=settings.FOLLOWUP_REMINDERS_POLL_SECONDS)
+        # T73 逾期自动标记/失访自动判定后台循环（独立于提醒开关；规则与总开关
+        # 在 followup_rule_configs 文档，阈值口径待临床确认）
+        from app.services.followup_reminder_service import disposition_runtime
+        await disposition_runtime.start(mongodb_state.db,
+                                        interval=settings.FOLLOWUP_REMINDERS_POLL_SECONDS)
         from app.operations.runtime import backup_schedule
         await backup_schedule.start(mongodb_state.db)
     except DatabaseConnectionError as e:
@@ -208,6 +213,8 @@ async def shutdown_db_client():
     """应用关闭时断开数据库连接"""
     logger.info("Application shutting down...")
     await reminder_runtime.stop()
+    from app.services.followup_reminder_service import disposition_runtime
+    await disposition_runtime.stop()
     from app.operations.runtime import backup_schedule
     await backup_schedule.stop()
     await close_mongodb_connection()
@@ -333,6 +340,8 @@ from app.clinical.router import router as clinical_router
 app.include_router(clinical_router, prefix="/api")
 from app.directory.router import router as directory_router
 app.include_router(directory_router, prefix="/api")
+from app.api.routers.icf_router import router as icf_router
+app.include_router(icf_router, prefix="/api", tags=["icf"])
 
 @app.get("/api")
 async def api_root():

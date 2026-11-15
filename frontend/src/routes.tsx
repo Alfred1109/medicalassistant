@@ -78,6 +78,9 @@ import DeviceBinding from './pages/Patient/DeviceBinding';
 import PatientDevices from './pages/Clinical/PatientDevices';
 import PatientCommunication from './pages/Patient/Communication';
 import PatientStatistics from './pages/Patient/Statistics';
+import PatientEducation from './pages/Patient/Education';
+import PatientHealthStatus from './pages/Patient/HealthStatus';
+import PatientMyFollowUps from './pages/Patient/MyFollowUps';
 
 // 知情同意文档相关页面
 import ConsentDocumentList from './pages/Patient/ConsentDocumentList';
@@ -91,6 +94,7 @@ import PatientLinks from './pages/Admin/PatientLinks';
 import AccessApplications from './pages/Admin/AccessApplications';
 import IntegrationRuns from './pages/Admin/IntegrationRuns';
 import ClinicalWorkbench from './pages/Clinical/ClinicalWorkbench';
+import IcfWorkbenchPage from './pages/Clinical/IcfWorkbenchPage';
 import HealthManagerManagement from './pages/Admin/HealthManagerManagement';
 import OrganizationManagement from './pages/Admin/OrganizationManagement';
 import TagManagement from './pages/Admin/TagManagement';
@@ -291,12 +295,13 @@ const AppRoutes: React.FC = () => (
       <Route path="exercises/:id" element={<ExerciseDetail />} />
       <Route path="exercises" element={<Exercises />} />
       
-      {/* Agents routes - 注意路由顺序 */}
-      <Route path="agents/new" element={<AgentForm />} />
-      <Route path="agents/edit/:id" element={<AgentForm />} />
-      <Route path="agents/:id" element={<AgentDetail />} />
-      <Route path="agents" element={<Agents />} />
-      
+      {/* Agents routes - 注意路由顺序。动态 Agent 平台仅医疗角色可用（与后端
+          agent_router 角色守卫对齐），患者角色访问跳回主面板。 */}
+      <Route path="agents/new" element={<RoleRoute allowedRoles={['doctor', 'health_manager', 'admin']}><AgentForm /></RoleRoute>} />
+      <Route path="agents/edit/:id" element={<RoleRoute allowedRoles={['doctor', 'health_manager', 'admin']}><AgentForm /></RoleRoute>} />
+      <Route path="agents/:id" element={<RoleRoute allowedRoles={['doctor', 'health_manager', 'admin']}><AgentDetail /></RoleRoute>} />
+      <Route path="agents" element={<RoleRoute allowedRoles={['doctor', 'health_manager', 'admin']}><Agents /></RoleRoute>} />
+
       {/* Exercise Recommendations route */}
       <Route path="exercise-recommendations" element={<ExerciseRecommendations />} />
       
@@ -323,6 +328,7 @@ const AppRoutes: React.FC = () => (
         <Route path="health-records/:patientId?" element={<HealthRecords />} />
         <Route path="follow-ups" element={<FollowUpManagement />} />
         <Route path="clinical" element={<ClinicalWorkbench />} />
+        <Route path="icf" element={<IcfWorkbenchPage />} />
         <Route path="devices" element={<PatientDevices />} />
         <Route path="monitoring/:patientId?" element={<DataMonitoring />} />
         <Route path="communications/:patientId?" element={<Communication />} />
@@ -349,6 +355,7 @@ const AppRoutes: React.FC = () => (
         <Route path="thresholds/:patientId?" element={<HealthThresholdPage />} />
         <Route path="follow-ups" element={<FollowUpManagement />} />
         <Route path="clinical" element={<ClinicalWorkbench />} />
+        <Route path="icf" element={<IcfWorkbenchPage />} />
         <Route path="devices" element={<PatientDevices />} />
         <Route path="monitoring/:patientId?" element={<DataMonitoring />} />
         <Route path="communications/:patientId?" element={<Communication />} />
@@ -375,6 +382,10 @@ const AppRoutes: React.FC = () => (
         <Route path="devices" element={<DeviceBinding />} />
         <Route path="communications" element={<PatientCommunication />} />
         <Route path="statistics" element={<PatientStatistics />} />
+        {/* 患者端宣教 / 随访自助 / 健康指标与预警（T75 患者端功能面） */}
+        <Route path="education" element={<PatientEducation />} />
+        <Route path="follow-ups" element={<PatientMyFollowUps />} />
+        <Route path="health-status" element={<PatientHealthStatus />} />
         {/* 患者端知情同意文档路由 - 注意路由顺序 */}
         <Route path="documents/templates" element={<ConsentTemplateList />} />
         <Route path="documents/:documentId/sign" element={<ConsentDocumentView />} />
