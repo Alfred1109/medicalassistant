@@ -19,6 +19,12 @@ PATIENTS_COLLECTION_NAME，见 docs/patient-domain-cutover-plan.md），且属�
 报表调度，必须先参照 T37 备份调度的 find_one_and_update 原子领取重写扫描领取
 逻辑（filter 含到点条件、领取成功者才执行），再接入应用启动，否则会原样复刻
 D1 重复执行缺陷。禁止单独恢复 _scheduler_loop。
+
+3.4 伪实现下线（docs/business-redundancy-review-2026-11-15.md）：原
+_export_report 把 JSON 写进 .pdf、把 CSV 写进 .excel——文件名承诺的格式与
+内容不符，是「点得进去、拿到的永远是假东西」的空壳实现。现在 PDF/Excel 一律
+如实拒绝（不再产出格式不符的文件），HTML 分支保持真实产出。恢复真报表导出
+前不得改回写假文件的做法。
 """
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -364,97 +370,74 @@ class ReportSchedulerService:
         return result
     
     async def _export_report(self, report_data: Dict[str, Any], format: str, title: str) -> str:
-        """导出报表为指定格式的文件"""
-        # 在实际应用中，应该使用专业的报表生成库，如ReportLab或WeasyPrint等
-        # 这里简化处理，将数据导出为JSON文件（实际应用中应生成PDF/Excel）
-        
+        """导出报表为指定格式的文件。
+
+        PDF/Excel 导出**未实现**（3.4 伪实现下线，见
+        docs/business-redundancy-review-2026-11-15.md）：原实现把 JSON 写进
+        .pdf、把 CSV 写进 .excel——文件名承诺的格式与内容不符，一旦被当成
+        真报表消费就是坏文件。此处如实拒绝，不再产出格式不符的文件；待接入
+        真正的 PDF/Excel 生成库后再放开。HTML 分支是真实产出，保持不变。
+
+        本方法当前不可达（T53 已删除调度入口，见模块头注释）；恢复调度前须
+        先满足模块头登记的原子领取前置条件。
+        """
+        if format in {"pdf", "excel"}:
+            raise ValueError(f"报表格式 {format} 尚未实现，拒绝产出格式不符的文件")
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{format}") as temp:
-            if format == "pdf":
-                # TODO: 实现PDF生成
-                # 简化处理，生成文本文件
-                import json
-                temp.write(json.dumps(report_data, default=str).encode('utf-8'))
-            elif format == "excel":
-                # TODO: 实现Excel生成
-                # 简化处理，生成CSV格式
-                import csv
-                
-                # 写入基本信息
-                temp.write(f"标题: {title}\n".encode('utf-8'))
-                temp.write(f"生成时间: {report_data['generated_at']}\n\n".encode('utf-8'))
-                
-                # 写入图表数据
-                for chart in report_data["charts_data"]:
-                    temp.write(f"{chart['title']}\n".encode('utf-8'))
-                    
-                    # 获取所有可能的列
-                    columns = set()
-                    for item in chart["data"]:
-                        columns.update(item.keys())
-                    
-                    # 写入列头
-                    temp.write((",".join(columns) + "\n").encode('utf-8'))
-                    
-                    # 写入数据行
-                    for item in chart["data"]:
-                        row = [str(item.get(col, "")) for col in columns]
-                        temp.write((",".join(row) + "\n").encode('utf-8'))
-                    
-                    temp.write("\n".encode('utf-8'))
-            else:  # html 或其他
-                # 生成简单的HTML报表
-                html = f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <title>{title}</title>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                        h1 {{ color: #333; }}
-                        table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
-                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-                        th {{ background-color: #f2f2f2; }}
-                        .chart-container {{ margin-bottom: 30px; }}
-                    </style>
-                </head>
-                <body>
-                    <h1>{title}</h1>
-                    <p>生成时间: {report_data['generated_at']}</p>
-                    <p>{report_data.get('description', '')}</p>
+            # 生成简单的HTML报表
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>{title}</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                    h1 {{ color: #333; }}
+                    table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                    th {{ background-color: #f2f2f2; }}
+                    .chart-container {{ margin-bottom: 30px; }}
+                </style>
+            </head>
+            <body>
+                <h1>{title}</h1>
+                <p>生成时间: {report_data['generated_at']}</p>
+                <p>{report_data.get('description', '')}</p>
+            """
+
+            for chart in report_data["charts_data"]:
+                html += f"""
+                <div class="chart-container">
+                    <h2>{chart['title']}</h2>
+                    <table>
+                        <thead>
+                            <tr>
                 """
-                
-                for chart in report_data["charts_data"]:
-                    html += f"""
-                    <div class="chart-container">
-                        <h2>{chart['title']}</h2>
-                        <table>
-                            <thead>
-                                <tr>
-                    """
-                    
-                    # 获取所有可能的列
-                    columns = set()
-                    for item in chart["data"]:
-                        columns.update(item.keys())
-                    
-                    # 写入列头
+
+                # 获取所有可能的列
+                columns = set()
+                for item in chart["data"]:
+                    columns.update(item.keys())
+
+                # 写入列头
+                for col in columns:
+                    html += f"<th>{col}</th>"
+                html += "</tr></thead><tbody>"
+
+                # 写入数据行
+                for item in chart["data"]:
+                    html += "<tr>"
                     for col in columns:
-                        html += f"<th>{col}</th>"
-                    html += "</tr></thead><tbody>"
-                    
-                    # 写入数据行
-                    for item in chart["data"]:
-                        html += "<tr>"
-                        for col in columns:
-                            html += f"<td>{item.get(col, '')}</td>"
-                        html += "</tr>"
-                    
-                    html += "</tbody></table></div>"
-                
-                html += "</body></html>"
-                temp.write(html.encode('utf-8'))
-            
+                        html += f"<td>{item.get(col, '')}</td>"
+                    html += "</tr>"
+
+                html += "</tbody></table></div>"
+
+            html += "</body></html>"
+            temp.write(html.encode('utf-8'))
+
             return temp.name
     
     async def _send_report_email(self, recipients: List[str], subject: str, report_file: str, 

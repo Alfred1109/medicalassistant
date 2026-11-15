@@ -9,12 +9,11 @@ from jose import jwt
 from pydantic import SecretStr
 
 from app.core.config import Settings, settings
-from app.core.dependencies import get_agent_service, get_rehabilitation_service
+from app.api.dependencies import get_agent_service, get_rehabilitation_service
 from app.core.llm import LLMConfigurationError, require_llm_api_key
 from app.db.mongodb import get_database
 from app.main import app
 from app.schemas.user import UserResponse
-from app.services.agent_optimized_service import AgentOptimizedService
 from app.services.agent_service import AgentService
 from app.services.rehabilitation_service import RehabilitationService, recommendations_from_model
 from app.services.user_service import UserService
@@ -28,7 +27,6 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
         for name in ("agent_interactions", "llm_generations", "rehab_plans"):
             getattr(self.db, name).insert_one = AsyncMock()
         self.base = AgentService(self.db)
-        self.optimized = AgentOptimizedService(self.db)
         self.rehab = RehabilitationService(self.db)
 
     def assert_no_writes(self):
@@ -58,23 +56,6 @@ class LLMConfigurationTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(LLMConfigurationError):
                     await call()
             client.assert_not_called()
-        self.assert_no_writes()
-
-    async def test_optimized_cache_and_streaming_cannot_report_success_without_configuration(self):
-        self.optimized._get_cache = AsyncMock(return_value={"response": "stale synthetic response"})
-        with patch.object(settings, "LLM_API_KEY", None), patch("openai.OpenAI") as client, \
-                patch("app.services.agent_optimized_service.asyncio.create_task") as task:
-            for streaming in (False, True):
-                with self.assertRaises(LLMConfigurationError):
-                    await self.optimized.process_query("synthetic", {"query": "Synthetic"}, streaming=streaming)
-            with self.assertRaises(LLMConfigurationError):
-                await self.optimized.generate_agent_parameters({})
-            with self.assertRaises(LLMConfigurationError):
-                await self.optimized._streaming_llm_call("synthetic", "query", "prompt", "model", .7, 1, "q")
-            task.assert_not_called()
-            client.assert_not_called()
-        self.optimized._get_cache.assert_not_awaited()
-        self.assertTrue(self.optimized.response_queue.empty())
         self.assert_no_writes()
 
     async def test_recommendations_use_configured_model_text_and_fail_closed(self):
