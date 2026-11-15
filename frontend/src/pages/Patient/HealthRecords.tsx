@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { formatAppDate } from '../../utils/dateTime';
 import { useSelector } from 'react-redux';
 import {
   Box,
@@ -48,9 +49,7 @@ const formatFollowUpDate = (value?: string | null) => formatDateTime(value) ?? '
 // 时间显示：无效或缺失时间返回 null，避免渲染出 NaN/Invalid Date
 const formatDateTime = (value?: string | null) => {
   if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+  return formatAppDate(value, 'minute', { invalid: '' }) || null;
 };
 
 // 面板内通用的加载中提示

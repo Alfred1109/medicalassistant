@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatAppDate } from '../../utils/dateTime';
 import {
   Box,
   Typography,
@@ -90,11 +91,8 @@ function TabPanel(props: TabPanelProps) {
 }
 
 // 时间格式化
-const formatDateTime = (value?: string | null): string => {
-  if (!value) return '未知';
-  const date = new Date(value);
-  return isNaN(date.getTime()) ? String(value) : date.toLocaleString();
-};
+const formatDateTime = (value?: string | null): string =>
+  formatAppDate(value, 'locale', { empty: '未知', invalid: value ? String(value) : '未知' });
 
 // 设备状态映射为展示文案与颜色
 const getStatusLabel = (status?: string | null): string => {

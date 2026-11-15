@@ -24,7 +24,7 @@ import {
   Divider,
 } from '@mui/material';
 import AssessmentIcon from '@mui/icons-material/Assessment';
-import { format } from 'date-fns';
+import { formatAppDate } from '../../utils/dateTime';
 import api, { apiService } from '../../services/api';
 
 /**
@@ -191,12 +191,8 @@ const RehabAssessment: React.FC = () => {
   };
 
   // 格式化时间
-  const formatTime = (iso?: string): string => {
-    if (!iso) return '未知时间';
-    const date = new Date(iso);
-    if (isNaN(date.getTime())) return String(iso);
-    return format(date, 'yyyy-MM-dd HH:mm');
-  };
+  const formatTime = (iso?: string): string =>
+    formatAppDate(iso, 'minute', { empty: '未知时间', invalid: iso ? String(iso) : '未知时间' });
 
   return (
     <Container maxWidth="lg">

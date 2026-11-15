@@ -1,4 +1,5 @@
 import { API_COLLECTION_PATHS } from '../../config/apiPaths';
+import { formatAppDate } from '../../utils/dateTime';
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box,
@@ -106,16 +107,8 @@ const DeviceManagement: React.FC = () => {
     return String(value);
   };
 
-  const formatDateTime = (value?: string | null) => {
-    if (!value) {
-      return '—';
-    }
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-      return String(value);
-    }
-    return date.toLocaleString();
-  };
+  const formatDateTime = (value?: string | null) =>
+    formatAppDate(value, 'locale', { empty: '—', invalid: value ? String(value) : '—' });
 
   const getStatusColor = (status: string): any => {
     switch (status) {

@@ -22,7 +22,8 @@ import AddIcon from '@mui/icons-material/Add';
 import EditIcon from '@mui/icons-material/Edit';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import { useNavigate } from 'react-router-dom';
-import { apiService } from '../../services/api';
+import { useSelector } from 'react-redux';
+import { assignedPatientsApi } from '../../services/api';
 import { patientDomainErrorCopy } from '../../services/patientErrors';
 import {
   mergePatientBatches,
@@ -32,10 +33,13 @@ import {
   PATIENT_LIST_PAGE_SIZE,
 } from '../../services/patientList';
 import { useApi } from '../../hooks/useApi';
+import { RootState } from '../../store';
 import { Patient } from '../../types/patient.types';
 
 const PatientManagement: React.FC = () => {
   const navigate = useNavigate();
+  const role = useSelector((state: RootState) => state.auth.user?.role);
+  const basePath = role === 'health_manager' ? '/app/health-manager' : '/app/doctor';
   const [searchTerm, setSearchTerm] = useState('');
   const [filteredPatients, setFilteredPatients] = useState<Patient[]>([]);
   // T59 分页预适配：缺省仍为一次性全量拉取；「加载更多」为可选追加路径，
@@ -51,7 +55,7 @@ const PatientManagement: React.FC = () => {
     loading,
     error,
     execute: fetchPatients
-  } = useApi<Patient[], []>(apiService.doctor.getPatients, true);
+  } = useApi<Patient[], []>(() => assignedPatientsApi(role).getPatients(), true);
 
   // 一次性全量 + 「加载更多」追加的合并视图；未追加时与原全量行为一致。
   const allPatients = useMemo(
@@ -94,7 +98,7 @@ const PatientManagement: React.FC = () => {
     setLoadingMore(true);
     setMoreError('');
     try {
-      const { data } = await apiService.doctor.getPatients(
+      const { data } = await assignedPatientsApi(role).getPatients(
         { skip: totalLoaded, limit: PATIENT_LIST_PAGE_SIZE });
       const batch = Array.isArray(data) ? data : [];
       setMorePatients((prev) => mergePatientBatches<Patient>(prev, batch));
@@ -152,7 +156,7 @@ const PatientManagement: React.FC = () => {
           variant="contained"
           color="primary"
           startIcon={<AddIcon />}
-          onClick={() => navigate('/app/doctor/patients/add')}
+          onClick={() => navigate(`${basePath}/patients/add`)}
         >
           添加患者
         </Button>
@@ -211,13 +215,13 @@ const PatientManagement: React.FC = () => {
                   <TableCell align="right">
                     <IconButton
                       color="primary"
-                      onClick={() => navigate(`/app/doctor/patients/${patient.id}`)}
+                      onClick={() => navigate(`${basePath}/patients/${patient.id}`)}
                     >
                       <VisibilityIcon />
                     </IconButton>
                     <IconButton
                       color="secondary"
-                      onClick={() => navigate(`/app/doctor/patients/${patient.id}/edit`)}
+                      onClick={() => navigate(`${basePath}/patients/${patient.id}/edit`)}
                     >
                       <EditIcon />
                     </IconButton>

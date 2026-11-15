@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useSelector } from 'react-redux';
 import {
   Box,
   Typography,
@@ -28,8 +29,9 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import EditIcon from '@mui/icons-material/Edit';
 import AddIcon from '@mui/icons-material/Add';
 import RefreshIcon from '@mui/icons-material/Refresh';
-import { apiService } from '../../services/api';
+import { assignedPatientsApi } from '../../services/api';
 import { useApi } from '../../hooks/useApi';
+import { RootState } from '../../store';
 import { PatientHealthRecord } from '../../types/patient.types';
 
 interface TabPanelProps {
@@ -75,15 +77,17 @@ const HealthRecords: React.FC = () => {
   const { patientId } = useParams<{ patientId: string }>();
   const navigate = useNavigate();
   const [tabValue, setTabValue] = useState(0);
+  const role = useSelector((state: RootState) => state.auth.user?.role);
+  const patientsPath = role === 'health_manager' ? '/app/health-manager/patients' : '/app/doctor/patients';
 
-  // 使用API钩子获取患者健康记录
+  // 使用API钩子获取患者健康记录（医生与健康管理师各走自己的授权端点）
   const { 
     data: healthRecord, 
     loading, 
     error,
     execute: fetchHealthRecord
   } = useApi<PatientHealthRecord, [string]>(
-    () => apiService.doctor.getPatientHealthRecord(patientId || ''),
+    () => assignedPatientsApi(role).getPatientHealthRecord(patientId || ''),
     true
   );
 
@@ -95,7 +99,7 @@ const HealthRecords: React.FC = () => {
         <Button 
           variant="contained" 
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/app/doctor/patients')}
+          onClick={() => navigate(patientsPath)}
           sx={{ mt: 2 }}
         >
           返回患者列表
@@ -120,7 +124,7 @@ const HealthRecords: React.FC = () => {
   return (
     <Box p={3}>
       <Box display="flex" alignItems="center" mb={3}>
-        <IconButton onClick={() => navigate('/app/doctor/patients')} sx={{ mr: 1 }}>
+        <IconButton onClick={() => navigate(patientsPath)} sx={{ mr: 1 }}>
           <ArrowBackIcon />
         </IconButton>
         <Typography variant="h4">患者健康档案</Typography>

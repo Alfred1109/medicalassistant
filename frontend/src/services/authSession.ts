@@ -28,6 +28,7 @@ export function assertSameOrigin(url: string): URL {
 /** One configuration lookup gates all transports; errors never select a weaker mode. */
 export function getAuthConfig(): Promise<AuthConfig> {
   if (!configuration) {
+    // 配置查询在 httpClient 请求拦截器里被调用，不能再走 httpClient，否则循环。
     configuration = axios.get(`${API_BASE_URL}/auth/config`, { timeout: 10000 }).then(({ data }) => {
       if (data?.mode !== 'legacy' && data?.mode !== 'oidc') throw new Error('登录配置响应无效');
       if (data.mode === 'oidc') {

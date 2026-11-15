@@ -71,10 +71,59 @@ import {
   Search as SearchIcon,
   Notifications as NotificationsIcon
 } from '@mui/icons-material';
+import { MenuIconKey, NAV_BASE, NAV_SECTIONS, ResolvedNavItem, resolveNavEntry } from '../../config/appRoutes';
 import { AppDispatch, RootState } from '../../store';
 import { signOut } from '../../store/slices/authSlice';
 import { showSnackbar, toggleSidebar } from '../../store/slices/uiSlice';
 import NotificationPusher from '../common/NotificationPusher';
+
+const MENU_ICONS: Record<MenuIconKey, React.ReactElement> = {
+  home: <HomeIcon />,
+  accessibility: <AccessibilityIcon />,
+  psychology: <PsychologyIcon />,
+  fitnessCenter: <FitnessCenterIcon />,
+  assessment: <AssessmentIcon />,
+  trendingUp: <TrendingUpIcon />,
+  directionsRun: <DirectionsRunIcon />,
+  star: <StarIcon />,
+  favorite: <FavoriteIcon />,
+  admin: <AdminIcon />,
+  doctor: <DoctorIcon />,
+  patient: <PatientIcon />,
+  healthManager: <HealthManagerIcon />,
+  folder: <FolderIcon />,
+  eventNote: <EventNoteIcon />,
+  assignment: <AssignmentIcon />,
+  monitorHeart: <MonitorHeartIcon />,
+  chat: <ChatIcon />,
+  queryStats: <QueryStatsIcon />,
+  description: <DescriptionIcon />,
+  devices: <DevicesIcon />,
+  insights: <InsightsIcon />,
+  history: <HistoryIcon />,
+  link: <LinkIcon />,
+  business: <BusinessIcon />,
+  label: <LabelIcon />,
+  menuBook: <MenuBookIcon />,
+  tune: <TuneIcon />,
+  timeline: <TimelineIcon />,
+  dashboard: <DashboardIcon />,
+};
+
+function toMenuItem(item: ResolvedNavItem): MenuItem {
+  return {
+    name: item.name,
+    path: item.path,
+    icon: MENU_ICONS[item.icon],
+    roles: item.roles,
+    chip: item.chip,
+    children: item.children?.map(toMenuItem),
+  };
+}
+
+// 菜单内容只来自 config/appRoutes.ts（与路由表同一份声明）
+const BASE_MENU_ITEMS: MenuItem[] = NAV_BASE.map(entry => toMenuItem(resolveNavEntry(entry)));
+const ROLE_MENU_ITEMS: MenuItem[] = NAV_SECTIONS.map(entry => toMenuItem(resolveNavEntry(entry)));
 
 // Drawer width for desktop
 const DRAWER_WIDTH = 260;
@@ -255,33 +304,8 @@ const Layout: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   
-  // Define base and role menus first
-  // 基础菜单项 (Corrected)
-  const baseMenuItems: MenuItem[] = [
-    { name: '首页', path: '/app/dashboard', icon: <HomeIcon /> },
-    { 
-      name: '康复中心', 
-      path: '/app/rehabilitation',
-      icon: <AccessibilityIcon />,
-      children: [
-        { name: '康复计划', path: '/app/rehab-plans', icon: <FitnessCenterIcon /> },
-        { name: '康复评估', path: '/app/rehab-assessment', icon: <AssessmentIcon /> },
-        { name: '进度报告', path: '/app/rehab-progress', icon: <TrendingUpIcon /> },
-        { name: '练习库', path: '/app/exercises', icon: <DirectionsRunIcon /> },
-      ]
-    },
-    {
-      name: '智能助手',
-      path: '/app/ai-assistant',
-      icon: <PsychologyIcon />,
-      children: [
-        // 动态 Agent 平台仅医疗角色可用（与后端 agent_router 角色守卫对齐），
-        // 患者角色不展示该入口（T75 安全缺口收口）。
-        { name: '智能问答', path: '/app/agents', icon: <StarIcon />, roles: ['doctor', 'health_manager', 'admin'] },
-        { name: '训练推荐', path: '/app/exercise-recommendations', icon: <FavoriteIcon /> },
-      ]
-    },
-  ];
+  // 基础菜单与角色菜单都从 config/appRoutes.ts 派生（与路由表同一份声明）。
+  const baseMenuItems = BASE_MENU_ITEMS;
 
   // 基础菜单按当前角色过滤子项：无 roles 的子项对所有角色可见。
   const visibleBaseMenuItems: MenuItem[] = baseMenuItems.map(item => ({
@@ -289,95 +313,7 @@ const Layout: React.FC = () => {
     children: item.children?.filter(child => !child.roles || child.roles.includes(userRole)),
   }));
   
-  // 角色模块菜单 (Corrected)
-  const roleMenuItems: MenuItem[] = [
-    { 
-      name: '管理员', 
-      path: '/app/admin', 
-      icon: <AdminIcon />, 
-      roles: ['admin'],
-      children: [
-        { name: '医生管理', path: '/app/admin/doctors', icon: <DoctorIcon /> },
-        { name: '患者管理', path: '/app/admin/patients', icon: <PatientIcon /> },
-        { name: '患者与问卷来源', path: '/app/admin/patient-links', icon: <AssignmentIcon /> },
-        // T77：显式账号绑定管理（临床患者 ↔ 登录账号），与问卷来源（patient-links）区分
-        { name: '账号绑定管理', path: '/app/admin/account-bindings', icon: <LinkIcon /> },
-        { name: '接入申请', path: '/app/admin/access-applications', icon: <AssignmentIcon /> },
-        { name: '同步记录', path: '/app/admin/integration-runs', icon: <HistoryIcon /> },
-        { name: '患者记录', path: '/app/admin/clinical', icon: <FolderIcon /> },
-        { name: '健管师管理', path: '/app/admin/health-managers', icon: <HealthManagerIcon /> },
-        { name: '组织机构', path: '/app/admin/organizations', icon: <BusinessIcon /> },
-        { name: '标签管理', path: '/app/admin/tags', icon: <LabelIcon /> },
-        { name: '设备查看', path: '/app/admin/devices', icon: <DevicesIcon /> },
-        { name: '数据可视化', path: '/app/admin/visualization', icon: <InsightsIcon /> },
-        { name: '质量监管', path: '/app/quality-control', icon: <AssessmentIcon /> },
-        { name: '审计日志', path: '/app/admin/audit-logs', icon: <HistoryIcon />, chip: { text: '审', color: 'info' } },
-      ]
-    },
-    { 
-      name: '医生工作站', 
-      path: '/app/doctor', 
-      icon: <DoctorIcon />, 
-      roles: ['doctor'],
-      children: [
-        { name: '患者管理', path: '/app/doctor/patients', icon: <PatientIcon /> },
-        { name: '健康档案', path: '/app/doctor/health-records', icon: <FolderIcon /> },
-        { name: '随访管理', path: '/app/doctor/follow-ups', icon: <EventNoteIcon /> },
-        { name: '问卷填报', path: '/app/doctor/form-fill', icon: <AssignmentIcon /> },
-        { name: '患者记录', path: '/app/doctor/clinical', icon: <FolderIcon /> },
-        { name: 'ICF 评估', path: '/app/doctor/icf', icon: <AccessibilityIcon /> },
-        { name: '患者设备', path: '/app/doctor/devices', icon: <DevicesIcon /> },
-        { name: '质量监管', path: '/app/quality-control', icon: <AssessmentIcon /> },
-        { name: '数据监测', path: '/app/doctor/monitoring', icon: <MonitorHeartIcon /> },
-        { name: '医患沟通', path: '/app/doctor/communications', icon: <ChatIcon /> },
-        { name: '数据统计', path: '/app/doctor/statistics', icon: <QueryStatsIcon /> },
-        { name: '知情同意', path: '/app/doctor/informed-consent', icon: <DescriptionIcon /> },
-        { name: '文档管理', path: '/app/doctor/documents', icon: <AssignmentIcon /> },
-      ]
-    },
-    { 
-      name: '患者中心', 
-      path: '/app/patient', 
-      icon: <PatientIcon />, 
-      roles: ['patient'],
-      children: [
-        { name: '主面板', path: '/app/patient/main-dashboard', icon: <DashboardIcon /> },
-        { name: '健康档案', path: '/app/patient/health-records', icon: <FolderIcon /> },
-        { name: '我的记录', path: '/app/patient/clinical', icon: <FolderIcon /> },
-        { name: '日常记录', path: '/app/patient/daily-records', icon: <EventNoteIcon /> },
-        { name: '设备绑定', path: '/app/patient/devices', icon: <DevicesIcon /> },
-        { name: '医患沟通', path: '/app/patient/communications', icon: <ChatIcon /> },
-        { name: '数据统计', path: '/app/patient/statistics', icon: <QueryStatsIcon /> },
-        // 患者端临床功能面（T75）：宣教消费 / 随访自助视图 / 健康指标与预警
-        { name: '宣教材料', path: '/app/patient/education', icon: <MenuBookIcon /> },
-        { name: '我的随访', path: '/app/patient/follow-ups', icon: <EventNoteIcon /> },
-        { name: '健康指标与预警', path: '/app/patient/health-status', icon: <MonitorHeartIcon /> },
-        { name: '知情同意文档', path: '/app/patient/documents', icon: <AssignmentIcon /> },
-      ]
-    },
-    { 
-      name: '健康管理师', 
-      path: '/app/health-manager', 
-      icon: <HealthManagerIcon />, 
-      roles: ['health_manager'],
-      children: [
-        { name: '患者管理', path: '/app/health-manager/patients', icon: <PatientIcon /> },
-        { name: '健康档案', path: '/app/health-manager/health-records', icon: <FolderIcon /> },
-        { name: '健康数据时间线', path: '/app/health-manager/health-data-timeline', icon: <TimelineIcon /> },
-        { name: '健康数据阈值', path: '/app/health-manager/thresholds', icon: <TuneIcon /> },
-        { name: '随访管理', path: '/app/health-manager/follow-ups', icon: <EventNoteIcon /> },
-        { name: '问卷填报', path: '/app/health-manager/form-fill', icon: <AssignmentIcon /> },
-        { name: '患者记录', path: '/app/health-manager/clinical', icon: <FolderIcon /> },
-        { name: 'ICF 评估', path: '/app/health-manager/icf', icon: <AccessibilityIcon /> },
-        { name: '患者设备', path: '/app/health-manager/devices', icon: <DevicesIcon /> },
-        { name: '质量监管', path: '/app/quality-control', icon: <AssessmentIcon /> },
-        { name: '数据监测', path: '/app/health-manager/monitoring', icon: <MonitorHeartIcon /> },
-        { name: '医患沟通', path: '/app/health-manager/communications', icon: <ChatIcon /> },
-        { name: '数据统计', path: '/app/health-manager/statistics', icon: <QueryStatsIcon /> },
-        { name: '文档管理', path: '/app/health-manager/documents', icon: <AssignmentIcon /> },
-      ]
-    },
-  ];
+  const roleMenuItems = ROLE_MENU_ITEMS;
   
   // Calculate filteredRoleMenuItems BEFORE it's used in useCallback
   const filteredRoleMenuItems = roleMenuItems.filter(item => 

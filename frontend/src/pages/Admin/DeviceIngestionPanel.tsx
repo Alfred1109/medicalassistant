@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { formatAppDate } from '../../utils/dateTime';
 import {
   Alert,
   Box,
@@ -38,11 +39,8 @@ import {
 // - 采集会话管理（开始/结束/取消）；
 // - 协议假设核实清单透出（待厂商文档核实的字段假设）。
 
-const formatDate = (value?: string | null) => {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
-};
+const formatDate = (value?: string | null) =>
+  formatAppDate(value, 'locale', { empty: '—', invalid: value ? String(value) : '—' });
 
 // 质量标记语义化标签（与后端 quality_flags 常量对齐）
 const QUALITY_FLAG_LABELS: Record<string, string> = {

@@ -13,8 +13,8 @@ import {
   Alert,
   CircularProgress,
 } from '@mui/material';
-import { format, differenceInDays, parseISO } from 'date-fns';
-import { zhCN } from 'date-fns/locale';
+import { differenceInDays, parseISO } from 'date-fns';
+import { formatAppDate } from '../../utils/dateTime';
 import api from '../../services/api';
 import { RehabPlan } from '../../types/rehab';
 
@@ -129,14 +129,8 @@ const RehabProgressEvaluation: React.FC<RehabProgressEvaluationProps> = ({ plan 
   })();
 
   // 格式化日期
-  const formatDate = (dateString?: string): string => {
-    if (!dateString) return '';
-    try {
-      return format(parseISO(dateString), 'yyyy年MM月dd日', { locale: zhCN });
-    } catch {
-      return dateString;
-    }
-  };
+  const formatDate = (dateString?: string): string =>
+    formatAppDate(dateString, 'dayZh', { invalid: dateString ?? '' });
 
 
   return (

@@ -6,6 +6,7 @@ import { CircularProgress, Box } from '@mui/material';
 
 // Layout
 import Layout from './components/Layout/Layout';
+import { APP_ROUTES, AppRouteNode } from './config/appRoutes';
 
 // IndexPage - 新添加的入口页面
 import IndexPage from './pages/IndexPage';
@@ -223,6 +224,121 @@ const LegacyRedirect: React.FC<{ to: string }> = ({ to }) => {
   return <Navigate to={{ pathname: rest ? `${to}/${rest}` : to, search: location.search, hash: location.hash }} replace />;
 };
 
+// 页面绑定（路径、角色、菜单在 config/appRoutes.ts，这里只登记每个 id 画什么）
+const ROUTE_ELEMENTS: Record<string, React.ReactNode> = {
+  index: <IndexPage />,
+  dashboard: <Dashboard />,
+  notifications: <NotificationsPage />,
+  'follow-up-detail': <FollowUpDetailPage />,
+  'quality-control': <QualityControlWorkbench />,
+  'rehab-plans.new': <RehabPlanForm />,
+  'rehab-plans.edit': <RehabPlanForm />,
+  'rehab-plans.detail': <RehabPlanDetailEntry />,
+  'rehab-plans': <RehabPlansEntry />,
+  'exercises.new': <ExerciseForm />,
+  'exercises.edit': <ExerciseForm />,
+  'exercises.detail': <ExerciseDetail />,
+  exercises: <Exercises />,
+  'agents.new': <AgentForm />,
+  'agents.edit': <AgentForm />,
+  'agents.detail': <AgentDetail />,
+  agents: <Agents />,
+  'exercise-recommendations': <ExerciseRecommendations />,
+  'rehab-assessment': <RehabAssessment />,
+  'rehab-progress': <RehabProgress />,
+  profile: <Profile />,
+  settings: <SystemSettings />,
+  'app.not-found': <NotFound />,
+  doctor: <DoctorDashboard />,
+  'doctor.index': <Navigate to="/app/doctor/patients" replace />,
+  'doctor.patients': <PatientManagement />,
+  'doctor.health-records': <HealthRecords />,
+  'doctor.follow-ups': <FollowUpManagement />,
+  'doctor.form-fill': <FormFillTasksPage />,
+  'doctor.clinical': <ClinicalWorkbench />,
+  'doctor.icf': <IcfWorkbenchPage />,
+  'doctor.devices': <PatientDevices />,
+  'doctor.monitoring': <DataMonitoring />,
+  'doctor.communications': <Communication />,
+  'doctor.statistics': <Statistics />,
+  'doctor.informed-consent': <InformedConsent />,
+  'doctor.documents': <ConsentDocumentList />,
+  'doctor.documents.templates': <ConsentTemplateList />,
+  'doctor.documents.detail': <ConsentDocumentView />,
+  'doctor.form-fill.detail': <FormFillEmbedPage />,
+  'health-manager': <HealthManagerDashboard />,
+  'health-manager.index': <Navigate to="/app/health-manager/patients" replace />,
+  'health-manager.patients': <PatientManagement />,
+  'health-manager.health-records': <HealthRecords />,
+  'health-manager.health-data-timeline': <HealthDataTimelinePage />,
+  'health-manager.thresholds': <HealthThresholdPage />,
+  'health-manager.follow-ups': <FollowUpManagement />,
+  'health-manager.form-fill': <FormFillTasksPage />,
+  'health-manager.clinical': <ClinicalWorkbench />,
+  'health-manager.icf': <IcfWorkbenchPage />,
+  'health-manager.devices': <PatientDevices />,
+  'health-manager.monitoring': <DataMonitoring />,
+  'health-manager.communications': <Communication />,
+  'health-manager.statistics': <Statistics />,
+  'health-manager.documents': <ConsentDocumentList />,
+  'health-manager.documents.templates': <ConsentTemplateList />,
+  'health-manager.documents.detail': <ConsentDocumentView />,
+  'health-manager.form-fill.detail': <FormFillEmbedPage />,
+  patient: <PatientDashboard />,
+  'patient.index': <Navigate to="/app/patient/main-dashboard" replace />,
+  'patient.main-dashboard': <PatientMainDashboard />,
+  'patient.health-records': <PatientHealthRecords />,
+  'patient.clinical': <ClinicalWorkbench />,
+  'patient.daily-records': <DailyRecords />,
+  'patient.devices': <DeviceBinding />,
+  'patient.communications': <PatientCommunication />,
+  'patient.statistics': <PatientStatistics />,
+  'patient.education': <PatientEducation />,
+  'patient.follow-ups': <PatientMyFollowUps />,
+  'patient.health-status': <PatientHealthStatus />,
+  'patient.documents': <ConsentDocumentList />,
+  'patient.documents.templates': <ConsentTemplateList />,
+  'patient.documents.sign': <ConsentDocumentView />,
+  'patient.documents.detail': <ConsentDocumentView />,
+  admin: <AdminDashboard />,
+  'admin.index': <Navigate to="/app/admin/doctors" replace />,
+  'admin.doctors': <DoctorManagement />,
+  'admin.patients': <AdminPatientManagement />,
+  'admin.patient-links': <PatientLinks />,
+  'admin.account-bindings': <AccountBindings />,
+  'admin.access-applications': <AccessApplications />,
+  'admin.integration-runs': <IntegrationRuns />,
+  'admin.clinical': <ClinicalWorkbench />,
+  'admin.health-managers': <HealthManagerManagement />,
+  'admin.organizations': <OrganizationManagement />,
+  'admin.tags': <TagManagement />,
+  'admin.devices': <DeviceManagement />,
+  'admin.visualization': <DataVisualization />,
+  'admin.audit-logs': <AuditLogsPage />,
+  'admin.permission-audit': <PermissionAuditLog />,
+  'admin.settings': <SystemSettings />,
+};
+
+function renderConfiguredRoutes(nodes: AppRouteNode[]): React.ReactNode {
+  return nodes.map((node) => {
+    const page = ROUTE_ELEMENTS[node.id];
+    if (page === undefined) {
+      throw new Error(`路由 ${node.id} 没有对应页面`);
+    }
+    const element = node.allowedRoles
+      ? <RoleRoute allowedRoles={node.allowedRoles}>{page}</RoleRoute>
+      : page;
+    if (node.index) {
+      return <Route key={node.id} index element={element} />;
+    }
+    return (
+      <Route key={node.id} path={node.path} element={element}>
+        {node.children?.length ? renderConfiguredRoutes(node.children) : null}
+      </Route>
+    );
+  });
+}
+
 // 创建应用路由组件
 const AppRoutes: React.FC = () => (
   <Routes>
@@ -261,150 +377,7 @@ const AppRoutes: React.FC = () => (
         </ProtectedRoute>
       }
     >
-      {/* 首页/导航页面 */}
-      <Route index element={<IndexPage />} />
-
-      {/* Dashboard route - 主面板 */}
-      <Route path="dashboard" element={<Dashboard />} />
-
-      {/* 通知中心路由 */}
-      <Route path="notifications" element={<NotificationsPage />} />
-      <Route path="follow-ups/:followUpId" element={<FollowUpDetailPage />} />
-      <Route path="quality-control" element={<QualityControlWorkbench />} />
-      
-      {/* Rehabilitation Plans routes - 注意路由顺序，特定路由需要在参数路由前定义 */}
-      <Route path="rehab-plans/new" element={<RehabPlanForm />} />
-      <Route path="rehab-plans/edit/:id" element={<RehabPlanForm />} />
-      <Route path="rehab-plans/:id" element={<RehabPlanDetailEntry />} />
-      <Route path="rehab-plans" element={<RehabPlansEntry />} />
-      
-      {/* Exercises routes - 注意路由顺序 */}
-      <Route path="exercises/new" element={<ExerciseForm />} />
-      <Route path="exercises/edit/:id" element={<ExerciseForm />} />
-      <Route path="exercises/:id" element={<ExerciseDetail />} />
-      <Route path="exercises" element={<Exercises />} />
-      
-      {/* Agents routes - 注意路由顺序。动态 Agent 平台仅医疗角色可用（与后端
-          agent_router 角色守卫对齐），患者角色访问跳回主面板。 */}
-      <Route path="agents/new" element={<RoleRoute allowedRoles={['doctor', 'health_manager', 'admin']}><AgentForm /></RoleRoute>} />
-      <Route path="agents/edit/:id" element={<RoleRoute allowedRoles={['doctor', 'health_manager', 'admin']}><AgentForm /></RoleRoute>} />
-      <Route path="agents/:id" element={<RoleRoute allowedRoles={['doctor', 'health_manager', 'admin']}><AgentDetail /></RoleRoute>} />
-      <Route path="agents" element={<RoleRoute allowedRoles={['doctor', 'health_manager', 'admin']}><Agents /></RoleRoute>} />
-
-      {/* Exercise Recommendations route */}
-      <Route path="exercise-recommendations" element={<ExerciseRecommendations />} />
-      
-      {/* Rehab Assessment routes */}
-      <Route path="rehab-assessment" element={<RehabAssessment />} />
-      <Route path="rehab-progress" element={<RehabProgress />} />
-      
-      {/* Profile route */}
-      <Route path="profile" element={<Profile />} />
-      
-      {/* Settings route */}
-      <Route path="settings" element={<SystemSettings />} />
-      
-      {/* 已登录用户访问不存在的 /app 路径时显示 404。 */}
-      <Route path="*" element={<NotFound />} />
-
-      {/* 医生专属路由 */}
-      <Route 
-        path="doctor" 
-        element={<RoleRoute allowedRoles={['doctor']}><DoctorDashboard /></RoleRoute>}
-      >
-        <Route index element={<Navigate to="/app/doctor/patients" replace />} />
-        <Route path="patients" element={<PatientManagement />} />
-        <Route path="health-records/:patientId?" element={<HealthRecords />} />
-        <Route path="follow-ups" element={<FollowUpManagement />} />
-        <Route path="clinical" element={<ClinicalWorkbench />} />
-        <Route path="icf" element={<IcfWorkbenchPage />} />
-        <Route path="devices" element={<PatientDevices />} />
-        <Route path="monitoring/:patientId?" element={<DataMonitoring />} />
-        <Route path="communications/:patientId?" element={<Communication />} />
-        <Route path="statistics" element={<Statistics />} />
-        <Route path="informed-consent" element={<InformedConsent />} />
-        {/* 医生端知情同意文档管理 */}
-        <Route path="documents/templates" element={<ConsentTemplateList />} />
-        <Route path="documents/:documentId" element={<ConsentDocumentView />} />
-        <Route path="documents" element={<ConsentDocumentList />} />
-        {/* 表单平台（113.44）嵌入填报 */}
-        <Route path="form-fill" element={<FormFillTasksPage />} />
-        <Route path="form-fill/:taskId" element={<FormFillEmbedPage />} />
-      </Route>
-
-      {/* 健康管理师专属路由 */}
-      <Route 
-        path="health-manager" 
-        element={<RoleRoute allowedRoles={['health_manager']}><HealthManagerDashboard /></RoleRoute>}
-      >
-        <Route index element={<Navigate to="/app/health-manager/patients" replace />} />
-        <Route path="patients" element={<PatientManagement />} />
-        <Route path="health-records/:patientId?" element={<HealthRecords />} />
-        <Route path="health-data-timeline/:patientId?" element={<HealthDataTimelinePage />} />
-        <Route path="thresholds/:patientId?" element={<HealthThresholdPage />} />
-        <Route path="follow-ups" element={<FollowUpManagement />} />
-        <Route path="clinical" element={<ClinicalWorkbench />} />
-        <Route path="icf" element={<IcfWorkbenchPage />} />
-        <Route path="devices" element={<PatientDevices />} />
-        <Route path="monitoring/:patientId?" element={<DataMonitoring />} />
-        <Route path="communications/:patientId?" element={<Communication />} />
-        <Route path="statistics" element={<Statistics />} />
-        {/* 健康管理师端知情同意文档管理 */}
-        <Route path="documents/templates" element={<ConsentTemplateList />} />
-        <Route path="documents/:documentId" element={<ConsentDocumentView />} />
-        <Route path="documents" element={<ConsentDocumentList />} />
-        {/* 表单平台（113.44）嵌入填报 */}
-        <Route path="form-fill" element={<FormFillTasksPage />} />
-        <Route path="form-fill/:taskId" element={<FormFillEmbedPage />} />
-      </Route>
-
-      {/* 患者专属路由 */}
-      <Route 
-        path="patient" 
-        element={<RoleRoute allowedRoles={['patient']}><PatientDashboard /></RoleRoute>}
-      >
-        <Route index element={<Navigate to="/app/patient/main-dashboard" replace />} />
-        <Route path="main-dashboard" element={<PatientMainDashboard />} />
-        <Route path="health-records" element={<PatientHealthRecords />} />
-        <Route path="clinical" element={<ClinicalWorkbench />} />
-        <Route path="daily-records" element={<DailyRecords />} />
-        <Route path="devices" element={<DeviceBinding />} />
-        <Route path="communications" element={<PatientCommunication />} />
-        <Route path="statistics" element={<PatientStatistics />} />
-        {/* 患者端宣教 / 随访自助 / 健康指标与预警（T75 患者端功能面） */}
-        <Route path="education" element={<PatientEducation />} />
-        <Route path="follow-ups" element={<PatientMyFollowUps />} />
-        <Route path="health-status" element={<PatientHealthStatus />} />
-        {/* 患者端知情同意文档路由 - 注意路由顺序 */}
-        <Route path="documents/templates" element={<ConsentTemplateList />} />
-        <Route path="documents/:documentId/sign" element={<ConsentDocumentView />} />
-        <Route path="documents/:documentId" element={<ConsentDocumentView />} />
-        <Route path="documents" element={<ConsentDocumentList />} />
-      </Route>
-      
-      {/* 系统管理员专属路由 */}
-      <Route 
-        path="admin" 
-        element={<RoleRoute allowedRoles={['admin']}><AdminDashboard /></RoleRoute>}
-      >
-        <Route index element={<Navigate to="/app/admin/doctors" replace />} />
-        <Route path="doctors" element={<DoctorManagement />} />
-        <Route path="patients" element={<AdminPatientManagement />} />
-        <Route path="patient-links" element={<PatientLinks />} />
-        {/* T77：显式账号绑定管理（/api/patients/account-bindings，admin-only） */}
-        <Route path="account-bindings" element={<AccountBindings />} />
-        <Route path="access-applications" element={<AccessApplications />} />
-        <Route path="integration-runs" element={<IntegrationRuns />} />
-        <Route path="clinical" element={<ClinicalWorkbench />} />
-        <Route path="health-managers" element={<HealthManagerManagement />} />
-        <Route path="organizations" element={<OrganizationManagement />} />
-        <Route path="tags" element={<TagManagement />} />
-        <Route path="devices" element={<DeviceManagement />} />
-        <Route path="visualization" element={<DataVisualization />} />
-        <Route path="audit-logs" element={<AuditLogsPage />} />
-        <Route path="permission-audit" element={<PermissionAuditLog />} />
-        <Route path="settings" element={<SystemSettings />} />
-      </Route>
+      {renderConfiguredRoutes(APP_ROUTES)}
     </Route>
     
     {/* Not Found route */}

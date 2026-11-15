@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatAppDate } from '../../utils/dateTime';
 import { useSelector } from 'react-redux';
 import {
   Box,
@@ -58,12 +59,7 @@ const MESSAGES_POLL_FALLBACK_MS = 15_000;
 const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_FILE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
-const formatTime = (iso?: string) => {
-  if (!iso) return '';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-};
+const formatTime = (iso?: string) => formatAppDate(iso, 'localeShort');
 
 type CommunicationView = 'medical-staff' | 'patient';
 

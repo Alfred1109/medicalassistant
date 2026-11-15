@@ -7,6 +7,11 @@ import type { Doctor } from '../types/doctor.types';
 import type { FollowUpRecord, FollowUpWorkbenchQuery, FollowUpWorkbenchPage, ReviewFollowUpRequest, ReEvaluateFollowUpRequest, FollowUpSummaryPayload } from '../types/followup';
 
 // API服务方法
+/** 医生与健康管理师共用页面时，按当前角色选归属患者接口。 */
+export function assignedPatientsApi(role?: string | null) {
+  return role === 'health_manager' ? apiService.healthManager : apiService.doctor;
+}
+
 export const apiService = {
   // 设备相关API
   // 后端 GET /api/devices 返回当前登录用户有权访问的患者设备，
@@ -82,7 +87,18 @@ export const apiService = {
   },
   
   healthManager: {
-    getPatients: (): Promise<AxiosResponse<Patient[]>> => api.get('/health-managers/patients'),
+    getPatients: (options?: { skip?: number; limit?: number }): Promise<AxiosResponse<Patient[]>> => {
+      const params = options && (options.skip !== undefined || options.limit !== undefined)
+        ? { skip: options.skip, limit: options.limit }
+        : undefined;
+      return params ? api.get('/health-managers/patients', { params }) : api.get('/health-managers/patients');
+    },
+    getPatientHealthRecord: (patientId: string): Promise<AxiosResponse<PatientHealthRecord>> =>
+      api.get(`/health-managers/health-records/${patientId}`),
+    getPatientMonitoring: (patientId: string, startDate?: string, endDate?: string): Promise<AxiosResponse<any>> =>
+      api.get(`/health-managers/patient-monitoring/${patientId}`, {
+        params: { start_date: startDate, end_date: endDate }
+      }),
   },
 
   // 康复计划接口

@@ -29,6 +29,7 @@ import {
   Alert
 } from '@mui/material';
 import { format, isValid, parseISO } from 'date-fns';
+import { formatAppDate } from '../../utils/dateTime';
 import { zhCN } from 'date-fns/locale';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
@@ -198,13 +199,8 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   };
   
   // 格式化日期
-  const formatDate = (dateString: string) => {
-    try {
-      return format(parseISO(dateString), 'yyyy年MM月dd日 HH:mm', { locale: zhCN });
-    } catch (e) {
-      return dateString;
-    }
-  };
+  const formatDate = (dateString: string) =>
+    formatAppDate(dateString, 'minuteZh', { invalid: dateString });
   
   // 渲染操作按钮
   const renderActions = (record: FollowUpRecord) => {

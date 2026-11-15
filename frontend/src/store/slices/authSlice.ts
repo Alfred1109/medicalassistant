@@ -1,8 +1,8 @@
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import axios, { AxiosResponse } from 'axios';
 import type { ThunkApiConfig } from '../types';
-import { API_BASE_URL } from '../../config/api';
-import { AuthMode, authRequestOptions, clearLegacyCredentials, getAuthConfig } from '../../services/authSession';
+import { AuthMode, clearLegacyCredentials, getAuthConfig } from '../../services/authSession';
+import httpClient from '../../services/httpClient';
 
 // 用户类型单属主在 types/api.types（含 permissions/is_active 等完整后端契约字段），
 // authSlice 仅 re-export，历史本地定义已删除。
@@ -65,8 +65,8 @@ export const register = createAsyncThunk<
   async (userData, { rejectWithValue }) => {
     try {
       if ((await getAuthConfig()).mode === 'oidc') return rejectWithValue('请通过统一登录入口注册或登录');
-      const response: AxiosResponse<{ user: User; token: string }> = await axios.post(
-        `${API_BASE_URL}/users/register`,
+      const response: AxiosResponse<{ user: User; token: string }> = await httpClient.post(
+        '/users/register',
         {
           email: userData.email,
           password: userData.password,
@@ -100,8 +100,8 @@ export const login = createAsyncThunk<
         setTimeout(() => reject(new Error('请求超时，请检查网络连接或服务器状态')), 8000);
       });
 
-      const requestPromise: Promise<AxiosResponse<LoginSuccessPayload & { access_token: string }>> = axios.post(
-        `${API_BASE_URL}/users/login`,
+      const requestPromise: Promise<AxiosResponse<LoginSuccessPayload & { access_token: string }>> = httpClient.post(
+        '/users/login',
         params,
         {
           headers: {
@@ -171,7 +171,7 @@ export const checkAuthStatus = createAsyncThunk<User | null, void, ThunkApiConfi
       const config = await getAuthConfig();
       dispatch(authSlice.actions.configurationLoaded({ ...config, requestId }));
       if (config.mode === 'oidc') {
-        const { data } = await axios.get(`${API_BASE_URL}/auth/session`, { withCredentials: true, timeout: 10000 });
+        const { data } = await httpClient.get('/auth/session');
         if (data?.authenticated !== true) return null;
         if (data.identity_state !== 'bound' && data.identity_state !== 'pending_binding') throw new Error('身份会话响应无效');
         dispatch(authSlice.actions.identityLoaded({ state: data.clinical_access === true ? data.identity_state : 'pending_binding', requestId }));
@@ -183,7 +183,7 @@ export const checkAuthStatus = createAsyncThunk<User | null, void, ThunkApiConfi
         return user as User;
       }
       if (!token) return null;
-      return (await axios.get<User>(`${API_BASE_URL}/users/me`, { headers: { Authorization: `Bearer ${token}` } })).data;
+      return (await httpClient.get<User>('/users/me')).data;
     } catch (error: any) {
       if (error.response?.status === 401 && getState().auth.mode === 'oidc') return null;
       if (error.response?.status === 503) return rejectWithValue('身份服务暂时不可用，请稍后重试');
@@ -198,7 +198,7 @@ export const signOut = createAsyncThunk<void, void, ThunkApiConfig>(
   async (_, { dispatch, rejectWithValue }) => {
     try {
       if ((await getAuthConfig()).mode === 'oidc') {
-        await axios.post(`${API_BASE_URL}/auth/logout`, undefined, { ...await authRequestOptions('POST'), timeout: 10000 });
+        await httpClient.post('/auth/logout');
       }
       dispatch(authSlice.actions.logout());
     } catch {
@@ -225,10 +225,7 @@ export const updateUserProfile = createAsyncThunk<
     try {
       const configuration = await getAuthConfig();
       if (configuration.mode !== 'oidc' && !auth.token) return rejectWithValue('请先登录');
-      const options = await authRequestOptions('PUT');
-      const response: AxiosResponse<User> = await axios.put(`${API_BASE_URL}/users/me`, userData, {
-        ...options, headers: configuration.mode === 'oidc' ? options.headers : { Authorization: `Bearer ${auth.token}` }
-      });
+      const response: AxiosResponse<User> = await httpClient.put('/users/me', userData);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.detail || '更新个人资料失败');

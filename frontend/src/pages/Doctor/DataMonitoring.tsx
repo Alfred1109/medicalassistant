@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatAppDate } from '../../utils/dateTime';
 import {
   Box,
   Typography,
@@ -32,9 +33,11 @@ import OpacityIcon from '@mui/icons-material/Opacity';
 import LocalHospitalIcon from '@mui/icons-material/LocalHospital';
 import MonitorWeightIcon from '@mui/icons-material/MonitorWeight';
 import { Link } from 'react-router-dom';
-import { apiService } from '../../services/api';
+import { useSelector } from 'react-redux';
+import { apiService, assignedPatientsApi } from '../../services/api';
 import { rehabilitationService, PlanStatisticsResponse } from '../../services/rehabilitationService';
 import AnalyticsChart from '../../components/Analytics/AnalyticsChart';
+import { RootState } from '../../store';
 
 // 选项卡面板属性接口
 interface TabPanelProps {
@@ -167,13 +170,8 @@ function TabPanel(props: TabPanelProps) {
 }
 
 // 将 ISO 时间格式化为展示字符串
-const formatTime = (iso?: string): string => {
-  if (!iso) return '未知时间';
-  const date = new Date(iso);
-  if (isNaN(date.getTime())) return String(iso);
-  const pad = (n: number) => n.toString().padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-};
+const formatTime = (iso?: string): string =>
+  formatAppDate(iso, 'minute', { empty: '未知时间', invalid: iso ? String(iso) : '未知时间' });
 
 // 图表 x 轴短标签
 const formatChartLabel = (iso?: string): string => {
@@ -231,6 +229,8 @@ const computePlanProgress = (exercises: any[]): number | null => {
 };
 
 const DataMonitoring: React.FC = () => {
+  const role = useSelector((state: RootState) => state.auth.user?.role);
+  const recordsBase = role === 'health_manager' ? '/app/health-manager' : '/app/doctor';
   // 状态管理
   const [tabValue, setTabValue] = React.useState(0);
   const [selectedPatient, setSelectedPatient] = React.useState<string>('');
@@ -258,7 +258,7 @@ const DataMonitoring: React.FC = () => {
     setPatientsLoading(true);
     setPatientsError(null);
     try {
-      const response = await apiService.doctor.getPatients();
+      const response = await assignedPatientsApi(role).getPatients();
       const list: any[] = Array.isArray(response.data) ? response.data : [];
       // 后端已诚实化：空库如实返回 []，不再返回 mock_* 模拟患者
       setPatients(list.map(p => ({
@@ -274,7 +274,7 @@ const DataMonitoring: React.FC = () => {
     } finally {
       setPatientsLoading(false);
     }
-  }, []);
+  }, [role]);
 
   // 初始加载患者列表
   React.useEffect(() => {
@@ -327,7 +327,7 @@ const DataMonitoring: React.FC = () => {
         // 康复计划，真实接口 GET /rehabilitation/plans?patient_id=
         apiService.rehabilitation.getPlans(selectedPatient),
         // 医生侧健康档案（用药记录来源），失败不阻塞其余数据
-        apiService.doctor.getPatientHealthRecord(selectedPatient).catch(() => null),
+        assignedPatientsApi(role).getPatientHealthRecord(selectedPatient).catch(() => null),
       ]);
 
       const vitalDocs: HealthDataDoc[] = Array.isArray(vitalRes.data) ? vitalRes.data : [];
@@ -774,7 +774,7 @@ const DataMonitoring: React.FC = () => {
                       variant="outlined"
                       size="small"
                       component={Link}
-                      to={`/app/doctor/health-records/${selectedPatient}`}
+                      to={`${recordsBase}/health-records/${selectedPatient}`}
                     >
                       查看完整用药史
                     </Button>

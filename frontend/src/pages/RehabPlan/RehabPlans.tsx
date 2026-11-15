@@ -50,7 +50,7 @@ import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
 import ScheduleIcon from '@mui/icons-material/Schedule';
 import ViewListIcon from '@mui/icons-material/ViewList';
 
-import { format } from 'date-fns';
+import { formatAppDate } from '../../utils/dateTime';
 import { createSelector } from 'reselect';
 import Alert from '@mui/material/Alert';
 
@@ -229,14 +229,8 @@ const RehabPlans: React.FC = () => {
   }, [plans, searchTerm, statusFilter, sortBy]);
   
   // 格式化日期函数
-  const formatDate = (dateString?: string) => {
-    if (!dateString) return 'N/A';
-    try {
-      return format(new Date(dateString), 'yyyy-MM-dd');
-    } catch (e) {
-      return 'Invalid date';
-    }
-  };
+  const formatDate = (dateString?: string) =>
+    formatAppDate(dateString, 'day', { empty: 'N/A', invalid: 'Invalid date' });
   
   // 计算完成百分比
   const calculateProgress = (plan: RehabPlan) => {
