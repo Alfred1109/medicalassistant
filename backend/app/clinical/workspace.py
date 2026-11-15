@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import HTTPException
 
+from app.core.csv_export import csv_cell
 from app.core.patient_access import (
     ensure_patient_access, load_patient_doc, resolve_self_patient_id)
 
@@ -873,10 +874,8 @@ def indicators_csv(result):
 
 
 def _csv(value):
-    text = "" if value is None else str(value)
-    if any(character in text for character in ",\"\n"):
-        return '"' + text.replace('"', '""') + '"'
-    return text
+    # 导出转义与公式注入防护收敛到 core.csv_export（与质控过程报表同一套规则）
+    return csv_cell(value)
 
 
 async def recorded_plan_sources(db, actor, patient_id):
