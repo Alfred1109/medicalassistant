@@ -678,3 +678,45 @@ M1中的API05可先通过契约测试客户端验证初始化、并发变更与�
 - 本批复跑基线（2026-11-15 实跑）：后端全量回归 `DEBUG=false` **863 passed / 327 skipped**（无隔离 URI 口径）；前端 Node 测试 **118 passed**（0 失败）。本批新增副本集门控专项：通信连接期撤权与多 worker（`REHAB_TEST_COMM_REVOCATION_URI`）；既有门控专项（患者域 e2e 演练、栅栏并发、调度多进程、迁移演练、跨系统闭环）延续 §16 口径，未配置时整体跳过，不把默认跳过算作通过。对抗审查第二轮修复在途未提交，并行批次落地后基线数字可能继续漂移，以提交后复跑为准。
 - 边界保持：canonical 域未启用（无生产切换，迁移 CLI cutover 保持禁用）；迁移未在真实库执行、真实库盘点待权威环境（D-12）；对抗审查第二轮修复在途未提交；临床规则、真实设备、多中心与隐私计算为外部条件，仍依赖 D05/D08/D01/D06/D07 确认。
 - 计划按任务与证据更新，不使用未经验证的完成百分比；本节不构成任何切换、迁移、部署或业务验收完成的宣称。
+
+## 18. 波次落地与架构目标达成（2026-11-15）
+
+核对基准：本仓库 `03df53e`。本节续记 §17 之后的第四批工作（自 `f683564` 至 `03df53e`），各主题执行与证据同步记录于[架构收敛工作记录](./architecture-convergence.md)「第四批续记」一节。以下均为本地实现与隔离环境验证（合成数据）；canonical 模式在本地代码与演练中可用，但生产切换未执行。
+
+### 对抗审查收口与前置修复
+
+- §17 登记的「第二轮对抗审查 B1—B7 修复在途未提交」落地为 `1887fe7`：备份领取条件扩 6 分支含非 date 时间戳、领取后归一化写回，DuplicateKeyError 区分并发抢领与类型落空并记日志；dual_bump 仅包装 FenceMismatch、FenceInvalid 透传；迁移 rerun 先漂移校验后投影闸（晚到者不再被硬闸掩盖）。该在途项至此闭合。
+- forms 域状态异常透传第四处（`f683564`）：`_verify_patient_assignment` 按域状态异常分流 503（闭合 §17 第一轮审查登记的 catch-all 透传补齐项）；契约文档补记源端两条硬约束——visit_code 全程一致、隐藏 response_id 必须回传。
+- 文档提交：[外部验证清单](./external-validation-checklist.md)（`16cf0e4`，119.45 正式环境的待外部条件项与建议顺序）；[双端 HTTPS 本地联调演练记录](./local-https-rehearsal.md)（`f71bf1c`，27 步全通 + 12 条坑清单，供 119.45 正式部署与 B2 验收照抄）。
+
+### 波次 6：无账号患者全链路与显式账号绑定
+
+- 无账号患者全链路演练与 `people_import` canonical 切换（`d5f88df`）：create_from_source 无账号建档→医护授权→随访/档案/方案全链走通，患者文档零账号依赖；补建账号即打开本人自取与通信；workbench 姓名搜索按域分派（修复无账号患者被静默过滤）；`people_import` 的 subject 经 create_from_source 建无账号临床患者，导入台账同事务原子提交，legacy 行为逐字保留。§17 登记为必做项的 `people_import.py:86`（唯一仍向 `users` 插入新患者的写入路径）就此切换。
+- 医护患者列表分页预适配与 canonical 映射（`db6b996`）：find_assigned_patients 域分派 + 加法式分页（缺省行为不变），两域统一 INVALID_PATIENT_PAGINATION/503，canonical 域状态异常 fail-closed；前端加载更多（阈值 100 触发）与错误文案，浏览器验收 9/9 回归。
+- 显式账号绑定工作流（`fd1bb43`）：`patient_account_links` 新增 explicit_binding origin（bind_account/disable_account_link，原子审计追加式）；resolve_self 双 origin 分派，显式链接不要求账号 ID 与患者 ID 对齐；冲突仅拒绝、绝不隐式替换；绑定管理 API（admin-only，审计必填）挂载 `/api/patients/account-bindings`。
+
+### 波次 2—5：各域 canonical 化与栅栏接线
+
+- 质控与过程监测域（`98d9bc5`，波次 2/3）：两域 503 门闩移除；患者存在性走内核分派，canonical 不回读 `users`、fail-closed；list/admin 范围/monitoring scope 按 clinical 归属复核（批量防 N+1）；栅栏双载体接线（canonical 账号落 `account_fences`、患者落 `clinical_patients` `_fence_access`）；patient_id 引用语义声明（迁移保留主键值不变）。
+- 康复发布与反馈域（`e1f2ec2`，波次 2）：发布授权 canonical 分支读 `clinical_patients`，本人访问必须 resolve_self；反馈身份锚点经 verified 链接解析（recorded_by=账号 ID、patient_id=临床患者 ID）；无链接反馈 503 fail-closed；栅栏双载体 dual_bump 同事务。
+- 提醒链路（`e4a68e8`，波次 3）：两处门闩移除；dispatch_one 事务内单次域读取贯穿收件人解析与栅栏载体；患者收件人经 `clinical_patients` + verified 链接解析，无链接/停用跳过（医护照常投递）；栅栏双载体（`_fence_reminder`）；ledger patient_id 语义声明（legacy 主键不变）。
+- 统计聚合与过程质控引用判定（`bd82a3f`，波次 3/4）：analytics/调度患者聚合按域分派，canonical 读 `clinical_patients`（status=active），unknown fail-safe 不猜域；$lookup 换源为 canonical 直查主键 + status 判定（ambiguous 分支保留为索引误配防护）；monitoring 服务 `_read` 接线域解析缝，legacy 等价逐字锁定；created_at 口径差异声明（legacy 注册时间 vs canonical 建档时间，跨域序列漂移为已知限制）。
+- 设备栅栏与内核自取解析（`03df53e`，波次 5）：设备栅栏双载体（`_fence_device`）与 `_insert_device` canonical 存在性复核，无账号患者设备绑定/手工读数全通；resolve_self_patient_entity 域分派，显式绑定（账号 ID≠患者 ID）对象级自取打通，legacy 同文档语义逐字不变；栅栏命名域化（rehab_publish/quality_access/device），消除跨域计数污染。**波次 1—6 全表完成。**
+
+### 过程中发现的缺陷与修复
+
+- 栅栏命名跨域污染：T65 发现一处域的 bump 影响他域计数，T67 以栅栏命名域化（rehab_publish/quality_access/device）修复。
+- self_patient_id 同文档假设：T64 登记「本人解析仍假设账号 ID 即患者 ID」，T67 以 resolve_self_patient_entity 显式绑定自取修复。
+- T55 演练残留：无账号患者曾被 workbench 姓名搜索静默过滤、患者列表缺 canonical 映射，由 `d5f88df`/`db6b996` 修复。
+- 三项均以演练断言升级锁定修复后行为，既有断言未放松。
+
+### 架构目标达成对照（无账号患者全链路）
+
+- §17 重申的目标形态验收标准三要素至此全部实现并有门控测试：**患者实体独立**（`people_import` 切换后不再存在向 `users` 插入新患者的写入路径）、**账号可选**（无账号建档→医护授权→随访/档案/方案全链演练走通）、**显式关联可审计**（explicit_binding 原子审计追加式 + admin-only 绑定管理 API + verified 链接 resolve_self 不假设 ID 对齐）。
+- §15—§17 依次登记的「保留待第二波段」与必做项至此全部落地；患者档案架构待办项的状态结论为：机制与代码侧完成，切换待外部条件。
+
+### 测试基线与开放边界
+
+- 本批复跑基线（以提交后复跑为准，T67 报告口径）：后端全量回归 `DEBUG=false` **899 passed / 365 skipped**（无隔离 URI 口径）；副本集门控 URI 全开约 **1001 passed**；前端 Node 测试 **123 passed**。副本集门控套件清单：患者域 e2e 演练、跨系统闭环（loop）、显式绑定（binding）、康复发布（publication）、统计聚合（aggregates）、栅栏并发（fences）、调度多进程（scheduler）、通信连接期撤权（comm）；均显式 URI/环境变量门控，未配置时整体跳过，不把默认跳过算作通过。
+- 边界声明：canonical 模式在本地代码与演练中可用，但**生产切换未执行**——真实库盘点（G1 门槛）、克隆迁移演练、维护窗口切换全部待 119.45 环境，执行顺序与验收标准见[外部验证清单](./external-validation-checklist.md)（A1 只读盘点→A2 克隆演练→A3 切换窗口，A1/A4/B1 可先行）；C 组业务决策待拍板；本地演练数据均为合成数据。
+- 计划按任务与证据更新，不使用未经验证的完成百分比；本节不构成任何生产切换、迁移执行、部署或业务验收完成的宣称。
