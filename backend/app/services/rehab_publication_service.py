@@ -12,8 +12,9 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from pydantic import ValidationError
 
 from app.core.exceptions import AppBaseException
-from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump
+from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump, legacy_document_fence
 from app.core.patient_access import patient_assignment_field, patient_domain_mode
+from app.core.patient_identity import resolve_unique_account
 
 # 栅栏名域化（T67 缺陷 1）：康复发布域的并发授权栅栏不与质控等域共用泛化名
 # "access"——同名栅栏会让同一账号（account_fences 复合键）与同一患者文档
@@ -136,11 +137,13 @@ class RehabPublicationService:
         # 患者实体校验不经过此处（见 _authorize 域分派）：legacy 账号与患者
         # 实体同文档，canonical 二者拆分（临床实体在 clinical_patients，
         # 账号↔实体关系由 patient_account_links 显式承载）。
-        keys = [str(identifier)]
-        if ObjectId.is_valid(str(identifier)):
-            keys.append(ObjectId(str(identifier)))
-        rows = await self.db.users.find({"_id": {"$in": keys}}, session=session).to_list(length=2)
-        return rows[0] if len(rows) == 1 else None
+        # （R1-A3 收敛：唯一账号解析迁 core/patient_identity.resolve_unique_account
+        # ——统一为 identity_key 归组口径。原 raw 双字面 $in 实现对 canonical
+        # ObjectId 字符串的候选集与归组口径结果一致；理论差异仅在非 canonical
+        # 形态的合法 ObjectId 字符串（如大写 hex）下归组口径多出一个 canonical
+        # 字符串候选，见报告行为变化清单。同键多文档返回 None 由调用方
+        # REHAB_ACCOUNT_UNAVAILABLE 防护兜住。）
+        return await resolve_unique_account(self.db, identifier, session=session)
 
     async def _access_fence(self, document, session):
         # legacy 载体：users 账号文档 _access_fence 计数（账号与患者实体同文档，
@@ -149,11 +152,11 @@ class RehabPublicationService:
         # 迁移窗口约束（cutover plan §3.3）：切换时存量栅栏计数不迁移（仅 CAS
         # 复核用，无业务含义），canonical 双载体从当前值重新起算；但切换窗口内
         # 本旧载体必须停止递增，否则回拨 legacy 后旧计数失效。
-
-        value = document.get("_access_fence", 0)
-        if type(value) is not int or value < 0:
-            raise error("REHAB_ACCESS_FENCE_INVALID", "账号并发状态异常", 503)
-        await self.db.users.update_one({"_id": document["_id"]}, {"$inc": {"_access_fence": 1}}, session=session)
+        # （R1-A2 收敛：骨架迁 fences.legacy_document_fence——本调用点无 CAS
+        # 复核，账号文档由 _account 在同事务内核实，行为逐字不变。）
+        await legacy_document_fence(self.db.users, document, "_access_fence",
+            session=session, error_code="REHAB_ACCESS_FENCE_INVALID",
+            error_message="账号并发状态异常")
 
     async def _authorize(self, plan, actor, session, *, write=False, fence=False):
         # 域分派：canonical 走 clinical_patients + 链接解析 + 双载体栅栏；
@@ -238,16 +241,32 @@ class RehabPublicationService:
             raise error("REHAB_PLAN_NOT_FOUND", "康复方案不存在", 404)
         return plan
 
-    async def _touch_plan(self, plan, session, *, changes=None):
+    async def _touch_plan(self, plan, session, *, changes=None, extra_query=None,
+                          conflict_code="REHAB_PLAN_CONFLICT",
+                          conflict_message="康复方案已变化，请重新读取"):
+        """_publication_fence 载体函数（R1-A2 收敛：发布域唯一实现，原
+        rehab_feedback.submit 的内联 guard+find_one_and_update 复用本载体）。
+
+        extra_query：调用方的并发防护条件折入定位查询（患者反馈提交路径以
+        published_version_id/status/deleted 锚定「读取时的发布快照仍有效」），
+        CAS 语义不变：matched != 1 即方案已变化，拒绝写。conflict_code/
+        conflict_message 参数化：反馈域保留自己的 409 码
+        （REHAB_FEEDBACK_VERSION_CHANGED），503 栅栏形态码统一为
+        REHAB_PUBLICATION_INVALID（前端未消费旧 REHAB_FEEDBACK_INVALID_FENCE，
+        见报告行为变化清单）。
+        """
         guard = plan.get("_publication_fence", 0)
         if type(guard) is not int or guard < 0:
             raise error("REHAB_PUBLICATION_INVALID", "康复方案并发状态异常", 503)
         update = {"$inc": {"_publication_fence": 1}}
         if changes:
             update["$set"] = changes
-        result = await self.plans.update_one({"_id": plan["_id"]}, update, session=session)
+        query = {"_id": plan["_id"]}
+        if extra_query:
+            query.update(extra_query)
+        result = await self.plans.update_one(query, update, session=session)
         if result.matched_count != 1:
-            raise error("REHAB_PLAN_CONFLICT", "康复方案已变化，请重新读取")
+            raise error(conflict_code, conflict_message)
 
     def _operation(self, plan_id, actor, kind, payload):
         identity = [plan_id, str(actor.id), payload.request_id]

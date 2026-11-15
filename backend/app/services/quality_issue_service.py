@@ -10,11 +10,11 @@ from bson import ObjectId, json_util
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.core.exceptions import AppBaseException
-from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump
+from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump, legacy_document_fence
 from app.db.transactions import run_transaction
 from app.core.patient_access import (PatientAccessError, assigned_scope_ids, is_domain_state_unavailable,
                                      load_patient_doc, patient_assignment_field, patient_domain_mode)
-from app.core.patient_identity import identity_key, load_identity_groups
+from app.core.patient_identity import identity_key, load_identity_groups, resolve_unique_account
 from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
 from app.patients.repository import ClinicalPatientRepository
 from app.services.followup_service import FollowupService
@@ -87,19 +87,21 @@ class QualityIssueService:
     async def _account(self, identifier, session=None):
         # 账号身份批量读取两域同源：canonical 只迁患者实体，医护/患者账号
         # （含质控 actor 与被指派责任人的账号域）仍以 users 为载体。
-        groups = await load_identity_groups(self.db, [identifier], session=session)
-        documents = groups.get(identity_key(identifier), [])
-        return documents[0] if len(documents) == 1 else None
+        # （R1-A3 收敛：唯一账号解析迁 core/patient_identity.resolve_unique_account
+        # ——identity_key 归组口径与原实现逐字一致，同键多文档返回 None 由
+        # 调用方 QUALITY_*_UNAVAILABLE 防护兜住。）
+        return await resolve_unique_account(self.db, identifier, session=session)
 
     async def _fence(self, document, session):
         # legacy 载体（行为不变）：账号与患者实体同文档，users 上一次 $inc
         # 同时覆盖"账号态"与"患者归属"两种语义。canonical 的双载体栅栏
         # （account_fences + clinical_patients._fence_quality_access）在
         # _patient/_assignee 的栅栏跳里按域分派，不经过本方法。
-        value = document.get("_access_fence", 0)
-        if type(value) is not int or value < 0:
-            raise fail("QUALITY_ACCESS_FENCE_INVALID", "账号并发状态异常", 503)
-        await self.db.users.update_one({"_id": document["_id"]}, {"$inc": {"_access_fence": 1}}, session=session)
+        # （R1-A2 收敛：骨架迁 fences.legacy_document_fence——本调用点无 CAS
+        # 复核，账号文档由 _account/_actor 在同事务内核实，行为逐字不变。）
+        await legacy_document_fence(self.db.users, document, "_access_fence",
+            session=session, error_code="QUALITY_ACCESS_FENCE_INVALID",
+            error_message="账号并发状态异常")
 
     async def _actor(self, actor, session=None, *, write=False):
         if actor.role not in (CLINICAL_ROLES if write else READ_ROLES):

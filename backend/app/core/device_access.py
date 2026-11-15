@@ -2,17 +2,23 @@
 from bson import ObjectId
 from fastapi import HTTPException
 
-from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump
+from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump, legacy_document_fence
 from app.core.patient_access import (
     assigned_scope_ids, ensure_patient_access, load_patient_doc, patient_domain_mode,
     resolve_self_patient_entity,
 )
-from app.core.patient_identity import identity_key, load_identity_groups
+from app.core.patient_identity import resolve_unique_account
 
 # 设备域栅栏名（T67 缺陷 1 域化命名）：canonical 双载体落 account_fences 的
 # ("device") 计数与 clinical_patients 的 _fence_device 字段。设备域不再与
 # 康复/质控等域共用泛化名，避免同账号/同患者文档的跨域计数互相污染 CAS 复核。
 DEVICE_ACCESS_FENCE = "device"
+
+
+def _http_fence_error(status_code, error_code, message):
+    """设备域栅栏错误壳保持 HTTPException 字符串 detail 逐字不变
+    （error_code 仅满足 legacy_document_fence 骨架签名，不出对外契约）。"""
+    return HTTPException(status_code, detail=message)
 
 
 async def resolve_device_patient(db, actor, patient_id=None, *, session=None, fence=False):
@@ -36,9 +42,10 @@ async def resolve_device_patient(db, actor, patient_id=None, *, session=None, fe
     if patient.get("is_active", True) is not True:
         raise HTTPException(404, detail="患者不存在或不可用")
     if fence:
-        groups = await load_identity_groups(db, [actor.id], session=session)
-        accounts = groups.get(identity_key(actor.id), [])
-        account = accounts[0] if len(accounts) == 1 else None
+        # （R1-A3 收敛：唯一账号解析迁 core/patient_identity.resolve_unique_account
+        # ——identity_key 归组口径与原 load_identity_groups 单键读取逐字一致，
+        # 同键多文档返回 None 由下方「当前账号不可用」403 兜住。）
+        account = await resolve_unique_account(db, actor.id, session=session)
         if (not account or account.get("role") != actor.role
                 or account.get("is_active", True) is not True):
             raise HTTPException(403, detail="当前账号不可用")
@@ -59,14 +66,19 @@ async def resolve_device_patient(db, actor, patient_id=None, *, session=None, fe
         else:
             # legacy 载体逐字不变：账号与患者实体同文档（患者本人两次 $inc
             # 去重为一次），一次 $inc 同时覆盖"账号态"与"患者归属"两种语义。
+            # （R1-A2 收敛：栅栏骨架迁 fences.legacy_document_fence——设备域
+            # 有 CAS 复核（matched != 1 → 403），错误壳为 HTTPException 字符串
+            # detail，经 exception_factory 逐字保留；域内联去重（dict 按 _id
+            # 去重）是调用方职责，保留在本处。语义等价核对：原实现同样是
+            # 「形态无效 503 → $inc → matched != 1 → 403」三段，无附加定位
+            # 条件，等价成立。）
             for document in {document["_id"]: document for document in (account, patient)}.values():
-                value = document.get("_device_access_fence", 0)
-                if type(value) is not int or value < 0:
-                    raise HTTPException(503, detail="设备授权并发状态无效")
-                result = await db.users.update_one({"_id": document["_id"]},
-                    {"$inc": {"_device_access_fence": 1}}, session=session)
-                if result.matched_count != 1:
-                    raise HTTPException(403, detail="设备授权已变化")
+                await legacy_document_fence(db.users, document, "_device_access_fence",
+                    session=session, error_code="DEVICE_ACCESS_FENCE_INVALID",
+                    error_message="设备授权并发状态无效",
+                    mismatch_code="DEVICE_ACCESS_CHANGED",
+                    mismatch_message="设备授权已变化", mismatch_status=403,
+                    exception_factory=_http_fence_error)
     return str(patient["_id"])
 
 

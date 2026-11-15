@@ -29,6 +29,9 @@ from app.models.icf import (
     IcfMetricConfig, IcfReport)
 from app.schemas.health_data_threshold import AlertCreate
 from app.services.health_alert_service import HealthAlertService
+from app.services.review_state_machine import (
+    append_review_history, check_review_version, commit_review, export_gate,
+    review_event, review_note)
 
 CLINICAL_ROLES = {"admin", "doctor", "health_manager"}
 
@@ -364,27 +367,22 @@ async def update_assessment(db, actor, assessment_id, *, items, note,
 
 
 async def review_assessment(db, actor, assessment_id, *, accepted, note, expected_version):
-    """review 沿用 clinical_reports 语义：医护核对，备注必填，CAS 防并发。"""
+    """review 沿用 clinical_reports 语义：医护核对，备注必填，CAS 防并发。
+
+    （R4-A1 收敛：状态机骨架迁 services/review_state_machine.py；本域为
+    简化形态——不绑 reviewed_snapshot、不记 review_history，经不传
+    snapshot_of/history_event 表达，字段集与原实现逐字一致。）
+    """
     _require_clinical(actor)
     row = await _load_assessment(db, assessment_id)
     await _patient_for(db, actor, row["patient_id"])
-    note = (note or "").strip()
-    if not note:
-        raise HTTPException(422, detail={"code": "REVIEW_NOTE_REQUIRED"})
-    if type(expected_version) is not int or expected_version != _version(row):
-        raise HTTPException(409, detail={"code": "ICF_ASSESSMENT_CONFLICT",
-                                         "message": "评估已变化，请重新加载后审核"})
-    update = {"$set": {"review_status": "reviewed" if accepted else "rejected",
-                       "review_note": note, "reviewer_id": str(actor.id),
-                       "reviewed_at": _now(),
-                       "mutation_version": expected_version + 1,
-                       "updated_at": _now()}}
-    result = await db.icf_assessments.update_one(
-        {"_id": row["_id"], "mutation_version": expected_version}, update)
-    if result.matched_count != 1:
-        raise HTTPException(409, detail={"code": "ICF_ASSESSMENT_CONFLICT",
-                                         "message": "评估已变化，请重新加载后审核"})
-    return _assessment_public({**row, **update["$set"]})
+    note = review_note(note)
+    check_review_version(expected_version, _version(row),
+                         code="ICF_ASSESSMENT_CONFLICT", message="评估已变化，请重新加载后审核")
+    values = await commit_review(db.icf_assessments, row, expected_version=expected_version,
+        accepted=accepted, note=note, actor_id=str(actor.id), now=_now(),
+        code="ICF_ASSESSMENT_CONFLICT", message="评估已变化，请重新加载后审核")
+    return _assessment_public({**row, **values})
 
 
 # ------------------------------------------------------------------
@@ -654,8 +652,7 @@ def _report_public(row, *, include_payload=True):
               "mutation_version": _report_version(row),
               "content_revision": row.get("content_revision", 1),
               "created_at": row.get("created_at"), "updated_at": row.get("updated_at"),
-              "exportable": (row.get("review_status") == "reviewed"
-                             and row.get("reviewed_snapshot") == _content_snapshot(row))}
+              "exportable": export_gate(row, _content_snapshot(row))}
     if include_payload:
         result["payload"] = deepcopy(row.get("payload") or {})
     if include_payload:
@@ -744,46 +741,29 @@ async def _load_report(db, report_id):
 
 async def review_icf_report(db, actor, report_id, *, accepted, note, expected_version):
     """复用 clinical_reports 的 review 状态语义：备注必填、CAS、
-    通过时保存 reviewed_snapshot，导出仅对与快照一致的已审核报告开放。"""
+    通过时保存 reviewed_snapshot，导出仅对与快照一致的已审核报告开放。
+    （R4-A1 收敛：骨架迁 services/review_state_machine.py；快照构造留本域
+    回调 _content_snapshot，历史事件经 review_event/append_review_history。）"""
     _require_clinical(actor)
     row = await _load_report(db, report_id)
     await _patient_for(db, actor, row["patient_id"])
-    note = (note or "").strip()
-    if not note:
-        raise HTTPException(422, detail={"code": "REVIEW_NOTE_REQUIRED"})
-    if type(expected_version) is not int or expected_version != _report_version(row):
-        raise HTTPException(409, detail={"code": "ICF_REPORT_CONFLICT",
-                                         "message": "报告已变化，请重新加载后审核"})
+    note = review_note(note)
+    check_review_version(expected_version, _report_version(row),
+                         code="ICF_REPORT_CONFLICT", message="报告已变化，请重新加载后审核")
     now = _now()
-    revision = row.get("content_revision", 1)
-    snapshot = _content_snapshot(row)
-    event = {"action": "review", "at": now, "actor_id": str(actor.id), "note": note,
-             "accepted": accepted}
-    update = {"$set": {"review_status": "reviewed" if accepted else "rejected",
-                       "review_note": note, "reviewer_id": str(actor.id),
-                       "reviewed_at": now,
-                       "reviewed_snapshot": snapshot if accepted else None,
-                       "review_history": deepcopy(row.get("review_history") or []) + [event],
-                       "mutation_version": expected_version + 1,
-                       "updated_at": now}}
-    result = await db.icf_reports.update_one(
-        {"_id": row["_id"], "mutation_version": expected_version}, update)
-    if result.matched_count != 1:
-        raise HTTPException(409, detail={"code": "ICF_REPORT_CONFLICT",
-                                         "message": "报告已变化，请重新加载后审核"})
-    return _report_public({**row, **update["$set"]})
+    values = await commit_review(db.icf_reports, row, expected_version=expected_version,
+        accepted=accepted, note=note, actor_id=str(actor.id), now=now,
+        code="ICF_REPORT_CONFLICT", message="报告已变化，请重新加载后审核",
+        snapshot_of=_content_snapshot,
+        history_event=append_review_history(
+            row, review_event(str(actor.id), note, accepted, now)))
+    return _report_public({**row, **values})
 
 
 def _require_exportable(row):
-    if row.get("review_status") != "reviewed" or row.get("reviewed_snapshot") != _content_snapshot(row):
+    if not export_gate(row, _content_snapshot(row)):
         raise HTTPException(409, detail={"code": "ICF_REPORT_NOT_REVIEWED",
                                          "message": "报告未经医护审核或内容已变化，不能导出"})
-
-
-def _report_item_rows(payload):
-    for domain, items in (payload.get("domains") or {}).items():
-        for item in items or []:
-            yield domain, item
 
 
 def export_report_json(row):

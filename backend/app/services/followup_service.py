@@ -34,6 +34,7 @@ from copy import deepcopy
 from hashlib import sha256
 from app.patients.legacy import LegacyPatientRepository
 from app.patients.repository import ClinicalPatientRepository
+from app.core.fences import legacy_document_fence
 from app.core.patient_access import patient_domain_mode
 from bson import encode
 from app.core.exceptions import AppBaseException
@@ -368,15 +369,17 @@ class FollowupService:
             "deleted": {"$ne": True}}, session=session)
 
     async def fence_quality_source(self, document, session):
-        value = document.get("_access_fence", 0)
-        if type(value) is not int or value < 0:
-            raise AppBaseException("随访并发状态异常", status_code=503,
-                                   error_code="QUALITY_SOURCE_FENCE_INVALID")
-        result = await self.followup_records.update_one({"_id": document["_id"],
-            "deleted": {"$ne": True}}, {"$inc": {"_access_fence": 1}}, session=session)
-        if result.matched_count != 1:
-            raise AppBaseException("随访来源已变化，请重新读取", status_code=409,
-                                   error_code="QUALITY_SOURCE_CHANGED")
+        # （R1-A2 收敛：骨架迁 fences.legacy_document_fence。）`deleted:
+        # {"$ne": True}` 语义（extra_query 保留）：与 quality_source 读取条件
+        # 同源——软删发生在读取与栅栏之间时 $inc 定位不命中，经 CAS
+        # （matched != 1）以 QUALITY_SOURCE_CHANGED 409 拒绝，而不是给已删
+        # 随访文档递增并发计数。
+        await legacy_document_fence(self.followup_records, document, "_access_fence",
+            session=session, error_code="QUALITY_SOURCE_FENCE_INVALID",
+            error_message="随访并发状态异常",
+            extra_query={"deleted": {"$ne": True}},
+            mismatch_code="QUALITY_SOURCE_CHANGED",
+            mismatch_message="随访来源已变化，请重新读取")
 
     async def quality_process_snapshot(self, patient_ids, **options):
         from app.services.quality_process_queries import monitoring_pipeline
@@ -411,13 +414,12 @@ class FollowupService:
         患者侧复核栅栏载体按域分派（legacy: users._reminder_fence；canonical:
         AccountFenceStore + PatientFenceStore），仅由
         followup_reminder_service.dispatch_one 写入；本方法只负责来源文档栅栏。
+        （R1-A2 收敛：骨架迁 fences.legacy_document_fence；本调用点无 CAS
+        复核与附加条件，行为逐字不变。）
         """
-        value = document.get("_reminder_fence", 0)
-        if type(value) is not int or value < 0:
-            raise AppBaseException("提醒并发字段无效", status_code=503,
-                                   error_code="REMINDER_INVALID_FENCE")
-        await self.followup_records.update_one({"_id": document["_id"]},
-            {"$inc": {"_reminder_fence": 1}}, session=session)
+        await legacy_document_fence(self.followup_records, document, "_reminder_fence",
+            session=session, error_code="REMINDER_INVALID_FENCE",
+            error_message="提醒并发字段无效")
 
     async def list_workbench(
         self, *, patient_ids: Optional[List[str]], patient_id: Optional[str] = None,

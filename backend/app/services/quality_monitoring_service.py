@@ -8,7 +8,7 @@ from bson import ObjectId
 from app.core.exceptions import AppBaseException
 from app.core.followup_access import followup_patient_scope
 from app.core.patient_access import ensure_patient_access, patient_domain_mode
-from app.core.patient_identity import identity_key, load_identity_groups
+from app.core.patient_identity import identity_key, load_identity_groups, resolve_unique_account
 from app.patients.legacy import LegacyPatientIdentityError
 from app.patients.repository import ClinicalPatientRepository
 from app.schemas.quality_monitoring import (
@@ -85,10 +85,12 @@ class QualityMonitoringService:
             raise _error("QUALITY_MEDICAL_ROLE_REQUIRED", "需要医护或管理员权限", 403)
         # 账号身份复核两域同源：canonical 只迁患者实体，账号域仍在 users
         # （T63 波次 3 门闩移除，患者域分派交给内核与下方的域感知复核）。
-        accounts = await load_identity_groups(self.db, [actor.id], projection={"role": 1, "is_active": 1})
-        matches = accounts.get(identity_key(actor.id), [])
-        if (len(matches) != 1 or matches[0].get("role") != actor.role
-                or matches[0].get("is_active") is not True):
+        # （R1-A3 收敛：唯一账号解析迁 resolve_unique_account——identity_key
+        # 归组口径与原 load_identity_groups 单键读取逐字一致。）
+        account = await resolve_unique_account(self.db, actor.id,
+            projection={"role": 1, "is_active": 1})
+        if (account is None or account.get("role") != actor.role
+                or account.get("is_active") is not True):
             raise _error("QUALITY_ACCOUNT_UNAVAILABLE", "当前账号身份不可唯一核实或已停用", 403)
         # The shared scope helper is domain-aware: legacy reads through the
         # legacy patient adapter, canonical executes on clinical_patients; its

@@ -511,6 +511,11 @@ async def _write_report(db, actor, row, expected_version, values):
 
 
 async def review_report(db, actor, report_id, *, accepted, note, expected_version):
+    # 收敛状态登记（R4-A1，2026-11-15）：本函数是 review 状态机三份注释复制
+    # 实现的**原始版本**，属冻结消费方——不迁移到 services/review_state_machine.py。
+    # 差异保留为域专属形态：content_revision 门闩、legacy_review 无版本历史
+    # 兼容分支、_write_report 事务与 _fence_report_access 授权栅栏。ICF 侧的
+    # review_assessment/review_icf_report 已迁状态机；本文件逻辑保持逐字不动。
     if actor.role not in CLINICAL_ROLES:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
     if not ObjectId.is_valid(report_id):

@@ -75,6 +75,61 @@ ACCOUNT_FENCE_INDEX_NAME = "account_fence_unique"
 _MONGO_TYPE_MISMATCH_CODE = 14
 
 
+def _fence_exception(factory, status_code, error_code, message):
+    """按调用方域构造栅栏异常：默认 AppBaseException（error_code 族），
+    exception_factory 供 HTTPException 语义的调用方（如 device_access）保持
+    对外错误壳逐字不变。factory 签名 (status_code, error_code, message)。"""
+    if factory is None:
+        return AppBaseException(message, status_code=status_code,
+                                error_code=error_code)
+    return factory(status_code, error_code, message)
+
+
+async def legacy_document_fence(collection, document, field, *, session,
+                                error_code, error_message, extra_query=None,
+                                mismatch_code=None, mismatch_message=None,
+                                mismatch_status=409, exception_factory=None):
+    """legacy 栅栏块统一骨架（R1-A2 收敛：原 7 处复制粘贴 → 单一实现）。
+
+    统一「读取 `document[field]`（缺省 0）→ `type(value) is not int or
+    value < 0` 即 503 → `update_one` 无条件 `$inc` → 调用方声明了 CAS
+    语义时 `matched_count != 1` 即拒绝」的骨架。计数载体是存量文档上的
+    字段本身（users._access_fence、followup_records._reminder_fence 等），
+    不经过 AccountFenceStore/PatientFenceStore 双载体（那是 canonical 域
+    的形态，见模块 docstring 的拆分方案）。
+
+    参数：
+    - error_code/error_message：栅栏字段形态无效（503）的域错误码，各域
+      保留自己的码（QUALITY_ACCESS_FENCE_INVALID / REHAB_ACCESS_FENCE_INVALID
+      / QUALITY_SOURCE_FENCE_INVALID / REMINDER_INVALID_FENCE / 设备域
+      HTTPException）。
+    - extra_query：折入 update_one 定位条件的域差异（如 followup 质量来源
+      的 `deleted: {"$ne": True}`——软删发生在读取与栅栏之间时 matched=0，
+      由 CAS 拒绝而非给已删文档递增计数）。
+    - mismatch_code/mismatch_message/mismatch_status：CAS 拒绝（matched!=1）
+      的域错误码。**不传（None）即本调用点没有 CAS 复核**——quality_issue
+      与 rehab_publication 的账号载体栅栏原本就只 $inc 不复核（账号文档由
+      上游 _account/_actor 在同事务内核实），保持该行为逐字不变，不在收敛
+      时悄悄加严。
+    - exception_factory：默认 None → AppBaseException(error_code 族)；
+      device_access 传入 HTTPException 工厂保持其错误壳（detail 为字符串）
+      逐字不变。
+
+    必须在 run_transaction 回调内、透传 session 调用（与双载体栅栏约束
+    一致，见模块 docstring「使用约束」）。
+    """
+    value = document.get(field, 0)
+    if type(value) is not int or value < 0:
+        raise _fence_exception(exception_factory, 503, error_code, error_message)
+    query = {"_id": document["_id"]}
+    if extra_query:
+        query.update(extra_query)
+    result = await collection.update_one(query, {"$inc": {field: 1}}, session=session)
+    if mismatch_code is not None and result.matched_count != 1:
+        raise _fence_exception(exception_factory, mismatch_status,
+                               mismatch_code, mismatch_message)
+
+
 class FenceError(AppBaseException):
     """栅栏载体错误基类（错误码命名对齐现有 *_FENCE_INVALID 风格）。"""
 

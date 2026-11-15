@@ -16,8 +16,9 @@ from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import AppBaseException
-from app.core.fences import AccountFenceStore, PatientFenceStore
+from app.core.fences import AccountFenceStore, PatientFenceStore, legacy_document_fence
 from app.core.patient_access import patient_domain_mode
+from app.core.patient_identity import resolve_unique_account
 from app.db.transactions import run_followup_transaction
 from app.patients.legacy import LegacyPatientRepository
 from app.patients.repository import ACCOUNT_LINKS, ClinicalPatientRepository
@@ -71,24 +72,25 @@ class FollowupReminderService:
         # users 的存在性与启停判断是账号语义，不是患者资料读取。
         # legacy 患者账号读取仍收敛到 LegacyPatientRepository（见 _recipients）；
         # canonical 患者账号读取经 patient_account_links（见 _canonical_recipients）。
+        # （R1-A3 收敛：唯一账号解析迁 core/patient_identity.resolve_unique_account
+        # ——统一为 identity_key 归组口径，同键多文档返回 None 由调用方的
+        # PROVIDER/PATIENT_ACCOUNT_UNAVAILABLE 防护兜住。非字符串/空标识的
+        # 前置守卫语义等价保留。）
         if not isinstance(identifier, str) or not identifier:
             return None
-        keys = [identifier]
-        if ObjectId.is_valid(identifier):
-            keys.append(ObjectId(identifier))
-        rows = await self.db.users.find({"_id": {"$in": keys}}, session=session).to_list(length=2)
-        return rows[0] if len(rows) == 1 else None
+        return await resolve_unique_account(self.db, identifier, session=session)
 
     async def _fence(self, collection, document, session):
-        """legacy 专属 users 载体栅栏（canonical 走双载体 fence store，见 dispatch_one）。"""
-        value = document.get("_reminder_fence", 0)
-        if type(value) is not int or value < 0:
-            raise AppBaseException("提醒并发字段无效", status_code=503,
-                                   error_code="REMINDER_INVALID_FENCE")
-        # A real write is essential: Mongo no-op updates do not fence a stale
-        # transaction against concurrent cancellation or permission revocation.
-        await collection.update_one({"_id": document["_id"]},
-                                    {"$inc": {"_reminder_fence": 1}}, session=session)
+        """legacy 专属 users 载体栅栏（canonical 走双载体 fence store，见 dispatch_one）。
+
+        （R1-A2 收敛：骨架迁 fences.legacy_document_fence；本调用点无 CAS
+        复核与附加条件，行为逐字不变。）A real write is essential: Mongo
+        no-op updates do not fence a stale transaction against concurrent
+        cancellation or permission revocation.
+        """
+        await legacy_document_fence(collection, document, "_reminder_fence",
+            session=session, error_code="REMINDER_INVALID_FENCE",
+            error_message="提醒并发字段无效")
 
     async def _recipients(self, record, session, mode):
         if mode == "canonical":

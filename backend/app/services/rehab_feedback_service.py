@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bson import ObjectId
-from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.core.exceptions import AppBaseException
@@ -172,19 +171,19 @@ class RehabFeedbackService:
                     isinstance(item, dict) and item.get("item_id") == payload.prescription_item_id
                     for item in snapshots):
                 raise _error("REHAB_FEEDBACK_ITEM_MISMATCH", "该处方项不属于已确认的发布版本")
-            guard = plan.get("_publication_fence", 0)
-            if type(guard) is not int or guard < 0:
-                raise _error("REHAB_FEEDBACK_INVALID_FENCE", "方案并发状态异常，请联系管理员核查", 503)
             # A real write serializes feedback against publication/withdrawal.
             # Mongo no-op writes cannot provide this guarantee.
-            locked = await self.db.rehab_plans.find_one_and_update(
-                {"_id": plan["_id"], "patient_id": plan["patient_id"],
-                 "published_version_id": payload.version_id,
-                 "status": plan.get("status"), "deleted": plan.get("deleted")},
-                {"$inc": {"_publication_fence": 1}}, return_document=ReturnDocument.AFTER,
-                session=session)
-            if locked is None:
-                raise _error("REHAB_FEEDBACK_VERSION_CHANGED", "方案已变化，请刷新后重新确认")
+            # （R1-A2 收敛：_publication_fence 载体复用 publication._touch_plan
+            # 的唯一实现，消除同一字段两套错误码——503 栅栏形态码由
+            # REHAB_FEEDBACK_INVALID_FENCE 统一为 REHAB_PUBLICATION_INVALID
+            # （前端未消费旧码）；CAS miss 保留本域 409 码
+            # REHAB_FEEDBACK_VERSION_CHANGED，经 conflict_code 参数化注入。）
+            await self.publication._touch_plan(plan, session, extra_query={
+                "patient_id": plan["patient_id"],
+                "published_version_id": payload.version_id,
+                "status": plan.get("status"), "deleted": plan.get("deleted")},
+                conflict_code="REHAB_FEEDBACK_VERSION_CHANGED",
+                conflict_message="方案已变化，请刷新后重新确认")
             attachments = await self._claim_media(plan, event_id, payload.media_ids, session)
             now = datetime.now(timezone.utc)
             if payload.performed_at > now:
