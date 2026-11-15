@@ -95,6 +95,8 @@
 
 [quality_process_queries.py:5](backend/app/services/quality_process_queries.py) 定义 `FOLLOWUP_STATUSES = ("pending_schedule","scheduled","awaiting_fill","in_review",...)`；ICF 侧把 `in_review` 计入失败分母，质控侧把 `pending` 节点当未完成。两个口径对同一批随访给出不同完成率。
 
+具体分歧点（已核实）：ICF 的作废集是 `{canceled, cancelled, void}`、完成集是 `{completed, done, finished}`（[icf_service.py:98-99](backend/app/services/icf_service.py)），质控的状态全集里既没有 `done`/`finished`，也没有 `void`——一条状态为 `done` 的随访，ICF 算完成，质控算未知状态；一条 `in_review` 的随访，ICF 计入分母当未完成，质控单列为待审阅节点。
+
 **判定：合并** —— 枚举定义归一（一处定义状态全集与语义），完成率公式参数化：默认取保守口径（未终态即未完成），并把口径选择暴露为配置项、页面上标注"待临床确认"。
 
 → Wave 3
