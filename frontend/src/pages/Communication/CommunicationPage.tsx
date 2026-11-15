@@ -28,9 +28,12 @@ import LocalHospitalIcon from '@mui/icons-material/LocalHospital';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import AddIcon from '@mui/icons-material/Add';
+import ImageIcon from '@mui/icons-material/Image';
+import AttachFileIcon from '@mui/icons-material/AttachFile';
+import CloseIcon from '@mui/icons-material/Close';
 import type { RootState } from '../../store';
-import { chatApi } from '../../services/chatService';
-import type { ConversationDto, MessageDto } from '../../services/chatService';
+import { chatApi, isImageAttachment, attachmentUrl, formatAttachmentSize } from '../../services/chatService';
+import type { ConversationDto, MessageDto, AttachmentDto } from '../../services/chatService';
 import {
   ChatWsClient,
   applyChatReadReceipt,
@@ -51,6 +54,9 @@ const MESSAGES_PAGE_SIZE = 30;
 const CONVERSATIONS_POLL_MS = 30_000;
 const MESSAGES_POLL_WS_MS = 60_000;
 const MESSAGES_POLL_FALLBACK_MS = 15_000;
+// 附件限制（与后端 communication_service 对齐）：图片 ≤5MB、文件 ≤10MB
+const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_FILE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 const formatTime = (iso?: string) => {
   if (!iso) return '';
@@ -101,6 +107,12 @@ const CommunicationPage: React.FC<{ view: CommunicationView }> = ({ view }) => {
   const [sending, setSending] = React.useState(false);
 
   const [newMessage, setNewMessage] = React.useState('');
+  // 附件（T76）：先传后引——选中文件即上传，发送时随消息引用
+  const [pendingAttachments, setPendingAttachments] = React.useState<AttachmentDto[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = React.useState(false);
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
+  const imageInputRef = React.useRef<HTMLInputElement | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [participantInput, setParticipantInput] = React.useState('');
   const [creating, setCreating] = React.useState(false);
@@ -253,6 +265,9 @@ const CommunicationPage: React.FC<{ view: CommunicationView }> = ({ view }) => {
     setMessages([]);
     setMessagesError(null);
     setMessagesLoading(true);
+    // 切换会话丢弃未发送的附件引用（附件归属按会话校验，跨会话不可复用）
+    setPendingAttachments([]);
+    setUploadError(null);
     try {
       const data = await chatApi.getMessages(conversationId, MESSAGES_PAGE_SIZE);
       setMessages(data);
@@ -312,14 +327,46 @@ const CommunicationPage: React.FC<{ view: CommunicationView }> = ({ view }) => {
     }
   };
 
+  // 附件上传（T76）：选中即上传（先传后引），成功后加入待发送引用列表
+  const handleAttachmentSelected = async (kind: 'image' | 'file') => {
+    const input = kind === 'image' ? imageInputRef.current : fileInputRef.current;
+    const file = input?.files?.[0];
+    if (input) input.value = '';
+    if (!file || !activeId || uploadingAttachment) return;
+    const limit = kind === 'image' ? MAX_IMAGE_ATTACHMENT_BYTES : MAX_FILE_ATTACHMENT_BYTES;
+    if (file.size > limit) {
+      setUploadError(kind === 'image' ? '图片不能超过 5MB' : '文件不能超过 10MB');
+      return;
+    }
+    setUploadingAttachment(true);
+    setUploadError(null);
+    try {
+      const saved = await chatApi.uploadAttachment(activeId, file);
+      setPendingAttachments((prev) => [...prev, saved]);
+    } catch (error: any) {
+      setUploadError(error?.response?.data?.detail || error?.message || '上传附件失败');
+    } finally {
+      setUploadingAttachment(false);
+    }
+  };
+
+  const removePendingAttachment = (attachmentId: string) => {
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== attachmentId));
+  };
+
   const handleSendMessage = async () => {
     const content = newMessage.trim();
-    if (!content || !activeId || sending) return;
+    const hasAttachments = pendingAttachments.length > 0;
+    if ((!content && !hasAttachments) || !activeId || sending || uploadingAttachment) return;
     const client = wsClientRef.current;
+    // 仅发附件时以类型占位文本落库（后端 content 必填）
+    const payloadContent = content
+      || (hasAttachments && isImageAttachment(pendingAttachments[0]) ? '[图片]' : '[附件]');
 
-    if (client && client.isConnected()) {
+    if (client && client.isConnected() && !hasAttachments) {
       // WS 路径：乐观占位 → ack/广播后以服务端落库消息替换；失败保留占位供重试。
       // 发送守卫（sending）保证同一时刻至多一条在途消息，错误帧可无歧义映射。
+      // 附件不走 WS（协议未扩展）：带附件一律降级到下方 REST 路径。
       const clientMessageId = generateClientMessageId();
       setPendingMessages((prev) => [...prev, { clientMessageId, content, status: 'pending' }]);
       setNewMessage('');
@@ -341,12 +388,15 @@ const CommunicationPage: React.FC<{ view: CommunicationView }> = ({ view }) => {
       return;
     }
 
-    // WS 未连接（降级/重连期间）：REST 兜底发送，同步等待结果
+    // REST 兜底发送（WS 未连接降级/重连期间，或带附件时），同步等待结果
     setSending(true);
     try {
-      const saved = await chatApi.sendMessage(activeId, content);
+      const saved = await chatApi.sendMessage(
+        activeId, payloadContent, hasAttachments ? pendingAttachments : undefined
+      );
       setMessages((prev) => [...prev, saved]);
       setNewMessage('');
+      setPendingAttachments([]);
       loadConversations(true);
     } catch (error: any) {
       setSendError(error?.response?.data?.detail || error?.message || '发送失败，请重试');
@@ -624,6 +674,53 @@ const CommunicationPage: React.FC<{ view: CommunicationView }> = ({ view }) => {
                               <Typography variant="body1">
                                 {message.deleted ? '此消息已被删除' : message.content}
                               </Typography>
+                              {/* 附件渲染（T76）：图片内联缩略、文件下载链接 */}
+                              {!message.deleted && message.attachments && message.attachments.length > 0 && (
+                                <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                                  {message.attachments.map((att) => (
+                                    isImageAttachment(att) ? (
+                                      <a
+                                        key={att.id}
+                                        href={attachmentUrl(att)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                      >
+                                        <Box
+                                          component="img"
+                                          src={attachmentUrl(att)}
+                                          alt={att.name || '图片附件'}
+                                          sx={{
+                                            display: 'block',
+                                            maxWidth: 220,
+                                            maxHeight: 160,
+                                            borderRadius: 1,
+                                          }}
+                                        />
+                                      </a>
+                                    ) : (
+                                      <Typography
+                                        key={att.id}
+                                        component="a"
+                                        href={attachmentUrl(att)}
+                                        download={att.name || true}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        variant="body2"
+                                        sx={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: 0.5,
+                                          textDecoration: 'underline',
+                                          color: isOwn ? 'inherit' : 'primary.main',
+                                        }}
+                                      >
+                                        <AttachFileIcon sx={{ fontSize: 16 }} />
+                                        {`${att.name || '附件'}${formatAttachmentSize(att.size) ? `（${formatAttachmentSize(att.size)}）` : ''}`}
+                                      </Typography>
+                                    )
+                                  ))}
+                                </Box>
+                              )}
                               <Typography variant="caption" display="block" sx={{ mt: 1, opacity: 0.7 }}>
                                 {formatTime(message.timestamp)}
                                 {isOwn && !message.deleted && (message.read ? ' · 已读' : ' · 未读')}
@@ -676,7 +773,61 @@ const CommunicationPage: React.FC<{ view: CommunicationView }> = ({ view }) => {
                   </Alert>
                 )}
 
-                <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', display: 'flex' }}>
+                {uploadError && (
+                  <Alert severity="error" sx={{ mx: 2, mb: 1 }} onClose={() => setUploadError(null)}>
+                    {uploadError}
+                  </Alert>
+                )}
+
+                {/* 待发送附件预览（T76）：可移除 */}
+                {pendingAttachments.length > 0 && (
+                  <Box sx={{ px: 2, pb: 1, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                    {pendingAttachments.map((att) => (
+                      <Chip
+                        key={att.id}
+                        size="small"
+                        icon={isImageAttachment(att) ? <ImageIcon /> : <AttachFileIcon />}
+                        label={`${att.name || '附件'}${formatAttachmentSize(att.size) ? ` ${formatAttachmentSize(att.size)}` : ''}`}
+                        onDelete={() => removePendingAttachment(att.id)}
+                        deleteIcon={<CloseIcon />}
+                      />
+                    ))}
+                  </Box>
+                )}
+
+                {/* 隐藏的文件选择入口（图片/文件） */}
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  hidden
+                  onChange={() => handleAttachmentSelected('image')}
+                />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  hidden
+                  onChange={() => handleAttachmentSelected('file')}
+                />
+
+                <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center' }}>
+                  <Button
+                    aria-label="上传图片"
+                    title="上传图片（≤5MB）"
+                    disabled={!activeId || uploadingAttachment}
+                    onClick={() => imageInputRef.current?.click()}
+                  >
+                    <ImageIcon />
+                  </Button>
+                  <Button
+                    aria-label="上传文件"
+                    title="上传文件（≤10MB）"
+                    disabled={!activeId || uploadingAttachment}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <AttachFileIcon />
+                  </Button>
+                  {uploadingAttachment && <CircularProgress size={20} sx={{ mr: 1 }} />}
                   <TextField
                     fullWidth
                     placeholder="输入消息..."
@@ -691,7 +842,7 @@ const CommunicationPage: React.FC<{ view: CommunicationView }> = ({ view }) => {
                     variant="contained"
                     endIcon={<SendIcon />}
                     sx={{ ml: 1 }}
-                    disabled={sending || !newMessage.trim()}
+                    disabled={sending || uploadingAttachment || (!newMessage.trim() && pendingAttachments.length === 0)}
                     onClick={handleSendMessage}
                   >
                     发送

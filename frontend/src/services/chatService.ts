@@ -37,6 +37,42 @@ export interface Conversation {
   updatedAt: Date | string;
 }
 
+// ---- 会话附件（T76）：先传后引 ----
+
+// POST /communications/conversations/{id}/attachments 返回的附件引用
+export interface AttachmentDto {
+  id: string;
+  conversation_id?: string;
+  kind: 'image' | 'file';
+  content_type?: string;
+  name: string;
+  size?: number;
+  url: string;
+}
+
+// 图片/文件判别：kind 优先，回落按 content_type（兼容历史消息附件）
+export function isImageAttachment(att?: Partial<AttachmentDto> | null): boolean {
+  if (!att) return false;
+  if (att.kind === 'image') return true;
+  if (att.kind === 'file') return false;
+  return (att.content_type || '').startsWith('image/');
+}
+
+// 附件访问地址：优先后端返回的 url，缺失时按 id 兜底拼接
+export function attachmentUrl(att?: Partial<AttachmentDto> | null): string {
+  if (!att) return '';
+  if (att.url) return att.url;
+  return att.id ? `/api/communications/attachments/${att.id}` : '';
+}
+
+// 附件大小展示
+export function formatAttachmentSize(size?: number): string {
+  if (!size || size <= 0) return '';
+  if (size < 1024) return `${size}B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)}KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)}MB`;
+}
+
 // ---- 与后端实际响应对齐的类型（backend/app/services/communication_service.py）----
 
 // GET /communications/conversations 返回的会话条目
@@ -73,7 +109,7 @@ export interface MessageDto {
   deleted: boolean;
   // WS 广播/message_ack 载荷中的可选幂等键（WS01：同发送者重复投递直接返回既有消息）
   client_message_id?: string;
-  attachments?: Array<Record<string, any>>;
+  attachments?: Array<Partial<AttachmentDto>>;
   metadata?: Record<string, any>;
 }
 
@@ -105,6 +141,24 @@ export const chatApi = {
       return response.data;
     } catch (error) {
       console.error('获取消息失败:', error);
+      throw error;
+    }
+  },
+
+  // 上传会话附件（后端 POST /communications/conversations/{id}/attachments，
+  // multipart/form-data；图片 ≤5MB、文件 ≤10MB，返回 AttachmentDto 引用）
+  async uploadAttachment(conversationId: string, file: File): Promise<AttachmentDto> {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await api.post(
+        `/communications/conversations/${conversationId}/attachments`,
+        formData,
+        { headers: { 'Content-Type': 'multipart/form-data' } }
+      );
+      return response.data;
+    } catch (error: any) {
+      console.error('上传附件失败:', error);
       throw error;
     }
   },

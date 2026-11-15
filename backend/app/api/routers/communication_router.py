@@ -1,13 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body, WebSocket, WebSocketDisconnect, File, UploadFile
 from typing import List, Dict, Any, Optional
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime
 from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse
 
 from app.db.mongodb import get_database
 from app.core.auth import get_current_user, get_current_active_user
 from app.schemas.user import UserResponse
-from app.services.communication_service import CommunicationService
+from app.services.communication_service import (
+    CommunicationService,
+    CommunicationAttachmentError,
+    CommunicationAttachmentAccessError,
+    CommunicationAttachmentInvalidError,
+)
 
 router = APIRouter(prefix="/communications", tags=["communications"])
 
@@ -124,6 +130,9 @@ async def send_message(
             client_message_id=message.client_message_id
         )
         return message_response
+    except CommunicationAttachmentError as e:
+        # 附件引用校验失败（归属/会话不符/重复使用等）按其语义状态码返回
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
 
@@ -207,9 +216,47 @@ async def sync_offline_messages(
 ):
     """同步用户离线期间的新消息"""
     user_id = str(current_user.id)
-    
+
     messages = await CommunicationService.sync_offline_messages(
         db, user_id, sync_data.last_sync_time
     )
-    
-    return messages 
+
+    return messages
+
+# 上传会话附件（T76）：先传后引——上传返回引用（id/url/名称/大小/类型），
+# 发送消息时在 attachments 参数里引用，服务端校验归属后随消息落库。
+@router.post("/conversations/{conversation_id}/attachments", status_code=201)
+async def upload_attachment(
+    conversation_id: str = Path(..., description="对话ID"),
+    file: UploadFile = File(...),
+    db: AsyncIOMotorClient = Depends(get_database),
+    current_user: UserResponse = Depends(get_current_active_user)
+):
+    """上传会话附件（限医护与患者会话参与者；图片 ≤5MB、文件 ≤10MB）"""
+    try:
+        saved = await CommunicationService.save_attachment(
+            db, conversation_id, current_user, await file.read(),
+            file.content_type or "", file.filename or "附件"
+        )
+    except CommunicationAttachmentError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    return saved
+
+# 下载会话附件（T76）：仅限附件所属会话的参与者
+@router.get("/attachments/{attachment_id}")
+async def download_attachment(
+    attachment_id: str = Path(..., description="附件ID"),
+    db: AsyncIOMotorClient = Depends(get_database),
+    current_user: UserResponse = Depends(get_current_active_user)
+):
+    """下载会话附件"""
+    try:
+        path, content_type, name = await CommunicationService.open_attachment(
+            db, attachment_id, str(current_user.id)
+        )
+    except CommunicationAttachmentError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    result = FileResponse(path, media_type=content_type, filename=name)
+    result.headers["Cache-Control"] = "no-store"
+    result.headers["Referrer-Policy"] = "no-referrer"
+    return result 

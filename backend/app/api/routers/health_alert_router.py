@@ -4,10 +4,19 @@ from typing import List, Optional, Dict, Any
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, status
 from fastapi.responses import JSONResponse
+from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.db.mongodb import get_database
 from app.services.health_alert_service import HealthAlertService
 from app.schemas.user import UserResponse
 from app.core.dependencies import get_current_user, get_health_alert_service
+from app.core.patient_access import (
+    PatientAccessError,
+    assigned_scope_ids,
+    ensure_patient_access,
+    ensure_self_patient_access,
+)
 from app.models.health_data_threshold import HealthDataThreshold, HealthDataAlert
 from app.schemas.health_data_threshold import (
     ThresholdCreate, ThresholdResponse, ThresholdUpdate,
@@ -20,6 +29,78 @@ router = APIRouter(
     tags=["健康预警"]
 )
 
+# T76 授权收口：本路由此前仅有 get_current_user（任何登录用户可读任何患者
+# 预警）。现按调用者角色分流——患者仅可读本人预警（自取语义，与
+# app/clinical/router.py 患者预警端点同源：ensure_self_patient_access）；
+# 医护（doctor/health_manager）按内核 ensure_patient_access / assigned_scope_ids；
+# admin 豁免。阈值 CRUD 与预警写路径仅限医护/admin。
+MANAGEMENT_ROLES = ("doctor", "health_manager", "admin")
+ASSIGNED_ROLES = ("doctor", "health_manager")
+
+
+def _access_denied(exc: PatientAccessError) -> HTTPException:
+    """PatientAccessError → HTTPException（与 clinical/workspace 同款 detail 形态）。"""
+    return HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.error_code, "message": exc.message},
+    )
+
+
+def _require_management_role(current_user: UserResponse) -> None:
+    """阈值 CRUD 与预警写路径的角色门槛：仅医护/admin。"""
+    if current_user.role not in MANAGEMENT_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "ROLE_NOT_ALLOWED", "message": "该端点仅限医护与管理员使用"},
+        )
+
+
+def _raise_patient_forbidden() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "ROLE_NOT_ALLOWED", "message": "患者无权执行该预警操作"},
+    )
+
+
+async def _resolve_self_patient(db: AsyncIOMotorDatabase, current_user: UserResponse,
+                                patient_id: Optional[str] = None) -> str:
+    """患者角色自取解析：显式 patient_id 必须为本人（legacy 同文档 /
+    canonical 链接核验，与临床患者预警端点同源）。"""
+    try:
+        return await ensure_self_patient_access(db, current_user, patient_id)
+    except PatientAccessError as exc:
+        raise _access_denied(exc) from None
+
+
+async def _authorize_patient_read(db: AsyncIOMotorDatabase, current_user: UserResponse,
+                                  patient_id: str) -> None:
+    """对象级读取授权：患者自取（显式他人 ID → 403）、医护按归属、admin 豁免。"""
+    if current_user.role == "patient":
+        identifier = await _resolve_self_patient(db, current_user)
+        if str(patient_id) != identifier:
+            raise _access_denied(PatientAccessError("无权访问该患者的数据"))
+        return
+    if current_user.role in ASSIGNED_ROLES:
+        try:
+            await ensure_patient_access(db, patient_id, str(current_user.id), current_user.role)
+        except PatientAccessError as exc:
+            raise _access_denied(exc) from None
+    return
+
+
+async def _authorize_alert_access(db: AsyncIOMotorDatabase, current_user: UserResponse,
+                                  patient_id: str) -> None:
+    """按预警归属做对象级读取授权（患者不得读他人预警）。"""
+    await _authorize_patient_read(db, current_user, patient_id)
+
+
+async def _authorize_alert_management(db: AsyncIOMotorDatabase, current_user: UserResponse,
+                                      patient_id: str) -> None:
+    """预警状态写路径授权：患者一律拒绝（临床处置动作）；医护按归属；admin 豁免。"""
+    if current_user.role == "patient":
+        _raise_patient_forbidden()
+    await _authorize_patient_read(db, current_user, patient_id)
+
 # -------- 阈值配置 API 接口 --------
 
 @router.post("/thresholds", response_model=ThresholdResponse)
@@ -29,6 +110,7 @@ async def create_threshold(
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """创建健康数据阈值配置"""
+    _require_management_role(current_user)
     try:
         # 根据不同数据类型处理
         if data.data_type == "vital_signs":
@@ -105,6 +187,7 @@ async def get_threshold(
     current_user: UserResponse = Depends(get_current_user)
 ):
     """获取健康数据阈值配置"""
+    _require_management_role(current_user)
     threshold = await service.get_threshold(threshold_id)
     if not threshold:
         raise HTTPException(
@@ -121,6 +204,7 @@ async def update_threshold(
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """更新健康数据阈值配置"""
+    _require_management_role(current_user)
     try:
         # 补充更新者信息
         data_dict = data.dict(exclude_unset=True)
@@ -147,6 +231,7 @@ async def delete_threshold(
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """删除健康数据阈值配置"""
+    _require_management_role(current_user)
     result = await service.delete_threshold(threshold_id)
     if not result:
         raise HTTPException(
@@ -168,6 +253,7 @@ async def list_thresholds(
     service: HealthAlertService = Depends(get_health_alert_service)
 ):
     """列出健康数据阈值配置"""
+    _require_management_role(current_user)
     try:
         thresholds = await service.list_thresholds(
             data_type=data_type,
@@ -197,9 +283,12 @@ async def check_health_data(
     value: Optional[float] = Query(None, description="数值"),
     unit: Optional[str] = Query(None, description="单位"),
     current_user: UserResponse = Depends(get_current_user),
-    service: HealthAlertService = Depends(get_health_alert_service)
+    service: HealthAlertService = Depends(get_health_alert_service),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """检查健康数据是否异常"""
+    _require_management_role(current_user)
+    await _authorize_patient_read(db, current_user, patient_id)
     try:
         result = await service.check_health_data(
             health_data_id=health_data_id,
@@ -222,9 +311,12 @@ async def check_health_data(
 async def create_alert(
     data: AlertCreate,
     current_user: UserResponse = Depends(get_current_user),
-    service: HealthAlertService = Depends(get_health_alert_service)
+    service: HealthAlertService = Depends(get_health_alert_service),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """手动创建健康数据预警"""
+    _require_management_role(current_user)
+    await _authorize_patient_read(db, current_user, data.patient_id)
     try:
         alert = await service.create_alert(data)
         return alert
@@ -238,7 +330,8 @@ async def create_alert(
 async def get_alert(
     alert_id: str = Path(..., description="预警ID"),
     service: HealthAlertService = Depends(get_health_alert_service),
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """获取健康数据预警详情"""
     alert = await service.get_alert(alert_id)
@@ -247,6 +340,7 @@ async def get_alert(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="预警不存在"
         )
+    await _authorize_alert_access(db, current_user, alert.patient_id)
     return alert
 
 @router.put("/alerts/{alert_id}", response_model=AlertResponse)
@@ -254,9 +348,17 @@ async def update_alert(
     alert_id: str,
     data: AlertUpdate,
     current_user: UserResponse = Depends(get_current_user),
-    service: HealthAlertService = Depends(get_health_alert_service)
+    service: HealthAlertService = Depends(get_health_alert_service),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """更新健康数据预警状态"""
+    existing = await service.get_alert(alert_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="预警不存在"
+        )
+    await _authorize_alert_management(db, current_user, existing.patient_id)
     try:
         alert = await service.update_alert(alert_id, data)
         if not alert:
@@ -276,9 +378,17 @@ async def resolve_alert(
     alert_id: str,
     resolution_notes: Optional[str] = Query(None, description="解决备注"),
     current_user: UserResponse = Depends(get_current_user),
-    service: HealthAlertService = Depends(get_health_alert_service)
+    service: HealthAlertService = Depends(get_health_alert_service),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """解决健康数据预警"""
+    existing = await service.get_alert(alert_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="预警不存在"
+        )
+    await _authorize_alert_management(db, current_user, existing.patient_id)
     try:
         alert = await service.resolve_alert(
             alert_id=alert_id,
@@ -302,9 +412,17 @@ async def ignore_alert(
     alert_id: str,
     resolution_notes: Optional[str] = Query(None, description="忽略原因"),
     current_user: UserResponse = Depends(get_current_user),
-    service: HealthAlertService = Depends(get_health_alert_service)
+    service: HealthAlertService = Depends(get_health_alert_service),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """忽略健康数据预警"""
+    existing = await service.get_alert(alert_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="预警不存在"
+        )
+    await _authorize_alert_management(db, current_user, existing.patient_id)
     try:
         alert = await service.ignore_alert(
             alert_id=alert_id,
@@ -335,12 +453,29 @@ async def list_alerts(
     skip: int = Query(0, description="分页偏移量"),
     limit: int = Query(100, description="每页数量"),
     current_user: UserResponse = Depends(get_current_user),
-    service: HealthAlertService = Depends(get_health_alert_service)
+    service: HealthAlertService = Depends(get_health_alert_service),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """列出健康数据预警"""
+    """列出健康数据预警
+
+    患者仅可读本人预警（patient_id 显式给出时必须为本人 ID，缺失时自取解析）；
+    医护传入 patient_id 时按归属校验，未传入时收敛到其名下患者范围
+    （assigned_scope_ids）；admin 豁免。
+    """
+    # 注意：本端点查询参数 status 与 fastapi.status 模块重名（历史签名，
+    # 对外查询键不可变更）；授权段放在 try 外，异常转换不经过该名字。
+    patient_ids: Optional[List[str]] = None
+    if current_user.role == "patient":
+        patient_id = await _resolve_self_patient(db, current_user, patient_id)
+    elif current_user.role in ASSIGNED_ROLES:
+        if patient_id:
+            await _authorize_patient_read(db, current_user, patient_id)
+        else:
+            patient_ids = await assigned_scope_ids(db, str(current_user.id), current_user.role)
     try:
         alerts = await service.list_alerts(
             patient_id=patient_id,
+            patient_ids=patient_ids,
             data_type=data_type,
             vital_type=vital_type,
             alert_level=alert_level,
@@ -351,9 +486,11 @@ async def list_alerts(
             limit=limit
         )
         return alerts
+    except PatientAccessError as exc:
+        raise _access_denied(exc) from None
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取预警列表失败: {str(e)}"
         )
 
@@ -361,15 +498,35 @@ async def list_alerts(
 async def get_alerts_stats(
     patient_id: Optional[str] = Query(None, description="患者ID，如果提供则返回该患者的统计"),
     current_user: UserResponse = Depends(get_current_user),
-    service: HealthAlertService = Depends(get_health_alert_service)
+    service: HealthAlertService = Depends(get_health_alert_service),
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """获取健康数据预警统计"""
+    """获取健康数据预警统计
+
+    患者仅可取本人统计（patient_id 强制走自取解析，显式他人 ID 拒绝）；
+    医护传入 patient_id 时按归属校验；未传入时返回全局聚合计数（不含
+    患者个体明细）；admin 豁免。
+    """
+    if current_user.role == "patient":
+        identifier = await _resolve_self_patient(db, current_user, patient_id)
+        try:
+            return await service.get_patient_alerts_stats(identifier)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"获取预警统计失败: {str(e)}"
+            )
+    if patient_id:
+        await _authorize_patient_read(db, current_user, patient_id)
+        try:
+            return await service.get_patient_alerts_stats(patient_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"获取预警统计失败: {str(e)}"
+            )
     try:
-        if patient_id:
-            stats = await service.get_patient_alerts_stats(patient_id)
-        else:
-            stats = await service.get_alerts_stats()
-        return stats
+        return await service.get_alerts_stats()
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

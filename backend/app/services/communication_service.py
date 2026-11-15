@@ -9,7 +9,10 @@ from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 import asyncio
 import logging
+import os
+import uuid
 import weakref
+from pathlib import Path
 
 from app.core.exceptions import AppBaseException
 from app.core.patient_identity import identity_key, load_identity_groups
@@ -24,6 +27,62 @@ from app.services.conversation_policy import (
 
 # 配置日志
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 会话附件（T76）：HTTP 上传返回引用 → 消息发送时校验引用归属 → 落库后绑定。
+# 附件不进 WebSocket 协议：上传经 REST（POST /api/communications/.../attachments），
+# 发送消息时在既有 attachments 参数里引用（id），下载走 REST GET。
+#
+# 存储对齐 patient_feedback_media 的本地文件模式（服务内文件 + 元数据集合）；
+# 本地存储路径配置化（COMMUNICATION_MEDIA_DIR 环境变量，缺省 backend/data/
+# communication-attachments）。
+# ---------------------------------------------------------------------------
+COMMUNICATION_MEDIA_DIR = Path(os.getenv(
+    "COMMUNICATION_MEDIA_DIR",
+    str(Path(__file__).resolve().parents[2] / "data" / "communication-attachments")))
+ATTACHMENTS_COLLECTION = "communication_attachments"
+
+# 上传角色门槛：医护与患者会话参与者（admin 不参与会话沟通）
+ATTACHMENT_UPLOAD_ROLES = ("doctor", "health_manager", "patient")
+# 图片 ≤5MB；文件 ≤10MB；类型白名单（与 rehab_feedback 的 MEDIA_TYPES 同风格）
+ATTACHMENT_IMAGE_TYPES = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
+}
+ATTACHMENT_FILE_TYPES = {
+    "application/pdf": ".pdf", "text/plain": ".txt", "text/csv": ".csv",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/zip": ".zip",
+    "video/mp4": ".mp4",
+}
+MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_FILE_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+
+class CommunicationAttachmentError(ValueError):
+    """附件域错误基类（ValueError 子类：兼容 send_message 既有 ValueError 语义）。"""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class CommunicationAttachmentAccessError(CommunicationAttachmentError):
+    """附件访问/归属错误（非参与者、引用他人附件等）。"""
+
+    def __init__(self, message: str, status_code: int = 403):
+        super().__init__(message, status_code)
+
+
+class CommunicationAttachmentInvalidError(CommunicationAttachmentError):
+    """附件无效（类型/大小不合法、附件不存在、已被其他消息引用等）。"""
+
+    def __init__(self, message: str, status_code: int = 422):
+        super().__init__(message, status_code)
 
 # ---------------------------------------------------------------------------
 # D2 修复（T48）：send_message 授权→落库段事务化
@@ -438,6 +497,173 @@ class CommunicationService:
 
         return messages
     
+    # ------------------------------------------------------------------
+    # 会话附件（T76）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _attachment_url(attachment_id: str) -> str:
+        return f"/api/communications/attachments/{attachment_id}"
+
+    @staticmethod
+    async def save_attachment(
+        db: AsyncIOMotorClient,
+        conversation_id: str,
+        uploader: Any,
+        content: bytes,
+        content_type: str,
+        filename: str,
+    ) -> Dict[str, Any]:
+        """保存会话附件（HTTP 上传入口，先传后引）。
+
+        授权：会话参与者 + 有效账号（ConversationPolicy，与发消息同规则）+
+        角色门槛（医护/患者）；校验：类型白名单 + 大小限制（图片 ≤5MB，
+        文件 ≤10MB）。返回的引用含 id/url/名称/大小/类型，前端随消息的
+        attachments 参数原样回传，发送时经 _resolve_attachment_refs 校验归属。
+        """
+        uploader_id = str(getattr(uploader, "id", "") or "")
+        decision = await ConversationPolicy.authorize(
+            db, conversation_id, uploader_id, layer="outbound")
+        if not decision.allowed:
+            raise CommunicationAttachmentAccessError(
+                "发送者账号不可用" if decision.reason == REASON_ACCOUNT_INVALID
+                else "用户不是对话参与者")
+        if getattr(uploader, "role", None) not in ATTACHMENT_UPLOAD_ROLES:
+            raise CommunicationAttachmentAccessError("当前角色不能上传会话附件")
+
+        content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        if content_type in ATTACHMENT_IMAGE_TYPES:
+            kind, suffix, limit = "image", ATTACHMENT_IMAGE_TYPES[content_type], MAX_IMAGE_ATTACHMENT_BYTES
+        elif content_type in ATTACHMENT_FILE_TYPES:
+            kind, suffix, limit = "file", ATTACHMENT_FILE_TYPES[content_type], MAX_FILE_ATTACHMENT_BYTES
+        else:
+            raise CommunicationAttachmentInvalidError("不支持的附件类型，请上传图片或常见文档")
+        if not content or len(content) > limit:
+            raise CommunicationAttachmentInvalidError(
+                f"附件超出限制：图片不超过 {MAX_IMAGE_ATTACHMENT_BYTES // (1024 * 1024)}MB，"
+                f"文件不超过 {MAX_FILE_ATTACHMENT_BYTES // (1024 * 1024)}MB")
+
+        attachment_id = uuid.uuid4().hex
+        COMMUNICATION_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+        (COMMUNICATION_MEDIA_DIR / f"{attachment_id}{suffix}").write_bytes(content)
+        name = (filename or "附件")[:120]
+        row = {
+            "_id": attachment_id,
+            "conversation_id": conversation_id,
+            "uploader_id": uploader_id,
+            "kind": kind,
+            "content_type": content_type,
+            "name": name,
+            "suffix": suffix,
+            "size": len(content),
+            "bound_message_id": None,
+            "created_at": datetime.utcnow(),
+        }
+        await db[ATTACHMENTS_COLLECTION].insert_one(row)
+        return {
+            "id": attachment_id,
+            "conversation_id": conversation_id,
+            "kind": kind,
+            "content_type": content_type,
+            "name": name,
+            "size": len(content),
+            "url": CommunicationService._attachment_url(attachment_id),
+        }
+
+    @staticmethod
+    async def open_attachment(
+        db: AsyncIOMotorClient,
+        attachment_id: str,
+        user_id: str,
+    ):
+        """读取附件文件（下载/内联渲染），仅限附件所属会话的参与者。"""
+        if not isinstance(attachment_id, str) or len(attachment_id) != 32:
+            raise CommunicationAttachmentInvalidError("附件不存在", status_code=404)
+        row = await db[ATTACHMENTS_COLLECTION].find_one({"_id": attachment_id})
+        if not row:
+            raise CommunicationAttachmentInvalidError("附件不存在", status_code=404)
+        decision = await ConversationPolicy.authorize(
+            db, row["conversation_id"], str(user_id), layer="outbound")
+        if not decision.allowed:
+            raise CommunicationAttachmentAccessError("无权访问该附件")
+        path = COMMUNICATION_MEDIA_DIR / f"{attachment_id}{row.get('suffix') or ''}"
+        if not path.is_file():
+            raise CommunicationAttachmentInvalidError("附件文件不存在", status_code=404)
+        return path, row["content_type"], row.get("name") or "附件"
+
+    @staticmethod
+    async def _resolve_attachment_refs(
+        db: AsyncIOMotorClient,
+        conversation_id: str,
+        sender_id: str,
+        attachments: List[Any],
+        client_message_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """消息发送前的附件引用校验与富化（T76）。
+
+        归属规则：只能引用本人上传、且属于当前会话的附件；已被其他消息
+        绑定的附件拒绝（幂等重放窗口放行——同一 client_message_id 的重复
+        投递命中 DB 唯一索引返回既有消息，附件绑定随首投生效）。富化后的
+        引用（id/kind/content_type/name/size/url）随消息落库，读取端据此渲染。
+        """
+        resolved: List[Dict[str, Any]] = []
+        for entry in attachments or []:
+            attachment_id = None
+            if isinstance(entry, dict):
+                attachment_id = entry.get("id") or entry.get("attachment_id")
+            attachment_id = str(attachment_id) if attachment_id else None
+            if not attachment_id:
+                raise CommunicationAttachmentInvalidError("附件引用缺少 id")
+            row = await db[ATTACHMENTS_COLLECTION].find_one({"_id": attachment_id})
+            if not row:
+                raise CommunicationAttachmentInvalidError("附件不存在或已失效，请重新上传")
+            if row.get("uploader_id") != sender_id:
+                raise CommunicationAttachmentAccessError("只能引用自己上传的附件")
+            if row.get("conversation_id") != conversation_id:
+                raise CommunicationAttachmentAccessError("附件不属于当前会话")
+            bound_message_id = row.get("bound_message_id")
+            if bound_message_id:
+                bound_doc = None
+                if ObjectId.is_valid(str(bound_message_id)):
+                    bound_doc = await db.messages.find_one({"_id": ObjectId(str(bound_message_id))})
+                replay = (
+                    bound_doc is not None
+                    and str(bound_doc.get("conversation_id")) == conversation_id
+                    and str(bound_doc.get("sender_id")) == sender_id
+                    and bool(client_message_id)
+                    and bound_doc.get("client_message_id") == client_message_id
+                )
+                if not replay:
+                    raise CommunicationAttachmentInvalidError(
+                        "附件已被其他消息使用，请重新上传", status_code=409)
+            resolved.append({
+                "id": attachment_id,
+                "kind": row.get("kind") or "file",
+                "content_type": row.get("content_type"),
+                "name": row.get("name") or "附件",
+                "size": row.get("size"),
+                "url": CommunicationService._attachment_url(attachment_id),
+            })
+        return resolved
+
+    @staticmethod
+    async def _bind_attachments(db: AsyncIOMotorClient, attachments: List[Dict[str, Any]],
+                                message_id: ObjectId) -> None:
+        """提交后置 best-effort：把本次引用的附件绑定到消息 id（防重复引用）。
+
+        仅更新仍处于未绑定状态的附件（bound_message_id=None）；失败仅告警，
+        不影响已落库消息（与 WS 广播/通知的副作用语义一致）。事务回滚时
+        执行流不会到达此处。
+        """
+        if not attachments:
+            return
+        try:
+            await db[ATTACHMENTS_COLLECTION].update_many(
+                {"_id": {"$in": [a["id"] for a in attachments]}, "bound_message_id": None},
+                {"$set": {"bound_message_id": str(message_id)}})
+        except Exception as e:  # noqa: BLE001 — best-effort 副作用
+            logger.warning(f"附件绑定消息失败: {e}")
+
     @staticmethod
     async def send_message(
         db: AsyncIOMotorClient,
@@ -487,6 +713,12 @@ class CommunicationService:
             })
             if existing:
                 return CommunicationService._format_message(existing)
+
+        # 附件引用校验（T76）：只能引用本人上传且属于当前会话的附件；
+        # 校验通过后以富化引用（含 url/名称/大小）替换入参落库。
+        if attachments:
+            attachments = await CommunicationService._resolve_attachment_refs(
+                db, conversation_id, sender_id, attachments, client_message_id)
 
         # 确定接收者ID（D1 兼容读：participants 数组形态取另一成员；
         # 现行写入仍为双人单聊形态，群聊写入未启用，迁移属 WS01-c）
@@ -549,6 +781,10 @@ class CommunicationService:
 
         # 接收者以事务内复核到的会话文档为准（成员模型变更与写入同帧生效）
         recipient_id = message["recipient_id"]
+
+        # 附件绑定（T76，提交后置 best-effort）：事务回滚时执行流不会到达此处；
+        # 幂等重放路径（事务 replay / DuplicateKeyError）已在上方 return，不会重复绑定。
+        await CommunicationService._bind_attachments(db, attachments, message["_id"])
 
         # 准备返回的消息格式（广播载荷与响应共用，携带真实服务端 id/时间戳）
         message_response = CommunicationService._format_message(message)

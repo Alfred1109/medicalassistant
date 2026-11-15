@@ -637,10 +637,11 @@ class HealthAlertService:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         skip: int = 0,
-        limit: int = 100
+        limit: int = 100,
+        patient_ids: Optional[List[str]] = None
     ) -> List[AlertResponse]:
         """列出预警
-        
+
         Args:
             patient_id: 患者ID过滤
             data_type: 数据类型过滤
@@ -651,7 +652,9 @@ class HealthAlertService:
             end_date: 结束日期过滤
             skip: 分页偏移量
             limit: 每页数量
-            
+            patient_ids: 患者ID集合过滤（T76 授权收口：医护未传 patient_id 时
+                由路由层按 assigned_scope_ids 收敛范围后传入）
+
         Returns:
             List[AlertResponse]: 预警响应列表
         """
@@ -659,6 +662,8 @@ class HealthAlertService:
         query = {}
         if patient_id:
             query["patient_id"] = patient_id
+        elif patient_ids is not None:
+            query["patient_id"] = {"$in": list(patient_ids)}
         if data_type:
             query["data_type"] = data_type
         if vital_type:
