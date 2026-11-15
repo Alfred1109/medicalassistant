@@ -38,6 +38,18 @@
 - **执行**：按 deploy-ops-checklist「日常运行」节配置 backup_mongodb.py 定时任务 + verify_restore 定期对账；归档加密存放。
 - **验收**：一次真实「备份→隔离恢复→对账」闭环在 119.45 完成（本地已演练，命令照抄检查单）。
 
+### A5. 生命体征落点盘点（体征收敛的前置）
+- **目的**：生命体征要收敛为单一事实源（`health_data`），`device_data` 降级为设备原始遥测留档、`health_records` 内嵌 `vital_signs` 改为读取投影。收敛前必须先知道三落点的存量与相互重叠，否则去重口径无从谈起。
+- **需要**：与 A1 同一个 Mongo 只读账号与库名。
+- **执行**：
+  ```
+  backend/scripts/vitals_storage_audit.py \
+    --uri "mongodb://只读用户@119.45.x.x:27017/库名?authSource=admin" --allow-remote \
+    --overlap-window-hours 24
+  ```
+- **验收**：三落点计数与重叠配对数落盘；`device_data.missing_patient_id`（设备手工登记路径不写 patient_id，是已确认的归属缺口）与 `medical_timelines.device_linked_entries`（设备采集不进时间线）两项确认后，再由我给出收敛期的去重口径。
+- **风险**：无（纯只读）。
+
 ## B. 部署与正式 HTTPS/浏览器验收
 
 ### B1. 两端新版本部署

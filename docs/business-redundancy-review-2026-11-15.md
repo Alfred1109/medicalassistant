@@ -33,7 +33,7 @@
 
 **判定：合并**。以 `health_data` 为生命体征事实源，设备数据经网关落同一集合（保留来源标记 `source=device` 与设备 id），`device_data` 降级为设备原始遥测留档；内嵌 `vital_signs` 改为读取投影，不再单独存。
 
-**注意**：这是有历史数据面的改动——上线前需先跑一次存量盘点（`health_data` / `device_data` / 内嵌 `vital_signs` 三处的血压、血糖、心率条目数与重叠量），重叠条目需要去重口径。盘点脚本随该任务一并交付。
+**注意**：这是有历史数据面的改动——上线前需先跑一次存量盘点（`health_data` / `device_data` / 内嵌 `vital_signs` 三处的血压、血糖、心率条目数与重叠量），重叠条目需要去重口径。盘点工具已交付：`backend/scripts/vitals_storage_audit.py`（只读），生产执行方式见 `external-validation-checklist.md` A5。
 
 ### 1.2 `medical_timelines` 陈旧物化（合并）
 
