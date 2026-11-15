@@ -97,6 +97,9 @@ async def create_patient_indexes(db):
         [("status", ASCENDING), ("health_managers", ASCENDING)], name="clinical_health_manager_scope")
     # 姓名搜索辅助索引（普通非唯一索引）：支撑大小写不敏感的 name 查询，
     # 与 create_from_source 的唯一索引校验无关，缺失不会阻断该索引校验。
+    # 单一属主：clinical_patient_name_query 此前在 db/indexes.py 的
+    # PATIENT_SCOPE_INDEXES 有第二份声明，已收敛到此处（2026-11-15 冗余审查
+    # 批次 1）；db/indexes.py 侧不再重复声明。
     await db[PATIENTS].create_index("name", name="clinical_patient_name_query")
 
 

@@ -2,14 +2,13 @@
 设备维修路由器
 处理设备维修和修复记录相关API请求
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from bson import ObjectId
 
-from ...db.mongodb import get_db, get_database
+from ...db.mongodb import get_database
 from ...services.device_service import device_service, DEVICE_READ_ROLES
-from ...services.device_repair_service import device_repair_service
 from ...core.dependencies import get_current_user
 from ...core.device_access import device_patient_scope, ensure_device_access
 from ...patients.legacy import LegacyPatientRepository

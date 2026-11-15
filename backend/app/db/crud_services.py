@@ -2,9 +2,8 @@
 模型CRUD服务
 为各模型提供特定的CRUD操作
 """
-from typing import List, Dict, Any, Optional, Type, TypeVar, Generic, Union
+from typing import List, Dict, Any, Optional, Type, TypeVar
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from datetime import datetime, timedelta
 from bson import ObjectId
 from fastapi import status
 from pymongo import ASCENDING
@@ -16,12 +15,12 @@ from app.core.patient_access import (
 from app.core.patient_identity import identity_candidates
 from app.patients.legacy import LegacyPatientRepository
 from app.patients.repository import ClinicalPatientRepository, PatientDomainError
-from app.models.user import User, Doctor, Patient, HealthManager, SystemAdmin
+from app.models.user import User, Doctor, Patient, HealthManager
 from app.models.organization import Organization
 from app.models.health_record import HealthRecord, FollowUpRecord
 from app.models.rehabilitation import RehabilitationPlan, Exercise, ProgressRecord
-from app.models.device import Device, DeviceData, DeviceCalibration
-from app.models.agent import Agent, AgentInteraction
+from app.models.device import Device, DeviceData
+from app.models.agent import Agent
 # 注：原 Message/Conversation 模型类及其 CRUD（结构 A）已随 WS01 统一删除，
 # 通信域唯一真实实现见 app/services/communication_service.py（结构 B）。
 
@@ -65,67 +64,18 @@ def _patient_domain_state_unavailable(reason: str) -> PatientAccessError:
 
 class UserCRUD(CRUDBase[User]):
     """用户CRUD服务"""
-    
-    async def find_by_email(self, email: str) -> Optional[User]:
-        """通过邮箱查找用户"""
-        return await self.find_one({"email": email})
-    
-    async def find_by_role(self, role: str, skip: int = 0, limit: int = 100) -> List[User]:
-        """通过角色查找用户"""
-        return await self.find({"role": role}, skip, limit)
-    
-    async def update_password(self, user_id: str, password_hash: str) -> bool:
-        """更新用户密码"""
-        try:
-            result = await self.collection.update_one(
-                {"_id": ObjectId(user_id)},
-                {"$set": {"password_hash": password_hash, "updated_at": datetime.utcnow()}}
-            )
-            return result.modified_count > 0
-        except Exception:
-            return False
 
 
 class PractitionerCRUD(UserCRUD):
     """医疗从业者基类"""
-    
-    async def find_by_organization(self, organization_id: str, skip: int = 0, limit: int = 100) -> List[Any]:
-        """查找某组织的从业者"""
-        return await self.find({"organization_id": organization_id, "role": self.role}, skip, limit)
-    
-    async def get_patients(self, practitioner_id: str) -> List[str]:
-        """获取从业者的患者ID列表"""
-        try:
-            practitioner = await self.collection.find_one({"_id": ObjectId(practitioner_id), "role": self.role})
-            if practitioner and "patients" in practitioner:
-                return practitioner["patients"]
-            return []
-        except Exception as e:
-            print(f"获取{self.role}患者列表时出错: {str(e)}")
-            return []
-    
-    async def add_patient(self, practitioner_id: str, patient_id: str) -> bool:
-        """为从业者添加患者"""
-        try:
-            result = await self.collection.update_one(
-                {"_id": ObjectId(practitioner_id), "role": self.role},
-                {"$addToSet": {"patients": patient_id}}
-            )
-            return result.modified_count > 0
-        except Exception:
-            return False
 
 
 class DoctorCRUD(PractitionerCRUD):
     """医生CRUD服务"""
-    
+
     def __init__(self, db: AsyncIOMotorDatabase, model_class: Type[Doctor]):
         super().__init__(db, model_class)
         self.role = "doctor"
-    
-    async def find_by_specialty(self, specialty: str, skip: int = 0, limit: int = 100) -> List[Doctor]:
-        """查找特定专业的医生"""
-        return await self.find({"specialty": specialty, "role": self.role}, skip, limit)
 
 
 class PatientCRUD(CRUDBase[Patient]):
@@ -226,28 +176,6 @@ class PatientCRUD(CRUDBase[Patient]):
             if limit is not None:
                 cursor = cursor.limit(limit)
         return [await self._get_patient_data(doc) async for doc in cursor]
-    
-    async def update_medical_info(self, patient_id: str, medical_info: Dict[str, Any]) -> bool:
-        """更新患者医疗信息"""
-        try:
-            result = await self.collection.update_one(
-                {"_id": ObjectId(patient_id), "role": "patient"},
-                {"$set": {"medical_info": medical_info, "updated_at": datetime.utcnow()}}
-            )
-            return result.modified_count > 0
-        except Exception:
-            return False
-    
-    async def add_device(self, patient_id: str, device_id: str) -> bool:
-        """为患者添加设备"""
-        try:
-            result = await self.collection.update_one(
-                {"_id": ObjectId(patient_id), "role": "patient"},
-                {"$addToSet": {"devices": device_id}}
-            )
-            return result.modified_count > 0
-        except Exception:
-            return False
 
 
 class HealthManagerCRUD(PractitionerCRUD):
@@ -260,188 +188,54 @@ class HealthManagerCRUD(PractitionerCRUD):
 
 class OrganizationCRUD(CRUDBase[Organization]):
     """组织机构CRUD服务"""
-    
-    async def find_by_type(self, type: str, skip: int = 0, limit: int = 100) -> List[Organization]:
-        """查找特定类型的组织"""
-        return await self.find({"type": type}, skip, limit)
-    
-    async def find_children(self, parent_id: str, skip: int = 0, limit: int = 100) -> List[Organization]:
-        """查找子组织"""
-        return await self.find({"parent_id": parent_id}, skip, limit)
-    
-    async def get_hierarchy(self, org_id: str) -> List[Organization]:
-        """获取组织层级"""
-        result = []
-        org = await self.get(org_id)
-        
-        while org:
-            result.append(org)
-            if org.parent_id:
-                org = await self.get(org.parent_id)
-            else:
-                break
-                
-        return result
 
 
 class RecordBaseCRUD(CRUDBase[TypeVar('T')]):
     """记录CRUD服务基类"""
-    
-    async def find_by_patient(self, patient_id: str, skip: int = 0, limit: int = 100) -> List[Any]:
-        """查找患者的记录"""
-        return await self.find({"patient_id": patient_id}, skip, limit)
-    
-    async def find_by_creator(self, creator_id: str, skip: int = 0, limit: int = 100) -> List[Any]:
-        """查找由特定人员创建的记录"""
-        return await self.find({"created_by": creator_id}, skip, limit)
 
 
 class HealthRecordCRUD(RecordBaseCRUD[HealthRecord]):
     """健康档案CRUD服务"""
-    
-    async def find_by_type(self, patient_id: str, record_type: str, skip: int = 0, limit: int = 100) -> List[HealthRecord]:
-        """查找患者的特定类型健康档案"""
-        return await self.find({"patient_id": patient_id, "record_type": record_type}, skip, limit)
 
 
 class FollowUpRecordCRUD(RecordBaseCRUD[FollowUpRecord]):
     """随访记录CRUD服务"""
-    
-    async def find_upcoming(self, skip: int = 0, limit: int = 100) -> List[FollowUpRecord]:
-        """查找即将到来的随访"""
-        now = datetime.utcnow()
-        return await self.find({
-            "status": "scheduled",
-            "scheduled_date": {"$gt": now}
-        }, skip, limit)
-    
-    async def find_overdue(self, skip: int = 0, limit: int = 100) -> List[FollowUpRecord]:
-        """查找逾期随访"""
-        now = datetime.utcnow()
-        return await self.find({
-            "status": "scheduled",
-            "scheduled_date": {"$lt": now}
-        }, skip, limit)
 
 
 class RehabilitationPlanCRUD(RecordBaseCRUD[RehabilitationPlan]):
     """康复计划CRUD服务"""
-    
-    async def find_by_practitioner(self, practitioner_id: str, skip: int = 0, limit: int = 100) -> List[RehabilitationPlan]:
-        """查找医生创建的康复计划"""
-        return await self.find({"practitioner_id": practitioner_id}, skip, limit)
-    
-    async def find_active(self, patient_id: str = None, skip: int = 0, limit: int = 100) -> List[RehabilitationPlan]:
-        """查找活跃的康复计划"""
-        filter = {"status": "active"}
-        if patient_id:
-            filter["patient_id"] = patient_id
-        return await self.find(filter, skip, limit)
 
 
 class ExerciseCRUD(CRUDBase[Exercise]):
     """锻炼CRUD服务"""
-    
-    async def find_by_body_part(self, body_part: str, skip: int = 0, limit: int = 100) -> List[Exercise]:
-        """查找特定身体部位的锻炼"""
-        return await self.find({"body_part": body_part}, skip, limit)
-    
-    async def find_by_difficulty(self, difficulty: str, skip: int = 0, limit: int = 100) -> List[Exercise]:
-        """查找特定难度的锻炼"""
-        return await self.find({"difficulty": difficulty}, skip, limit)
-    
-    async def find_by_tag(self, tag: str, skip: int = 0, limit: int = 100) -> List[Exercise]:
-        """查找带有特定标签的锻炼"""
-        return await self.find({"tags": tag}, skip, limit)
 
 
 class ProgressRecordCRUD(RecordBaseCRUD[ProgressRecord]):
     """进度记录CRUD服务"""
-    
-    async def find_by_plan(self, plan_id: str, skip: int = 0, limit: int = 100) -> List[ProgressRecord]:
-        """查找康复计划的进度记录"""
-        return await self.find({"plan_id": plan_id}, skip, limit)
-    
-    async def find_by_exercise(self, plan_id: str, exercise_id: str, skip: int = 0, limit: int = 100) -> List[ProgressRecord]:
-        """查找特定锻炼的进度记录"""
-        return await self.find({"plan_id": plan_id, "exercise_id": exercise_id}, skip, limit)
-    
-    async def find_recent(self, patient_id: str, days: int = 7, skip: int = 0, limit: int = 100) -> List[ProgressRecord]:
-        """查找患者的最近进度记录"""
-        start_date = datetime.utcnow() - timedelta(days=days)
-        return await self.find({
-            "patient_id": patient_id,
-            "date": {"$gte": start_date}
-        }, skip, limit)
 
 
 class DeviceRelatedCRUD(CRUDBase[TypeVar('T')]):
     """设备相关CRUD服务基类"""
-    
-    async def find_by_patient(self, patient_id: str, skip: int = 0, limit: int = 100) -> List[Any]:
-        """查找患者的设备相关数据"""
-        return await self.find({"patient_id": patient_id}, skip, limit)
-    
-    async def find_by_type(self, type_field: str, skip: int = 0, limit: int = 100) -> List[Any]:
-        """查找特定类型的设备相关数据"""
-        field_name = f"{self.type_field_name}" if hasattr(self, 'type_field_name') else "device_type"
-        return await self.find({field_name: type_field}, skip, limit)
 
 
 class DeviceCRUD(DeviceRelatedCRUD[Device]):
     """设备CRUD服务"""
-    
+
     def __init__(self, db: AsyncIOMotorDatabase, model_class: Type[Device]):
         super().__init__(db, model_class)
         self.type_field_name = "device_type"
-    
-    async def find_by_status(self, status: str, skip: int = 0, limit: int = 100) -> List[Device]:
-        """查找特定状态的设备"""
-        return await self.find({"status": status}, skip, limit)
-    
-    async def find_unbound(self, skip: int = 0, limit: int = 100) -> List[Device]:
-        """查找未绑定的设备"""
-        return await self.find({"patient_id": None}, skip, limit)
 
 
 class DeviceDataCRUD(DeviceRelatedCRUD[DeviceData]):
     """设备数据CRUD服务"""
-    
+
     def __init__(self, db: AsyncIOMotorDatabase, model_class: Type[DeviceData]):
         super().__init__(db, model_class)
         self.type_field_name = "data_type"
-    
-    async def find_by_device(self, device_id: str, skip: int = 0, limit: int = 100) -> List[DeviceData]:
-        """查找设备的数据"""
-        return await self.find({"device_id": device_id}, skip, limit)
-    
-    async def find_by_time_range(self, device_id: str, start_time: datetime, end_time: datetime, 
-                               skip: int = 0, limit: int = 100) -> List[DeviceData]:
-        """查找特定时间范围的设备数据"""
-        return await self.find({
-            "device_id": device_id,
-            "timestamp": {"$gte": start_time, "$lte": end_time}
-        }, skip, limit)
 
 
 class AgentCRUD(CRUDBase[Agent]):
     """代理CRUD服务"""
-    
-    async def find_public(self, skip: int = 0, limit: int = 100) -> List[Agent]:
-        """查找公开的代理"""
-        return await self.find({"is_public": True}, skip, limit)
-    
-    async def find_by_creator(self, creator_id: str, skip: int = 0, limit: int = 100) -> List[Agent]:
-        """查找由特定用户创建的代理"""
-        return await self.find({"created_by": creator_id}, skip, limit)
-    
-    async def find_by_organization(self, organization_id: str, skip: int = 0, limit: int = 100) -> List[Agent]:
-        """查找特定组织的代理"""
-        return await self.find({"organization_id": organization_id}, skip, limit)
-    
-    async def find_by_model(self, model: str, skip: int = 0, limit: int = 100) -> List[Agent]:
-        """查找使用特定模型的代理"""
-        return await self.find({"model": model}, skip, limit)
 
 
 # 创建CRUD服务工厂函数

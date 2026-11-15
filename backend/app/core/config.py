@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
 from pydantic import AnyHttpUrl, SecretStr, field_validator
-from typing import List, Optional, Union, Dict, Any
+from typing import List, Optional, Union, Dict
 import os
 from dotenv import load_dotenv
 import secrets
@@ -204,37 +204,6 @@ class Settings(BaseSettings):
     model_config = {
         "case_sensitive": True
     }
-    
-    def get_api_url(self) -> str:
-        """获取API URL"""
-        return f"{self.API_V1_STR}"
-    
-    def is_development(self) -> bool:
-        """检查是否为开发环境"""
-        return self.ENVIRONMENT.lower() == "development"
-    
-    def is_production(self) -> bool:
-        """检查是否为生产环境"""
-        return self.ENVIRONMENT.lower() == "production"
-    
-    def is_testing(self) -> bool:
-        """检查是否为测试环境"""
-        return self.ENVIRONMENT.lower() == "testing"
-    
-    def get_response_envelope(self, data: Any = None, message: str = None) -> Dict[str, Any]:
-        """生成标准响应封装"""
-        result = {
-            "success": True,
-            "data": data
-        }
-        
-        if message:
-            result["message"] = message
-            
-        if self.API_RESPONSE_INCLUDE_VERSION:
-            result["version"] = self.API_VERSION
-            
-        return result
 
 
 settings = Settings()

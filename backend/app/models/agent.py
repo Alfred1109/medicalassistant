@@ -6,31 +6,6 @@ from datetime import datetime
 from bson import ObjectId
 from typing import Dict, List, Optional, Any
 
-class AgentTool:
-    """代理工具模型"""
-    
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        parameters: Dict[str, Any],
-        required_parameters: List[str] = None
-    ):
-        self.name = name
-        self.description = description
-        self.parameters = parameters
-        self.required_parameters = required_parameters or []
-    
-    def to_dict(self):
-        """将工具对象转换为字典"""
-        return self.__dict__.copy()
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        """从字典创建工具对象"""
-        return cls(**data)
-
-
 class Agent:
     """智能代理模型"""
     collection_name = "agents"
@@ -88,11 +63,6 @@ class Agent:
     def to_dict(self):
         """将代理对象转换为字典，用于API响应"""
         return self.__dict__.copy()
-    
-    def add_tool(self, tool: AgentTool):
-        """添加工具到代理"""
-        self.tools.append(tool.to_dict())
-        self.updated_at = datetime.utcnow()
     
     def remove_tool(self, tool_name: str):
         """从代理中移除工具"""

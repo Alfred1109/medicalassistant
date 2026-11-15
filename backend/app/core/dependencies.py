@@ -1,5 +1,5 @@
 from fastapi import Depends, HTTPException, Request, status
-from typing import Dict, Any, List
+from typing import Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime
@@ -83,42 +83,6 @@ def check_permission(permission: str):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"权限不足: 需要 {permission} 权限"
-            )
-        return current_user
-    return dependency
-
-def check_any_permission(permissions: List[str]):
-    """检查用户是否具有任一权限"""
-    async def dependency(current_user: UserResponse = Depends(auth_get_current_user)):
-        has_any = any(PermissionChecker.has_permission(current_user, perm) for perm in permissions)
-        if not has_any:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"权限不足: 需要以下权限之一: {', '.join(permissions)}"
-            )
-        return current_user
-    return dependency
-
-def check_all_permissions(permissions: List[str]):
-    """检查用户是否具有所有权限"""
-    async def dependency(current_user: UserResponse = Depends(auth_get_current_user)):
-        missing_perms = [perm for perm in permissions if not PermissionChecker.has_permission(current_user, perm)]
-        if missing_perms:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"权限不足: 缺少以下权限: {', '.join(missing_perms)}"
-            )
-        return current_user
-    return dependency
-
-# 角色检查依赖
-def is_admin():
-    """检查用户是否为管理员"""
-    async def dependency(current_user: UserResponse = Depends(auth_get_current_user)):
-        if current_user.role != "admin":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="需要管理员权限"
             )
         return current_user
     return dependency

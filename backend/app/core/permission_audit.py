@@ -11,7 +11,6 @@ from starlette.types import ASGIApp
 from app.core.config import settings
 from app.services.audit_log_service import AuditLogService
 from app.schemas.audit_log import AuditLogCreate
-from app.core.permissions import AUDITED_PERMISSIONS
 from app.integrations.identity.access import unified_authentication
 
 logger = logging.getLogger(__name__)
@@ -234,48 +233,6 @@ class ResourcePermissionTracker:
     def __init__(self, db=None):
         self.db = db
     
-    async def track_permission_check(
-        self,
-        user_id: str,
-        permission: str,
-        resource_type: str,
-        resource_id: Optional[str] = None,
-        is_granted: bool = True,
-        ip_address: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None
-    ):
-        """
-        记录权限检查结果
-        
-        参数:
-        - user_id: 用户ID
-        - permission: 检查的权限
-        - resource_type: 资源类型
-        - resource_id: 资源ID
-        - is_granted: 是否授予权限
-        - ip_address: IP地址
-        - details: 其他详细信息
-        """
-        # 关键权限或访问失败时才记录
-        if permission in AUDITED_PERMISSIONS or not is_granted:
-            try:
-                if self.db is not None:
-                    audit_service = AuditLogService(self.db)
-                    await audit_service.log_permission_check(
-                        user_id=user_id,
-                        permission=permission,
-                        resource_id=resource_id,
-                        is_granted=is_granted,
-                        ip_address=ip_address,
-                        # details 由调用方传入，写入前脱敏（AUTH02）。
-                        details=redact_sensitive_details({
-                            "resource_type": resource_type,
-                            **(details or {})
-                        })
-                    )
-            except Exception as e:
-                logger.error(f"Failed to track permission check: {str(e)}")
-    
     async def track_resource_access(
         self,
         user_id: str,
@@ -315,16 +272,3 @@ class ResourcePermissionTracker:
                 )
         except Exception as e:
             logger.error(f"Failed to track resource access: {str(e)}")
-
-
-# 创建单例实例以便在应用中使用
-async def get_permission_tracker(db=None):
-    """获取权限跟踪器实例"""
-    if db is None:
-        from app.db.mongodb import get_database
-        try:
-            db = await anext(get_database())
-        except Exception as e:
-            logger.error(f"获取数据库连接失败: {str(e)}")
-    
-    return ResourcePermissionTracker(db)

@@ -581,13 +581,16 @@ class IndexDeclarationTests(unittest.IsolatedAsyncioTestCase):
         db.list_collection_names = AsyncMock(return_value=list(collections))
         return db
 
-    async def test_patient_scope_indexes_cover_devices_and_clinical_name(self):
+    async def test_patient_scope_indexes_cover_devices_only(self):
+        # clinical_patient_name_query 单一属主为 create_patient_indexes
+        # （repository 侧），ensure_patient_scope_indexes 不再重复声明。
         db = self.recorder_db({"devices", "clinical_patients"})
         self.assertTrue(await ensure_patient_scope_indexes(db))
         created = {name: {item[0] for item in collection.created}
                    for name, collection in db._collections.items()}
         self.assertIn("device_patient_query", created["devices"])
-        self.assertIn("clinical_patient_name_query", created["clinical_patients"])
+        self.assertNotIn("clinical_patient_name_query", created["clinical_patients"])
+        self.assertEqual(created["clinical_patients"], set())
 
     async def test_absent_collections_are_skipped_without_creating_them(self):
         db = self.recorder_db({"messages"})

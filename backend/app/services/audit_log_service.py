@@ -79,30 +79,7 @@ class AuditLogService:
             }
         )
         return await self.create_log(log_data, ip_address)
-    
-    async def log_role_assignment(
-        self,
-        user_id: str,
-        target_user_id: str,
-        role: str,
-        action: str,  # 'assign' or 'remove'
-        ip_address: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """记录角色分配日志"""
-        log_data = AuditLogCreate(
-            user_id=user_id,
-            action=action,
-            resource_type="role",
-            resource_id=target_user_id,
-            details={
-                **(details or {}),
-                "role": role,
-                "target_user_id": target_user_id
-            }
-        )
-        return await self.create_log(log_data, ip_address)
-    
+
     async def get_logs(
         self, 
         filter_params: AuditLogFilter, 
