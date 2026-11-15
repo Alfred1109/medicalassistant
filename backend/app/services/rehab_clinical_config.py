@@ -14,8 +14,15 @@
 覆盖集合读取失败按 fail-closed 处理：口径不可读时宁可拒绝发布，也不在
 未知规则状态下放行；单条规则文档结构不合法同样拒绝（静默丢弃坏规则会
 把 block 规则变成放行）。
+
+存取动作（读集合 / 读单文档）走公共配置基座 app/core/config_store.py：
+本模块的两支读都是 fail-closed（ConfigFail.STRICT），与「运维开关读不到
+用默认」的宽松口径刻意分化——基座的 fail 语义是参数，不在这里改写。
 """
 from typing import Any, Dict, List
+
+from app.core.config_store import (CONFIG_INVALID, CONFIG_UNAVAILABLE, ConfigFail,
+                                   ConfigStore)
 
 # 规则覆盖集合（整集替换内置示例）
 RULES_COLLECTION = "rehab_clinical_rules"
@@ -175,40 +182,49 @@ def normalize_rule(doc: Any, source: str) -> Dict[str, Any]:
             "allergen_cross_match": cross is True, "status": status, "source": source}
 
 
+def _rules_error(reason, exc):
+    """把基座的失败原因映射为本域错误码（fail-closed：一律 503 拒绝放行）。"""
+    from app.core.exceptions import AppBaseException
+    if reason == CONFIG_INVALID:
+        return AppBaseException("禁忌规则集合存在结构不合法的规则，请修正后再试", status_code=503,
+                                error_code="REHAB_CLINICAL_RULES_INVALID")
+    return AppBaseException("禁忌规则集合不可读，请稍后重试", status_code=503,
+                            error_code="REHAB_CLINICAL_RULES_UNAVAILABLE")
+
+
+def _signature_error(reason, exc):
+    """把基座的失败原因映射为本域错误码（fail-closed：一律 503 拒绝放行）。"""
+    from app.core.exceptions import AppBaseException
+    if reason == CONFIG_INVALID:
+        return AppBaseException("签署声明配置缺少文案，请修正后再试", status_code=503,
+                                error_code="REHAB_CLINICAL_SIGNATURE_INVALID")
+    return AppBaseException("签署声明配置不可读，请稍后重试", status_code=503,
+                            error_code="REHAB_CLINICAL_SIGNATURE_UNAVAILABLE")
+
+
+def _signature_document(doc: Any) -> Dict[str, Any]:
+    """覆盖签署声明的规范化与结构校验（缺文案即内容不合法）。"""
+    declaration = _text(doc.get("declaration"))
+    if not declaration:
+        raise ValueError("签署声明缺少文案")
+    return {"declaration": declaration, "status": _text(doc.get("status")) or CLINICAL_REVIEW_STATUS,
+            "source": "collection"}
+
+
 async def load_contraindication_rules(db) -> List[Dict[str, Any]]:
     """读取生效的禁忌规则集合：覆盖集合非空时整集替换内置示例。
 
     读取失败或单条覆盖规则结构不合法 → 503 fail-closed（规则口径不可读
     或不可信时，禁止在未知规则状态下放行发布）。
     """
-    from app.core.exceptions import AppBaseException
-    try:
-        docs = await db[RULES_COLLECTION].find({"enabled": {"$ne": False}}).to_list(length=1000)
-    except Exception as exc:  # 口径读取失败宁可拒绝业务，也不静默回退内置
-        raise AppBaseException("禁忌规则集合不可读，请稍后重试", status_code=503,
-                               error_code="REHAB_CLINICAL_RULES_UNAVAILABLE") from exc
-    if not docs:
-        return [dict(rule) for rule in SAMPLE_RULES]
-    try:
-        return [normalize_rule(doc, "collection") for doc in docs]
-    except ValueError as exc:
-        raise AppBaseException("禁忌规则集合存在结构不合法的规则，请修正后再试", status_code=503,
-                               error_code="REHAB_CLINICAL_RULES_INVALID") from exc
+    store = ConfigStore(db, RULES_COLLECTION, fail=ConfigFail.STRICT, on_error=_rules_error,
+                        validate=lambda doc: normalize_rule(doc, "collection"))
+    return await store.read_many({"enabled": {"$ne": False}}, limit=1000,
+                                 default=[dict(rule) for rule in SAMPLE_RULES])
 
 
 async def load_signature_declaration(db) -> Dict[str, Any]:
     """读取发布签署声明：覆盖文档存在且非空时替换默认文案。"""
-    from app.core.exceptions import AppBaseException
-    try:
-        doc = await db[SIGNATURE_COLLECTION].find_one({"key": SIGNATURE_KEY})
-    except Exception as exc:
-        raise AppBaseException("签署声明配置不可读，请稍后重试", status_code=503,
-                               error_code="REHAB_CLINICAL_SIGNATURE_UNAVAILABLE") from exc
-    if not doc:
-        return dict(DEFAULT_SIGNATURE_DECLARATION)
-    declaration = _text(doc.get("declaration"))
-    if not declaration:
-        raise AppBaseException("签署声明配置缺少文案，请修正后再试", status_code=503,
-                               error_code="REHAB_CLINICAL_SIGNATURE_INVALID")
-    return {"declaration": declaration, "status": _text(doc.get("status")) or CLINICAL_REVIEW_STATUS,
-            "source": "collection"}
+    store = ConfigStore(db, SIGNATURE_COLLECTION, key_field="key", fail=ConfigFail.STRICT,
+                        on_error=_signature_error, validate=_signature_document)
+    return await store.read_one(SIGNATURE_KEY, default=dict(DEFAULT_SIGNATURE_DECLARATION))
