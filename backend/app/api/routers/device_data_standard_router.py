@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from ...models.device_data_standard import DeviceType, DEVICE_DATA_TYPES, METADATA_FIELDS, DEVICE_DATA_STANDARD_VERSION
 from ...services.device_data_validator_service import device_data_validator_service
 from ...services.device_service import device_service
-from ...core.dependencies import get_current_user
+from ..dependencies import get_current_user
 
 router = APIRouter(prefix="/device-standards", tags=["device-standards"])
 

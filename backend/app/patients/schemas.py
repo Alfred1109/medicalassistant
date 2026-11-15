@@ -56,6 +56,7 @@ class ClinicalPatientResponse(BaseModel):
     practitioners: list[str] = Field(default_factory=list)
     health_managers: list[str] = Field(default_factory=list)
     source: SourcePatientIdentity | None = None
+    # legacy-shape: 存量形态，不随域切换删除
     legacy_user_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None

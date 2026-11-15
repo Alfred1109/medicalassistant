@@ -78,6 +78,7 @@ def project_legacy_patient(document):
         if key in document and document[key] is not None and not isinstance(document[key], dict):
             raise PatientDomainError("INVALID_LEGACY_PATIENT_DATA")
     patient_id = str(identifier)
+    # legacy-shape: 存量形态，不随域切换删除
     result = {"_id": identifier, "patient_id": patient_id, "legacy_user_id": patient_id,
               "schema_version": SCHEMA_VERSION,
               "status": "inactive" if document.get("is_active") is False else "active"}

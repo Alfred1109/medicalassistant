@@ -6,6 +6,16 @@
 走同一条 legacy 分支；canonical 模式走 ClinicalPatientRepository +
 patient_account_links。模式读取失败或观察到未知状态一律 fail-closed
 （拒绝请求），绝不静默回退 legacy。
+
+分支标签（两类不要混删）：`mode == "canonical"` 是域分派分支，legacy
+停用之后可以删；`legacy_user_id`、`submission_history`、无版本节点这类是
+存量数据形态，不随域切换删除。
+
+请求内单次读取（Wave 2 任务 B）：patient_domain_context(db, session=...) 返回
+一个绑定好的访问器——域模式只读取一次，同一请求内的患者读取/归属校验/本人
+解析全部复用这一结论，域分派细节不再散落到各服务层。事务内必须把 session
+透传进来（否则状态读取会脱离事务快照）；只读展示路径用
+patient_domain_context_safe（fail-safe unknown 口径，与 fail-closed 刻意分化）。
 """
 from typing import Any, Dict, Optional
 
@@ -17,7 +27,7 @@ from pymongo.errors import PyMongoError
 from app.core.exceptions import AppBaseException
 from app.patients.legacy import LegacyPatientRepository, self_patient_id
 from app.patients.repository import (
-    ClinicalPatientRepository, PatientDomainError,
+    ACCOUNT_LINKS, ClinicalPatientRepository, PatientDomainError,
     assigned_query as canonical_assigned_query, domain_mode as read_domain_mode)
 
 
@@ -126,6 +136,29 @@ def resolve_self_patient_id(actor, patient_id=None) -> str:
     return identifier
 
 
+async def _resolve_self_patient_entity(db, mode, actor, patient_id=None, *, session=None) -> str:
+    """域分派已定（mode 由调用方给出）的本人实体解析；不读域状态。"""
+    account_id = getattr(actor, "id", None)
+    role = getattr(actor, "role", None)
+    if role != "patient" or not isinstance(account_id, (str, ObjectId)) or not str(account_id):
+        raise PatientAccessError("无权访问该患者的数据")
+    # domain-dispatch: 迁移完成后可删
+    if mode == "canonical":
+        patient = await _canonical_patient_read(
+            lambda: ClinicalPatientRepository(db).resolve_self(str(account_id), session=session))
+        if patient is None:
+            raise PatientAccessError("无权访问该患者的数据")
+        resolved = str(patient["patient_id"])
+        if patient_id is not None and (
+                not isinstance(patient_id, (str, ObjectId)) or str(patient_id) != resolved):
+            raise PatientAccessError("无权访问该患者的数据")
+        return resolved
+    identifier = self_patient_id(account_id, role, patient_id)
+    if identifier is None:
+        raise PatientAccessError("无权访问该患者的数据")
+    return identifier
+
+
 async def resolve_self_patient_entity(db, actor, patient_id=None, *, session=None) -> str:
     """Domain-dispatched entity resolution for a patient-role self request.
 
@@ -146,23 +179,17 @@ async def resolve_self_patient_entity(db, actor, patient_id=None, *, session=Non
     呈现，与「域状态不可用必须拒绝请求、绝不静默降级」的 fail-closed 口径
     一致。legacy 的角色/标识域无关校验仍先于域读取（任何域语义相同）。
     """
-    account_id = getattr(actor, "id", None)
-    role = getattr(actor, "role", None)
-    if role != "patient" or not isinstance(account_id, (str, ObjectId)) or not str(account_id):
-        raise PatientAccessError("无权访问该患者的数据")
-    if await patient_domain_mode(db, session=session) == "canonical":
-        patient = await _canonical_patient_read(
-            lambda: ClinicalPatientRepository(db).resolve_self(str(account_id), session=session))
-        if patient is None:
-            raise PatientAccessError("无权访问该患者的数据")
-        resolved = str(patient["patient_id"])
-        if patient_id is not None and (
-                not isinstance(patient_id, (str, ObjectId)) or str(patient_id) != resolved):
-            raise PatientAccessError("无权访问该患者的数据")
-        return resolved
-    identifier = self_patient_id(account_id, role, patient_id)
-    if identifier is None:
-        raise PatientAccessError("无权访问该患者的数据")
+    mode = await patient_domain_mode(db, session=session)
+    return await _resolve_self_patient_entity(db, mode, actor, patient_id, session=session)
+
+
+async def _ensure_self_patient_access(db, mode, actor, patient_id=None, *, session=None) -> str:
+    """域分派已定（mode 由调用方给出）的本人访问校验；不读域状态。"""
+    identifier = await _resolve_self_patient_entity(db, mode, actor, patient_id, session=session)
+    # domain-dispatch: 迁移完成后可删
+    if mode == "canonical":
+        return identifier
+    await _load_patient_doc(db, mode, identifier, session=session)
     return identifier
 
 
@@ -174,11 +201,8 @@ async def ensure_self_patient_access(db, actor, patient_id=None, *, session=None
     患者 ID；链接缺失、停用或临床记录不可用一律拒绝。canonical 分支的
     resolve_self 已含 active 临床记录与账号反向复核，无需二次 load_patient_doc。
     """
-    identifier = await resolve_self_patient_entity(db, actor, patient_id, session=session)
-    if await patient_domain_mode(db, session=session) == "canonical":
-        return identifier
-    await load_patient_doc(db, identifier, session=session)
-    return identifier
+    mode = await patient_domain_mode(db, session=session)
+    return await _ensure_self_patient_access(db, mode, actor, patient_id, session=session)
 
 
 def patient_assignment_field(operator_role: str) -> str:
@@ -201,6 +225,15 @@ def assigned_patient_query(operator_id: str, operator_role: str = "doctor") -> D
     return {"role": "patient", patient_assignment_field(operator_role): {"$in": identifiers}}
 
 
+async def _assigned_scope_query(db, mode, operator_id: str, operator_role: str) -> Dict[str, Any]:
+    """域分派已定（mode 由调用方给出）的归属范围构造；不读域状态。"""
+    patient_assignment_field(operator_role)
+    # domain-dispatch: 迁移完成后可删
+    if mode == "canonical":
+        return canonical_assigned_query(operator_id, operator_role)
+    return assigned_patient_query(operator_id, operator_role)
+
+
 async def assigned_scope_query(db, operator_id: str, operator_role: str = "doctor",
                                *, session=None) -> Dict[str, Any]:
     """按域模式返回患者归属查询范围；canonical 范围已含 status=active。
@@ -212,10 +245,27 @@ async def assigned_scope_query(db, operator_id: str, operator_role: str = "docto
     形状被交给 users 执行」载体错位缺口的根源）。需要「构造+执行」一体的
     域感知范围解析时，请使用 assigned_scope_ids。
     """
+    mode = await patient_domain_mode(db, session=session)
+    return await _assigned_scope_query(db, mode, operator_id, operator_role)
+
+
+async def _assigned_scope_ids(db, mode, operator_id: str, operator_role: str,
+                               *, session=None,
+                               extra_query: Optional[Dict[str, Any]] = None) -> list:
+    """域分派已定（mode 由调用方给出）的范围解析「构造+执行」一体；不读域状态。"""
     patient_assignment_field(operator_role)
-    if await patient_domain_mode(db, session=session) == "canonical":
-        return canonical_assigned_query(operator_id, operator_role)
-    return assigned_patient_query(operator_id, operator_role)
+    # domain-dispatch: 迁移完成后可删
+    if mode == "canonical":
+        repo = ClinicalPatientRepository(db)
+        cursor = repo.collection.find(
+            canonical_assigned_query(operator_id, operator_role), {"patient_id": 1},
+            session=session)
+        documents = await cursor.to_list(length=None)
+        return [document["patient_id"] for document in documents]
+    query = assigned_patient_query(operator_id, operator_role)
+    if extra_query:
+        query = {**query, **extra_query}
+    return await LegacyPatientRepository(db).assigned_ids(query)
 
 
 async def assigned_scope_ids(db, operator_id: str, operator_role: str = "doctor",
@@ -234,31 +284,15 @@ async def assigned_scope_ids(db, operator_id: str, operator_role: str = "doctor"
     status=active 内建，不叠加 legacy 专属字段，避免把 users 形态的查询
     条件误用于 clinical_patients。
     """
-    patient_assignment_field(operator_role)
-    if await patient_domain_mode(db, session=session) == "canonical":
-        repo = ClinicalPatientRepository(db)
-        cursor = repo.collection.find(
-            canonical_assigned_query(operator_id, operator_role), {"patient_id": 1},
-            session=session)
-        documents = await cursor.to_list(length=None)
-        return [document["patient_id"] for document in documents]
-    query = assigned_patient_query(operator_id, operator_role)
-    if extra_query:
-        query = {**query, **extra_query}
-    return await LegacyPatientRepository(db).assigned_ids(query)
+    mode = await patient_domain_mode(db, session=session)
+    return await _assigned_scope_ids(db, mode, operator_id, operator_role,
+                                     session=session, extra_query=extra_query)
 
 
-async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str, *, session=None) -> Dict[str, Any]:
-    """按 ID 加载当前域的患者文档（legacy: users；canonical: clinical_patients）。
-
-    两种主键形态（ObjectId / 非 ObjectId 字符串）在各自域内保持兼容；
-    canonical 分支不读 users。canonical 的对象级可用性由 status 承载：
-    status != "active"（迁移自 legacy is_active=False 的停用患者）按不存在
-    处理（404 PATIENT_NOT_FOUND），与 legacy 消费方对 is_active=False 的
-    404 语义对齐——canonical 文档没有 is_active 字段，缺少此校验会让
-    停用患者对所有对象级访问路径恒放行。
-    """
-    if await patient_domain_mode(db, session=session) == "canonical":
+async def _load_patient_doc(db, mode, patient_id, *, session=None) -> Dict[str, Any]:
+    """域分派已定（mode 由调用方给出）的患者文档读取；不读域状态。"""
+    # domain-dispatch: 迁移完成后可删
+    if mode == "canonical":
         doc = await _canonical_patient_read(
             lambda: ClinicalPatientRepository(db).get(patient_id, session=session))
         if doc is not None and doc.get("status") != "active":
@@ -271,6 +305,35 @@ async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str, *, session
     return doc
 
 
+async def load_patient_doc(db: AsyncIOMotorDatabase, patient_id: str, *, session=None) -> Dict[str, Any]:
+    """按 ID 加载当前域的患者文档（legacy: users；canonical: clinical_patients）。
+
+    两种主键形态（ObjectId / 非 ObjectId 字符串）在各自域内保持兼容；
+    canonical 分支不读 users。canonical 的对象级可用性由 status 承载：
+    status != "active"（迁移自 legacy is_active=False 的停用患者）按不存在
+    处理（404 PATIENT_NOT_FOUND），与 legacy 消费方对 is_active=False 的
+    404 语义对齐——canonical 文档没有 is_active 字段，缺少此校验会让
+    停用患者对所有对象级访问路径恒放行。
+    """
+    mode = await patient_domain_mode(db, session=session)
+    return await _load_patient_doc(db, mode, patient_id, session=session)
+
+
+async def _ensure_patient_access(db, mode, patient_id, operator_id, operator_role,
+                                 *, session=None) -> Dict[str, Any]:
+    """域分派已定（mode 由调用方给出）的患者侧关联校验；不读域状态。"""
+    if operator_role == "admin":
+        return {}
+    field = patient_assignment_field(operator_role)
+    patient = await _load_patient_doc(db, mode, patient_id, session=session)
+    assignments = {str(item) for item in (patient.get(field) or [])}
+    if str(operator_id) not in assignments:
+        raise PatientAccessError(
+            "当前用户未获分配管理该患者，无权访问该患者数据",
+            error_code="PATIENT_NOT_ASSIGNED", status_code=status.HTTP_403_FORBIDDEN)
+    return patient
+
+
 async def ensure_patient_access(db: AsyncIOMotorDatabase, patient_id: str,
                                 operator_id: str, operator_role: str, *, session=None) -> Dict[str, Any]:
     """按已认证角色校验患者侧关联；admin 沿用既有豁免。
@@ -281,13 +344,126 @@ async def ensure_patient_access(db: AsyncIOMotorDatabase, patient_id: str,
     的 canonical 分支统一执行（inactive → 404），经本函数与
     load_patient_doc 的对象级路径自动生效。
     """
-    if operator_role == "admin":
-        return {}
-    field = patient_assignment_field(operator_role)
-    patient = await load_patient_doc(db, patient_id, session=session)
-    assignments = {str(item) for item in (patient.get(field) or [])}
-    if str(operator_id) not in assignments:
-        raise PatientAccessError(
-            "当前用户未获分配管理该患者，无权访问该患者数据",
-            error_code="PATIENT_NOT_ASSIGNED", status_code=status.HTTP_403_FORBIDDEN)
-    return patient
+    mode = await patient_domain_mode(db, session=session)
+    return await _ensure_patient_access(db, mode, patient_id, operator_id,
+                                        operator_role, session=session)
+
+
+async def linked_account_id(db, patient_id, *, session=None) -> Optional[str]:
+    """canonical 链接方向：患者实体 ID → 已核验的患者账号 ID（无链接返回 None）。
+
+    仅认 patient_account_links 的 verified 链接（account_id / patient_id 唯一
+    索引保证至多一条）；不命中返回 None，绝不推断（不猜同 ID、不做姓名/归属
+    映射）。canonical 专用载体——legacy 域没有链接表，legacy 的本人身份走
+    同文档语义（见 resolve_self_patient_entity）。
+    """
+    link = await db[ACCOUNT_LINKS].find_one(
+        {"patient_id": str(patient_id), "status": "verified"}, session=session)
+    return link["account_id"] if link else None
+
+
+async def active_patient_ids(db, mode) -> list:
+    """当前域的全部可用患者 ID（admin 全量枚举口径）。
+
+    legacy：users + role=patient + is_active=True，经 legacy 适配器执行（保留
+    身份歧义 503 防护）。canonical：clinical_patients + status=active（主键
+    唯一，无 legacy 双形态歧义防护对应物）。枚举是全量只读口径，不绑定事务
+    会话（调用方均为非事务的 admin 列表路径）。
+    """
+    # domain-dispatch: 迁移完成后可删
+    if mode == "canonical":
+        cursor = ClinicalPatientRepository(db).collection.find(
+            {"status": "active"}, {"patient_id": 1})
+        return [document["patient_id"] async for document in cursor]
+    return await LegacyPatientRepository(db).assigned_ids(
+        {"role": "patient", "is_active": True})
+
+
+class PatientDomainContext:
+    """请求内贯穿的患者域访问器：域模式只读取一次，后续访问复用同一结论。
+
+    持有 db、已读取的 mode 与可选 session（事务内必须透传，否则状态读取
+    会脱离事务快照）。患者读取、归属校验、本人解析、范围解析都走本对象，
+    域分派细节不再散落到各服务层。
+
+    canonical 对象读取在 repository 侧仍保留一次 require_canonical 二次状态
+    复核——那是 canonical 一致性护栏（状态中途切换即拒绝），不是域模式分派
+    读取；legacy 路径不会产生第二次状态读取。
+    """
+
+    __slots__ = ("db", "mode", "session")
+
+    def __init__(self, db, mode, *, session=None):
+        self.db = db
+        self.mode = mode
+        self.session = session
+
+    @property
+    def is_canonical(self) -> bool:
+        # domain-dispatch: 迁移完成后可删
+        return self.mode == "canonical"
+
+    def assignment_field(self, operator_role: str) -> str:
+        """使用与患者关联写入路径一致的角色字段，禁止跨角色借用关系。"""
+        return patient_assignment_field(operator_role)
+
+    def entity_id(self, document: Dict[str, Any]) -> str:
+        """当前域的患者实体主键：legacy=users._id；canonical=clinical_patients.patient_id。"""
+        # domain-dispatch: 迁移完成后可删
+        if self.is_canonical:
+            return str(document["patient_id"])
+        return str(document["_id"])
+
+    async def load_patient_doc(self, patient_id) -> Dict[str, Any]:
+        return await _load_patient_doc(self.db, self.mode, patient_id, session=self.session)
+
+    async def ensure_patient_access(self, patient_id, operator_id, operator_role) -> Dict[str, Any]:
+        return await _ensure_patient_access(self.db, self.mode, patient_id, operator_id,
+                                            operator_role, session=self.session)
+
+    async def resolve_self_patient_entity(self, actor, patient_id=None) -> str:
+        return await _resolve_self_patient_entity(self.db, self.mode, actor, patient_id,
+                                                  session=self.session)
+
+    async def ensure_self_patient_access(self, actor, patient_id=None) -> str:
+        return await _ensure_self_patient_access(self.db, self.mode, actor, patient_id,
+                                                 session=self.session)
+
+    async def assigned_scope_query(self, operator_id, operator_role="doctor") -> Dict[str, Any]:
+        return await _assigned_scope_query(self.db, self.mode, operator_id, operator_role)
+
+    async def assigned_scope_ids(self, operator_id, operator_role="doctor", *,
+                                 extra_query=None) -> list:
+        return await _assigned_scope_ids(self.db, self.mode, operator_id, operator_role,
+                                         session=self.session, extra_query=extra_query)
+
+    async def linked_account_id(self, patient_id) -> Optional[str]:
+        """canonical 链接方向：患者实体 ID → 已核验的患者账号 ID（仅 canonical 有意义）。"""
+        return await linked_account_id(self.db, patient_id, session=self.session)
+
+    async def active_patient_ids(self) -> list:
+        """当前域的全部可用患者 ID（admin 全量枚举口径）。"""
+        return await active_patient_ids(self.db, self.mode)
+
+
+async def patient_domain_context(db, *, session=None) -> PatientDomainContext:
+    """构造请求内贯穿的患者域访问器：域模式在此读取一次（fail-closed）。
+
+    状态读取失败或观察到未知状态一律抛 PATIENT_DOMAIN_STATE_UNAVAILABLE
+    （503）——绝不静默回退 legacy。事务内调用必须传 session，让状态读取
+    落在同一事务快照内。
+    """
+    mode = await patient_domain_mode(db, session=session)
+    return PatientDomainContext(db, mode, session=session)
+
+
+async def patient_domain_context_safe(db, *, fallback: str = "unknown") -> PatientDomainContext:
+    """fail-safe 口径的域上下文（统计聚合/只读导出等展示类路径专用）。
+
+    读取失败或观察到不可用状态时 mode=fallback（默认 "unknown"），绝不猜测
+    域回退。与 patient_domain_context 的 fail-closed（503 拒绝请求）刻意分化：
+    unknown ≠ legacy——消费方收到 unknown 必须把患者类指标降级为不可用并如实
+    标记，不得按 legacy 聚合（canonical 患者会漏算、legacy 停用患者会误算）。
+    """
+    mode = await patient_domain_mode_safe(db, fallback=fallback)
+    return PatientDomainContext(db, mode)

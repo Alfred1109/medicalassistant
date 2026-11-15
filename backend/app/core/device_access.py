@@ -49,6 +49,7 @@ async def resolve_device_patient(db, actor, patient_id=None, *, session=None, fe
         if (not account or account.get("role") != actor.role
                 or account.get("is_active", True) is not True):
             raise HTTPException(403, detail="当前账号不可用")
+        # domain-dispatch: 迁移完成后可删
         if await patient_domain_mode(db, session=session) == "canonical":
             # canonical 双载体栅栏（波次 5，cutover plan §3.2/3.3）：账号态 →
             # account_fences("device") 独立集合计数；患者归属态 →

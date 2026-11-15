@@ -116,6 +116,7 @@ def _patient_reference_stages(patient_domain="legacy"):
       以维持与 legacy 判定枚举同构，并在索引缺失/误配的库上仍给出诚实信号，
       不做静默假设）。
     """
+    # domain-dispatch: 迁移完成后可删
     if patient_domain == "legacy":
         return [
             {"$set": {"_qc_patient_oid": {"$convert": {"input": "$patient_id", "to": "objectId", "onError": None, "onNull": None}}}},
@@ -138,6 +139,7 @@ def _patient_reference_stages(patient_domain="legacy"):
                 {"$eq": [{"$type": "$_id"}, "objectId"]},
             ]}}},
         ]
+    # domain-dispatch: 迁移完成后可删
     if patient_domain == "canonical":
         return [
             # canonical 主键即 patient_id 字符串，无需 legacy 的 ObjectId 双键

@@ -111,6 +111,7 @@ async def _import_canonical_subject(db, actor, project_id, origin, person, evide
 
 
 async def list_imported_people(db, origin, project_id):
+    # domain-dispatch: 迁移完成后可删
     if await patient_domain_mode(db) == "canonical":
         # canonical：member 仍在 users（账号域），subject 经台账取回临床患者。
         cursor = db.users.find({"source_origin": origin, "source_project_id": project_id})
@@ -128,6 +129,7 @@ async def list_imported_people(db, origin, project_id):
 
 async def import_project_people(db, client, actor, project_id, *, evidence_reference=None):
     origin = client.source_origin
+    # domain-dispatch: 迁移完成后可删
     canonical = await patient_domain_mode(db) == "canonical"
     if canonical:
         # 台账项目过滤索引：部署侧维护职责，幂等创建（与 users 幂等索引同风格）。
@@ -208,6 +210,7 @@ async def assign_imported_role(db, actor, user_id, role, evidence_reference):
     now = datetime.now(timezone.utc)
     review = {"role": role, "previous_role": user.get("role"), "actor_id": str(actor.id),
               "evidence_reference": evidence_reference, "at": now}
+    # domain-dispatch: 迁移完成后可删
     if await patient_domain_mode(db) == "canonical":
         # 角色变更清空患者归属的不变量在 canonical 下同样成立：canonical 患者
         # 的医护关系在 clinical_patients，不清除会让已改岗成员继续可见。
@@ -248,6 +251,7 @@ async def set_imported_care(db, actor, patient_id, practitioner_id, *, assigned,
     """Connect a doctor or health manager to a patient imported from the same project."""
     if patient_id == practitioner_id:
         raise HTTPException(422, detail={"code": "CARE_SELF_ASSIGNMENT"})
+    # domain-dispatch: 迁移完成后可删
     if await patient_domain_mode(db) == "canonical":
         clinical, import_row = await _imported_subject(db, patient_id)
     else:

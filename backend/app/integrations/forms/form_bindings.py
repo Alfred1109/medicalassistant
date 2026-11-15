@@ -9,8 +9,8 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 from pymongo import ASCENDING
-from pymongo.errors import DuplicateKeyError
 
+from app.core.reviewed_link import audit_entry, disable_link, insert_link
 from app.db.mongodb import get_database
 from .catalog_router import get_catalog_client, require_catalog_admin
 from . import catalog_service
@@ -72,20 +72,18 @@ async def bind_form(db, client, actor, payload: FormBindingRequest):
     bindings = db.external_form_bindings
     await bindings.create_index([("binding_key", ASCENDING)], name="unique_active_form_binding", unique=True,
                                 partialFilterExpression={"status": "active"})
-    if await bindings.find_one({"binding_key": key, "status": "active"}):
-        raise HTTPException(409, detail={"code": "FORM_BINDING_CONFLICT"})
     now = datetime.now(timezone.utc)
     doc = {"_id": ObjectId(), "binding_key": key, "source_origin": origin,
            "source": source, "project_id": payload.project_id, "form_id": payload.form_id,
            "version": payload.version, "version_ref": ref, "title": version["form"]["title"],
            "purpose": payload.purpose, "status": "active", "verified_by": str(actor.id),
            "verified_at": now, "evidence_reference": payload.evidence_reference,
-           "audit": [{"action": "select_form", "actor_id": str(actor.id), "at": now,
-                      "evidence_reference": payload.evidence_reference}]}
-    try:
-        await bindings.insert_one(doc)
-    except DuplicateKeyError:
-        raise HTTPException(409, detail={"code": "FORM_BINDING_CONFLICT"}) from None
+           "audit": [audit_entry(action="select_form", actor_id=str(actor.id), at=now,
+                                 evidence_reference=payload.evidence_reference)]}
+    await insert_link(
+        bindings, doc,
+        conflict_queries=[{"binding_key": key, "status": "active"}],
+        conflict_error=lambda: HTTPException(409, detail={"code": "FORM_BINDING_CONFLICT"}))
     return {"id": str(doc["_id"]), "project_id": doc["project_id"], "form_id": doc["form_id"],
             "version": doc["version"], "version_ref": doc["version_ref"], "title": doc["title"],
             "purpose": doc["purpose"], "status": doc["status"], "verified_at": now}
@@ -115,11 +113,12 @@ async def revoke_form_binding(binding_id: str, payload: RevokeFormBindingRequest
     if not ObjectId.is_valid(binding_id):
         raise HTTPException(422, detail={"code": "INVALID_FORM_BINDING_ID"})
     now = datetime.now(timezone.utc)
-    result = await db.external_form_bindings.update_one(
-        {"_id": ObjectId(binding_id), "status": "active"},
-        {"$set": {"status": "revoked", "revoked_at": now},
-         "$push": {"audit": {"action": "revoke_form", "actor_id": str(actor.id),
-                              "at": now, "reason": payload.reason}}})
-    if result.modified_count != 1:
-        raise HTTPException(409, detail={"code": "FORM_BINDING_NOT_ACTIVE"})
+    await disable_link(
+        db.external_form_bindings,
+        selector={"_id": ObjectId(binding_id)},
+        active_filter={"status": "active"},
+        set_fields={"status": "revoked", "revoked_at": now},
+        audit_entry=audit_entry(action="revoke_form", actor_id=str(actor.id), at=now,
+                                extra={"reason": payload.reason}),
+        conflict_error=lambda: HTTPException(409, detail={"code": "FORM_BINDING_NOT_ACTIVE"}))
     return {"id": binding_id, "status": "revoked", "revoked_at": now}

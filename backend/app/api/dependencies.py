@@ -1,3 +1,11 @@
+"""HTTP 依赖与业务服务容器（api 层）。
+
+服务容器原位于 core/dependencies.py：core 是底座，不得反向依赖 services，
+容器因此迁到 api 层（api → services 是正确方向）。对外依赖注入函数的
+签名与语义保持不变，只换了住处；core 不再转出这个模块。
+
+本模块只组装 HTTP 依赖（Depends 工厂与鉴权/权限守卫），不含业务逻辑。
+"""
 from fastapi import Depends, HTTPException, Request, status
 from typing import Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -12,7 +20,7 @@ from app.services.rehabilitation_service import RehabilitationService
 from app.services.rehab_plan_structure_service import RehabPlanStructureService
 from app.schemas.user import UserResponse
 from app.core.permissions import PermissionChecker
-from app.core.patient_access import PatientAccessError, load_patient_doc, ensure_patient_access
+from app.core.patient_access import PatientAccessError, ensure_patient_access
 from app.patients.legacy import LegacyPatientRepository
 from app.services.health_record_service import HealthRecordService
 from app.services.followup_service import FollowupService
@@ -179,7 +187,7 @@ async def get_health_alert_service(db: AsyncIOMotorDatabase = Depends(get_databa
 
 # 健康档案相关方法
 async def get_health_record_for_patient(
-    patient_id: str, 
+    patient_id: str,
     db: AsyncIOMotorDatabase
 ) -> Dict[str, Any]:
     """获取或创建患者健康档案"""
@@ -187,14 +195,14 @@ async def get_health_record_for_patient(
         # 获取患者数据：读取收敛到 legacy 适配器（string/ObjectId 双字面兼容，
         # 不再 ObjectId-only 直查 users）
         patient = await LegacyPatientRepository(db).get(patient_id)
-        
+
         if not patient:
             return {}
-            
+
         # 获取健康档案
         health_records_collection = db["health_records"]
         health_record = await health_records_collection.find_one({"patient_id": patient_id})
-        
+
         # 如果没有健康档案，创建基本结构
         if not health_record:
             # 将患者基本信息格式化为健康档案结构
@@ -216,7 +224,7 @@ async def get_health_record_for_patient(
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow()
             }
-            
+
         # 格式化MongoDB对象
         return format_mongo_doc(health_record)
     except Exception as e:
@@ -228,7 +236,7 @@ def format_mongo_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     """格式化MongoDB文档，将ObjectId转换为字符串等"""
     if not doc:
         return {}
-        
+
     def convert(obj):
         if isinstance(obj, ObjectId):
             return str(obj)
@@ -240,5 +248,5 @@ def format_mongo_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
             return [convert(item) for item in obj]
         else:
             return obj
-            
+
     return convert(doc)

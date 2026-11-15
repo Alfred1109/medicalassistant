@@ -7,7 +7,7 @@ from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, EmailStr
 
-from ...core.dependencies import get_current_user
+from ..dependencies import get_current_user
 from app.schemas.user import UserResponse
 from ...services.report_scheduler_service import ReportSchedulerService
 from app.db.mongodb import get_database

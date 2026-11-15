@@ -12,7 +12,7 @@ import httpx
 from bson import ObjectId
 
 from app.core.auth import get_current_user
-from app.core.dependencies import get_health_alert_service
+from app.api.dependencies import get_health_alert_service
 from app.db.mongodb import get_database
 from app.main import app
 from app.schemas.user import UserResponse

@@ -12,8 +12,8 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 from pymongo import ASCENDING
-from pymongo.errors import DuplicateKeyError
 
+from app.core.reviewed_link import audit_entry, disable_link, insert_link
 from app.db.mongodb import get_database
 from app.patients.legacy import LegacyPatientRepository
 from .client import FormPlatformError
@@ -122,21 +122,19 @@ async def bind_reviewed_patient(db, client, actor, payload: PatientLinkRequest):
     await links.create_index([("local_patient_id", ASCENDING)], name="unique_verified_local_patient", **index_options)
     await links.create_index([("source_key", ASCENDING)], name="unique_verified_source_patient", **index_options)
     key = _link_key(reference, origin)
-    existing = await links.find_one({"source_key": key, "status": "verified"})
-    if existing or await links.find_one({"local_patient_id": local_patient_id, "status": "verified"}):
-        raise HTTPException(409, detail={"code": "PATIENT_LINK_CONFLICT"})
     now = datetime.now(timezone.utc)
     link_id = ObjectId()
     entry = {"_id": link_id, "source_key": key, "source_origin": origin,
              "local_patient_id": local_patient_id,
              "reference": reference, "references": [reference], "status": "verified", "verified_by": str(actor.id),
              "verified_at": now, "evidence_reference": payload.evidence_reference,
-             "audit": [{"action": "verify_link", "actor_id": str(actor.id), "at": now,
-                        "evidence_reference": payload.evidence_reference}]}
-    try:
-        await links.insert_one(entry)
-    except DuplicateKeyError:
-        raise HTTPException(409, detail={"code": "PATIENT_LINK_CONFLICT"}) from None
+             "audit": [audit_entry(action="verify_link", actor_id=str(actor.id), at=now,
+                                   evidence_reference=payload.evidence_reference)]}
+    await insert_link(
+        links, entry,
+        conflict_queries=[{"source_key": key, "status": "verified"},
+                          {"local_patient_id": local_patient_id, "status": "verified"}],
+        conflict_error=lambda: HTTPException(409, detail={"code": "PATIENT_LINK_CONFLICT"}))
     return {"id": str(link_id), "local_patient_id": local_patient_id, "reference": reference,
             "status": "verified", "verified_at": now}
 
@@ -189,10 +187,11 @@ async def add_patient_context(link_id: str, payload: AddPatientContextRequest,
             "project_id": reference["project_id"], "center_id": reference["center_id"],
             "subject_id": reference["subject_id"]}}}},
         {"$push": {"references": reference,
-                   "audit": {"action": "add_context", "actor_id": str(actor.id), "at": now,
-                             "evidence_reference": payload.evidence_reference,
-                             "project_id": reference["project_id"], "center_id": reference["center_id"],
-                             "subject_id": reference["subject_id"]}}})
+                   "audit": audit_entry(action="add_context", actor_id=str(actor.id), at=now,
+                                        evidence_reference=payload.evidence_reference,
+                                        extra={"project_id": reference["project_id"],
+                                               "center_id": reference["center_id"],
+                                               "subject_id": reference["subject_id"]})}})
     if result.modified_count != 1:
         raise HTTPException(409, detail={"code": "PATIENT_CONTEXT_CONFLICT"})
     return {"id": link_id, "reference": reference, "status": "verified"}
@@ -204,11 +203,12 @@ async def revoke_patient_link(link_id: str, payload: RevokePatientLinkRequest,
     if not ObjectId.is_valid(link_id):
         raise HTTPException(422, detail={"code": "INVALID_LINK_ID"})
     now = datetime.now(timezone.utc)
-    result = await db.external_patient_links.update_one(
-        {"_id": ObjectId(link_id), "status": "verified"},
-        {"$set": {"status": "revoked", "revoked_at": now},
-         "$push": {"audit": {"action": "revoke_link", "actor_id": str(actor.id),
-                              "at": now, "reason": payload.reason}}})
-    if result.modified_count != 1:
-        raise HTTPException(409, detail={"code": "PATIENT_LINK_NOT_ACTIVE"})
+    await disable_link(
+        db.external_patient_links,
+        selector={"_id": ObjectId(link_id)},
+        active_filter={"status": "verified"},
+        set_fields={"status": "revoked", "revoked_at": now},
+        audit_entry=audit_entry(action="revoke_link", actor_id=str(actor.id), at=now,
+                                extra={"reason": payload.reason}),
+        conflict_error=lambda: HTTPException(409, detail={"code": "PATIENT_LINK_NOT_ACTIVE"}))
     return {"id": link_id, "status": "revoked", "revoked_at": now}

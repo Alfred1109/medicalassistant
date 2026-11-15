@@ -15,6 +15,66 @@ from email.message import EmailMessage
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# 按 UTC 存储时间的通知生产者（提醒链路）。其余生产者的 naive 时间来源
+# 不明（历史 datetime.now()），不得静默按 UTC 重新解释。
+_UTC_STORED_PRODUCERS = {("followup", "system:followup-reminders")}
+
+
+def _stores_utc(notification: Dict[str, Any]) -> bool:
+    """该通知是否来自按 UTC 存储时间的生产者。"""
+    return ((notification.get("notification_type"), notification.get("sender_id"))
+            in _UTC_STORED_PRODUCERS)
+
+
+def _notification_time(notification: Dict[str, Any]) -> str:
+    """通知时间的 ISO 表达：UTC 生产者补出时区，其余保持 naive 原样。"""
+    value = notification.get("time")
+    if not isinstance(value, datetime):
+        return ""
+    if value.tzinfo is None and _stores_utc(notification):
+        return value.replace(tzinfo=timezone.utc).isoformat()
+    return value.isoformat()
+
+
+def _new_document(title: str, content: str, sender_id: str, sender_name: str,
+                   sender_role: str, recipient_id: str, notification_type: str,
+                   priority: str, related_entity_id: Optional[str],
+                   related_entity_type: Optional[str], time: datetime) -> Dict[str, Any]:
+    """通知文档的唯一构造点（字段结构对所有生产者一致）。"""
+    return {
+        "_id": ObjectId(),
+        "title": title,
+        "content": content,
+        "sender_id": sender_id,
+        "sender_name": sender_name,
+        "sender_role": sender_role,
+        "recipient_id": recipient_id,
+        "time": time,
+        "read": False,
+        "notification_type": notification_type,
+        "priority": priority,
+        "related_entity_id": related_entity_id,
+        "related_entity_type": related_entity_type
+    }
+
+
+def _notification_payload(notification: Dict[str, Any]) -> Dict[str, Any]:
+    """前端消费的实时通知负载（与列表接口字段同构）。"""
+    return {
+        "id": str(notification["_id"]),
+        "title": notification["title"],
+        "content": notification["content"],
+        "sender_id": notification["sender_id"],
+        "sender_name": notification["sender_name"],
+        "sender_role": notification["sender_role"],
+        "time": _notification_time(notification),
+        "notification_type": notification["notification_type"],
+        "priority": notification["priority"],
+        "related_entity_id": notification["related_entity_id"],
+        "related_entity_type": notification["related_entity_type"]
+    }
+
+
 class NotificationService:
     """通知服务类"""
     
@@ -51,9 +111,8 @@ class NotificationService:
             # Historical datetime.now() notifications have unknown timezone
             # provenance and must not be silently reinterpreted as UTC.
             created_at = notification.get("time")
-            if (notification.get("notification_type") == "followup"
-                    and notification.get("sender_id") == "system:followup-reminders"
-                    and isinstance(created_at, datetime) and created_at.tzinfo is None):
+            if (_stores_utc(notification) and isinstance(created_at, datetime)
+                    and created_at.tzinfo is None):
                 notification["time"] = created_at.replace(tzinfo=timezone.utc)
         
         return notifications
@@ -118,51 +177,64 @@ class NotificationService:
         notification_type: str = "general",
         priority: str = "normal",
         related_entity_id: Optional[str] = None,
-        related_entity_type: Optional[str] = None
+        related_entity_type: Optional[str] = None,
+        *,
+        time: Optional[datetime] = None,
+        session: Optional[Any] = None
     ) -> str:
-        """创建新通知"""
-        notification = {
-            "_id": ObjectId(),
-            "title": title,
-            "content": content,
-            "sender_id": sender_id,
-            "sender_name": sender_name,
-            "sender_role": sender_role,
-            "recipient_id": recipient_id,
-            "time": datetime.now(),
-            "read": False,
-            "notification_type": notification_type,
-            "priority": priority,
-            "related_entity_id": related_entity_id,
-            "related_entity_type": related_entity_type
-        }
-        
-        result = await db.notifications.insert_one(notification)
-        await _maybe_send_email(db, recipient_id, title, content)
-        
+        """创建新通知（系统内唯一的通知生产者）
+
+        time：通知时间戳，缺省为当前本地时间（既有生产者语义不变）。随事务
+        落库的生产者必须显式传入与自身存储契约一致的时间（提醒链路传 UTC）。
+        session：随调用方事务提交/回滚。为 None 时本方法负责投递（可选邮件
+        + 实时推送）；随事务落库时只写库，投递由调用方在事务提交后调用
+        deliver_notification，避免事务回滚后仍推出已撤销的通知。
+        """
+        notification = _new_document(
+            title, content, sender_id, sender_name, sender_role, recipient_id,
+            notification_type, priority, related_entity_id, related_entity_type,
+            time or datetime.now())
+
+        if session is None:
+            result = await db.notifications.insert_one(notification)
+            await NotificationService._deliver(db, notification)
+        else:
+            result = await db.notifications.insert_one(notification, session=session)
+
+        return str(result.inserted_id)
+
+    @staticmethod
+    async def deliver_notification(db: AsyncIOMotorClient, notification_id: str) -> bool:
+        """投递已落库的通知（可选邮件 + 实时推送）。
+
+        随事务落库的通知在事务提交后调用本方法投递；通知不存在（已被删除）
+        时返回 False，不抛错——投递失败不影响已落库的通知本身。
+        """
+        if not ObjectId.is_valid(notification_id):
+            return False
+        notification = await db.notifications.find_one({"_id": ObjectId(notification_id)})
+        if not notification:
+            return False
+        await NotificationService._deliver(db, notification)
+        return True
+
+    @staticmethod
+    async def _deliver(db: AsyncIOMotorClient, notification: Dict[str, Any]) -> None:
+        """投递（可选邮件 + 实时推送）；推送失败不影响已落库的通知。"""
+        recipient_id = notification["recipient_id"]
+        await _maybe_send_email(db, recipient_id, notification["title"],
+                                 notification["content"])
+
         # 异步推送通知（如果启用了WebSocket连接管理器）
         try:
-            from app.api.websockets import get_connection_manager
-            connection_manager = get_connection_manager()
-            
-            # 转换通知为可JSON序列化格式
-            notification_json = {
-                "id": str(notification["_id"]),
-                "title": notification["title"],
-                "content": notification["content"],
-                "sender_id": notification["sender_id"],
-                "sender_name": notification["sender_name"],
-                "sender_role": notification["sender_role"],
-                "time": notification["time"].isoformat(),
-                "notification_type": notification["notification_type"],
-                "priority": notification["priority"],
-                "related_entity_id": notification["related_entity_id"],
-                "related_entity_type": notification["related_entity_type"]
-            }
-            
+            from app.realtime.ws_manager import resolve_connection_manager
+            connection_manager = resolve_connection_manager()
+
+            notification_json = _notification_payload(notification)
+
             # 创建异步任务发送通知
             asyncio.create_task(connection_manager.send_notification(notification_json, recipient_id))
-            
+
             # 更新未读通知计数
             unread_count = await NotificationService.get_unread_count(db, recipient_id)
             asyncio.create_task(connection_manager.send_personal_message(
@@ -174,8 +246,6 @@ class NotificationService:
             ))
         except Exception as e:
             logger.warning(f"通知实时推送失败: {str(e)}")
-        
-        return str(result.inserted_id)
     
     @staticmethod
     async def create_batch_notifications(
@@ -199,59 +269,35 @@ class NotificationService:
         """
         if not recipient_ids:
             return []
-        
+
         notifications = []
         notification_ids = []
-        
+
         for recipient_id in recipient_ids:
-            notification_id = ObjectId()
-            notification = {
-                "_id": notification_id,
-                "title": title,
-                "content": content,
-                "sender_id": sender_id,
-                "sender_name": sender_name,
-                "sender_role": sender_role,
-                "recipient_id": recipient_id,
-                "time": datetime.now(),
-                "read": False,
-                "notification_type": notification_type,
-                "priority": priority,
-                "related_entity_id": related_entity_id,
-                "related_entity_type": related_entity_type
-            }
+            notification = _new_document(
+                title, content, sender_id, sender_name, sender_role, recipient_id,
+                notification_type, priority, related_entity_id, related_entity_type,
+                datetime.now())
             notifications.append(notification)
-            notification_ids.append(str(notification_id))
-        
+            notification_ids.append(str(notification["_id"]))
+
         if notifications:
             await db.notifications.insert_many(notifications)
-            
+
             # 异步推送通知
             try:
-                from app.api.websockets import get_connection_manager
-                connection_manager = get_connection_manager()
-                
+                from app.realtime.ws_manager import resolve_connection_manager
+                connection_manager = resolve_connection_manager()
+
                 for notification in notifications:
                     recipient_id = notification["recipient_id"]
-                    
+
                     # 转换通知为可JSON序列化格式
-                    notification_json = {
-                        "id": str(notification["_id"]),
-                        "title": notification["title"],
-                        "content": notification["content"],
-                        "sender_id": notification["sender_id"],
-                        "sender_name": notification["sender_name"],
-                        "sender_role": notification["sender_role"],
-                        "time": notification["time"].isoformat(),
-                        "notification_type": notification["notification_type"],
-                        "priority": notification["priority"],
-                        "related_entity_id": notification["related_entity_id"],
-                        "related_entity_type": notification["related_entity_type"]
-                    }
-                    
+                    notification_json = _notification_payload(notification)
+
                     # 发送通知
                     asyncio.create_task(connection_manager.send_notification(notification_json, recipient_id))
-                    
+
                     # 更新未读通知计数
                     unread_count = await NotificationService.get_unread_count(db, recipient_id)
                     asyncio.create_task(connection_manager.send_personal_message(
@@ -263,7 +309,7 @@ class NotificationService:
                     ))
             except Exception as e:
                 logger.warning(f"批量通知实时推送失败: {str(e)}")
-        
+
         return notification_ids
 
 

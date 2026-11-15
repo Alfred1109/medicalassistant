@@ -19,7 +19,7 @@ import httpx
 from bson import ObjectId
 
 from app.core.auth import get_current_user
-from app.core.dependencies import get_health_record_for_patient
+from app.api.dependencies import get_health_record_for_patient
 from app.db.mongodb import get_database
 from app.main import app
 from app.schemas.user import UserResponse

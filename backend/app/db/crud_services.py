@@ -142,6 +142,7 @@ class PatientCRUD(CRUDBase[Patient]):
         if limit is not None and not 1 <= limit <= PATIENT_LIST_MAX_LIMIT:
             raise _patient_pagination_error("LIMIT_OUT_OF_RANGE")
         paged = skip > 0 or limit is not None
+        # domain-dispatch: 迁移完成后可删
         if await patient_domain_mode(self.db) == "canonical":
             repository = ClinicalPatientRepository(self.db)
             effective_limit = PATIENT_LIST_DEFAULT_LIMIT if limit is None else limit

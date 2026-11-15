@@ -12,11 +12,10 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from app.core.exceptions import AppBaseException
 from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump, legacy_document_fence
 from app.db.transactions import run_transaction
-from app.core.patient_access import (PatientAccessError, assigned_scope_ids, is_domain_state_unavailable,
-                                     load_patient_doc, patient_assignment_field, patient_domain_mode)
+from app.core.patient_access import (PatientAccessError, is_domain_state_unavailable,
+                                     patient_assignment_field, patient_domain_context)
 from app.core.patient_identity import identity_key, load_identity_groups, resolve_unique_account
-from app.patients.legacy import LegacyPatientIdentityError, LegacyPatientRepository
-from app.patients.repository import ClinicalPatientRepository
+from app.patients.legacy import LegacyPatientIdentityError
 from app.services.followup_service import FollowupService
 from app.services.rehabilitation_service import RehabilitationService
 
@@ -113,8 +112,11 @@ class QualityIssueService:
             raise fail("QUALITY_ACCOUNT_UNAVAILABLE", "当前账号不可用", 403)
         return account
 
-    async def _patient(self, patient_id, actor, session=None, *, write=False, fence=False):
+    async def _patient(self, patient_id, actor, session=None, *, write=False, fence=False, context=None):
         account = await self._actor(actor, session, write=write)
+        # 域分派一次读取：患者实体读取与栅栏载体分派复用同一上下文。
+        if context is None:
+            context = await patient_domain_context(self.db, session=session)
         # 患者存在性与身份歧义消解按域分派（内核 load_patient_doc）：
         # legacy 走 legacy 适配器——可见 ID 冲突以适配器的
         # LegacyPatientIdentityError（503）呈现而非 404；canonical 走
@@ -122,7 +124,7 @@ class QualityIssueService:
         # 视同不存在。canonical 绝不回读 users（无账号患者也必须可质控），
         # 内核统一的 404 在此映射回本域既有语义码；域状态不可用 503 原样透传。
         try:
-            patient = await load_patient_doc(self.db, patient_id, session=session)
+            patient = await context.load_patient_doc(patient_id)
         except PatientAccessError as error:
             if is_domain_state_unavailable(error):
                 raise
@@ -139,16 +141,19 @@ class QualityIssueService:
             if not isinstance(values, list) or str(account["_id"]) not in {str(value) for value in values}:
                 raise fail("QUALITY_PATIENT_NOT_ASSIGNED", "当前未分配管理该患者", 403)
         if fence:
-            # 栅栏载体按域分派（T63 波次 2；T67 命名域化）：legacy 双跳仍写
+            # DOMAIN-BRANCH: 栅栏载体按域分派（T63 波次 2；T67 命名域化）——
+            # canonical 全量后 legacy 双跳分支可整体删除。legacy 双跳仍写
             # users 载体（行为不变）；canonical 切换双载体——账号跳
             # account_fences、患者跳 clinical_patients._fence_quality_access，
             # 同一事务内经 dual_bump 先后复核，任一跳失败由外层事务整体回滚。
-            if await patient_domain_mode(self.db, session=session) == "canonical":
+            # domain-dispatch: 迁移完成后可删
+            if context.is_canonical:
                 await dual_bump(
                     (AccountFenceStore(self.db), str(account["_id"]), QUALITY_ACCESS_FENCE),
                     (PatientFenceStore(self.db), str(patient["patient_id"]), QUALITY_ACCESS_FENCE),
                     session=session)
             else:
+                # LEGACY-SHAPE: legacy 载体——账号与患者实体同文档。
                 await self._fence(account, session)
                 await self._fence(patient, session)
         return patient
@@ -213,19 +218,23 @@ class QualityIssueService:
             return issue_view(document), True
         return await self._run(create)
 
-    async def _assignee(self, identifier, patient, session):
+    async def _assignee(self, identifier, patient, session, *, context=None):
         account = await self._account(identifier, session)
         if not account or account.get("role") not in CLINICAL_ROLES or account.get("is_active") is not True:
             raise fail("QUALITY_ASSIGNEE_UNAVAILABLE", "责任医护账号不可用", 422)
         assigned = patient.get(patient_assignment_field(account["role"]))
         if not isinstance(assigned, list) or str(account["_id"]) not in {str(item) for item in assigned}:
             raise fail("QUALITY_ASSIGNEE_NOT_ASSIGNED", "责任医护当前未分配管理该患者", 422)
-        # 栅栏只有账号跳（无患者侧写入），载体随域分派：canonical 落
-        # account_fences（QUALITY_ACCESS_FENCE），不写 users（保持其
-        # canonical 只读约定）。
-        if await patient_domain_mode(self.db, session=session) == "canonical":
+        if context is None:
+            context = await patient_domain_context(self.db, session=session)
+        # DOMAIN-BRANCH: 栅栏只有账号跳（无患者侧写入），载体随域分派：
+        # canonical 落 account_fences（QUALITY_ACCESS_FENCE），不写 users
+        # （保持其 canonical 只读约定）；canonical 全量后 legacy 分支可整体删除。
+        # domain-dispatch: 迁移完成后可删
+        if context.is_canonical:
             await AccountFenceStore(self.db).bump(str(account["_id"]), QUALITY_ACCESS_FENCE, session=session)
         else:
+            # LEGACY-SHAPE: legacy 载体——账号与患者实体同文档。
             await self._fence(account, session)
         return str(account["_id"])
 
@@ -286,6 +295,7 @@ class QualityIssueService:
 
     async def _all_patient_ids(self):
         """admin 全量患者枚举按域分派；legacy 分支保留歧义防护语义。"""
+        # domain-dispatch: 迁移完成后可删
         if await patient_domain_mode(self.db) == "canonical":
             # canonical：clinical_patients 全部 active 患者 ID（主键唯一，
             # 无 legacy 双形态歧义防护对应物）。

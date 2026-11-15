@@ -2,7 +2,7 @@ from patient_identity_fake import identity_find_from_lookup, legacy_domain_state
 """设备维修记录路由契约测试（缺陷 A / 缺陷 B 收敛）。
 
 device_repair_router 此前以 dict.get("roles", []) 访问认证用户，
-而 get_current_user（core.dependencies 再导出 core.auth）返回 pydantic
+而 get_current_user（api.dependencies 再导出 core.auth）返回 pydantic
 UserResponse（单角色字段 .role），任何已认证请求在守卫处必然
 AttributeError → 500。本测试锁定三层契约：
 1. 未认证访问一律 401，数据库查询不被触发；

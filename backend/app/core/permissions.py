@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 
 from app.schemas.user import UserResponse
-from app.services.audit_log_service import AuditLogService
+from app.core.audit import resolve_audit_sink
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -239,7 +239,7 @@ class PermissionChecker:
         - bool: 是否具有权限
         """
         has_permission = PermissionChecker.has_permission(user, permission)
-        
+
         # 记录审计日志（仅针对重要权限或权限检查失败的情况）
         if db is not None and (not has_permission or permission in AUDITED_PERMISSIONS):
             try:
@@ -247,12 +247,12 @@ class PermissionChecker:
                 ip_address = None
                 if request and hasattr(request, 'client') and request.client:
                     ip_address = request.client.host
-                
-                # 创建审计日志服务
-                audit_service = AuditLogService(db)
-                
+
+                # 审计落库实现由上层注入（core 不反向依赖 services）
+                audit_sink = resolve_audit_sink(db)
+
                 # 记录权限检查日志
-                await audit_service.log_permission_check(
+                await audit_sink.log_permission_check(
                     user_id=user.id,
                     permission=permission,
                     resource_id=resource_id,
@@ -263,7 +263,7 @@ class PermissionChecker:
             except Exception as e:
                 # 记录日志错误，但不影响权限检查结果
                 logger.error(f"Failed to create audit log: {str(e)}")
-        
+
         return has_permission
 
 

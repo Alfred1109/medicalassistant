@@ -37,7 +37,7 @@ from app.services.user_service import UserService
 from app.models.health_data_threshold import HealthDataThreshold
 from app.core import device_access as device_access_module
 from tests.device_ingestion_fake import FakeCollection, FakeDatabase
-from app.core.dependencies import get_device_service
+from app.api.dependencies import get_device_service
 
 OPERATOR_ID = "507f1f77bcf86cd799439011"
 # 路由层对 device_id 做 ObjectId.is_valid 粗判（畸形 ID → 404），

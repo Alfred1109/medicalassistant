@@ -1,4 +1,3 @@
-from bson import ObjectId
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -13,43 +12,10 @@ from app.core.logging import app_logger as logger
 from app.core.config import settings
 # 导入自定义异常类
 from app.core.exceptions import AppBaseException
-from app.services.followup_reminder_service import reminder_runtime
-from app.api.routers.followup_reminder_router import router as followup_reminder_router
-from app.api.routers.rehab_publication_router import router as rehab_publication_router
-from app.api.routers.rehab_feedback_router import router as rehab_feedback_router
-from app.api.routers.quality_monitoring_router import router as quality_monitoring_router
-from app.api.routers.quality_issue_router import router as quality_issue_router
-
-# Import routers
-from app.api.routers import agent_router, rehabilitation_router, user_router
-# 导入新增的路由模块
-from app.api.routers import doctor_router, health_manager_router, patient_router, system_admin_router, health_alert_router, notification_router
-from app.api.routers import health_record_router
-# 导入数据库连接函数
-from app.db.mongodb import connect_to_mongodb, close_mongodb_connection, DatabaseConnectionError, db as mongodb_state
-# 启动期索引基建（通信域唯一索引等）
-from app.db.indexes import ensure_communication_indexes, ensure_patient_scope_indexes
-from app.integrations.identity.config import oidc_settings
-from app.integrations.identity.service import ensure_identity_indexes
-from app.integrations.identity.router import router as identity_router
+from app.api.router_registry import register_routers
+from app.bootstrap import start_background_services, stop_background_services
+from app.db.mongodb import connect_to_mongodb, close_mongodb_connection, DatabaseConnectionError
 from app.integrations.identity.access import IdentityCsrfMiddleware
-
-# 导入WebSocket服务
-from app.api.websockets import setup_websockets
-# 导入通信路由
-from app.api.routers import communication_router
-
-# 添加新的路由导入（data_filter_router 已于 T79 下线：任意集合原生查询透传
-# 无白名单/角色/对象级访问控制，且前端零引用、无业务页面语义挂靠）
-from .api.routers import report_scheduler_router
-
-# 导入设备相关路由
-from .api.routers.device_router import router as device_router
-from .api.routers.device_analysis_router import router as device_analysis_router
-from .api.routers.device_repair_router import router as device_repair_router
-from .api.routers.device_data_standard_router import router as device_data_standard_router
-
-# 导入权限审计中间件
 from app.core.permission_audit import PermissionAuditMiddleware
 
 # 创建应用实例
@@ -152,7 +118,8 @@ async def maintenance_gate(request: Request, call_next):
         row = await database.system_settings.find_one({"_id": "system"})
         if not row or not row.get("maintenance_mode"):
             return await call_next(request)
-        role = await _maintenance_role(request, database)
+        from app.core.auth import request_actor_role
+        role = await request_actor_role(request, database)
     except Exception:
         return await call_next(request)
     if role == "admin":
@@ -160,64 +127,24 @@ async def maintenance_gate(request: Request, call_next):
     return JSONResponse(status_code=503, content={"code": "MAINTENANCE", "message": "系统正在维护，请稍后再试。"})
 
 
-async def _maintenance_role(request: Request, database):
-    from app.core.auth import _access_token_user_id
-    from app.integrations.identity.access import SESSION_COOKIE, unified_authentication
-    from app.integrations.identity.config import oidc_settings
-    from app.integrations.identity.service import OidcClient
-    if unified_authentication():
-        _record, actor = await OidcClient(database, oidc_settings).actor_for_session(request.cookies.get(SESSION_COOKIE))
-        return (actor or {}).get("role")
-    header = request.headers.get("authorization") or ""
-    token = header[7:] if header.lower().startswith("bearer ") else ""
-    user_id = _access_token_user_id(token) if token else None
-    if not user_id or not ObjectId.is_valid(user_id):
-        return None
-    user = await database.users.find_one({"_id": ObjectId(user_id)}, {"role": 1})
-    return (user or {}).get("role")
-
-
 # 添加MongoDB连接和关闭事件
 @app.on_event("startup")
 async def startup_db_client():
-    """应用启动时连接数据库"""
+    """应用启动时连接数据库，再拉起后台服务。"""
     logger.info("Application starting up...")
     try:
         await connect_to_mongodb()
-        
-        # 初始化WebSocket服务
-        setup_websockets(app)
-        logger.info("WebSocket服务已初始化")
-
-        # 启动期声明通信域索引（幂等；失败仅告警，不阻断启动）
-        await ensure_communication_indexes(mongodb_state.db)
-        # 患者域查询索引（devices.patient_id / clinical_patients.name；幂等，失败仅告警）
-        await ensure_patient_scope_indexes(mongodb_state.db)
-        if oidc_settings.enabled:
-            await ensure_identity_indexes(mongodb_state.db)
-        await reminder_runtime.start(mongodb_state.db, enabled=settings.FOLLOWUP_REMINDERS_ENABLED,
-                                     interval=settings.FOLLOWUP_REMINDERS_POLL_SECONDS)
-        # T73 逾期自动标记/失访自动判定后台循环（独立于提醒开关；规则与总开关
-        # 在 followup_rule_configs 文档，阈值口径待临床确认）
-        from app.services.followup_reminder_service import disposition_runtime
-        await disposition_runtime.start(mongodb_state.db,
-                                        interval=settings.FOLLOWUP_REMINDERS_POLL_SECONDS)
-        from app.operations.runtime import backup_schedule
-        await backup_schedule.start(mongodb_state.db)
+        await start_background_services(app)
     except DatabaseConnectionError as e:
         logger.critical(f"Failed to connect to database: {str(e)}")
         # 不启动无法访问数据库的服务。
         raise
-    
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    """应用关闭时断开数据库连接"""
+    """应用关闭时先停后台服务，再断开数据库连接"""
     logger.info("Application shutting down...")
-    await reminder_runtime.stop()
-    from app.services.followup_reminder_service import disposition_runtime
-    await disposition_runtime.stop()
-    from app.operations.runtime import backup_schedule
-    await backup_schedule.stop()
+    await stop_background_services()
     await close_mongodb_connection()
 
 # 自定义异常处理
@@ -282,66 +209,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         }
     )
 
-# Include routers
-app.include_router(user_router, prefix="/api/users", tags=["users"])
-app.include_router(rehabilitation_router, prefix="/api/rehabilitation", tags=["rehabilitation"])
-app.include_router(agent_router, prefix="/api/agents", tags=["agent"])
-
-# 新增角色和功能相关路由
-app.include_router(doctor_router, prefix="/api/doctors", tags=["doctors"])
-app.include_router(health_manager_router, prefix="/api/health-managers", tags=["health-managers"])
-app.include_router(patient_router, prefix="/api/patients", tags=["patients"])
-from app.api.routers.patient_account_binding_router import router as patient_account_binding_router
-app.include_router(patient_account_binding_router, prefix="/api", tags=["patient-account-bindings"])
-app.include_router(system_admin_router, prefix="/api/admin", tags=["admin"])
-# 健康档案 / 随访记录 / 健康数据(路由自带 /health-records 前缀)
-app.include_router(followup_reminder_router, prefix="/api")
-app.include_router(rehab_publication_router, prefix="/api")
-app.include_router(rehab_feedback_router, prefix="/api")
-app.include_router(quality_monitoring_router, prefix="/api")
-app.include_router(quality_issue_router, prefix="/api")
-app.include_router(health_record_router, prefix="/api")
-# 健康预警路由
-app.include_router(health_alert_router, tags=["health-alerts"])
-# 添加通知路由
-app.include_router(notification_router, prefix="/api", tags=["notifications"])
-
-# 注册通信路由
-app.include_router(communication_router, prefix="/api", tags=["communications"])
-
-# 在 app.include_router 部分添加新的路由
-app.include_router(report_scheduler_router.router, prefix="/api")
-
-# 添加设备相关路由
-app.include_router(device_router, prefix="/api")
-app.include_router(device_analysis_router, prefix="/api")
-app.include_router(device_repair_router, prefix="/api")
-app.include_router(device_data_standard_router, prefix="/api")
-
-# 添加审计日志路由
-from app.api.routers import audit_log_router
-app.include_router(audit_log_router, prefix="/api", tags=["audit-logs"])
-
-# 添加数据分析路由
-from app.api.routers import analytics_router
-app.include_router(analytics_router, prefix="/api", tags=["analytics"])
-
-# 表单平台（113.44）集成填报路由
-from app.integrations.forms.router import router as integration_forms_router
-app.include_router(integration_forms_router, prefix="/api", tags=["form-integration"])
-from app.integrations.forms.catalog_router import router as form_catalog_router
-from app.integrations.forms.patient_links import router as form_patient_links_router
-from app.integrations.forms.form_bindings import router as form_bindings_router
-app.include_router(form_catalog_router, prefix="/api")
-app.include_router(form_patient_links_router, prefix="/api")
-app.include_router(form_bindings_router, prefix="/api")
-app.include_router(identity_router, prefix="/api")
-from app.clinical.router import router as clinical_router
-app.include_router(clinical_router, prefix="/api")
-from app.directory.router import router as directory_router
-app.include_router(directory_router, prefix="/api")
-from app.api.routers.icf_router import router as icf_router
-app.include_router(icf_router, prefix="/api", tags=["icf"])
+register_routers(app)
 
 @app.get("/api")
 async def api_root():

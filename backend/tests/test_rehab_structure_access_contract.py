@@ -18,7 +18,7 @@ from bson import ObjectId
 from jose import jwt
 
 from app.core.config import settings
-from app.core.dependencies import (
+from app.api.dependencies import (
     get_database,
     get_rehab_plan_structure_service,
     get_rehabilitation_service,

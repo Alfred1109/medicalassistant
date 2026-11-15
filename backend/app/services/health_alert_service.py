@@ -2,17 +2,61 @@
 健康数据预警服务
 提供健康数据阈值管理和健康数据异常检测功能
 """
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Union
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorCollection
 
+from app.core.patient_access import load_patient_doc, patient_assignment_field
+from app.core.patient_identity import resolve_unique_account
 from app.models.health_data_threshold import HealthDataThreshold, HealthDataAlert
 from app.schemas.health_data_threshold import (
     ThresholdCreate, ThresholdUpdate, ThresholdResponse,
     AlertCreate, AlertUpdate, AlertResponse, AlertStatistics,
     BloodPressureThresholdCreate, SingleValueThresholdCreate
 )
+from app.services.notification_service import NotificationService
+
+logger = logging.getLogger(__name__)
+
+# 预警级别 → 通知优先级（前端 priority 取值：low/normal/high/urgent）。
+ALERT_PRIORITIES = {"critical": "urgent", "warning": "high"}
+# 预警级别 → 文案标签。
+ALERT_LEVEL_LABELS = {"critical": "危急", "warning": "警告"}
+# 生命体征类型 → 文案标签（构造摘要时用；未登记的类型原样呈现）。
+ALERT_TYPE_LABELS = {
+    "blood_pressure": "血压",
+    "heart_rate": "心率",
+    "blood_glucose": "血糖",
+    "body_temperature": "体温",
+    "respiratory_rate": "呼吸频率",
+    "oxygen_saturation": "血氧饱和度",
+}
+# 医护通知的固定身份（与提醒链路的 system:followup-reminders 同款约定）。
+ALERT_SENDER_ID = "system:health-alerts"
+ALERT_SENDER_NAME = "健康预警"
+
+
+def _alert_level(alert: Dict[str, Any]) -> str:
+    """预警级别取值（枚举或字符串统一为字符串）。"""
+    level = alert.get("alert_level")
+    return getattr(level, "value", level) or ""
+
+
+def _format_occurred_at(value) -> str:
+    """预警发生时间（统一按 UTC 呈现，避免时区歧义）。"""
+    if not isinstance(value, datetime):
+        return "未知时间"
+    moment = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return moment.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _format_number(value) -> str:
+    """数值文案（整数值的浮点表示不保留小数尾巴）。"""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 class HealthAlertService:
@@ -455,7 +499,122 @@ class HealthAlertService:
         )
         
     # -------- 健康数据异常检测相关方法 --------
-    
+
+    async def _responsible_staff(self, patient_id: str):
+        """该患者的责任医护账号（doctor / health_manager）。
+
+        归属判定复用内核 app.core.patient_access：患者文档按当前域读取
+        （load_patient_doc，含可用性判定），角色对应的归属字段由
+        patient_assignment_field 给出（与患者关联写入路径同源），账号身份
+        解析走 core.patient_identity.resolve_unique_account（同键多文档
+        fail-closed）。此处不新增任何归属规则。
+        """
+        patient = await load_patient_doc(self.db, patient_id)
+        accounts = []
+        for role in ("doctor", "health_manager"):
+            field = patient_assignment_field(role)
+            assignments = patient.get(field)
+            if not isinstance(assignments, list):
+                continue
+            for identifier in assignments:
+                account = await resolve_unique_account(self.db, identifier)
+                if (account and account.get("is_active") is True
+                        and account.get("role") == role):
+                    accounts.append(account)
+        return patient, accounts
+
+    def _alert_summary(self, alert: Dict[str, Any]) -> str:
+        """预警类型 + 关键数值（含单位）的一句话摘要。"""
+        message = (alert.get("metadata") or {}).get("message")
+        if message:
+            return str(message)
+        label = (alert.get("metadata") or {}).get("metric_name") or \
+            ALERT_TYPE_LABELS.get(alert.get("vital_type")) or alert.get("vital_type") or \
+            alert.get("test_name") or alert.get("data_type") or "健康数据"
+        value = alert.get("value")
+        if isinstance(value, dict):
+            text = "/".join(_format_number(item) for item in value.values())
+        else:
+            text = _format_number(value)
+        return f"{label} {text}{alert.get('unit') or ''}"
+
+    def _alert_content(self, alert: Dict[str, Any], patient_name: Optional[str]) -> str:
+        """预警通知文案：预警类型 + 关键数值（含单位）+ 发生时间 + 患者显示名。"""
+        level = ALERT_LEVEL_LABELS.get(_alert_level(alert), "提醒")
+        return (f"{patient_name or '该患者'}触发健康预警：{self._alert_summary(alert)}"
+                f"（预警级别：{level}，发生时间：{_format_occurred_at(alert.get('recorded_at'))}）。"
+                "请及时查看并处理。")
+
+    async def _already_notified(self, alert: Dict[str, Any]) -> bool:
+        """同一业务预警是否已通知过。
+
+        幂等键 = 患者 + 数据类型 + 健康数据 ID + 预警级别（ICF 指标另计
+        metric_key）。阈值对同一份健康数据的重复命中会生成多个预警文档，
+        按文档去重会让医护被反复轰炸；按业务身份去重后，同一份数据同一
+        级别只通知一次，已处理（resolved/ignored）后的再次越界会重新通知。
+        """
+        identity = {
+            "patient_id": alert.get("patient_id"),
+            "data_type": alert.get("data_type"),
+            "health_data_id": alert.get("health_data_id"),
+            "alert_level": _alert_level(alert),
+        }
+        if alert.get("vital_type"):
+            identity["vital_type"] = alert["vital_type"]
+        if alert.get("test_name"):
+            identity["test_name"] = alert["test_name"]
+        metric_key = (alert.get("metadata") or {}).get("metric_key")
+        if metric_key:
+            identity["metadata.metric_key"] = metric_key
+        alert_id = str(alert["_id"])
+        candidates = [alert_id]
+        siblings = await self.alerts.find(
+            {**identity, "status": "active"}).to_list(length=None)
+        candidates.extend(str(doc["_id"]) for doc in siblings
+                          if str(doc["_id"]) != alert_id)
+        existing = await self.db.notifications.find_one({
+            "related_entity_type": "health_alert",
+            "related_entity_id": {"$in": candidates}})
+        return existing is not None
+
+    async def _notify_responsible_staff(self, alert: Dict[str, Any]) -> None:
+        """预警产生后触达该患者的责任医护。
+
+        best-effort：解析不到责任医护（未分配、患者不存在、域状态异常）或
+        投递失败时只记日志，绝不抛错、绝不阻断预警本身的创建。
+        """
+        try:
+            patient, accounts = await self._responsible_staff(alert.get("patient_id"))
+        except Exception:
+            logger.warning("预警责任医护解析失败，跳过医护通知：alert_id=%s patient_id=%s",
+                           alert.get("_id"), alert.get("patient_id"), exc_info=True)
+            return
+        if not accounts:
+            logger.info("预警无责任医护，跳过医护通知：alert_id=%s patient_id=%s",
+                        alert.get("_id"), alert.get("patient_id"))
+            return
+        if await self._already_notified(alert):
+            return
+        content = self._alert_content(alert, patient.get("name"))
+        for account in accounts:
+            try:
+                await NotificationService.create_notification(
+                    self.db,
+                    title="健康预警",
+                    content=content,
+                    sender_id=ALERT_SENDER_ID,
+                    sender_name=ALERT_SENDER_NAME,
+                    sender_role="system",
+                    recipient_id=str(account["_id"]),
+                    notification_type="health_alert",
+                    priority=ALERT_PRIORITIES.get(_alert_level(alert), "normal"),
+                    related_entity_id=str(alert["_id"]),
+                    related_entity_type="health_alert",
+                )
+            except Exception:
+                logger.warning("预警通知投递失败，预警本身不受影响：alert_id=%s recipient=%s",
+                               alert.get("_id"), account.get("_id"), exc_info=True)
+
     async def check_health_data(
         self,
         health_data_id: str,
@@ -518,9 +677,12 @@ class HealthAlertService:
                 recorded_at=recorded_at
             )
             # 保存预警到数据库
-            await self.alerts.insert_one(alert.to_mongo())
+            document = alert.to_mongo()
+            await self.alerts.insert_one(document)
             check_result["alert_id"] = alert._id
-        
+            # 触达责任医护（统一经 NotificationService；失败不影响预警本身）
+            await self._notify_responsible_staff(document)
+
         return check_result
     
     async def create_alert(self, data: AlertCreate) -> AlertResponse:
@@ -549,11 +711,15 @@ class HealthAlertService:
         )
         
         # 插入数据库
-        result = await self.alerts.insert_one(alert.to_mongo())
-        
+        document = alert.to_mongo()
+        result = await self.alerts.insert_one(document)
+
         # 更新ID
         alert._id = str(result.inserted_id)
-        
+
+        # 触达责任医护（统一经 NotificationService；失败不影响预警本身）
+        await self._notify_responsible_staff(document)
+
         # 返回响应
         return self._map_alert_to_response(alert)
     

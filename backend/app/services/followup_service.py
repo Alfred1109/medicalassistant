@@ -38,6 +38,9 @@ from app.core.fences import legacy_document_fence
 from app.core.patient_access import patient_domain_mode
 from bson import encode
 from app.core.exceptions import AppBaseException
+from app.core.followup_semantics import (
+    current_followup_evidence, followup_conflict, followup_submission_fields,
+    followup_version_filter, submission_history_with_legacy)
 from app.db.transactions import run_followup_transaction
 from app.schemas.audit_log import AuditLogCreate
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -68,6 +71,7 @@ _FOLLOWUP_FORMAL_FIELDS = (
     "legacy_source", "deleted", "deleted_at", "deleted_by",
     "mutation_version", "cancellation_operation", "completion_operation", "reschedule_operation",
     "review_operation", "re_evaluate_operation",
+    # legacy-shape: 存量形态，不随域切换删除
     "current_evidence", "submission_history",
     "followup_summary",  # T73 随访小结（结论/下次计划建议/异常记录），增量字段兼容存量文档
     "_reminder_fence",  # Internal concurrency fence, never a clinical revision.
@@ -129,76 +133,14 @@ _FILL_TASKS_COLLECTION = "integration_fill_tasks"
 _EFFECTIVE_REMOTE_STATUSES = {"submitted", "restored", None}
 
 
-def followup_conflict(message="随访已发生变更，请重新读取后操作"):
-    return AppBaseException(message, status_code=409, error_code="FOLLOWUP_CONFLICT")
-
-
 def _as_optional_str(value):
     """ObjectId / str 兼容转 Optional[str]（响应契约字段均为 str）。"""
     return None if value is None else str(value)
 
 
-def followup_version_filter(doc):
-    """兼容无版本的存量节点；所有节点写者共享同一乐观并发版本。"""
-    return {"_id": doc["_id"], "status": doc["status"], "deleted": {"$ne": True},
-            "mutation_version": doc.get("mutation_version", 0) or {"$in": [0, None]}}
-
-
 def _request_fingerprint(kind, payload):
     # BSON 编码统一日期为UTC毫秒，与实际Mongo持久化精度保持一致。
     return sha256(encode({"kind": kind, "payload": payload})).hexdigest()
-
-
-def _evidence_value(doc, key):
-    if key in doc:
-        return doc[key]
-    return (doc.get("metadata") or {}).get("result" if key == "follow_up_result" else key)
-
-
-def current_followup_evidence(doc):
-    """Resolve only unambiguous current evidence; never choose between mixed legacy sources."""
-    manual = (_evidence_value(doc, "completion_data") or {}).get("source") == "manual_entry"
-    external = _evidence_value(doc, "effective_response") or {}
-    external_valid = bool(external.get("task_id") and external.get("response_id") is not None)
-    marker = doc.get("current_evidence") or {}
-    if manual and external:
-        return {"source": "ambiguous"}
-    source = "manual_entry" if manual else "external_form" if external_valid else "unknown"
-    if marker.get("source") and marker["source"] != source:
-        return {"source": "ambiguous"}
-    if source == "unknown":
-        return {"source": source}
-    return {**marker, "source": source, **({"legacy": True} if not marker else {})}
-
-
-def _submission_snapshot(doc):
-    return {key: deepcopy(_evidence_value(doc, key)) for key in (
-        "completion_data", "effective_response", "answers", "notes", "actual_date", "follow_up_result")}
-
-
-def submission_history_with_legacy(doc):
-    """Archive pre-marker evidence before replacing or returning it, without rewriting history."""
-    history = deepcopy(doc.get("submission_history") or [])
-    if (not (doc.get("current_evidence") or {}).get("submission_id")
-            and (_evidence_value(doc, "completion_data") or _evidence_value(doc, "effective_response"))):
-        history.append({"submission_id": str(ObjectId()), "source": "legacy_snapshot",
-                        "observed_version": doc.get("mutation_version", 0) or 0,
-                        "evidence_state": current_followup_evidence(doc),
-                        "snapshot": _submission_snapshot(doc)})
-    return history
-
-
-def followup_submission_fields(doc, values, *, source, submitted_by, submitted_at, confirmation=None):
-    """One current source plus append-only evidence snapshots, shared by manual and form writers."""
-    marker = {"submission_id": str(ObjectId()), "source": source,
-              "submitted_version": (doc.get("mutation_version", 0) or 0) + 1}
-    snapshot = _submission_snapshot({**doc, **values})
-    entry = {**marker, "submitted_by": submitted_by, "submitted_at": submitted_at,
-             "snapshot": snapshot}
-    if confirmation is not None:
-        entry["confirmation"] = deepcopy(confirmation)
-    return {"current_evidence": marker,
-            "submission_history": [*submission_history_with_legacy(doc), entry]}
 
 
 def _summary_storage(summary: FollowUpSummaryPayload, operator_id, now):
@@ -461,6 +403,7 @@ class FollowupService:
             # 会把命中的随访静默过滤成空（且 users 歧义防护语义不适用于
             # canonical）。canonical 分支执行于 clinical_patients（同名匹配语义
             # 与 legacy 适配器一致，见 repository.matching_name_ids）。
+            # domain-dispatch: 迁移完成后可删
             if await patient_domain_mode(self.db) == "canonical":
                 matched_ids = await ClinicalPatientRepository(self.db).matching_name_ids(
                     patient_name, patient_ids=scope)

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from typing import List, Optional, Dict, Any
 from app.schemas.user import UserResponse
 from app.schemas.health_record import HealthRecordResponse
-from app.core.dependencies import (
+from app.api.dependencies import (
     get_current_user, get_database, get_health_record_service, get_device_service,
 )
 from app.core.patient_access import (

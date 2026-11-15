@@ -794,9 +794,9 @@ class CommunicationService:
         # 全部为 best-effort 副作用（WS 广播 + 离线通知），失败仅告警不回滚
         # 消息——与修复前语义一致。
         try:
-            from app.api.websockets import get_connection_manager
-            manager = get_connection_manager()
-            
+            from app.realtime.ws_manager import resolve_connection_manager
+            manager = resolve_connection_manager()
+
             # 向聊天室发送消息（D7：事件信封携带 server_seq，
             # 取落库文档 _id 的 hex 编码——BSON 可编码（T45/D1 修复），重放稳定）
             await manager.send_chat_message(
@@ -967,8 +967,8 @@ class CommunicationService:
         })]
         if persisted_ids:
             try:
-                from app.api.websockets import get_connection_manager
-                await get_connection_manager().send_chat_message({
+                from app.realtime.ws_manager import resolve_connection_manager
+                await resolve_connection_manager().send_chat_message({
                     "type": "read_receipt",
                     "conversation_id": conversation_id,
                     "reader_id": user_id,
@@ -1039,8 +1039,8 @@ class CommunicationService:
         # 通过WebSocket推送消息删除通知（D7：信封携带 server_seq）
         if result.modified_count > 0:
             try:
-                from app.api.websockets import get_connection_manager
-                manager = get_connection_manager()
+                from app.realtime.ws_manager import resolve_connection_manager
+                manager = resolve_connection_manager()
 
                 # 发送消息删除通知
                 await manager.send_chat_message(

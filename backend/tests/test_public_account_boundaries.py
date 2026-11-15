@@ -7,7 +7,7 @@ import httpx
 from fastapi import FastAPI
 
 from app.api.routers.user_router import router
-from app.core.dependencies import get_current_user, get_user_service
+from app.api.dependencies import get_current_user, get_user_service
 from app.schemas.user import UserResponse
 
 

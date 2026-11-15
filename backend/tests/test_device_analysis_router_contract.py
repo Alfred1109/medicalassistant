@@ -28,7 +28,7 @@ device_analysis_router = importlib.import_module(
     "app.api.routers.device_analysis_router")
 from app.schemas.user import UserResponse
 from app.services.user_service import UserService
-from app.core.dependencies import get_device_service, get_device_analysis_service
+from app.api.dependencies import get_device_service, get_device_analysis_service
 
 OPERATOR_ID = "507f1f77bcf86cd799439011"
 # 路由层现对 device_id 做 ObjectId.is_valid 粗判（畸形 ID → 404），

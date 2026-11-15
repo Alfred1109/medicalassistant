@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from app.core.dependencies import get_current_user
+from app.api.dependencies import get_current_user
 from app.core.followup_access import followup_patient_scope, ensure_followup_patient_access
 from app.db.mongodb import get_database
 from app.services.followup_reminder_service import DELIVERIES, reminder_runtime

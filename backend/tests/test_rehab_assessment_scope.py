@@ -12,7 +12,7 @@ from jose import jwt
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.core.config import settings
-from app.core.dependencies import get_rehabilitation_service
+from app.api.dependencies import get_rehabilitation_service
 from app.core.exceptions import AppBaseException
 from app.db.mongodb import get_database
 from app.main import app

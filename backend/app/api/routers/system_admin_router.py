@@ -10,7 +10,7 @@ from app.core.patient_identity import load_identity_groups
 from app.patients.legacy import LegacyPatientIdentityError
 from app.services.user_service import UserService
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.core.dependencies import get_database
+from app.api.dependencies import get_database
 from app.directory.records import (
     create_tag, delete_tag, list_tags, save_system_setting, set_account_active, set_organization_active,
 )

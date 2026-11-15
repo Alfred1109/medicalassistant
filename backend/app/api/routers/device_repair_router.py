@@ -9,7 +9,7 @@ from bson import ObjectId
 
 from ...db.mongodb import get_database
 from ...services.device_service import device_service, DEVICE_READ_ROLES
-from ...core.dependencies import get_current_user
+from ..dependencies import get_current_user
 from ...core.device_access import device_patient_scope, ensure_device_access
 from ...patients.legacy import LegacyPatientRepository
 

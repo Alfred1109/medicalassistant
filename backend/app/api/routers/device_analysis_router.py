@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ...db.mongodb import get_database
-from ...core.dependencies import get_device_service, get_device_analysis_service
+from ..dependencies import get_device_service, get_device_analysis_service
 from ...core.device_access import ensure_device_access, resolve_device_patient
 from ...services.device_service import device_service, DEVICE_READ_ROLES
 from ...services.device_analysis_service import device_analysis_service

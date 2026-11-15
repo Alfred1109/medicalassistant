@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 
 from app.schemas.agent import AgentCreate, AgentUpdate, AgentResponse, AgentQueryResponse
 from app.services.agent_service import AgentService
-from app.core.dependencies import get_agent_service
+from app.api.dependencies import get_agent_service
 from app.core.auth import get_current_active_user
 
 router = APIRouter()

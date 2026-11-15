@@ -11,7 +11,7 @@ import httpx
 from pymongo.errors import AutoReconnect
 from app.api.routers.rehabilitation_router import router
 from app.core.auth import get_current_active_user
-from app.core.dependencies import get_database, get_rehabilitation_service
+from app.api.dependencies import get_database, get_rehabilitation_service
 from app.core.exceptions import AppBaseException
 from app.schemas.rehabilitation import GeneratedPlanEdits, RehabPlanUpdate
 from app.services.rehabilitation_service import RehabilitationService

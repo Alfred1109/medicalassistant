@@ -102,6 +102,7 @@ class QualityMonitoringService:
             raise _error("QUALITY_PATIENT_SCOPE_UNVERIFIED", "患者身份存在歧义，请先核实范围", 503) from None
         if values is not None:
             field = "practitioners" if actor.role == "doctor" else "health_managers"
+            # domain-dispatch: 迁移完成后可删
             if await patient_domain_mode(self.db) == "canonical":
                 # canonical 第二道复核：候选逐一对照 clinical_patients
                 # （status=active 且归属字段含当前账号），防止上游范围解析
@@ -143,6 +144,7 @@ class QualityMonitoringService:
             if actor.role == "admin":
                 # admin 豁免不核归属，但患者实体身份仍须按域核实（对象级可用
                 # 性：legacy is_active / canonical status）。
+                # domain-dispatch: 迁移完成后可删
                 if await patient_domain_mode(self.db) == "canonical":
                     document = await ClinicalPatientRepository(self.db).get(patient_id)
                     if not document or document.get("status") != "active":

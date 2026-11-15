@@ -43,6 +43,25 @@ def _access_token_user_id(token: str) -> Optional[str]:
     return user_id
 
 
+async def request_actor_role(request: Request, database) -> Optional[str]:
+    """维护门闩用的角色读取：只取 role，不走完整登录。
+
+    不停用账号、不因令牌无效而 401——无身份时返回 None，由门闩决定是否拒绝。
+    统一身份与 Bearer 两条路径的判定与历史维护门闩一致。
+    """
+    if unified_authentication():
+        _record, actor = await OidcClient(database, oidc_settings).actor_for_session(
+            request.cookies.get(SESSION_COOKIE))
+        return (actor or {}).get("role")
+    header = request.headers.get("authorization") or ""
+    token = header[7:] if header.lower().startswith("bearer ") else ""
+    user_id = _access_token_user_id(token) if token else None
+    if not user_id or not ObjectId.is_valid(user_id):
+        return None
+    user = await database.users.find_one({"_id": ObjectId(user_id)}, {"role": 1})
+    return (user or {}).get("role")
+
+
 async def get_current_user(
     request: Request,
     token: Optional[str] = Depends(oauth2_scheme),
@@ -67,25 +86,19 @@ async def get_current_user(
             raise credentials_exception
         if actor is None:
             raise HTTPException(403, detail={"code": "IDENTITY_BINDING_REQUIRED"})
-        from app.services.user_service import UserService
+        from app.core.user_record import user_response_from_document
         request.state.identity_subject = record["subject"]
         request.state.identity_issuer = record["issuer"]
         request.state.authenticated_actor_id = str(actor["_id"])
         request.state.authenticated_actor_role = actor["role"]
-        return UserService(db)._map_user_to_schema(actor)
+        return user_response_from_document(actor)
 
     user_id = _access_token_user_id(token) if token else None
     if user_id is None:
         raise credentials_exception
-        
-    # 动态导入UserService，避免循环导入
-    from app.services.user_service import UserService
-    
-    # 直接创建UserService
-    user_service = UserService(db=db)
-    
-    # 获取用户信息
-    user = await user_service.get_user_by_id(user_id)
+
+    from app.core.user_record import load_user_response
+    user = await load_user_response(db, user_id)
     if user is None:
         raise credentials_exception
     if not user.is_active:

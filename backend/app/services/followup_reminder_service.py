@@ -23,6 +23,7 @@ from app.db.transactions import run_followup_transaction
 from app.patients.legacy import LegacyPatientRepository
 from app.patients.repository import ACCOUNT_LINKS, ClinicalPatientRepository
 from app.services.followup_service import FollowupService, FOLLOWUP_REMINDER_DELIVERIES
+from app.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 # 提醒投递台账集合名唯一来源在 followup_service（T73 失访判定统计投递次数需同源）
@@ -93,6 +94,7 @@ class FollowupReminderService:
             error_message="提醒并发字段无效")
 
     async def _recipients(self, record, session, mode):
+        # domain-dispatch: 迁移完成后可删
         if mode == "canonical":
             return await self._canonical_recipients(record, session)
         # legacy：患者账号读取收敛到 legacy 患者适配器（LegacyPatientRepository.get）：
@@ -184,6 +186,7 @@ class FollowupReminderService:
                 pending.append((key, slot, account, reason))
             if any(account is not None for _, _, account, _ in pending):
                 await self.followups.fence_reminder_source(record, session)
+                # domain-dispatch: 迁移完成后可删
                 if mode == "canonical":
                     # 栅栏双载体（canonical）：随访来源文档自身的栅栏不动（载体
                     # 不是 users），账号侧计数落 account_fences（AccountFenceStore），
@@ -215,16 +218,25 @@ class FollowupReminderService:
                          "planned_at": planned, "checked_at": now,
                          "status": "skipped" if reason else "persisted", "reason": reason}
                 if account is not None:
-                    notification = {"_id": ObjectId(), "title": "随访计划提醒",
-                        "content": "一项随访计划将在24小时内开始，请查看随访安排。",
-                        "sender_id": "system:followup-reminders", "sender_name": "随访提醒",
-                        "sender_role": "system", "recipient_id": str(account["_id"]),
-                        "time": now, "read": False, "notification_type": "followup",
-                        "priority": "normal", "related_entity_type": "followup",
-                        "related_entity_id": str(record["_id"])}
-                    await self.db.notifications.insert_one(notification, session=session)
-                    entry.update(recipient_id=str(account["_id"]), notification_id=str(notification["_id"]))
-                    notifications.append(notification)
+                    # 通知文档与投递统一由 NotificationService 生产（不再
+                    # 手搓 insert + 手推 WS）：落库随本事务提交/回滚，投递
+                    # 在事务提交后由 deliver_notification 完成。
+                    notification_id = await NotificationService.create_notification(
+                        self.db,
+                        title="随访计划提醒",
+                        content="一项随访计划将在24小时内开始，请查看随访安排。",
+                        sender_id="system:followup-reminders",
+                        sender_name="随访提醒",
+                        sender_role="system",
+                        recipient_id=str(account["_id"]),
+                        notification_type="followup",
+                        priority="normal",
+                        related_entity_id=str(record["_id"]),
+                        related_entity_type="followup",
+                        time=now.replace(tzinfo=timezone.utc),
+                        session=session)
+                    entry.update(recipient_id=str(account["_id"]), notification_id=notification_id)
+                    notifications.append(notification_id)
                 await self.db[DELIVERIES].update_one({"_id": key}, {"$set": entry}, upsert=True, session=session)
             return {"outcome": "checked", "notifications": notifications}
 
@@ -237,13 +249,9 @@ class FollowupReminderService:
             except AppBaseException as error:
                 if not isinstance(error.__cause__, DuplicateKeyError) or attempt == 2:
                     raise
-        for notification in result["notifications"]:
+        for notification_id in result["notifications"]:
             try:
-                from app.api.websockets import get_connection_manager
-                manager = get_connection_manager()
-                payload = {key: value for key, value in notification.items() if key not in {"_id", "recipient_id"}}
-                payload.update(id=str(notification["_id"]), time=notification["time"].replace(tzinfo=timezone.utc).isoformat())
-                await manager.send_notification(payload, notification["recipient_id"])
+                await NotificationService.deliver_notification(self.db, notification_id)
                 # A successful send only means a realtime hint was attempted.
             except Exception:
                 logger.warning("Reminder realtime hint failed; persisted notification remains available")

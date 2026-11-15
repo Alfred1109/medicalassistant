@@ -7,7 +7,7 @@ import logging
 import json
 from bson import ObjectId
 
-from app.core.dependencies import get_user_service, get_current_active_user, get_current_user
+from app.api.dependencies import get_user_service, get_current_active_user, get_current_user
 from app.services.user_service import UserService
 from app.schemas.user import (
     UserCreate, UserUpdate, PublicPatientRegistration, SelfUserUpdate, UserResponse, Token, TokenResponse, RefreshTokenRequest,

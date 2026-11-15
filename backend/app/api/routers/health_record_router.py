@@ -6,7 +6,7 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path, Response
 from datetime import datetime, timezone
 
-from app.core.dependencies import (
+from app.api.dependencies import (
     get_current_user,
     get_health_record_service,
     get_followup_service,

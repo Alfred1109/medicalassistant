@@ -25,7 +25,7 @@ from bson import ObjectId
 from jose import jwt
 
 from app.core.config import settings
-from app.core.dependencies import get_database
+from app.api.dependencies import get_database
 from app.main import app
 from app.schemas.user import UserResponse
 from app.services.user_service import UserService

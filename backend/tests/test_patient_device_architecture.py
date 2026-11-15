@@ -80,7 +80,7 @@ class PatientDeviceMongoArchitectureTests(unittest.IsolatedAsyncioTestCase):
             {"device_type": "血压计", "name": "synthetic"}, actor=self.actor)
 
     async def test_injected_device_analysis_and_repair_stay_in_request_database(self):
-        from app.core.dependencies import get_device_service, get_device_analysis_service, get_device_repair_service
+        from app.api.dependencies import get_device_service, get_device_analysis_service, get_device_repair_service
         device = await get_device_service(db=self.db)
         analysis = await get_device_analysis_service(db=self.db)
         repair = await get_device_repair_service(db=self.db)
@@ -117,7 +117,7 @@ class PatientDeviceMongoArchitectureTests(unittest.IsolatedAsyncioTestCase):
         from fastapi import FastAPI
         from app.api.routers.device_router import router
         from app.core.auth import get_current_active_user
-        from app.core.dependencies import get_device_service
+        from app.api.dependencies import get_device_service
         from app.db.mongodb import get_database
         application = FastAPI()
         application.include_router(router, prefix="/api")

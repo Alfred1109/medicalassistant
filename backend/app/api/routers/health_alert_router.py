@@ -10,7 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.db.mongodb import get_database
 from app.services.health_alert_service import HealthAlertService
 from app.schemas.user import UserResponse
-from app.core.dependencies import get_current_user, get_health_alert_service
+from app.api.dependencies import get_current_user, get_health_alert_service
 from app.core.patient_access import (
     PatientAccessError,
     assigned_scope_ids,

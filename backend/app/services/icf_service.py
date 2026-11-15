@@ -9,7 +9,8 @@
    修改内容即重置 pending，mutation_version CAS 防并发覆盖）。
 3. 指标自动计算（icf_metric_configs 定义可配置）：从 icf_assessments 与
    随访记录计算改善幅度、达标率、随访完成率；阈值触发复用
-   health_alert_service（health_data_alerts 集合与既有通知链路），不重造。
+   health_alert_service（health_data_alerts 集合；医护通知由该服务统一经
+   NotificationService 产生），不重造。
 4. 正式 ICF 报告（icf_reports）：按评估生成结构化报告，review 状态机与
    clinical_reports 一致；审核通过后方可导出（结构化 JSON + 打印友好 HTML）。
 
@@ -594,8 +595,8 @@ async def _compute_metrics_for(db, patient_id):
 
 async def evaluate_metrics_and_alert(db, actor, patient_id):
     """计算指标并对越界项触发预警：复用 health_alert_service.create_alert
-    （health_data_alerts 集合与既有通知链路），同一患者同一指标存在未处理
-    预警时去重，不重复轰炸。"""
+    （health_data_alerts 集合；医护通知由该服务统一经 NotificationService
+    产生），同一患者同一指标存在未处理预警时去重，不重复轰炸。"""
     _require_clinical(actor)
     patient = await _patient_for(db, actor, patient_id)
     pid = str(patient["_id"])

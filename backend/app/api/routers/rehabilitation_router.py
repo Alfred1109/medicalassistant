@@ -26,7 +26,7 @@ from app.schemas.rehab_plan_structure import (
     PrescriptionItemCreate,
 )
 from app.services.rehabilitation_service import RehabilitationService
-from app.core.dependencies import (
+from app.api.dependencies import (
     get_rehabilitation_service,
     get_rehab_plan_structure_service,
     get_database,

@@ -131,8 +131,10 @@ class AnalyticsService:
         见 observe_patient_domain_state / patient_domain_mode_safe。
         """
         mode = await observe_patient_domain_state(self.db)
+        # domain-dispatch: 迁移完成后可删
         if mode == "canonical":
             return (CANONICAL_PATIENTS_COLLECTION_NAME, CANONICAL_PATIENT_MATCH)
+        # domain-dispatch: 迁移完成后可删
         if mode == "legacy":
             return self._LEGACY_PATIENT_SOURCE
         return None

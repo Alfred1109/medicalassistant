@@ -8,12 +8,13 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 from bson import ObjectId, json_util
-from pymongo.errors import DuplicateKeyError, PyMongoError
+from pymongo.errors import DuplicateKeyError
 from pydantic import ValidationError
 
 from app.core.exceptions import AppBaseException
 from app.core.fences import AccountFenceStore, PatientFenceStore, dual_bump, legacy_document_fence
-from app.core.patient_access import patient_assignment_field, patient_domain_mode
+from app.core.patient_access import (PatientAccessError, is_domain_state_unavailable,
+                                     patient_assignment_field, patient_domain_context)
 from app.core.patient_identity import resolve_unique_account
 
 # 栅栏名域化（T67 缺陷 1）：康复发布域的并发授权栅栏不与质控等域共用泛化名
@@ -23,8 +24,6 @@ from app.core.patient_identity import resolve_unique_account
 # 患者归属态两次复核），命名直指被守护的写域。
 REHAB_PUBLISH_FENCE = "rehab_publish"
 from app.db.transactions import run_transaction
-from app.patients.legacy import LegacyPatientRepository
-from app.patients.repository import ClinicalPatientRepository, PatientDomainError
 from app.schemas.rehab_publication import PublicationContent, PublicationItem
 from app.services.rehab_clinical_config import load_contraindication_rules, load_signature_declaration
 from app.services.rehab_contraindication_service import (
@@ -111,27 +110,6 @@ class RehabPublicationService:
         await self.items.create_index([("version_id", 1), ("item_id", 1)], unique=True,
                                      name="rehab_version_item_unique")
 
-    async def _canonical(self, operation):
-        # canonical 对象读取的 fail-closed 包装：域状态异常（PatientDomainError）
-        # 与传输层读取失败一律 503，绝不静默回退 legacy（与
-        # core/patient_access 的 canonical 读取异常语义一致）。
-        try:
-            return await operation()
-        except PatientDomainError:
-            raise error("PATIENT_DOMAIN_STATE_UNAVAILABLE", "患者域状态不可用，已拒绝访问", 503) from None
-        except PyMongoError as exc:
-            raise error("PATIENT_DOMAIN_STATE_UNAVAILABLE", "患者域状态不可用，已拒绝访问", 503) from exc
-
-    async def _canonical_patient(self, patient_id, session):
-        # canonical 患者实体读取：clinical_patients 承载。status != "active"
-        # （迁移自 legacy is_active=False 的停用患者）按不存在处理——canonical
-        # 文档没有 is_active 字段，缺少此校验会让停用患者对所有发布路径恒放行。
-        patient = await self._canonical(
-            lambda: ClinicalPatientRepository(self.db).get(patient_id, session=session))
-        if patient is not None and patient.get("status") != "active":
-            return None
-        return patient
-
     async def _account(self, identifier, session):
         # 账号层（两种域模式下账号均仍在 users 集合）按字面读取认证主体自身；
         # 患者实体校验不经过此处（见 _authorize 域分派）：legacy 账号与患者
@@ -146,9 +124,9 @@ class RehabPublicationService:
         return await resolve_unique_account(self.db, identifier, session=session)
 
     async def _access_fence(self, document, session):
-        # legacy 载体：users 账号文档 _access_fence 计数（账号与患者实体同文档，
-        # 一次 $inc 同时覆盖两种语义）。canonical 分支已拆分为双载体（见
-        # _authorize_canonical 的 dual_bump）。
+        # LEGACY-SHAPE: legacy 载体——users 账号文档 _access_fence 计数（账号与
+        # 患者实体同文档，一次 $inc 同时覆盖两种语义）。canonical 分支已拆分为
+        # 双载体（见 _fence_writes 的 dual_bump）。
         # 迁移窗口约束（cutover plan §3.3）：切换时存量栅栏计数不迁移（仅 CAS
         # 复核用，无业务含义），canonical 双载体从当前值重新起算；但切换窗口内
         # 本旧载体必须停止递增，否则回拨 legacy 后旧计数失效。
@@ -158,64 +136,67 @@ class RehabPublicationService:
             session=session, error_code="REHAB_ACCESS_FENCE_INVALID",
             error_message="账号并发状态异常")
 
-    async def _authorize(self, plan, actor, session, *, write=False, fence=False):
-        # 域分派：canonical 走 clinical_patients + 链接解析 + 双载体栅栏；
-        # legacy（显式 {mode:"legacy"} 回拨载体与无状态文档一致）行为逐字不变。
-        # 状态读取失败/未知状态时 patient_domain_mode 自然传播 503 fail-closed。
-        if await patient_domain_mode(self.db, session=session) == "canonical":
-            return await self._authorize_canonical(plan, actor, session, write=write, fence=fence)
-        account = await self._account(str(actor.id), session)
-        if not account or account.get("is_active") is not True or account.get("role") != actor.role:
-            raise error("REHAB_ACCOUNT_UNAVAILABLE", "当前账号不可用", 403)
-        # 患者实体存在性校验走患者读取适配器：获得 ObjectId/string 双字面兼容
-        # 与歧义防护（标识对应多个实体时抛 503，而非静默取单条）。适配器返回
-        # 的即为 legacy users 患者文档（role=patient 由适配器保证），其上的
-        # is_active 与归属字段读取与原实现语义等价。
-        patient = await LegacyPatientRepository(self.db).get(str(plan.get("patient_id", "")), session=session)
-        if not patient or patient.get("is_active") is not True:
+    async def _patient_document(self, context, plan):
+        """患者实体读取下沉内核（域分派）；本域只保留错误码映射与可用性精化。
+
+        内核负责域载体选择（legacy: users / canonical: clinical_patients）、
+        ObjectId/string 双字面兼容、身份歧义 503 防护与 canonical 的
+        status=active 判定；本域把「患者不存在」映射为本域错误码
+        REHAB_PATIENT_UNAVAILABLE（404），域状态不可用（503）原样透传。
+        """
+        try:
+            patient = await context.load_patient_doc(str(plan.get("patient_id", "")))
+        except PatientAccessError as failure:
+            if is_domain_state_unavailable(failure):
+                raise
+            raise error("REHAB_PATIENT_UNAVAILABLE", "患者档案不可用", 404) from None
+        # LEGACY-SHAPE: legacy 用户文档的可用性载体是 is_active（canonical
+        # 文档无该字段，其可用性已由内核按 status=active 统一判定）。
+        # domain-dispatch: 迁移完成后可删
+        if not context.is_canonical and patient.get("is_active") is not True:
             raise error("REHAB_PATIENT_UNAVAILABLE", "患者档案不可用", 404)
-        if actor.role == "patient":
-            if write or str(patient["_id"]) != str(account["_id"]):
-                raise error("REHAB_PATIENT_FORBIDDEN", "无权访问该患者的康复方案", 403)
-        elif actor.role in {"doctor", "health_manager"}:
-            assigned = patient.get(patient_assignment_field(actor.role))
-            if not isinstance(assigned, list) or str(account["_id"]) not in {str(value) for value in assigned}:
-                raise error("REHAB_PATIENT_NOT_ASSIGNED", "当前未分配管理该患者", 403)
-        elif actor.role != "admin" or write:
-            raise error("REHAB_CLINICIAN_REQUIRED", "需要医护确认权限", 403)
-        if fence:
-            await self._access_fence(account, session)
-            if account["_id"] != patient["_id"]:
-                await self._access_fence(patient, session)
         return patient
 
-    async def _authorize_canonical(self, plan, actor, session, *, write=False, fence=False):
-        # canonical 波次 2 目标形态：账号层仍在 users（账号域不变），患者实体
-        # 读取走 clinical_patients；患者本人不再假定「账号 ID 即患者实体 ID」，
-        # 必须经 resolve_self 的 verified 链接解析（无链接患者无法访问/反馈，
-        # 属预期形态，绝不回退同 ID 假设）。
+    async def _authorize(self, plan, actor, session, *, write=False, fence=False, context=None):
+        # 域分派下沉内核（core/patient_access.patient_domain_context）：域模式
+        # 一次读取，患者实体读取与本人身份核验复用同一上下文；服务层只保留
+        # 本域业务差异（角色归属策略、栅栏载体、错误码族）。
+        # 状态读取失败/未知状态时内核自然传播 503 fail-closed。
+        if context is None:
+            context = await patient_domain_context(self.db, session=session)
         account = await self._account(str(actor.id), session)
         if not account or account.get("is_active") is not True or account.get("role") != actor.role:
             raise error("REHAB_ACCOUNT_UNAVAILABLE", "当前账号不可用", 403)
-        patient = await self._canonical_patient(str(plan.get("patient_id", "")), session)
-        if not patient:
-            raise error("REHAB_PATIENT_UNAVAILABLE", "患者档案不可用", 404)
-        patient_id = str(patient["patient_id"])
+        patient = await self._patient_document(context, plan)
         if actor.role == "patient":
-            resolved = await self._canonical(
-                lambda: ClinicalPatientRepository(self.db).resolve_self(str(account["_id"]), session=session))
-            if write or resolved is None or str(resolved["patient_id"]) != patient_id:
+            # 本人核验下沉内核：legacy 同文档身份 / canonical verified 链接解析
+            # （无链接患者无法访问，属预期形态，绝不回退同 ID 假设）。
+            try:
+                await context.resolve_self_patient_entity(actor, context.entity_id(patient))
+            except PatientAccessError as failure:
+                if is_domain_state_unavailable(failure):
+                    raise
+                raise error("REHAB_PATIENT_FORBIDDEN", "无权访问该患者的康复方案", 403) from None
+            if write:
                 raise error("REHAB_PATIENT_FORBIDDEN", "无权访问该患者的康复方案", 403)
         elif actor.role in {"doctor", "health_manager"}:
             # 归属字段与 legacy 同构（迁移保留原归属列表与 ID 字面量）；
-            # 可用性语义由 _canonical_patient 的 status=active 内建。
+            # canonical 可用性语义已由内核的 status=active 判定内建。
             assigned = patient.get(patient_assignment_field(actor.role))
             if not isinstance(assigned, list) or str(account["_id"]) not in {str(value) for value in assigned}:
                 raise error("REHAB_PATIENT_NOT_ASSIGNED", "当前未分配管理该患者", 403)
         elif actor.role != "admin" or write:
             raise error("REHAB_CLINICIAN_REQUIRED", "需要医护确认权限", 403)
         if fence:
-            # 栅栏双载体（cutover plan §3.2/3.3）：账号态 → account_fences
+            await self._fence_writes(context, account, patient, session)
+        return patient
+
+    async def _fence_writes(self, context, account, patient, session):
+        # DOMAIN-BRANCH: 栅栏载体按域分派（迁移完成、canonical 全量后，
+        # legacy 双跳载体分支可整体删除）。
+        # domain-dispatch: 迁移完成后可删
+        if context.is_canonical:
+            # canonical 双载体（cutover plan §3.2/3.3）：账号态 → account_fences
             # 独立集合计数；患者归属态 → clinical_patients 文档
             # _fence_rehab_publish 字段（栅栏名域化，T67 缺陷 1：不与质控等
             # 域共用泛化名，避免同账号/同患者文档跨域计数互相污染 CAS 复核）。
@@ -229,9 +210,14 @@ class RehabPublicationService:
             # 生效；撤权路径参与账号载体计数后可进一步对账关闭该窗口。
             await dual_bump(
                 (AccountFenceStore(self.db), str(account["_id"]), REHAB_PUBLISH_FENCE),
-                (PatientFenceStore(self.db), patient_id, REHAB_PUBLISH_FENCE),
+                (PatientFenceStore(self.db), context.entity_id(patient), REHAB_PUBLISH_FENCE),
                 session=session)
-        return patient
+            return
+        # LEGACY-SHAPE: legacy 载体——账号与患者实体同文档，一次 $inc 同时覆盖
+        # 两种语义；账号与患者同文档时只递增一次（去重是 legacy 形态约束）。
+        await self._access_fence(account, session)
+        if account["_id"] != patient["_id"]:
+            await self._access_fence(patient, session)
 
     async def _plan(self, plan_id, session):
         if not ObjectId.is_valid(plan_id):
@@ -443,18 +429,17 @@ class RehabPublicationService:
         async def read(session):
             if actor.role != "patient":
                 raise error("REHAB_PATIENT_REQUIRED", "需要患者本人账号", 403)
-            if await patient_domain_mode(self.db, session=session) == "canonical":
-                # canonical：账号→患者实体经 resolve_self（verified 链接）解析；
-                # 无链接患者账号无法定位本人临床实体，拒绝且不猜 ID（预期形态）。
-                resolved = await self._canonical(
-                    lambda: ClinicalPatientRepository(self.db).resolve_self(str(actor.id), session=session))
-                if resolved is None:
-                    raise error("REHAB_PATIENT_FORBIDDEN", "无权访问该患者的康复方案", 403)
-                patient_id = str(resolved["patient_id"])
-            else:
-                # legacy 同文档假设：str(actor.id) 同时是账号 ID 与患者实体 ID。
-                patient_id = str(actor.id)
-            await self._authorize({"patient_id": patient_id}, actor, session)
+            # 域分派下沉内核：本人实体解析一次读取域模式（canonical 经
+            # resolve_self 的 verified 链接解析，legacy 保持同文档身份），
+            # 随后的授权复核复用同一上下文（同一请求内只读一次域状态）。
+            context = await patient_domain_context(self.db, session=session)
+            try:
+                patient_id = await context.resolve_self_patient_entity(actor)
+            except PatientAccessError as failure:
+                if is_domain_state_unavailable(failure):
+                    raise
+                raise error("REHAB_PATIENT_FORBIDDEN", "无权访问该患者的康复方案", 403) from None
+            await self._authorize({"patient_id": patient_id}, actor, session, context=context)
             query = {"patient_id": patient_id, "published_version_id": {"$type": "string"},
                      "status": {"$nin": ["cancelled", "canceled", "archived"]}}
             rows = await self.plans.find(query, session=session).sort([("published_at", -1), ("_id", -1)]).skip(skip).limit(limit).to_list(length=limit)

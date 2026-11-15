@@ -17,6 +17,9 @@ from bson import ObjectId
 from pymongo import ASCENDING
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
+from app.core.reviewed_link import (audit_entry, disable_link, insert_link,
+                                    validate_review)
+
 from .schemas import SourcePatientIdentity, patient_response
 
 PATIENTS = "clinical_patients"
@@ -170,6 +173,7 @@ class ClinicalPatientRepository:
                     and accounts[0].get("role") == "patient"
                     and accounts[0].get("is_active", True) is True):
                 patient = await self.get(identifier, active_only=True, session=session)
+                # legacy-shape: 存量形态，不随域切换删除
                 if patient and patient.get("legacy_user_id") == identifier and patient["_id"] == accounts[0]["_id"]:
                     return patient
         # legacy 载体未命中或校验失败时才探测显式绑定；account_id 全局唯一
@@ -291,14 +295,10 @@ class ClinicalPatientRepository:
     @staticmethod
     def _binding_review(reviewer, evidence_reference):
         """Shared human-review validation for the explicit binding workflow."""
-        if (not isinstance(reviewer, str) or not reviewer.strip()
-                or not isinstance(evidence_reference, str) or not evidence_reference.strip()):
-            raise PatientDomainError("PATIENT_REVIEW_REQUIRED")
-        reviewer = reviewer.strip()
-        evidence_reference = evidence_reference.strip()
-        if len(reviewer) > 200 or len(evidence_reference) > 1024:
-            raise PatientDomainError("INVALID_PATIENT_REVIEW_REFERENCE")
-        return reviewer, evidence_reference
+        return validate_review(
+            reviewer, evidence_reference,
+            missing_error=lambda: PatientDomainError("PATIENT_REVIEW_REQUIRED"),
+            invalid_error=lambda: PatientDomainError("INVALID_PATIENT_REVIEW_REFERENCE"))
 
     async def bind_account(self, patient_id, *, account_id, reviewer,
                            evidence_reference, session=None):
@@ -342,11 +342,6 @@ class ClinicalPatientRepository:
         if (not account or account.get("role") != "patient"
                 or account.get("is_active", True) is not True):
             raise PatientDomainError("INVALID_PATIENT_ACCOUNT")
-        existing = await self.db[ACCOUNT_LINKS].find_one(
-            {"$or": [{"patient_id": identifier}, {"account_id": account_id}]},
-            session=session)
-        if existing is not None:
-            raise PatientDomainError("PATIENT_ACCOUNT_LINK_CONFLICT")
         now = datetime.now(timezone.utc)
         link = {"_id": f"explicit:{identifier}", "account_id": account_id,
                 "account_document_id": account_oid, "patient_id": identifier,
@@ -354,12 +349,14 @@ class ClinicalPatientRepository:
                 "status": "verified", "bound_at": now,
                 # 追加式审计 list（与 legacy_same_document 的单条 dict 不同）：
                 # 绑定首条 + 后续状态变更逐条追加，停用经 $push 原子写入。
-                "audit": [{"reviewer": reviewer, "evidence_reference": evidence_reference,
-                           "operation": "explicit_binding", "at": now}]}
-        try:
-            await self.db[ACCOUNT_LINKS].insert_one(link, session=session)
-        except DuplicateKeyError:
-            raise PatientDomainError("PATIENT_ACCOUNT_LINK_CONFLICT") from None
+                "audit": [audit_entry(operation="explicit_binding", reviewer=reviewer,
+                                      evidence_reference=evidence_reference, at=now)]}
+        await insert_link(
+            self.db[ACCOUNT_LINKS], link,
+            conflict_queries=[{"$or": [{"patient_id": identifier},
+                                       {"account_id": account_id}]}],
+            conflict_error=lambda: PatientDomainError("PATIENT_ACCOUNT_LINK_CONFLICT"),
+            session=session)
         return link
 
     async def disable_account_link(self, patient_id, *, reviewer,
@@ -377,18 +374,14 @@ class ClinicalPatientRepository:
         reviewer, evidence_reference = self._binding_review(reviewer, evidence_reference)
         identifier = str(patient_id)
         now = datetime.now(timezone.utc)
-        updated = await self.db[ACCOUNT_LINKS].update_one(
-            {"patient_id": identifier, "source": EXPLICIT_BINDING, "status": "verified"},
-            {"$set": {"status": "disabled", "disabled_at": now},
-             "$push": {"audit": {"operation": "explicit_binding_disable",
-                                 "reviewer": reviewer,
-                                 "evidence_reference": evidence_reference, "at": now}}},
+        return await disable_link(
+            self.db[ACCOUNT_LINKS],
+            selector={"patient_id": identifier},
+            active_filter={"source": EXPLICIT_BINDING, "status": "verified"},
+            set_fields={"status": "disabled", "disabled_at": now},
+            audit_entry=audit_entry(operation="explicit_binding_disable",
+                                    reviewer=reviewer,
+                                    evidence_reference=evidence_reference, at=now),
+            not_found_error=lambda: PatientDomainError("PATIENT_ACCOUNT_LINK_NOT_FOUND"),
+            conflict_error=lambda: PatientDomainError("PATIENT_ACCOUNT_LINK_CONFLICT"),
             session=session)
-        if updated.modified_count == 1:
-            return await self.db[ACCOUNT_LINKS].find_one(
-                {"patient_id": identifier, "source": EXPLICIT_BINDING}, session=session)
-        existing = await self.db[ACCOUNT_LINKS].find_one(
-            {"patient_id": identifier}, session=session)
-        if existing is None:
-            raise PatientDomainError("PATIENT_ACCOUNT_LINK_NOT_FOUND")
-        raise PatientDomainError("PATIENT_ACCOUNT_LINK_CONFLICT")

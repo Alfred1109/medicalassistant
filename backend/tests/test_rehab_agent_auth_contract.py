@@ -20,7 +20,7 @@ from bson import ObjectId
 from jose import jwt
 
 from app.core.config import settings
-from app.core.dependencies import get_agent_service, get_rehabilitation_service
+from app.api.dependencies import get_agent_service, get_rehabilitation_service
 from app.db.mongodb import get_database
 from app.main import app
 from app.schemas.user import UserResponse

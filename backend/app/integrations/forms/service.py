@@ -289,6 +289,7 @@ async def _verify_patient_assignment(db: AsyncIOMotorDatabase, patient_id: str,
 FOLLOWUP_VISIT_TERMINAL_STATUSES = {"completed", "canceled", "cancelled"}
 
 
+# legacy-shape: 存量形态，不随域切换删除
 def _task_version_filter(doc):
     return {"_id": doc["_id"], "mutation_version": doc.get("mutation_version", 0)
             if doc.get("mutation_version", 0) else {"$in": [0, None]}}
@@ -633,7 +634,7 @@ async def create_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient,
             "来源身份在创建期间失效", error_code="SOURCE_IDENTITY_CHANGED", status_code=403))
 
     from app.db.transactions import run_followup_transaction
-    from app.services.followup_service import followup_version_filter, followup_conflict
+    from app.core.followup_semantics import followup_conflict, followup_version_filter
 
     async def persist_task(session):
         try:
@@ -962,8 +963,8 @@ async def confirm_fill_task(db: AsyncIOMotorDatabase, client: FormPlatformClient
         confirmed.mark_confirmed(evidence)
         if followup_visit_id:
             from app.models.health_record import FollowUpRecord
-            from app.services.followup_service import (
-                followup_version_filter, followup_conflict, followup_submission_fields)
+            from app.core.followup_semantics import (
+                followup_conflict, followup_submission_fields, followup_version_filter)
             visit = await db[FollowUpRecord.collection_name].find_one(
                 {"_id": ObjectId(followup_visit_id)}, **options)
             if not visit or str(visit.get("patient_id")) != str(current.get("patient_id")):

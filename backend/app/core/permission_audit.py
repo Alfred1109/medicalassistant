@@ -9,11 +9,23 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from app.core.config import settings
-from app.services.audit_log_service import AuditLogService
+from app.core.audit import resolve_audit_sink
 from app.schemas.audit_log import AuditLogCreate
 from app.integrations.identity.access import unified_authentication
 
 logger = logging.getLogger(__name__)
+
+# 审计落库实现：core 不反向依赖 services——默认走 app.core.audit 的注入点
+# （具体实现由上层组合根注入）。保留 AuditLogService 名字作为可覆盖的落库
+# 工厂：既有调用方/测试可直接 patch 本模块该名字替换实现。
+AuditLogService = None
+
+
+def _resolve_audit_sink(db):
+    """解析审计落库实现：显式覆盖优先，其次上层注入，最后内置实现。"""
+    if AuditLogService is not None:
+        return AuditLogService(db)
+    return resolve_audit_sink(db)
 
 # AUTH02 审计脱敏：凭证明文/哈希类键按子串匹配（防止 secret_hash、api_key
 # 等变体绕过）；答卷/报告类大文本按精确键名匹配，避免误删状态类小字段。
@@ -187,7 +199,7 @@ class PermissionAuditMiddleware(BaseHTTPMiddleware):
             # 注意：实际实现中可能需要从应用状态获取数据库连接
             from app.db.mongodb import get_database
             db = await anext(get_database())
-            audit_service = AuditLogService(db)
+            audit_service = _resolve_audit_sink(db)
             
             # 记录审计日志
             details = {
@@ -257,7 +269,7 @@ class ResourcePermissionTracker:
         """
         try:
             if self.db is not None:
-                audit_service = AuditLogService(self.db)
+                audit_service = _resolve_audit_sink(self.db)
                 await audit_service.create_log(
                     log_data=AuditLogCreate(
                         user_id=user_id,

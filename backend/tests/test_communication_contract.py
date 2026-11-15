@@ -487,8 +487,10 @@ class CommunicationIndexDefinitionTests(unittest.IsolatedAsyncioTestCase):
     async def test_index_creation_is_mounted_in_startup(self):
         import inspect
         import app.main as main_module
-        source = inspect.getsource(main_module.startup_db_client)
+        source = inspect.getsource(main_module.start_background_services)
         self.assertIn("ensure_communication_indexes", source)
+        startup = inspect.getsource(main_module.startup_db_client)
+        self.assertIn("start_background_services", startup)
 
 
 class UniqueIndexRaceTests(unittest.IsolatedAsyncioTestCase):
@@ -1539,9 +1541,12 @@ class DeadCodeRemovalTests(unittest.TestCase):
         ))
 
     def test_no_dead_references_to_removed_symbols(self):
-        import app.core.dependencies as dependencies
+        import app.api.dependencies as dependencies
         self.assertFalse(hasattr(dependencies, "get_message_crud"))
         self.assertFalse(hasattr(dependencies, "get_conversation_crud"))
+        self.assertFalse(os.path.exists(
+            os.path.join(os.path.dirname(__file__), "..", "app", "core", "dependencies.py")
+        ))
 
     def test_import_app_main_still_works(self):
         # 本模块顶部已 import app.main；此处再显式断言一次

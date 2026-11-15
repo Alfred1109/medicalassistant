@@ -1,20 +1,87 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from app.schemas.user import UserResponse
-from app.schemas.followup import FollowUpRecordCreate, FollowUpRecordResponse
-from app.core.dependencies import get_current_user, get_database, format_mongo_doc, get_health_record_for_patient, get_followup_service
+from app.schemas.followup import FollowUpRecordCreate, FollowUpRecordResponse, FollowUpStatus
+from app.api.dependencies import get_current_user, get_database, format_mongo_doc, get_health_record_for_patient, get_followup_service
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.db.crud_services import PatientCRUD
 from app.models.user import Patient
-from app.core.patient_access import assigned_patient_query, ensure_patient_access, PatientAccessError
+from app.core.patient_access import assigned_scope_ids, ensure_patient_access, PatientAccessError
 from app.core.exceptions import AppBaseException
-from app.patients.legacy import LegacyPatientRepository
 from app.services.followup_service import FollowupService
 from app.core.followup_access import ensure_followup_patient_access, followup_patient_scope
 from bson.objectid import ObjectId
 
 router = APIRouter()
+
+
+async def load_provider_health_record(db, patient_id, operator_id, role):
+    """医护查看一名归属患者的健康档案。医生与健康管理师共用这一份读取。"""
+    patient = await ensure_patient_access(db, patient_id, str(operator_id), role)
+    record = await get_health_record_for_patient(patient_id, db)
+    if not record:
+        return {
+            "id": patient_id,
+            "name": patient.get("name", "未知患者"),
+            "age": patient.get("age", 0),
+            "gender": patient.get("gender", "未知"),
+            "height": patient.get("height", 0),
+            "weight": patient.get("weight", 0),
+            "bloodType": patient.get("blood_type", "未知"),
+            "allergies": patient.get("allergies", []),
+            "emergencyContact": patient.get("emergency_contact", "未设置"),
+            "medicalHistory": [],
+            "rehabHistory": [],
+            "medications": [],
+            "vitalSigns": []
+        }
+    return {
+        "id": record.get("id") or record.get("_id") or patient_id,
+        "name": record.get("name", "未知患者"),
+        "age": record.get("age", 0),
+        "gender": record.get("gender", "未知"),
+        "height": record.get("height", 0),
+        "weight": record.get("weight", 0),
+        "bloodType": record.get("blood_type", "未知"),
+        "allergies": record.get("allergies", []),
+        "emergencyContact": record.get("emergency_contact", "未设置"),
+        "medicalHistory": record.get("medical_history", []),
+        "rehabHistory": record.get("rehab_history", []),
+        "medications": record.get("medications", []),
+        "vitalSigns": record.get("vital_signs", [])
+    }
+
+
+async def load_provider_monitoring(db, patient_id, operator_id, role):
+    """医护查看一名归属患者的监测快照。无数据时计数为 0。"""
+    if not ObjectId.is_valid(patient_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到患者信息")
+    await ensure_patient_access(db, patient_id, str(operator_id), role)
+    plans_collection = db["rehab_plans"]
+    total_plans = await plans_collection.count_documents({"patient_id": patient_id})
+    active_plans = await plans_collection.count_documents(
+        {"patient_id": patient_id, "status": "active"})
+    completed_plans = await plans_collection.count_documents(
+        {"patient_id": patient_id, "status": "completed"})
+    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+    completed_sessions = await db["rehab_progress"].count_documents({
+        "patient_id": patient_id,
+        "completed": True,
+        "date": {"$gte": thirty_days_ago},
+    })
+    return {
+        "implemented": True,
+        "patientId": patient_id,
+        "boundDevices": await db["devices"].count_documents({"patient_id": patient_id}),
+        "rehabPlans": {
+            "total": total_plans,
+            "active": active_plans,
+            "completed": completed_plans,
+        },
+        "completedSessionsLast30Days": completed_sessions,
+    }
+
 
 # 医生功能路由
 
@@ -73,48 +140,8 @@ async def get_patient_health_record(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     
     try:
-        patient = await ensure_patient_access(
-            db, patient_id, str(current_user.id), current_user.role)
-        
-        # 使用通用函数获取健康档案
-        record = await get_health_record_for_patient(patient_id, db)
-        
-        if not record:
-            # 构建基本的健康档案结构
-            return {
-                "id": patient_id,
-                "name": patient.get("name", "未知患者"),
-                "age": patient.get("age", 0),
-                "gender": patient.get("gender", "未知"),
-                "height": patient.get("height", 0),
-                "weight": patient.get("weight", 0),
-                "bloodType": patient.get("blood_type", "未知"),
-                "allergies": patient.get("allergies", []),
-                "emergencyContact": patient.get("emergency_contact", "未设置"),
-                "medicalHistory": [],
-                "rehabHistory": [],
-                "medications": [],
-                "vitalSigns": []
-            }
-        
-        # 将后端字段名转换为前端字段名
-        formatted_record = {
-            "id": record.get("id") or record.get("_id") or patient_id,
-            "name": record.get("name", "未知患者"),
-            "age": record.get("age", 0),
-            "gender": record.get("gender", "未知"),
-            "height": record.get("height", 0),
-            "weight": record.get("weight", 0),
-            "bloodType": record.get("blood_type", "未知"),
-            "allergies": record.get("allergies", []),
-            "emergencyContact": record.get("emergency_contact", "未设置"),
-            "medicalHistory": record.get("medical_history", []),
-            "rehabHistory": record.get("rehab_history", []),
-            "medications": record.get("medications", []),
-            "vitalSigns": record.get("vital_signs", [])
-        }
-        
-        return formatted_record
+        return await load_provider_health_record(
+            db, patient_id, current_user.id, current_user.role)
     except (HTTPException, PatientAccessError):
         raise
     except Exception as e:
@@ -185,36 +212,9 @@ async def get_patient_monitoring_data(
     """
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    if not ObjectId.is_valid(patient_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到患者信息")
     try:
-        await ensure_patient_access(db, patient_id, str(current_user.id), current_user.role)
-
-        plans_collection = db["rehab_plans"]
-        total_plans = await plans_collection.count_documents({"patient_id": patient_id})
-        active_plans = await plans_collection.count_documents(
-            {"patient_id": patient_id, "status": "active"})
-        completed_plans = await plans_collection.count_documents(
-            {"patient_id": patient_id, "status": "completed"})
-
-        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-        completed_sessions = await db["rehab_progress"].count_documents({
-            "patient_id": patient_id,
-            "completed": True,
-            "date": {"$gte": thirty_days_ago},
-        })
-
-        return {
-            "implemented": True,
-            "patientId": patient_id,
-            "boundDevices": await db["devices"].count_documents({"patient_id": patient_id}),
-            "rehabPlans": {
-                "total": total_plans,
-                "active": active_plans,
-                "completed": completed_plans,
-            },
-            "completedSessionsLast30Days": completed_sessions,
-        }
+        return await load_provider_monitoring(
+            db, patient_id, current_user.id, current_user.role)
     except (HTTPException, PatientAccessError):
         raise
     except Exception as e:
@@ -224,28 +224,129 @@ async def get_patient_monitoring_data(
             detail="获取患者监测数据失败，请稍后重试"
         )
 
-# 医患沟通
-@router.get("/communications", response_model=List[dict])
-async def get_communications(
-    patient_id: Optional[str] = None,
-    current_user: UserResponse = Depends(get_current_user)
-):
-    """获取医患沟通记录"""
-    if current_user.role != "doctor":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return []
+# 随访「待完成」状态：未终结、仍需医护跟进的状态集合。
+# 医患消息走 /api/communications，这里不再保留返回空列表或假 ID 的存根。
+# completed / canceled / lost 属终态（已完成 / 已取消 / 失访认定），不计入待完成。
+FOLLOW_UP_PENDING_STATUSES = (
+    FollowUpStatus.PENDING_SCHEDULE.value,
+    FollowUpStatus.SCHEDULED.value,
+    FollowUpStatus.AWAITING_FILL.value,
+    FollowUpStatus.IN_REVIEW.value,
+    FollowUpStatus.MISSED.value,
+    FollowUpStatus.OVERDUE.value,
+    FollowUpStatus.RESCHEDULED.value,
+)
 
-@router.post("/communications", status_code=status.HTTP_201_CREATED)
-async def create_communication(
-    message_data: dict,
-    current_user: UserResponse = Depends(get_current_user)
-):
-    """创建新的沟通消息"""
-    if current_user.role != "doctor":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    # 这里调用相应的服务层功能
-    return {"id": "new_message_id"}
+
+async def collect_follow_up_statistics(
+    followup_service: FollowupService, patient_ids: List[str]
+) -> Dict[str, int]:
+    """随访统计（唯一入口 FollowupService；路由层不直连 followup_records 集合）。
+
+    口径与 FollowupService.list_all_followups 同源：排除已删除节点、患者
+    范围由调用方传入。分页拉取以免一次性载入全部随访记录。
+    """
+    pending_statuses = set(FOLLOW_UP_PENDING_STATUSES)
+    total = completed = pending = 0
+    skip = 0
+    page_size = 200
+    while True:
+        records = await followup_service.list_all_followups(
+            skip=skip, limit=page_size, patient_ids=patient_ids)
+        if not records:
+            break
+        for record in records:
+            total += 1
+            status = getattr(record, "status", None)
+            status_value = getattr(status, "value", status)
+            if status_value == FollowUpStatus.COMPLETED.value:
+                completed += 1
+            elif status_value in pending_statuses:
+                pending += 1
+        skip += len(records)
+        if len(records) < page_size:
+            break
+    return {"total": total, "completed": completed, "pending": pending}
+
+
+async def collect_work_statistics(
+    db: AsyncIOMotorDatabase,
+    *,
+    operator_id: str,
+    operator_role: str,
+    plan_scope: str,
+    operator_label: str,
+    followup_service: Optional[FollowupService] = None,
+) -> Dict[str, Any]:
+    """医护工作统计的唯一聚合实现（医生与健康管理师共用，避免第三份复制）。
+
+    归属判定统一走 app.core.patient_access.assigned_scope_ids（域感知：
+    legacy 执行于 users、canonical 执行于 clinical_patients，含标识歧义
+    防护 PATIENT_IDENTITY_AMBIGUOUS），本函数不自写归属规则。
+
+    plan_scope —— 康复方案的归属口径（两个角色确实不同，各自说明）：
+    - "owner"：按 practitioner_id 归属本人。医生既有口径（rehab_plans 的
+      写入方只写 practitioner_id），保持既有契约不变。
+    - "patients"：按本人归属患者范围。rehab_plans 的 health_manager_id
+      字段从未有写入方（模型字段从未落库），按该字段统计将恒为 0 而非真实；
+      健康管理师采用此口径，与 GET /rehabilitation/plans 的授权范围一致。
+
+    followup_service —— 传入时附带随访统计（健康管理师端开启；医生端既有
+    响应契约不含随访字段，保持不变）。随访集合只经 FollowupService 读取。
+
+    返回值均来自真实集合，无数据时如实为 0：
+    patientCount / rehabPlans{total,active,completed} /
+    completedSessionsThisMonth /（可选）followUps{total,completed,pending}
+    """
+    operator = await db["users"].find_one(
+        {"_id": ObjectId(str(operator_id)), "role": operator_role})
+    if not operator:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"未找到{operator_label}信息")
+
+    # 患者范围：域感知的归属解析（legacy 双字面归属 + 标识歧义防护）
+    patient_ids = await assigned_scope_ids(db, str(operator_id), operator_role)
+    patient_keys = [str(patient_id) for patient_id in patient_ids]
+
+    if plan_scope == "owner":
+        plan_filter: Dict[str, Any] = {"practitioner_id": str(operator_id)}
+    elif plan_scope == "patients":
+        plan_filter = {"patient_id": {"$in": patient_keys}}
+    else:
+        raise ValueError(f"未知的康复方案归属口径: {plan_scope}")
+    plans_collection = db["rehab_plans"]
+    total_plans = await plans_collection.count_documents(plan_filter)
+    active_plans = await plans_collection.count_documents(
+        {**plan_filter, "status": "active"})
+    completed_plans = await plans_collection.count_documents(
+        {**plan_filter, "status": "completed"})
+
+    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    completed_sessions = 0
+    if patient_keys:
+        completed_sessions = await db["rehab_progress"].count_documents({
+            "patient_id": {"$in": patient_keys},
+            "completed": True,
+            "date": {"$gte": month_start},
+        })
+
+    statistics: Dict[str, Any] = {
+        "implemented": True,
+        "patientCount": len(patient_keys),
+        "rehabPlans": {
+            "total": total_plans,
+            "active": active_plans,
+            "completed": completed_plans,
+        },
+        "completedSessionsThisMonth": completed_sessions,
+    }
+
+    if followup_service is not None:
+        statistics["followUps"] = await collect_follow_up_statistics(
+            followup_service, patient_keys)
+
+    return statistics
+
 
 # 数据统计
 @router.get("/statistics", response_model=dict)
@@ -264,45 +365,21 @@ async def get_doctor_statistics(
                     （rehab_progress，completed=true 且 date 不早于本月；
                     该集合当前无写入方，通常为 0 —— 是真实空数据而非存根）
     - implemented:  显式标记端点已实现真实聚合
+
+    聚合实现与健康管理师端共用 collect_work_statistics（唯一实现）。
     """
     if current_user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     try:
-        doctor_id = current_user.id
-        doctor = await db["users"].find_one({"_id": ObjectId(doctor_id), "role": "doctor"})
-        if not doctor:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到医生信息")
-
-        # 患者 ID 列表读取收敛到适配器（assigned_ids：双字面归属 + 标识歧义防护）
-        patient_ids = await LegacyPatientRepository(db).assigned_ids(
-            assigned_patient_query(str(doctor_id)))
-        plans_collection = db["rehab_plans"]
-        total_plans = await plans_collection.count_documents({"practitioner_id": doctor_id})
-        active_plans = await plans_collection.count_documents(
-            {"practitioner_id": doctor_id, "status": "active"})
-        completed_plans = await plans_collection.count_documents(
-            {"practitioner_id": doctor_id, "status": "completed"})
-
-        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        completed_sessions = 0
-        if patient_ids:
-            completed_sessions = await db["rehab_progress"].count_documents({
-                "patient_id": {"$in": [str(p) for p in patient_ids]},
-                "completed": True,
-                "date": {"$gte": month_start},
-            })
-
-        return {
-            "implemented": True,
-            "timeRange": time_range,
-            "patientCount": len(patient_ids),
-            "rehabPlans": {
-                "total": total_plans,
-                "active": active_plans,
-                "completed": completed_plans,
-            },
-            "completedSessionsThisMonth": completed_sessions,
-        }
+        statistics = await collect_work_statistics(
+            db,
+            operator_id=current_user.id,
+            operator_role="doctor",
+            plan_scope="owner",
+            operator_label="医生",
+        )
+        statistics["timeRange"] = time_range
+        return statistics
     except (HTTPException, AppBaseException):
         # PatientAccessError 与适配器的 LegacyPatientIdentityError 均为 AppBaseException
         raise
