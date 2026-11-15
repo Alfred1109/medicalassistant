@@ -17,6 +17,7 @@ device_router 此前以字典方式访问认证用户（user["_id"] / user.get("
 import importlib
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -31,7 +32,11 @@ from app.main import app
 device_router = importlib.import_module("app.api.routers.device_router")
 from app.schemas.user import UserResponse
 from app.services import device_service as device_service_module
+from app.services.device_service import DeviceService, ManualReadingValidationError
 from app.services.user_service import UserService
+from app.models.health_data_threshold import HealthDataThreshold
+from app.core import device_access as device_access_module
+from tests.device_ingestion_fake import FakeCollection, FakeDatabase
 from app.core.dependencies import get_device_service
 
 OPERATOR_ID = "507f1f77bcf86cd799439011"
@@ -492,6 +497,220 @@ class DeviceServiceMalformedIdContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["battery_level"])
         self.assertIsNone(result["signal_strength"])
         self.assertEqual(result["last_sync_time"], doc["last_connected"])
+
+
+class _SessionTolerantCollection(FakeCollection):
+    """fake 集合兼容 session kwarg（事务路径会透传 session）。"""
+
+    async def find_one(self, query, **kwargs):
+        return await super().find_one(query)
+
+    async def insert_one(self, doc, **kwargs):
+        return await super().insert_one(doc)
+
+    async def update_one(self, query, update, **kwargs):
+        return await super().update_one(query, update)
+
+
+class ManualReadingValidationWiringTests(unittest.IsolatedAsyncioTestCase):
+    """T78 手工读数接线：入库前数据标准校验 + 提交后阈值预警检查。
+
+    走真实 DeviceService.record_manual_reading（fake 库 + 假事务会话），
+    对象级授权（ensure_device_access）不在本类范围（AUTH01 用例已覆盖），
+    打桩放行；校验器与 HealthAlertService.check_health_data 均为真实调用。
+    """
+
+    def setUp(self):
+        self.db = FakeDatabase()
+        for name in ("devices", "device_data", "device_repair_logs",
+                     "health_data_thresholds", "health_data_alerts", "users"):
+            self.db._collections[name] = _SessionTolerantCollection()
+        self.db.client = SimpleNamespace(start_session=AsyncMock(
+            return_value=TransactionSession()))
+        self.access_patch = patch.object(
+            device_access_module, "ensure_device_access", AsyncMock(return_value=None))
+        self.access_patch.start()
+        self.actor = SimpleNamespace(id=str(ObjectId()), role="doctor")
+        self.service = DeviceService(self.db)
+
+    def tearDown(self):
+        self.access_patch.stop()
+
+    async def _bind_device(self, device_type="手环"):
+        # 同一测试内多次录读数：设备文档幂等（fake 库无事务回滚，
+        # 重复 append 会令写围栏 matched_count>1 触发 409）
+        for doc in self.db["devices"].docs:
+            if str(doc["_id"]) == DEVICE_ID:
+                doc["device_type"] = device_type
+                return doc
+        doc = {"_id": ObjectId(DEVICE_ID), "device_id": DEVICE_ID,
+               "device_type": device_type, "name": "接线演练设备",
+               "patient_id": "p1", "status": "active"}
+        self.db["devices"].docs.append(doc)
+        return doc
+
+    def _seed_heart_rate_threshold(self):
+        # 阈值模型语义：值在 critical 括号外 → critical，warning 括号外 →
+        # warning，normal 区间内 → normal；括号取值须与用例值域自洽
+        self.db["health_data_thresholds"].docs.append(
+            HealthDataThreshold.create_heart_rate_threshold(
+                name="心率默认阈值",
+                normal_range={"min": 60, "max": 100},
+                warning_range={"min": 45, "max": 120},
+                critical_range={"min": 0, "max": 1000}).to_mongo())
+
+    async def _record(self, data_type, value, unit="", device_type="手环"):
+        await self._bind_device(device_type)
+        return await self.service.record_manual_reading(
+            DEVICE_ID, data_type, value, unit, datetime.utcnow(),
+            actor=self.actor)
+
+    async def test_valid_reading_persists_normalized_and_triggers_alert(self):
+        self._seed_heart_rate_threshold()
+        document = await self._record("heart_rate", "180")
+        stored = self.db["device_data"].docs
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["value"], 180.0)     # 标准精度归一化
+        self.assertEqual(stored[0]["unit"], "bpm")      # 缺省单位回标准单位
+        self.assertEqual(stored[0]["metadata"]["source"], "手工登记")
+        note = document["metadata"]["health_alert"]
+        self.assertEqual(note["status"], "warning")
+        self.assertTrue(note["alert_id"])
+        self.assertTrue(note["threshold_id"])
+        alerts = self.db["health_data_alerts"].docs
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["alert_level"], "warning")
+        self.assertEqual(alerts[0]["patient_id"], "p1")
+        self.assertEqual(alerts[0]["vital_type"], "heart_rate")
+        self.assertEqual(alerts[0]["health_data_id"], document["id"])
+
+    async def test_in_range_reading_reports_normal_without_alert(self):
+        self._seed_heart_rate_threshold()
+        document = await self._record("heart_rate", "72")
+        self.assertEqual(document["metadata"]["health_alert"]["status"], "normal")
+        self.assertIsNone(document["metadata"]["health_alert"]["alert_id"])
+        self.assertEqual(len(self.db["health_data_alerts"].docs), 0)
+
+    async def test_out_of_range_reading_rejected_without_write_or_alert(self):
+        self._seed_heart_rate_threshold()
+        with self.assertRaises(ManualReadingValidationError) as raised:
+            await self._record("heart_rate", "999")
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.error_code, "MANUAL_READING_INVALID")
+        self.assertEqual(self.db["device_data"].docs, [])
+        self.assertEqual(self.db["health_data_alerts"].docs, [])
+
+    async def test_malformed_reading_rejected(self):
+        self._seed_heart_rate_threshold()
+        for value in ("not-a-number", "nan"):
+            with self.assertRaises(ManualReadingValidationError):
+                await self._record("heart_rate", value)
+        self.assertEqual(self.db["device_data"].docs, [])
+
+    async def test_unregistered_data_type_passes_with_flag_and_skips_alert(self):
+        document = await self._record("synthetic", "1", unit="unit")
+        self.assertEqual(document["quality_flags"], ["unregistered_metric"])
+        self.assertEqual(document["metadata"]["health_alert"]["status"], "skipped")
+        self.assertEqual(self.db["health_data_alerts"].docs, [])
+
+    async def test_registered_but_unmapped_type_skips_threshold_check(self):
+        document = await self._record("weight", "70.5", device_type="体重秤")
+        self.assertEqual(document["quality_flags"], [])
+        self.assertEqual(document["metadata"]["health_alert"]["status"], "skipped")
+        self.assertEqual(len(self.db["device_data"].docs), 1)
+
+    async def test_device_type_incompatible_reading_rejected(self):
+        with self.assertRaises(ManualReadingValidationError) as raised:
+            await self._record("heart_rate", "80", device_type="血压计")
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("不支持数据类型", raised.exception.message)
+        self.assertEqual(self.db["device_data"].docs, [])
+
+    async def test_blood_pressure_pair_triggers_threshold_check(self):
+        self.db["health_data_thresholds"].docs.append(
+            HealthDataThreshold.create_blood_pressure_threshold(
+                name="血压默认阈值",
+                normal_systolic={"min": 90, "max": 120},
+                normal_diastolic={"min": 60, "max": 80},
+                warning_systolic={"min": 120, "max": 140},
+                warning_diastolic={"min": 80, "max": 90},
+                critical_systolic={"min": 140, "max": 1000},
+                critical_diastolic={"min": 90, "max": 1000}).to_mongo())
+        systolic = await self._record("blood_pressure_systolic", "150",
+                                      device_type="血压计")
+        # 先录的分量不成对，不评估也不误报
+        self.assertEqual(
+            systolic["metadata"]["health_alert"]["status"], "skipped")
+        self.assertEqual(self.db["health_data_alerts"].docs, [])
+        diastolic = await self.service.record_manual_reading(
+            DEVICE_ID, "blood_pressure_diastolic", "95", "",
+            datetime.utcnow(), actor=self.actor)
+        note = diastolic["metadata"]["health_alert"]
+        self.assertEqual(note["status"], "warning")
+        self.assertTrue(note["alert_id"])
+        alerts = self.db["health_data_alerts"].docs
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["value"], {"systolic": 150.0, "diastolic": 95.0})
+        self.assertEqual(alerts[0]["vital_type"], "blood_pressure")
+
+
+class ManualReadingEndpointResponseTests(unittest.IsolatedAsyncioTestCase):
+    """POST /devices/{id}/readings 响应契约：预警结论经 metadata 如实透出，
+    库内质量标记（quality_flags）属分析侧字段，响应模型不透出。"""
+
+    def setUp(self):
+        self.operator = make_operator()
+        self.device_service = AsyncMock()
+        self.device_service.get_device = AsyncMock(
+            return_value=make_device_doc())
+        now = datetime.utcnow()
+        self.device_service.record_manual_reading = AsyncMock(return_value={
+            "id": str(ObjectId()), "device_id": DEVICE_ID, "timestamp": now,
+            "data_type": "heart_rate", "value": 180.0, "unit": "bpm",
+            "quality_flags": [],
+            "metadata": {"source": "手工登记", "recorded_by": OPERATOR_ID,
+                         "health_alert": {"status": "warning",
+                                          "alert_id": "alert-1"}},
+            "created_at": now})
+        self.device_patch = patch.object(
+            device_router, "device_service", self.device_service)
+        self.device_patch.start()
+        self.db = legacy_domain_state(MagicMock())
+        self.db.users.find_one = AsyncMock(return_value=make_patient_doc(OPERATOR_ID))
+        identity_find_from_lookup(self.db.users)
+        app.dependency_overrides[get_database] = self._fake_database
+        app.dependency_overrides[get_device_service] = lambda: self.device_service
+        self.get_user_mock = AsyncMock(return_value=self.operator)
+        self.lookup = patch.object(UserService, "get_user_by_id", new=self.get_user_mock)
+        self.lookup.start()
+        self.client = httpx.AsyncClient(app=app, base_url="http://test")
+
+    async def _fake_database(self):
+        yield self.db
+
+    async def asyncTearDown(self):
+        await self.client.aclose()
+        self.lookup.stop()
+        self.device_patch.stop()
+        app.dependency_overrides.clear()
+
+    def auth(self):
+        token = jwt.encode({"sub": OPERATOR_ID, "token_type": "access",
+                            "exp": datetime.utcnow() + timedelta(minutes=5)},
+                           settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+        return {"Authorization": f"Bearer {token}"}
+
+    async def test_reading_response_carries_alert_note_and_strips_internal_flags(self):
+        response = await self.client.post(
+            f"/api/devices/{DEVICE_ID}/readings",
+            json={"data_type": "heart_rate", "value": "180", "unit": "bpm",
+                  "measured_at": datetime.utcnow().isoformat()},
+            headers=self.auth())
+        self.assertEqual(response.status_code, 201, response.text)
+        payload = response.json()
+        self.assertEqual(payload["metadata"]["health_alert"]["status"], "warning")
+        self.assertNotIn("quality_flags", payload)  # 响应模型不含分析侧标记
+        self.device_service.record_manual_reading.assert_awaited_once()
 
 
 if __name__ == "__main__":
