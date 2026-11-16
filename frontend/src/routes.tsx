@@ -305,6 +305,8 @@ const ROUTE_ELEMENTS: Record<string, React.ReactNode> = {
   'admin.doctors': <DoctorManagement />,
   'admin.patients': <AdminPatientManagement />,
   'admin.patient-links': <PatientLinks />,
+  'admin.form-fill': <FormFillTasksPage />,
+  'admin.form-fill.detail': <FormFillEmbedPage />,
   'admin.account-bindings': <AccountBindings />,
   'admin.access-applications': <AccessApplications />,
   'admin.integration-runs': <IntegrationRuns />,

@@ -5,13 +5,14 @@
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.auth import get_current_active_user
 from app.db.mongodb import get_database
 from .client import FormPlatformClient, FormPlatformError
 from . import service
+from .candidates import list_fill_candidates
 from .service import FormIntegrationError
 
 def private_response(response: Response):
@@ -46,6 +47,24 @@ def require_fill_entry_enabled() -> None:
         service.require_fill_enabled()
     except FormIntegrationError as exc:
         raise _form_error_response(exc) from exc
+
+
+@router.get("/fill-candidates")
+async def fill_candidates(
+    skip: int = Query(0, ge=0, le=10_000),
+    limit: int = Query(50, ge=1, le=100),
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    client: FormPlatformClient = Depends(get_form_platform_client),
+):
+    """列出当前操作者可发起填报的本地患者及已审核来源表单。"""
+    try:
+        return await list_fill_candidates(
+            db, current_user, client.source_origin, skip=skip, limit=limit)
+    except FormPlatformError as exc:
+        raise HTTPException(status_code=503, detail={
+            "error": "FORM_PLATFORM_NOT_CONFIGURED", "message": "表单平台来源配置无效",
+        }) from exc
 
 
 async def current_fill_delegation(request, db, current_user):

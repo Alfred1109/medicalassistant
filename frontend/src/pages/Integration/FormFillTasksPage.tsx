@@ -5,8 +5,7 @@
  * - 展示当前用户发起的嵌入填报任务（admin 可见全部），支持状态过滤与刷新；
  * - 打开嵌入页（仅 session_created / waiting_fill 可打开）；
  * - 手动确认（向远端核实提交状态）与取消任务；
- * - 任务创建暂通过后端 API（试点阶段）；正式创建入口依赖患者/受试者
- *   映射（DATA01）就绪后另行设计，这里不做模拟创建。
+ * - 从已核实的患者来源和问卷用途创建任务。
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -32,6 +31,7 @@ import {
 } from '@mui/material';
 
 import { RootState } from '../../store';
+import FillTaskCreateDialog from './FillTaskCreateDialog';
 import {
   formIntegrationService,
   FillTask,
@@ -69,8 +69,9 @@ const FormFillTasksPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
-  const rolePrefix = user?.role === 'health_manager' ? 'health-manager' : 'doctor';
+  const rolePrefix = user?.role === 'admin' ? 'admin' : user?.role === 'health_manager' ? 'health-manager' : 'doctor';
 
   const load = useCallback(async (nextQuery: FillTaskListPage) => {
     const currentRequest = ++requestId.current;
@@ -137,11 +138,16 @@ const FormFillTasksPage: React.FC = () => {
   return (
     <Box sx={{ p: 3 }}>
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-        <Typography variant="h5">表单填报任务（113.44 嵌入）</Typography>
-        <Button variant="outlined" onClick={() => void load(queryRef.current)} disabled={loading || busyTaskId !== null}>
-          刷新
-        </Button>
+        <Typography variant="h5">问卷填报任务</Typography>
+        <Box display="flex" gap={1}>
+          <Button variant="outlined" onClick={() => void load(queryRef.current)} disabled={loading || busyTaskId !== null}>刷新</Button>
+          <Button variant="contained" onClick={() => setCreating(true)}>新建任务</Button>
+        </Box>
       </Box>
+      <FillTaskCreateDialog open={creating} onClose={() => setCreating(false)} onCreated={id => {
+        setCreating(false);
+        navigate(`/app/${rolePrefix}/form-fill/${id}`);
+      }} />
 
       <Box display="flex" gap={2} mb={2} alignItems="center">
         <TextField
@@ -194,7 +200,7 @@ const FormFillTasksPage: React.FC = () => {
                 <TableRow>
                   <TableCell colSpan={7} align="center">
                     <Typography variant="body2" color="text.secondary" py={2}>
-                      {error ? '任务加载失败，请重试。' : '暂无填报任务。任务创建暂通过后端 API 发起（试点阶段）。'}
+                      {error ? '任务加载失败，请重试。' : '暂无填报任务，可选择“新建任务”开始填报。'}
                     </Typography>
                   </TableCell>
                 </TableRow>
@@ -277,8 +283,7 @@ const FormFillTasksPage: React.FC = () => {
       />
 
       <Typography sx={{ mt: 2 }} variant="caption" color="text.secondary">
-        返回填报页面可继续同一任务的草稿；“待审阅（已核实）”表示后端已向
-        113.44 核实答卷真实提交。
+        返回填报页面可继续同一任务的草稿；“待审阅（已核实）”表示后端已向问卷系统核实答卷真实提交。
       </Typography>
     </Box>
   );

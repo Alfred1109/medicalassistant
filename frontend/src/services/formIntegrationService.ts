@@ -7,6 +7,7 @@
  */
 
 import apiClient from './apiClient';
+import type { FollowUpWorkbenchPage } from '../types/followup';
 
 export interface FillTaskRemoteRefs {
   project_id: number;
@@ -64,6 +65,35 @@ export interface CreateFillTaskPayload {
   visitCode?: string;
   visitName?: string;
   maTaskRef?: string;
+  followupVisitId?: string;
+}
+
+export interface FillCandidateForm {
+  binding_id: string;
+  form_id: number;
+  version: number;
+  purpose: CreateFillTaskPayload['formPurpose'];
+  title: string;
+}
+
+export interface FillCandidateReference {
+  project_id: number;
+  center_id: number;
+  subject_id: number;
+  forms: FillCandidateForm[];
+}
+
+export interface FillCandidatePatient {
+  patient_id: string;
+  name: string;
+  references: FillCandidateReference[];
+}
+
+export interface FillCandidatesPage {
+  patients: FillCandidatePatient[];
+  skip: number;
+  limit: number;
+  total: number;
 }
 
 export type CreateFillTaskResult = FillTask;
@@ -170,9 +200,20 @@ const buildCreatePayload = (payload: CreateFillTaskPayload): Record<string, unkn
   ...(payload.visitCode ? { visit_code: payload.visitCode } : {}),
   ...(payload.visitName ? { visit_name: payload.visitName } : {}),
   ...(payload.maTaskRef ? { ma_task_ref: payload.maTaskRef } : {}),
+  ...(payload.followupVisitId ? { followup_visit_id: payload.followupVisitId } : {}),
 });
 
 export const formIntegrationService = {
+  async listFillCandidates(skip = 0, limit = 50): Promise<FillCandidatesPage> {
+    return apiClient.get<FillCandidatesPage>('/integrations/forms/fill-candidates', { params: { skip, limit } });
+  },
+
+  async listPatientFollowups(patientId: string, skip = 0, limit = 50): Promise<FollowUpWorkbenchPage> {
+    return apiClient.get<FollowUpWorkbenchPage>('/health-records/followup-workbench', {
+      params: { patient_id: patientId, skip, limit },
+    });
+  },
+
   async listFillTasks(params?: {
     status?: string;
     patientId?: string;
