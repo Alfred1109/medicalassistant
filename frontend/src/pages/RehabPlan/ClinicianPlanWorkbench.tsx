@@ -8,10 +8,10 @@ import type { RootState } from '../../store';
 import httpClient from '../../services/httpClient';
 import { usePatientOptions, type PatientOption } from '../../hooks/usePatientOptions';
 import PatientSelect from '../../components/common/PatientSelect';
-import { rehabClinicalWorkbench as api, type ClinicalPlan, type ClinicalFeedback, type ContraindicationReport,
+import { rehabClinicalWorkbench as api, type ClinicalPlan, type ClinicalFeedback, type ContraindicationReport, type TrainingCycle,
   type DraftItem, type DraftState, type PublicationSignature, type SignatureDeclaration } from '../../services/rehabClinicalWorkbench';
 import { contentForm, contentPayload, emptyContent, findingLines, interventionLabels, operationId, validateItems,
-  workbenchError, type FormContent } from '../../utils/rehabClinicalWorkbench';
+  nextOperationAttempt, workbenchError, type FormContent, type OperationAttempt } from '../../utils/rehabClinicalWorkbench';
 import { FeedbackAttachments } from './PatientPlans';
 import PlanVersionHistoryDialog from '../../components/Rehabilitation/PlanVersionHistoryDialog';
 
@@ -161,12 +161,112 @@ function SignatureRecord({ signature }: { signature: PublicationSignature }) {
   </Paper>;
 }
 
-function FeedbackList({ planId, publication }: { planId: string; publication: DraftState['published'] }) {  const [rows, setRows] = useState<ClinicalFeedback[]>([]);
+function TrainingCycles({ planId, refreshToken }: { planId: string; refreshToken: number }) {
+  const [cycles, setCycles] = useState<TrainingCycle[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [reload, setReload] = useState(0);
+  const [pending, setPending] = useState(false);
+  const [title, setTitle] = useState('');
+  const [start, setStart] = useState('');
+  const [end, setEnd] = useState('');
+  const [editingCycle, setEditingCycle] = useState<TrainingCycle | null>(null);
+  const [note, setNote] = useState<Record<string, string>>({});
+  const cycleAttempt = useRef<OperationAttempt | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true); setError('');
+    api.trainingCycles(planId, controller.signal).then(({ data }) => {
+      if (controller.signal.aborted) return;
+      if (!data || !Array.isArray(data.items) || data.items.some(item => item.plan_id !== planId)) throw new Error('训练周期数据格式异常');
+      setCycles(data.items);
+    }).catch(failure => { if (!controller.signal.aborted) setError(workbenchError(failure, '训练周期加载失败，请重试。')); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [planId, reload, refreshToken]);
+  const create = async () => {
+    if (!title.trim() || !start || !end || end < start) { setError('请填写周期名称和有效的起止日期。'); return; }
+    setPending(true); setError('');
+    try {
+      const body = { title: title.trim(), start_date: start, end_date: end };
+      cycleAttempt.current = nextOperationAttempt(cycleAttempt.current, 'training-cycle:create', body);
+      await api.createTrainingCycle(planId, { request_id: cycleAttempt.current.id, ...body });
+      cycleAttempt.current = null;
+      setTitle(''); setStart(''); setEnd(''); setReload(value => value + 1);
+    } catch (failure) { setError(workbenchError(failure, '训练周期创建失败，请检查日期是否与已有周期重叠。')); }
+    finally { setPending(false); }
+  };
+  const update = async () => {
+    if (!editingCycle || !title.trim() || !start || !end || end < start) { setError('请填写周期名称和有效的起止日期。'); return; }
+    setPending(true); setError('');
+    try {
+      const body = { expected_revision: editingCycle.revision, title: title.trim(), start_date: start, end_date: end };
+      cycleAttempt.current = nextOperationAttempt(cycleAttempt.current, `training-cycle:update:${editingCycle.id}`, body);
+      await api.updateTrainingCycle(planId, editingCycle.id, { request_id: cycleAttempt.current.id, ...body });
+      cycleAttempt.current = null;
+      setEditingCycle(null); setTitle(''); setStart(''); setEnd(''); setReload(value => value + 1);
+    } catch (failure) { setError(workbenchError(failure, '训练周期未更新。开始后的周期或已有训练反馈的周期不能调整。')); }
+    finally { setPending(false); }
+  };
+  const accept = async (cycle: TrainingCycle) => {
+    const acceptanceNote = (note[cycle.id] || '').trim();
+    if (!acceptanceNote) { setError('请填写本周期验收记录。'); return; }
+    setPending(true); setError('');
+    try {
+      const body = { expected_revision: cycle.revision, note: acceptanceNote };
+      cycleAttempt.current = nextOperationAttempt(cycleAttempt.current, `training-cycle:accept:${cycle.id}`, body);
+      await api.acceptTrainingCycle(planId, cycle.id, { request_id: cycleAttempt.current.id, ...body });
+      cycleAttempt.current = null;
+      setNote(value => ({ ...value, [cycle.id]: '' })); setReload(value => value + 1);
+    } catch (failure) { setError(workbenchError(failure, '周期验收未完成，请核对视频核验状态和周期日期后重试。')); }
+    finally { setPending(false); }
+  };
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(new Date());
+  return <Paper variant="outlined" sx={{ p: 2 }}><Stack spacing={1.5}>
+    <Typography variant="h6">训练周期与统一验收</Typography>
+      <Typography variant="body2" color="text.secondary">训练周期由医护单独设置，按北京时间自然日计算。最后一天结束后，且周期内所有需核验的训练视频均已通过，才能提交统一验收记录。</Typography>
+    {error && <Alert severity="error">{error}</Alert>}{loading && <CircularProgress size={22} aria-label="正在读取训练周期" />}
+    {!loading && !cycles.length && <Typography color="text.secondary">尚未设置训练周期。</Typography>}
+    {cycles.map(cycle => {
+      const ended = cycle.end_date < today;
+      const pendingReviews = cycle.pending_reviews_count;
+      const mayAccept = cycle.status === 'open' && ended && pendingReviews === 0;
+      return <Paper variant="outlined" key={cycle.id} sx={{ p: 1.5 }}><Stack spacing={1}>
+        <Stack direction="row" spacing={1} alignItems="center"><Typography fontWeight="medium">{cycle.title}</Typography>
+          <Chip size="small" label={cycle.status === 'accepted' ? '已验收' : ended ? '周期已结束' : '进行中'} color={cycle.status === 'accepted' ? 'success' : 'default'} /></Stack>
+        <Typography variant="body2">周期：{cycle.start_date} 至 {cycle.end_date}</Typography>
+        {cycle.status === 'open' && cycle.start_date > today && cycle.feedback_count === 0 &&
+          <Box><Button size="small" disabled={pending} onClick={() => { cycleAttempt.current = null; setEditingCycle(cycle); setTitle(cycle.title); setStart(cycle.start_date); setEnd(cycle.end_date); }}>调整周期</Button></Box>}
+        {typeof cycle.feedback_count === 'number' && <Typography variant="body2">训练反馈 {cycle.feedback_count} 条 · 已核验 {cycle.verified_count ?? 0} 条 · 待核验 {pendingReviews ?? '—'} 条</Typography>}
+        {cycle.acceptance && <><Typography variant="body2">验收时间：{dateText(cycle.acceptance.accepted_at)}</Typography>
+          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>验收记录：{cycle.acceptance.note}</Typography></>}
+        {cycle.status === 'open' && <><TextField label="周期验收记录" multiline minRows={2} value={note[cycle.id] || ''} disabled={pending || !ended}
+          inputProps={{ maxLength: 2000 }} onChange={event => { cycleAttempt.current = null; setNote(value => ({ ...value, [cycle.id]: event.target.value })); }} />
+          {!ended && <Typography variant="caption" color="text.secondary">周期最后一天结束后，才能进行统一验收。</Typography>}
+          {pendingReviews !== undefined && pendingReviews > 0 && <Alert severity="info">还有 {pendingReviews} 条训练反馈待核验，请完成核验后再验收。</Alert>}
+          <Box><Button variant="contained" disabled={pending || !mayAccept || !(note[cycle.id] || '').trim()} onClick={() => accept(cycle)}>完成本周期验收</Button></Box></>}
+      </Stack></Paper>;
+    })}
+    <Divider /><Typography variant="subtitle1">{editingCycle ? '调整训练周期' : '设置训练周期'}</Typography>
+    <TextField label="周期名称" value={title} disabled={pending} inputProps={{ maxLength: 120 }} onChange={event => { cycleAttempt.current = null; setTitle(event.target.value); }} />
+    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+      <TextField label="开始日期" type="date" value={start} disabled={pending} InputLabelProps={{ shrink: true }} onChange={event => { cycleAttempt.current = null; setStart(event.target.value); }} />
+      <TextField label="结束日期" type="date" value={end} disabled={pending} InputLabelProps={{ shrink: true }} onChange={event => { cycleAttempt.current = null; setEnd(event.target.value); }} />
+    </Stack>
+    <Box><Button variant="outlined" disabled={pending || !title.trim() || !start || !end || end < start}
+      onClick={editingCycle ? update : create}>{editingCycle ? '保存周期调整' : '保存训练周期'}</Button>
+      {editingCycle && <Button disabled={pending} onClick={() => { cycleAttempt.current = null; setEditingCycle(null); setTitle(''); setStart(''); setEnd(''); }}>取消调整</Button>}</Box>
+  </Stack></Paper>;
+}
+
+function FeedbackList({ planId, publication, onReviewChanged }: { planId: string; publication: DraftState['published']; onReviewChanged: () => void }) {  const [rows, setRows] = useState<ClinicalFeedback[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [reload, setReload] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
+  const [reviewing, setReviewing] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     setRows([]); setTotal(0); setLoading(true); setError('');
@@ -182,6 +282,17 @@ function FeedbackList({ planId, publication }: { planId: string; publication: Dr
     return () => controller.abort();
   }, [planId, page, reload]);
   const labels = { completed: '已执行', partial: '部分执行', not_done: '未执行' };
+  const review = async (row: ClinicalFeedback, status: 'verified' | 'return_for_supplement') => {
+    const note = (reviewNotes[row.id] || '').trim();
+    if (!note) { setError('请填写本次视频核验意见。'); return; }
+    setReviewing(true); setError('');
+    try {
+      const revision = row.clinical_review?.revision ?? 0;
+      await api.reviewFeedback(planId, row.id, { expected_revision: revision, status, note });
+      setReviewNotes(value => ({ ...value, [row.id]: '' })); setReload(value => value + 1); onReviewChanged();
+    } catch (failure) { setError(workbenchError(failure, '视频核验未保存，请刷新反馈后重试。')); }
+    finally { setReviewing(false); }
+  };
   return <Stack spacing={1.5}>
     <Stack direction="row" justifyContent="space-between"><Typography variant="h6">患者执行反馈</Typography>
       <Button onClick={() => setReload(value => value + 1)} disabled={loading}>刷新反馈</Button></Stack>
@@ -195,6 +306,17 @@ function FeedbackList({ planId, publication }: { planId: string; publication: Dr
       <Typography>{labels[row.execution_status] || '执行情况未识别'} · {dateText(row.performed_at)}</Typography>
       <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{row.feelings}</Typography>
       <FeedbackAttachments planId={planId} items={row.attachments} />
+      {row.supplements?.map(supplement => <Box key={supplement.id}><Typography variant="body2">患者补充：{supplement.note}</Typography>
+        <FeedbackAttachments planId={planId} items={supplement.attachments} /></Box>)}
+      {row.intervention_type === 'exercise' && row.execution_status !== 'not_done' && <Stack spacing={1} sx={{ mt: 1 }}>
+        <Typography variant="subtitle2">训练视频人工核验：{row.clinical_review?.status === 'verified' ? '已通过' : row.clinical_review?.status === 'return_for_supplement' ? '已退回补充' : '待核验'}</Typography>
+        {row.clinical_review?.reviewed_at && <Typography variant="body2">最近核验：{dateText(row.clinical_review.reviewed_at)}</Typography>}
+        {row.clinical_review?.note && <Typography variant="body2">核验意见：{row.clinical_review.note}</Typography>}
+        {row.clinical_review?.status === 'pending' && <><TextField label="本次核验意见" multiline minRows={2} value={reviewNotes[row.id] || ''} disabled={reviewing}
+          inputProps={{ maxLength: 2000 }} onChange={event => setReviewNotes(value => ({ ...value, [row.id]: event.target.value }))} />
+          <Stack direction="row" spacing={1}><Button disabled={reviewing || !(reviewNotes[row.id] || '').trim()} onClick={() => review(row, 'verified')}>核验通过</Button>
+            <Button color="warning" disabled={reviewing || !(reviewNotes[row.id] || '').trim()} onClick={() => review(row, 'return_for_supplement')}>退回补充</Button></Stack></>}
+      </Stack>}
     </Paper>)}
     {total > LIMIT && <TablePagination component="div" count={total} page={page} rowsPerPage={LIMIT} rowsPerPageOptions={[]}
       onPageChange={(_, next) => setPage(next)} labelDisplayedRows={({ from, to, count }) => `${from}-${to} 共 ${count}`} />}
@@ -237,6 +359,7 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
   const [withdrawAction, setWithdrawAction] = useState<'withdraw' | 'cancel' | 'archive'>('withdraw');
   // T77 方案版本历史（管理页内直达入口）
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [cycleRefresh, setCycleRefresh] = useState(0);
   const alive = useRef(true);
   const attempt = useRef<{ signature: string; id: string } | null>(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -360,7 +483,9 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
           <TextField label="处理原因" multiline minRows={2} value={reason} disabled={pending || needsReload} inputProps={{ maxLength: 2000 }} onChange={event => setReason(event.target.value)} />
           <Box><Button color="error" disabled={pending || needsReload || !reason.trim()} onClick={withdraw}>确认停止患者查看</Button></Box>
         </>}
-        <Divider /><FeedbackList key={`${plan._id}:${snapshot.published_version_id}`} planId={plan._id} publication={snapshot.published} />
+        <Divider /><TrainingCycles key={`${plan._id}:training-cycles`} planId={plan._id} refreshToken={cycleRefresh} />
+        <FeedbackList key={`${plan._id}:${snapshot.published_version_id}`} planId={plan._id} publication={snapshot.published}
+          onReviewChanged={() => setCycleRefresh(value => value + 1)} />
       </>}
     </Stack></DialogContent>
     <DialogActions><Button disabled={pending} onClick={onClose}>关闭</Button></DialogActions>

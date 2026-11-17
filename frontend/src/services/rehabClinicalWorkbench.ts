@@ -41,7 +41,19 @@ export interface DraftState {
   publication_revision: number; has_publication_history: boolean;
   published?: PublishedRehabPlan | null; signature?: PublicationSignature | null;
 }
-export interface ClinicalFeedback extends PatientRehabFeedback { plan_id: string; submitted_at?: string; }
+export interface ClinicalFeedback extends PatientRehabFeedback {
+  plan_id: string; submitted_at?: string; cycle_id?: string | null;
+  intervention_type?: 'exercise' | 'diet' | 'medication' | 'psychology' | null;
+  clinical_review?: { status: 'pending' | 'verified' | 'return_for_supplement'; revision: number;
+    note?: string | null; reviewed_at?: string | null };
+  supplements?: { id: string; note: string; submitted_at: string; attachments?: { id: string; content_type: string; name: string }[] }[];
+}
+export interface TrainingCycle {
+  id: string; plan_id: string; title: string; start_date: string; end_date: string;
+  status: 'open' | 'accepted'; revision: number;
+  acceptance?: { status: 'accepted'; note: string; accepted_at: string };
+  pending_reviews_count?: number; feedback_count?: number; verified_count?: number;
+}
 const root = '/rehabilitation/publications/plans';
 const planPath = (id: string) => `${root}/${encodeURIComponent(id)}`;
 
@@ -69,4 +81,17 @@ export const rehabClinicalWorkbench = {
   feedback: (id: string, skip: number, limit: number, signal?: AbortSignal) => api.get<{
     items: ClinicalFeedback[]; total: number; skip: number; limit: number;
   }>(`/rehabilitation/plans/${encodeURIComponent(id)}/patient-feedback`, { params: { skip, limit }, signal }),
+  reviewFeedback: (planId: string, feedbackId: string, body: { expected_revision: number;
+    status: 'verified' | 'return_for_supplement'; note: string }) => api.post<{ feedback: ClinicalFeedback }>(
+    `/rehabilitation/plans/${encodeURIComponent(planId)}/patient-feedback/${encodeURIComponent(feedbackId)}/review`, body),
+  trainingCycles: (planId: string, signal?: AbortSignal) => api.get<{ items: TrainingCycle[]; total: number }>(
+    `/rehabilitation/plans/${encodeURIComponent(planId)}/training-cycles`, { signal }),
+  createTrainingCycle: (planId: string, body: { request_id: string; title: string; start_date: string; end_date: string }) =>
+    api.post<{ cycle: TrainingCycle; created: boolean }>(`/rehabilitation/plans/${encodeURIComponent(planId)}/training-cycles`, body),
+  updateTrainingCycle: (planId: string, cycleId: string, body: { request_id: string; expected_revision: number;
+    title: string; start_date: string; end_date: string }) => api.put<{ cycle: TrainingCycle; updated: boolean }>(
+    `/rehabilitation/plans/${encodeURIComponent(planId)}/training-cycles/${encodeURIComponent(cycleId)}`, body),
+  acceptTrainingCycle: (planId: string, cycleId: string, body: { request_id: string; expected_revision: number; note: string }) =>
+    api.post<{ cycle: TrainingCycle; created: boolean }>(
+      `/rehabilitation/plans/${encodeURIComponent(planId)}/training-cycles/${encodeURIComponent(cycleId)}/acceptance`, body),
 };

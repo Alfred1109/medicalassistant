@@ -4,7 +4,7 @@ import { Alert, Box, Button, Card, CardContent, CircularProgress, Container, Div
 import { useSelector } from 'react-redux';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { RootState } from '../../store';
-import { rehabPublications, type PatientRehabAttachment, type PatientRehabFeedback, type PublishedRehabPlan, type RehabInterventionType } from '../../services/rehabPublications';
+import { rehabPublications, type PatientRehabAttachment, type PatientRehabFeedback, type PatientTrainingCycle, type PublishedRehabPlan, type RehabInterventionType } from '../../services/rehabPublications';
 import { patientDomainErrorCopy } from '../../services/patientErrors';
 
 const categories: Record<RehabInterventionType, string> = {
@@ -101,7 +101,7 @@ export function FeedbackAttachments({ planId, items }: { planId: string; items?:
   return <Stack spacing={1}>{items.map(item => <FeedbackFile key={item.id} planId={planId} item={item} />)}</Stack>;
 }
 
-function FeedbackForm({ plan, itemId, onSaved, onUnavailable }: { plan: PublishedRehabPlan; itemId: string; onSaved: () => void; onUnavailable: () => void }) {
+function FeedbackForm({ plan, itemId, isExercise, onSaved, onUnavailable }: { plan: PublishedRehabPlan; itemId: string; isExercise: boolean; onSaved: () => void; onUnavailable: () => void }) {
   const [status, setStatus] = useState<PatientRehabFeedback['execution_status'] | ''>('');
   const [feelings, setFeelings] = useState('');
   const [when, setWhen] = useState('');
@@ -117,6 +117,9 @@ function FeedbackForm({ plan, itemId, onSaved, onUnavailable }: { plan: Publishe
       setError('请选择执行情况，填写感受和执行时间。'); return;
     }
     if (files.length > 4) { setError('每次最多上传 4 个图片或视频。'); return; }
+    if (isExercise && status !== 'not_done' && !files.some(file => ['video/mp4', 'video/webm'].includes(file.type))) {
+      setError('请上传训练视频，供医护核验。'); return;
+    }
     try { if (!attempt.current) attempt.current = newRequestId(); }
     catch (failure) { setError(failure instanceof Error ? failure.message : '无法安全创建提交，请更换浏览器。'); return; }
     setPending(true); setError(''); setMessage('');
@@ -149,6 +152,7 @@ function FeedbackForm({ plan, itemId, onSaved, onUnavailable }: { plan: Publishe
     </TextField>
     <TextField label="执行时间" type="datetime-local" size="small" value={when} disabled={pending} onChange={event => { changed(); setWhen(event.target.value); }} InputLabelProps={{ shrink: true }} />
     <TextField label="您的感受或遇到的问题" multiline minRows={2} value={feelings} disabled={pending} inputProps={{ maxLength: 2000 }} onChange={event => { changed(); setFeelings(event.target.value); }} />
+    {isExercise && <Typography variant="body2" color="text.secondary">已执行或部分执行时，请上传训练视频供医护核验；未执行可不上传。</Typography>}
     <Button component="label" disabled={pending}>上传图片或视频
       <input hidden type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" multiple onChange={event => {
         changed();
@@ -159,6 +163,41 @@ function FeedbackForm({ plan, itemId, onSaved, onUnavailable }: { plan: Publishe
     {files.map(file => <Typography key={`${file.name}:${file.size}:${file.lastModified}`} variant="body2">{file.name}</Typography>)}
     {error && <Alert severity="error">{error}</Alert>}{message && <Alert severity="success">{message}</Alert>}
     <Box><Button variant="outlined" disabled={pending} onClick={submit}>提交反馈</Button></Box>
+  </Stack>;
+}
+
+function SupplementForm({ planId, feedbackId, onSaved }: { planId: string; feedbackId: string; onSaved: () => void }) {
+  const [note, setNote] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState('');
+  const attempt = useRef<string | null>(null);
+  const uploaded = useRef<{ file: File; id: string } | null>(null);
+  const submit = async () => {
+    if (!note.trim() || !file || !['video/mp4', 'video/webm'].includes(file.type)) {
+      setError('请填写补充说明并上传训练视频。'); return;
+    }
+    setPending(true); setError('');
+    try {
+      if (!attempt.current) attempt.current = newRequestId();
+      if (uploaded.current?.file !== file) {
+        const { data } = await rehabPublications.uploadFeedbackMedia(planId, file);
+        if (!data?.id) throw new Error('视频上传失败');
+        uploaded.current = { file, id: data.id };
+      }
+      await rehabPublications.supplement(planId, feedbackId, { event_id: attempt.current, note: note.trim(), media_ids: [uploaded.current.id] });
+      setNote(''); setFile(null); attempt.current = null; uploaded.current = null; onSaved();
+    } catch { setError('补充提交失败，请刷新反馈或重试。'); }
+    finally { setPending(false); }
+  };
+  return <Stack spacing={1} sx={{ mt: 1 }}>
+    <TextField label="补充说明" value={note} disabled={pending} multiline onChange={event => { setNote(event.target.value); attempt.current = null; }} />
+    <Button component="label" disabled={pending}>选择补充训练视频
+      <input hidden type="file" accept="video/mp4,video/webm" onChange={event => { setFile(event.target.files?.[0] || null); attempt.current = null; event.target.value = ''; }} />
+    </Button>
+    {file && <Typography variant="body2">{file.name}</Typography>}
+    {error && <Alert severity="error">{error}</Alert>}
+    <Box><Button disabled={pending} onClick={submit}>提交补充，等待医护重新核验</Button></Box>
   </Stack>;
 }
 
@@ -181,11 +220,35 @@ function PlanSummary({ plan, onFeedbackSaved, onUnavailable }: { plan: Published
               <Box><Typography variant="body2">本项指导动作</Typography><video src={item.guidance_video_url} controls style={{ width: '100%', maxHeight: 320 }} /></Box>}
             {([['安排', item.schedule], ['疗程', item.course], ['执行要求', item.execution_requirements], ['饮食内容', item.diet_fields], ['用药内容', item.medication_fields], ['心理内容', item.psychology_fields], ['医护提示', item.patient_instructions], ['注意事项', item.contraindications]] as const).map(([label, value]) => displayValue(value) &&
               <Typography key={label} variant="body2" sx={{ overflowWrap: 'anywhere' }}>{label}：{displayValue(value)}</Typography>)}
-            <FeedbackForm key={`${plan.version_id}:${item.item_id}`} plan={plan} itemId={item.item_id} onSaved={onFeedbackSaved} onUnavailable={onUnavailable} />
+            <FeedbackForm key={`${plan.version_id}:${item.item_id}`} plan={plan} itemId={item.item_id} isExercise={type === 'exercise'} onSaved={onFeedbackSaved} onUnavailable={onUnavailable} />
           </Paper>)}</Stack>}
       </Box>;
     })}
   </Stack>;
+}
+
+function PatientCycles({ planId }: { planId: string }) {
+  const [cycles, setCycles] = useState<PatientTrainingCycle[]>([]);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    const controller = new AbortController();
+    rehabPublications.trainingCycles(planId, controller.signal).then(({ data }) => {
+      if (!Array.isArray(data.items)) throw new Error('invalid cycles');
+      if (!controller.signal.aborted) setCycles(data.items);
+    }).catch(() => { if (!controller.signal.aborted) setError('暂时无法读取训练周期。'); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [planId]);
+  return <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 } }}><Stack spacing={1}>
+    <Typography variant="h6">训练周期与验收</Typography>
+    {error && <Alert severity="error">{error}</Alert>}
+    {loading && <CircularProgress size={20} aria-label="正在加载训练周期" />}
+    {!loading && !error && cycles.length === 0 && <Typography color="text.secondary">医护尚未设置训练周期。</Typography>}
+    {cycles.map(cycle => <Box key={cycle.id}><Typography>{cycle.title} · {cycle.start_date} 至 {cycle.end_date}</Typography>
+      <Typography variant="body2">{cycle.status === 'accepted' ? '医护已完成周期验收' : '周期尚未验收'}{cycle.acceptance?.accepted_at ? ` · ${dateText(cycle.acceptance.accepted_at)}` : ''}</Typography>
+      {cycle.acceptance?.note && <Typography variant="body2">医护验收意见：{cycle.acceptance.note}</Typography>}</Box>)}
+  </Stack></Paper>;
 }
 
 export function PatientPlanList() {
@@ -287,11 +350,16 @@ function PatientPlanDetailForActor({ id, accountId }: { id?: string; accountId: 
     {plan && <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 } }}><PlanSummary plan={plan}
       onFeedbackSaved={() => { setHistoryPage(0); setHistoryReload(value => value + 1); }}
       onUnavailable={() => { setPlan(null); setHistory([]); setError('当前无权查看该方案或方案已撤回，请刷新确认。'); }} /></Paper>}
+    {plan && <PatientCycles planId={plan.id} />}
     {plan && <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 } }}><Stack spacing={1}><Typography variant="h6">我的反馈</Typography>
       {historyError && <Alert severity="error">{historyError}</Alert>}
       {historyLoading && <CircularProgress size={20} aria-label="正在加载反馈" />}
       {!historyLoading && !historyError && history.length === 0 && <Typography color="text.secondary">暂无反馈记录。</Typography>}
-      {history.map(record => <Box key={record.id}><Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{feedbackReference(record, plan)}</Typography><Typography variant="body2">{dateText(record.performed_at)} · {record.execution_status === 'completed' ? '已执行' : record.execution_status === 'partial' ? '部分执行' : '未执行'}</Typography><Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{record.feelings}</Typography><FeedbackAttachments planId={plan.id} items={record.attachments} /></Box>)}
+      {history.map(record => <Box key={record.id}><Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{feedbackReference(record, plan)}</Typography><Typography variant="body2">{dateText(record.performed_at)} · {record.execution_status === 'completed' ? '已执行' : record.execution_status === 'partial' ? '部分执行' : '未执行'}</Typography><Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{record.feelings}</Typography><FeedbackAttachments planId={plan.id} items={record.attachments} />
+        {record.intervention_type === 'exercise' && record.execution_status !== 'not_done' && record.clinical_review && <Typography variant="body2">医护核验：{record.clinical_review.status === 'verified' ? '通过' : record.clinical_review.status === 'return_for_supplement' ? '退回补充' : '待核验'}{record.clinical_review.note ? ` · ${record.clinical_review.note}` : ''}</Typography>}
+        {record.supplements?.map(supplement => <Box key={supplement.id} sx={{ mt: 1 }}><Typography variant="body2">补充于 {dateText(supplement.submitted_at)}：{supplement.note}</Typography><FeedbackAttachments planId={plan.id} items={supplement.attachments} /></Box>)}
+        {record.clinical_review?.status === 'return_for_supplement' && <SupplementForm planId={plan.id} feedbackId={record.id} onSaved={() => setHistoryReload(value => value + 1)} />}
+      </Box>)}
       {historyTotal > 20 && <Stack direction="row" alignItems="center" spacing={1}><Button disabled={historyLoading || historyPage === 0} onClick={() => setHistoryPage(value => value - 1)}>上一页</Button><Typography variant="body2">第 {historyPage + 1} 页，共 {historyTotal} 条</Typography><Button disabled={historyLoading || (historyPage + 1) * 20 >= historyTotal} onClick={() => setHistoryPage(value => value + 1)}>下一页</Button></Stack>}
     </Stack></Paper>}
   </Stack></Container>;

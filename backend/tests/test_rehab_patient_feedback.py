@@ -77,13 +77,24 @@ class FeedbackReplicaTests(unittest.IsolatedAsyncioTestCase):
         self.mongo.close()
 
     def payload(self, **changes):
+        status = changes.get("execution_status", "partial")
+        media_ids = changes.pop("media_ids", None)
+        if media_ids is None and status in {"completed", "partial"}:
+            media_ids = [uuid4().hex]
         return PatientFeedbackCreate.model_validate({"event_id": str(uuid4()),
             "version_id": str(self.version), "prescription_item_id": str(self.item),
             "execution_status": "partial", "feelings": "需要休息后再继续",
-            "performed_at": datetime.now(timezone.utc) - timedelta(minutes=10), **changes})
+            "performed_at": datetime.now(timezone.utc) - timedelta(minutes=10),
+            **({"media_ids": media_ids} if media_ids is not None else {}), **changes})
 
     async def submit(self, payload=None, actor=None):
-        return await self.service.submit(str(self.plan), payload or self.payload(), actor or self.actor)
+        payload = payload or self.payload()
+        for media_id in payload.media_ids:
+            await self.db.patient_feedback_media.update_one({"_id": media_id}, {"$setOnInsert": {
+                "_id": media_id, "plan_id": str(self.plan), "patient_id": str(self.patient),
+                "content_type": "video/mp4", "name": "训练.mp4", "suffix": ".mp4",
+                "bound_event_id": None, "created_at": datetime.now(timezone.utc)}}, upsert=True)
+        return await self.service.submit(str(self.plan), payload, actor or self.actor)
 
     async def test_concurrent_identical_submit_is_one_immutable_report_and_no_derived_progress(self):
         payload = self.payload()
@@ -127,6 +138,30 @@ class FeedbackReplicaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mismatch.exception.error_code, "REHAB_FEEDBACK_ITEM_MISMATCH")
         self.assertEqual(await self.db.rehab_execution_events.count_documents({}), 0)
 
+    async def test_completed_exercise_requires_video_and_image_alone_is_insufficient(self):
+        no_media = self.payload(execution_status="completed", media_ids=[])
+        with self.assertRaises(AppBaseException) as no_video:
+            await self.submit(no_media)
+        self.assertEqual(no_video.exception.error_code, "REHAB_FEEDBACK_VIDEO_REQUIRED")
+        image_id = uuid4().hex
+        await self.db.patient_feedback_media.insert_one({"_id": image_id,
+            "plan_id": str(self.plan), "patient_id": str(self.patient),
+            "content_type": "image/jpeg", "name": "image.jpg", "suffix": ".jpg",
+            "bound_event_id": None, "created_at": datetime.now(timezone.utc)})
+        image_only = self.payload(execution_status="partial", media_ids=[image_id])
+        with self.assertRaises(AppBaseException) as no_training_video:
+            await self.submit(image_only)
+        self.assertEqual(no_training_video.exception.error_code, "REHAB_FEEDBACK_VIDEO_REQUIRED")
+        self.assertEqual(await self.db.rehab_execution_events.count_documents({}), 0)
+
+    async def test_video_requirement_does_not_apply_to_non_exercise_interventions(self):
+        diet_item = str(ObjectId())
+        await self.db.rehab_plan_versions.update_one({"_id": self.version}, {"$push": {
+            "items_snapshot": {"item_id": diet_item, "name": "饮食记录", "intervention_type": "diet"}}})
+        payload = self.payload(execution_status="completed", prescription_item_id=diet_item, media_ids=[])
+        result = await self.submit(payload)
+        self.assertEqual(result.feedback.execution_status, "completed")
+
     async def test_history_is_role_scoped_typed_and_paginated_and_revocation_is_immediate(self):
         for status in ("completed", "partial", "not_done"):
             await self.submit(self.payload(execution_status=status))
@@ -150,6 +185,11 @@ class FeedbackReplicaTests(unittest.IsolatedAsyncioTestCase):
     async def test_rest_contract_is_private_and_replay_uses_200(self):
         url = f"/api/rehabilitation/plans/{self.plan}/patient-feedback"
         body = self.payload().model_dump(mode="json")
+        for media_id in body["media_ids"]:
+            await self.db.patient_feedback_media.insert_one({"_id": media_id,
+                "plan_id": str(self.plan), "patient_id": str(self.patient),
+                "content_type": "video/mp4", "name": "训练.mp4", "suffix": ".mp4",
+                "bound_event_id": None, "created_at": datetime.now(timezone.utc)})
         first = await self.client.post(url, json=body)
         self.assertEqual(first.status_code, 201, first.text)
         replay = await self.client.post(url, json=body)

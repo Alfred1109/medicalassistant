@@ -53,6 +53,11 @@ export function operationId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
+export type OperationAttempt = { signature: string; id: string };
+export function nextOperationAttempt(current: OperationAttempt | null, action: string, body: unknown): OperationAttempt {
+  const signature = JSON.stringify([action, body]);
+  return current?.signature === signature ? current : { signature, id: operationId() };
+}
 export function workbenchError(error: unknown, fallback: string): string {
   // 患者域错误（如 503 REHAB_PATIENT_DOMAIN_UNSUPPORTED）优先使用统一提示文案
   const patientCopy = patientDomainErrorCopy(error);

@@ -588,7 +588,7 @@ class SinglePatientClosedLoopLocalTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as media_dir:
             with patch("app.services.rehab_feedback_service.MEDIA_DIR", Path(media_dir)):
                 stored = await feedback.save_media(
-                    plan, patient, b"closed-loop-media", "image/png", "闭环训练照片")
+                    plan, patient, b"closed-loop-media", "video/mp4", "闭环训练视频")
                 media_id = stored["id"]
                 request = PatientFeedbackCreate(
                     event_id=uuid4(), version_id=version_id,
@@ -603,7 +603,7 @@ class SinglePatientClosedLoopLocalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(replayed.created)
                 self.assertEqual(replayed.feedback.id, submitted.feedback.id)
                 path, content_type = await feedback.open_media(plan, media_id, patient)
-                self.assertEqual(content_type, "image/png")
+                self.assertEqual(content_type, "video/mp4")
                 self.assertTrue(Path(path).is_file())
                 with self.assertRaises(AppBaseException) as media_conflict:
                     await feedback.submit(

@@ -8,6 +8,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError, PyMongoError
@@ -15,7 +16,8 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from app.core.exceptions import AppBaseException
 from app.core.patient_access import patient_domain_context
 from app.schemas.rehab_feedback import (
-    PatientFeedbackCreate, PatientFeedbackPage, PatientFeedbackResponse,
+    ClinicalFeedbackReview, PatientFeedbackCreate, PatientFeedbackPage,
+    PatientFeedbackResponse, PatientFeedbackSupplement,
     PatientFeedbackResult,
 )
 from app.services.rehab_publication_service import RehabPublicationService, run_rehab_transaction
@@ -23,6 +25,7 @@ from app.services.rehab_publication_service import RehabPublicationService, run_
 PATIENT_REPORT = "patient_report"
 REPORT_NAMESPACE = "patient-report:"
 REPORT_SCHEMA = 1
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 EVENT_INDEX = "uniq_plan_event_id"
 MEDIA_DIR = Path(__file__).resolve().parents[2] / "data" / "patient-feedback"
 MEDIA_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
@@ -67,7 +70,11 @@ def _response(document):
             execution_status=document["execution_status"], feelings=document["feelings"],
             performed_at=_utc(document["performed_at"]), recorded_by=document["recorded_by"],
             created_at=_utc(document["created_at"]),
-            attachments=document.get("attachments") or [])
+            attachments=document.get("attachments") or [], cycle_id=document.get("cycle_id"),
+            intervention_type=document.get("intervention_type"),
+            clinical_review=RehabFeedbackService._review_projection(document.get("clinical_review")),
+            supplements=[RehabFeedbackService._supplement_projection(item)
+                         for item in document.get("supplements") or []])
     except (KeyError, TypeError, ValueError, AttributeError):
         raise _error("REHAB_FEEDBACK_INVALID_HISTORY", "反馈历史格式异常，请联系管理员核查", 503) from None
 
@@ -96,6 +103,21 @@ class RehabFeedbackService:
         self.db = db
         self.events = db.rehab_execution_events
         self.publication = RehabPublicationService(db)
+
+    @staticmethod
+    def _review_projection(value):
+        if not isinstance(value, dict):
+            return {"status": "pending", "revision": 0, "note": "", "reviewed_at": None}
+        reviewed_at = value.get("reviewed_at")
+        return {"status": value.get("status", "pending"),
+                "revision": value.get("revision", 0), "note": value.get("note", ""),
+                "reviewed_at": _utc(reviewed_at) if isinstance(reviewed_at, datetime) else None}
+
+    @staticmethod
+    def _supplement_projection(value):
+        return {"id": value["id"], "event_id": value["event_id"],
+                "note": value["note"], "submitted_at": _utc(value["submitted_at"]),
+                "attachments": value.get("attachments") or []}
 
     async def _plan(self, plan_id, *, session=None):
         if not ObjectId.is_valid(plan_id):
@@ -130,6 +152,30 @@ class RehabFeedbackService:
         return {"plan_id": str(plan["_id"]), "patient_id": patient_id,
                 "recorded_by": recorded_by, "event_type": PATIENT_REPORT,
                 "schema_version": REPORT_SCHEMA}
+
+    async def _feedback_intervention_type(self, document, session=None):
+        version_id = document.get("version_id")
+        if not isinstance(version_id, str) or not ObjectId.is_valid(version_id):
+            raise _error("REHAB_FEEDBACK_INVALID_HISTORY", "反馈方案版本无效，无法核验", 503)
+        version = await self.db.rehab_plan_versions.find_one({"_id": ObjectId(version_id),
+            "plan_id": document.get("plan_id"), "workflow": "patient_publication",
+            "status": {"$in": ["published", "withdrawn"]}},
+            {"items_snapshot": 1}, session=session)
+        if not version:
+            raise _error("REHAB_FEEDBACK_INVALID_HISTORY", "反馈方案版本不存在，无法核验", 503)
+        item = next((item for item in version.get("items_snapshot", [])
+                     if isinstance(item, dict) and item.get("item_id") == document.get("prescription_item_id")), None)
+        if not item or item.get("intervention_type") not in {"exercise", "diet", "medication", "psychology"}:
+            raise _error("REHAB_FEEDBACK_INVALID_HISTORY", "反馈处方项无效，无法核验", 503)
+        return item["intervention_type"]
+
+    async def _cycle_for_feedback(self, plan_id, performed_at, session=None):
+        local_day = _utc(performed_at).astimezone(SHANGHAI).date().isoformat()
+        cycles = await self.db.rehab_training_cycles.find({"plan_id": plan_id,
+            "start_date": {"$lte": local_day}, "end_date": {"$gte": local_day}}, session=session).to_list(length=2)
+        if len(cycles) > 1:
+            raise _error("REHAB_TRAINING_CYCLE_OVERLAP", "存在重叠训练周期，暂不能记录训练", 503)
+        return cycles[0] if cycles else None
 
     async def submit(self, plan_id, payload: PatientFeedbackCreate, actor):
         if getattr(actor, "role", None) != "patient":
@@ -169,6 +215,7 @@ class RehabFeedbackService:
                     isinstance(item, dict) and item.get("item_id") == payload.prescription_item_id
                     for item in snapshots):
                 raise _error("REHAB_FEEDBACK_ITEM_MISMATCH", "该处方项不属于已确认的发布版本")
+            item_snapshot = next(item for item in snapshots if item.get("item_id") == payload.prescription_item_id)
             # A real write serializes feedback against publication/withdrawal.
             # Mongo no-op writes cannot provide this guarantee.
             # （R1-A2 收敛：_publication_fence 载体复用 publication._touch_plan
@@ -186,14 +233,31 @@ class RehabFeedbackService:
             now = datetime.now(timezone.utc)
             if payload.performed_at > now:
                 raise _error("REHAB_FEEDBACK_FUTURE_TIME", "执行时间不能晚于当前时间", 422)
+            if (item_snapshot.get("intervention_type") == "exercise"
+                    and payload.execution_status.value in {"completed", "partial"}
+                    and not any(item["content_type"].startswith("video/") for item in attachments)):
+                raise _error("REHAB_FEEDBACK_VIDEO_REQUIRED", "已执行或部分执行的训练必须上传训练视频", 422)
+            cycle = None
+            if item_snapshot.get("intervention_type") == "exercise":
+                cycle = await self._cycle_for_feedback(str(plan["_id"]), payload.performed_at, session=session)
+                configured_cycles = await self.db.rehab_training_cycles.find_one(
+                    {"plan_id": str(plan["_id"])}, {"_id": 1}, session=session)
+                if configured_cycles and cycle is None:
+                    raise _error("REHAB_TRAINING_CYCLE_REQUIRED", "本次训练时间不在医护设置的训练周期内", 422)
+            if cycle and cycle.get("status") == "accepted":
+                raise _error("REHAB_TRAINING_CYCLE_ACCEPTED", "该训练周期已验收，不能再添加训练反馈")
             document = {"_id": ObjectId(), **(await self._identity_query(plan, session=session, context=context)),
                 "event_id": event_id, "client_event_id": str(payload.event_id),
                 "request_fingerprint": fingerprint, "version_id": payload.version_id,
                 "version_no": version.get("version_no"),
                 "prescription_item_id": payload.prescription_item_id,
+                "intervention_type": item_snapshot["intervention_type"],
                 "execution_status": payload.execution_status.value, "feelings": payload.feelings,
                 "performed_at": payload.performed_at, "created_at": now,
-                "attachments": attachments, "source": "patient_self_report"}
+                "attachments": attachments, "source": "patient_self_report",
+                "cycle_id": cycle["_id"] if cycle else None,
+                "clinical_review": {"status": "pending", "revision": 0,
+                                    "note": "", "history": []}, "supplements": []}
             await self.events.insert_one(document, session=session)
             return PatientFeedbackResult(feedback=_response(document), created=True)
 
@@ -203,6 +267,114 @@ class RehabFeedbackService:
             except AppBaseException as error:
                 if not isinstance(error.__cause__, DuplicateKeyError) or attempt == 2:
                     raise
+
+    async def review(self, plan_id, feedback_id, payload: ClinicalFeedbackReview, actor):
+        if getattr(actor, "role", None) not in {"doctor", "health_manager"}:
+            raise _error("REHAB_CLINICIAN_REQUIRED", "需要医护核验权限", 403)
+        if not ObjectId.is_valid(feedback_id):
+            raise _error("REHAB_FEEDBACK_NOT_FOUND", "训练反馈不存在", 404)
+
+        async def write(session):
+            plan = await self._plan(plan_id, session=session)
+            await self.publication._authorize(plan, actor, session, write=True, fence=True)
+            document = await self.events.find_one({"_id": ObjectId(feedback_id),
+                "plan_id": str(plan["_id"]), "event_type": PATIENT_REPORT,
+                "schema_version": REPORT_SCHEMA}, session=session)
+            if not document:
+                raise _error("REHAB_FEEDBACK_NOT_FOUND", "训练反馈不存在", 404)
+            current = document.get("clinical_review") or {"status": "pending", "revision": 0,
+                                                           "note": "", "history": []}
+            if current.get("status") != "pending":
+                raise _error("REHAB_FEEDBACK_REVIEW_CONFLICT", "该反馈已核验，请刷新后查看")
+            if current.get("revision", 0) != payload.expected_revision:
+                raise _error("REHAB_FEEDBACK_REVIEW_CONFLICT", "反馈核验状态已变化，请刷新后重试")
+            if await self._feedback_intervention_type(document, session=session) != "exercise":
+                raise _error("REHAB_FEEDBACK_REVIEW_NOT_EXERCISE", "此核验流程只适用于运动训练反馈", 422)
+            if document.get("execution_status") not in {"completed", "partial"}:
+                raise _error("REHAB_FEEDBACK_REVIEW_NOT_REQUIRED", "未执行的训练反馈无需视频核验", 422)
+            if payload.status == "verified":
+                attachments = list(document.get("attachments") or [])
+                for supplement in document.get("supplements") or []:
+                    attachments.extend(supplement.get("attachments") or [])
+                if not any(item.get("content_type", "").startswith("video/") for item in attachments):
+                    raise _error("REHAB_FEEDBACK_VIDEO_REQUIRED", "没有训练视频，不能核验通过；请退回患者补充", 422)
+            cycle = await self._cycle_for_feedback(str(plan["_id"]), document["performed_at"], session=session)
+            if cycle and cycle.get("status") == "accepted":
+                raise _error("REHAB_TRAINING_CYCLE_ACCEPTED", "该训练周期已验收，不能再修改核验")
+            stamp = datetime.now(timezone.utc)
+            item = {"status": payload.status, "revision": payload.expected_revision + 1,
+                    "note": payload.note.strip(), "reviewed_at": stamp,
+                    "reviewed_by": str(actor.id)}
+            history = list(current.get("history") or []) + [item]
+            review = {**item, "history": history}
+            await self.publication._touch_plan(plan, session)
+            revision_filter = {"_id": document["_id"], "$or": [
+                {"clinical_review.revision": payload.expected_revision},
+                {"clinical_review": {"$exists": False}}]}
+            result = await self.events.update_one(revision_filter,
+                {"$set": {"clinical_review": review}}, session=session)
+            if result.matched_count != 1:
+                raise _error("REHAB_FEEDBACK_REVIEW_CONFLICT", "反馈核验状态已变化，请刷新后重试")
+            return {"feedback": _response({**document, "clinical_review": review})}
+        return await run_rehab_transaction(self.db, write)
+
+    async def supplement(self, plan_id, feedback_id, payload: PatientFeedbackSupplement, actor):
+        if getattr(actor, "role", None) != "patient":
+            raise _error("REHAB_FEEDBACK_PATIENT_REQUIRED", "仅患者本人可以补充训练材料", 403)
+        if not ObjectId.is_valid(feedback_id):
+            raise _error("REHAB_FEEDBACK_NOT_FOUND", "训练反馈不存在", 404)
+        await ensure_feedback_indexes(self.db)
+        supplement_event_id = f"patient-supplement:{actor.id}:{payload.event_id}"
+        fingerprint = hashlib.sha256(json.dumps([payload.note, sorted(payload.media_ids)],
+            ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+        async def write(session):
+            plan = await self._plan(plan_id, session=session)
+            context = await patient_domain_context(self.db, session=session)
+            await self.publication._authorize(plan, actor, session, write=False, fence=True,
+                                              context=context)
+            document = await self.events.find_one({"_id": ObjectId(feedback_id),
+                "plan_id": str(plan["_id"]), "recorded_by": str(actor.id),
+                "event_type": PATIENT_REPORT, "schema_version": REPORT_SCHEMA}, session=session)
+            if not document:
+                raise _error("REHAB_FEEDBACK_NOT_FOUND", "训练反馈不存在", 404)
+            existing = next((item for item in document.get("supplements", [])
+                             if item.get("event_id") == supplement_event_id), None)
+            if existing:
+                if existing.get("request_fingerprint") != fingerprint:
+                    raise _error("REHAB_FEEDBACK_EVENT_CONFLICT", "此补充标识已用于其他内容")
+                return {"feedback": _response(document), "created": False}
+            current = document.get("clinical_review") or {"status": "pending", "revision": 0,
+                                                           "note": "", "history": []}
+            if current.get("status") != "return_for_supplement":
+                raise _error("REHAB_FEEDBACK_SUPPLEMENT_UNEXPECTED", "当前反馈不需要补充材料")
+            if await self._feedback_intervention_type(document, session=session) != "exercise":
+                raise _error("REHAB_FEEDBACK_SUPPLEMENT_UNEXPECTED", "此补充流程只适用于运动训练反馈", 422)
+            cycle = await self._cycle_for_feedback(str(plan["_id"]), document["performed_at"], session=session)
+            if cycle and cycle.get("status") == "accepted":
+                raise _error("REHAB_TRAINING_CYCLE_ACCEPTED", "该训练周期已验收，不能再补充")
+            attachments = await self._claim_media(plan, supplement_event_id, payload.media_ids, session)
+            if (document.get("execution_status") in {"completed", "partial"}
+                    and not any(item["content_type"].startswith("video/") for item in attachments)):
+                raise _error("REHAB_FEEDBACK_VIDEO_REQUIRED", "训练补充材料必须包含视频", 422)
+            stamp = datetime.now(timezone.utc)
+            supplement = {"id": str(ObjectId()), "event_id": supplement_event_id,
+                "request_fingerprint": fingerprint, "note": payload.note,
+                "submitted_at": stamp, "attachments": attachments}
+            review = {"status": "pending", "revision": current.get("revision", 0) + 1,
+                "note": "", "reviewed_at": None, "history": list(current.get("history") or [])}
+            await self.publication._touch_plan(plan, session)
+            result = await self.events.update_one({"_id": document["_id"],
+                "clinical_review.revision": current.get("revision", 0),
+                "clinical_review.status": "return_for_supplement"},
+                {"$push": {"supplements": supplement}, "$set": {"clinical_review": review}},
+                session=session)
+            if result.matched_count != 1:
+                raise _error("REHAB_FEEDBACK_REVIEW_CONFLICT", "反馈状态已变化，请刷新后重试")
+            updated = {**document, "supplements": list(document.get("supplements") or []) + [supplement],
+                       "clinical_review": review}
+            return {"feedback": _response(updated), "created": True}
+        return await run_rehab_transaction(self.db, write)
 
     async def list(self, plan_id, actor, *, version_id=None, prescription_item_id=None, skip=0, limit=20):
         plan = await self._plan(plan_id)
@@ -235,12 +407,18 @@ class RehabFeedbackService:
         versions = await self.db.rehab_plan_versions.find({"_id": {"$in": [ObjectId(value) for value in identifiers]},
             "plan_id": str(plan["_id"]), "patient_id": plan["patient_id"],
             "workflow": "patient_publication", "status": {"$in": ["published", "withdrawn"]}},
-            {"items_snapshot.item_id": 1}).to_list(length=len(identifiers)) if identifiers else []
+            {"items_snapshot.item_id": 1, "items_snapshot.intervention_type": 1}).to_list(length=len(identifiers)) if identifiers else []
         version_items = {str(version["_id"]): {entry.get("item_id") for entry in version.get("items_snapshot", [])
                          if isinstance(entry, dict)} for version in versions}
         for item in page["items"]:
             if item.get("prescription_item_id") not in version_items.get(item["version_id"], set()):
                 raise _error("REHAB_FEEDBACK_INVALID_HISTORY", "反馈处方引用异常", 503)
+            version = next((row for row in versions if str(row["_id"]) == item["version_id"]), None)
+            snapshot_item = next((entry for entry in version.get("items_snapshot", [])
+                                  if isinstance(entry, dict) and entry.get("item_id") == item["prescription_item_id"]), None) if version else None
+            if not snapshot_item or snapshot_item.get("intervention_type") not in {"diet", "exercise", "medication", "psychology"}:
+                raise _error("REHAB_FEEDBACK_INVALID_HISTORY", "反馈处方类型异常", 503)
+            item["intervention_type"] = snapshot_item["intervention_type"]
         return PatientFeedbackPage(items=[_response(item) for item in page["items"]],
             total=page["count"][0]["total"] if page["count"] else 0, skip=skip, limit=limit)
 

@@ -42,6 +42,21 @@ test('operation identity works without randomUUID and conflicts require fresh re
   assert.match(domain.workbenchError({ response: { status: 403 } }, 'fallback'), /无权/);
 });
 
+test('training cycle retries reuse request identity until the operation payload changes or succeeds', () => {
+  let pending = null;
+  pending = domain.nextOperationAttempt(pending, 'training-cycle:create', { title: '周期一', start_date: '2026-11-01', end_date: '2026-11-07' });
+  const firstId = pending.id;
+  pending = domain.nextOperationAttempt(pending, 'training-cycle:create', { title: '周期一', start_date: '2026-11-01', end_date: '2026-11-07' });
+  assert.equal(pending.id, firstId);
+  pending = domain.nextOperationAttempt(pending, 'training-cycle:update:cycle-1', { title: '周期一', start_date: '2026-11-02', end_date: '2026-11-07' });
+  assert.notEqual(pending.id, firstId);
+  const changedId = pending.id;
+  pending = domain.nextOperationAttempt(pending, 'training-cycle:update:cycle-1', { title: '周期一', start_date: '2026-11-02', end_date: '2026-11-07' });
+  assert.equal(pending.id, changedId);
+  pending = domain.nextOperationAttempt(null, 'training-cycle:update:cycle-1', { title: '周期一', start_date: '2026-11-02', end_date: '2026-11-07' });
+  assert.notEqual(pending.id, changedId);
+});
+
 test('clinical transport sends scoped reads, CAS and explicit withdrawal action', async () => {
   const calls = [];
   const transport = Object.fromEntries(['get', 'post', 'put'].map(method => [method, async (...args) => {

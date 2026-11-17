@@ -2,11 +2,11 @@
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List
+from typing import List, Literal
 from uuid import UUID
 
 from bson import ObjectId
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PatientExecutionStatus(str, Enum):
@@ -68,6 +68,37 @@ class PatientFeedbackResponse(BaseModel):
     attachments: List[FeedbackAttachment] = Field(default_factory=list)
     recorded_by: str
     created_at: datetime
+    cycle_id: str | None = None
+    intervention_type: Literal["diet", "exercise", "medication", "psychology"] | None = None
+    clinical_review: dict | None = None
+    supplements: List[dict] = Field(default_factory=list)
+
+
+class ClinicalFeedbackReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    status: Literal["verified", "return_for_supplement"]
+    note: str = Field(default="", max_length=2000)
+    expected_revision: int = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def returned_requires_reason(self):
+        if self.status == "return_for_supplement" and not self.note.strip():
+            raise ValueError("a return note is required")
+        return self
+
+
+class PatientFeedbackSupplement(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    event_id: UUID
+    note: str = Field(min_length=1, max_length=2000)
+    media_ids: List[str] = Field(default_factory=list, max_length=4)
+
+    @field_validator("media_ids")
+    @classmethod
+    def distinct_media(cls, value):
+        if len(set(value)) != len(value) or any(not re.fullmatch(r"[a-f0-9]{32}", item) for item in value):
+            raise ValueError("media identifiers must be distinct stored files")
+        return value
 
 
 class PatientFeedbackResult(BaseModel):
