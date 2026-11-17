@@ -124,6 +124,8 @@ interface DeviceBindingProps {
 const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, onManagingChange }) => {
   // 设备列表（真实数据：GET /api/devices）
   const [devices, setDevices] = React.useState<Device[]>([]);
+  const [dataDeviceId, setDataDeviceId] = React.useState('');
+  const dataDevice = devices.find(device => device.id === dataDeviceId) || devices[0];
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
 
@@ -358,7 +360,7 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
       <Typography variant="h5" component="h1" gutterBottom>
         {patientId ? `${patientName || '当前患者'}的设备` : '设备绑定与管理'}
       </Typography>
-      <Alert severity="info" sx={{ mb: 2 }}>设备登记不代表已经连接。尚未接入厂商采集接口时，系统只显示已有记录和人工登记的读数。</Alert>
+      <Alert severity="info" sx={{ mb: 2 }}>设备登记不代表已经连接。F300 读数可由已配置的采集小程序上传；其他设备请以实际接入情况为准。</Alert>
 
       {/* 主标签页切换 */}
       <Paper sx={{ mb: 3 }}>
@@ -504,10 +506,14 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
           <Typography variant="h6" gutterBottom>设备健康数据</Typography>
           <Divider sx={{ mb: 3 }} />
 
-          {devices.length > 0 ? (
+          {dataDevice ? (
             <>
+              <TextField select label="选择设备" value={dataDevice.id} onChange={event => setDataDeviceId(event.target.value)} size="small" sx={{ mb: 3, minWidth: 200 }}>
+                {devices.map(device => <MenuItem key={device.id} value={device.id}>{device.name}</MenuItem>)}
+              </TextField>
               <DeviceDataDisplay
-                deviceId={devices[0].id}
+                key={dataDevice.id}
+                deviceId={dataDevice.id}
                 showChart={true}
                 timeRange="day"
                 onError={(error) => {
@@ -521,8 +527,9 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
 
               <Box mt={4}>
                 <DeviceConnectionTest
-                  deviceId={devices[0].id}
-                  deviceType={devices[0].device_type}
+                  key={dataDevice.id}
+                  deviceId={dataDevice.id}
+                  deviceType={dataDevice.device_type}
                   onComplete={(success) => {
                     setSnackbar({
                       open: true,
@@ -707,7 +714,9 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
                     设备数据
                   </Typography>
                   <Alert severity="info" sx={{ textAlign: 'left', mb: 2 }}>
-                    还没有接入设备厂商接口。开始同步不会生成电量或测量值。下面可以登记一条你实际看到的读数，记录会标明“手工登记”。
+                    {selectedDevice?.model?.toUpperCase() === 'F300'
+                      ? '请在小程序中连接 F300 并上传读数，然后在这里查看。也可以手工登记实际看到的读数。'
+                      : '设备采集需先完成对应厂商接入。下面可以登记实际看到的读数，记录会标明“手工登记”。'}
                   </Alert>
                   <Stack direction="row" spacing={1} justifyContent="center" sx={{ mb: 2 }}>
                     <TextField size="small" label="类型" value={readingType} onChange={event => setReadingType(event.target.value)} />
@@ -729,7 +738,7 @@ const DeviceBinding: React.FC<DeviceBindingProps> = ({ patientId, patientName, o
                     }}>登记读数</Button>
                   </Stack>
 
-                  {syncing ? (
+                  {selectedDevice?.model?.toUpperCase() === 'F300' ? null : syncing ? (
                     <Box sx={{ width: '100%', mt: 3 }}>
                       <LinearProgress />
                       <Typography variant="body2" sx={{ mt: 2 }}>

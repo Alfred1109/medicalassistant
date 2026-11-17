@@ -1,0 +1,17 @@
+<view class="page">
+  <view wx:if="{{user}}" class="card">
+    <view class="title">我的账号</view>
+    <view class="row">姓名：{{user.name || user.email || '当前用户'}}</view>
+    <view class="row">角色：{{roleLabel}}</view>
+    <view class="hint">登录及访问权限由系统统一管理。</view>
+    <block wx:if="{{user.role === 'patient'}}">
+      <button data-page="followups" bindtap="openPatientPage">我的随访</button>
+      <button data-page="daily" bindtap="openPatientPage">日常记录</button>
+      <button data-page="education" bindtap="openPatientPage">康复指导</button>
+      <button data-page="consent" bindtap="openPatientPage">知情同意</button>
+    </block>
+    <button bindtap="logout">退出登录</button>
+  </view>
+  <view wx:else class="card">登录已失效，请返回首页重新登录。</view>
+</view>
+<role-nav current="profile" />

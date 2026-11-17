@@ -3,10 +3,10 @@
 处理设备管理相关API请求
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from datetime import datetime
 from bson import ObjectId
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -134,6 +134,58 @@ class DeviceSyncResponse(BaseModel):
     success: bool = Field(..., description="同步是否成功")
     message: str = Field(..., description="消息")
     new_data: Optional[List[DeviceDataBase]] = Field(None, description="新同步的数据")
+
+
+class VeePooHeartRateReading(BaseModel):
+    """Normalized F300 live heart-rate callback from the Veepoo WeChat SDK."""
+    data_type: Literal["heart_rate"]
+    value: float = Field(..., gt=0, allow_inf_nan=False)
+    unit: Literal["bpm"]
+    measured_at: datetime = Field(..., description="手机收到回调的时间，必须带时区")
+    sdk_type: Literal[51] = Field(..., description="Veepoo 实时心率回调类型")
+    record_key: Optional[str] = Field(None, max_length=160)
+    raw_payload: Optional[Dict[str, Any]] = None
+
+    @field_validator("measured_at")
+    @classmethod
+    def require_timezone(cls, value):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("measured_at 必须包含时区")
+        return value
+
+
+class VeePooReadingsRequest(BaseModel):
+    hardware_id: str = Field(..., min_length=1, max_length=128,
+                             description="用户确认的 SDK 设备标识（VPDeviceMAC）")
+    readings: List[VeePooHeartRateReading] = Field(..., min_length=1, max_length=500)
+
+
+@router.post("/{device_id}/veepoo/readings")
+async def ingest_veepoo_readings(
+    device_id: str,
+    payload: VeePooReadingsRequest,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    device_api: Any = Depends(get_device_service),
+    ingestion: Any = Depends(get_device_ingestion_service),
+):
+    """Store F300 live heart-rate callbacks under the authenticated binding.
+
+    Patient identity and source are server-owned. The first user-confirmed SDK
+    hardware identifier is pinned to the bound F300 record; later uploads must
+    match. This is an account-level association, not cryptographic BLE proof.
+    """
+    device = await _get_device_or_404(device_id, device_api)
+    await ensure_device_access(
+        db, device, current_user, DEVICE_READ_ROLES, write=True)
+    try:
+        pinned = await ingestion.pin_veepoo_hardware_id(
+            device, payload.hardware_id, actor=current_user)
+        readings = [reading.model_dump() for reading in payload.readings]
+        return await ingestion.ingest_veepoo_readings(
+            pinned, readings, actor=current_user)
+    except DeviceIngestionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
 
 class DeviceConfigUpdate(BaseModel):

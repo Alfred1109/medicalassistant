@@ -1,0 +1,132 @@
+<view class="page">
+  <view class="hero">
+    <view class="title">智能康复助手</view>
+    <view class="subtitle">康复计划、健康记录和患者管理</view>
+  </view>
+
+  <view wx:if="{{!loggedIn}}" class="card">
+    <view class="section-title">登录 Rehabman</view>
+    <block wx:if="{{authMode === 'legacy'}}">
+      <input class="input" placeholder="用户名或邮箱" value="{{username}}" bindinput="onUsernameInput" />
+      <input class="input" placeholder="密码" password value="{{password}}" bindinput="onPasswordInput" />
+      <button class="primary" loading="{{busy}}" bindtap="login">登录</button>
+    </block>
+    <view wx:if="{{!authMode}}" class="notice">正在读取系统登录方式…</view>
+    <block wx:if="{{authMode === 'oidc'}}">
+      <view class="notice">使用系统 OneID 登录。登录后请再次确认显示的账号和角色。</view>
+      <button class="primary" loading="{{oidcLoading}}" disabled="{{oidcLoading || !!oidcWebviewUrl || !!oidcReadyUser}}" bindtap="startOneIdLogin">使用 OneID 登录</button>
+    </block>
+  </view>
+
+  <view wx:if="{{oidcWebviewUrl}}" class="card">
+    <view class="section-title">OneID 登录</view>
+    <view class="muted">请在下方页面完成 OneID 登录并确认账号。登录凭据由 OneID 页面处理。</view>
+    <web-view class="oidc-webview" src="{{oidcWebviewUrl}}" bindmessage="onOneIdWebviewMessage"></web-view>
+    <button class="secondary" disabled="{{busy}}" bindtap="cancelOneIdLogin">取消登录</button>
+  </view>
+
+  <view wx:if="{{oidcReadyUser && !loggedIn}}" class="card">
+    <view class="section-title">确认 OneID 账号</view>
+    <view class="row spread"><view>账号</view><view class="value">{{oidcReadyUser.display_name}}</view></view>
+    <view class="row spread"><view>角色</view><view class="value">{{oidcReadyRoleLabel}}</view></view>
+    <view class="notice">请核对这是你本人及正确角色。确认后小程序才会建立本机短时会话。</view>
+    <button class="primary" loading="{{busy}}" disabled="{{busy}}" bindtap="confirmOneIdActor">确认账号并继续</button>
+    <button class="secondary" disabled="{{busy}}" bindtap="cancelOneIdLogin">取消</button>
+  </view>
+
+  <view wx:if="{{loggedIn && authMode === 'oidc' && !identityConfirmed}}" class="card">
+    <view class="section-title">再次确认登录身份</view>
+    <view class="row spread"><view>OneID 账号</view><view class="value">{{identityReview.displayName}}</view></view>
+    <view class="row spread"><view>系统角色</view><view class="value">{{identityReview.role}}</view></view>
+    <view wx:if="{{identityReview.id}}" class="muted">账号标识：{{identityReview.id}}</view>
+    <view class="notice">请确认此账号和角色正确。确认后才会加载患者及设备信息。</view>
+    <button class="primary" loading="{{busy}}" disabled="{{busy}}" bindtap="confirmOneIdIdentity">确认身份并进入</button>
+    <button class="secondary" disabled="{{busy}}" bindtap="logout">退出登录</button>
+  </view>
+
+  <block wx:if="{{loggedIn && identityConfirmed}}">
+    <view class="card row spread">
+      <view><view class="section-title">{{user.name || user.email}}</view><view class="muted">{{roleLabel}}</view></view>
+      <button class="small" bindtap="logout">退出</button>
+    </view>
+
+    <block wx:if="{{activePanel === 'home'}}">
+      <view class="card" wx:if="{{user.role === 'patient'}}">
+        <view class="section-title">我的康复</view>
+        <view class="muted">查看今天的康复事项、已发布方案和健康记录。</view>
+        <button class="primary" data-page="patientHome" bindtap="openPage">进入我的首页</button>
+        <button class="secondary" data-page="plans" bindtap="openPage">查看康复方案</button>
+        <button class="secondary" bindtap="openCapture">连接手环并测量</button>
+        <button class="secondary" data-page="records" bindtap="openPage">查看健康记录</button>
+        <button class="secondary" data-page="followups" bindtap="openPage">我的随访</button>
+      </view>
+      <view class="card" wx:elif="{{user.role === 'doctor' || user.role === 'health_manager'}}">
+        <view class="section-title">医护工作台</view>
+        <view class="muted">查看有权管理的患者及随访，采集前请核对患者身份。</view>
+        <button class="primary" data-page="clinical" bindtap="openPage">进入工作台</button>
+        <button class="secondary" data-page="patients" bindtap="openPage">我的患者</button>
+        <button class="secondary" data-page="staffFollowups" bindtap="openPage">随访工作台</button>
+        <button class="secondary" bindtap="openCapture">为患者连接手环</button>
+      </view>
+      <view class="card" wx:else><view class="notice">当前角色暂无移动端业务入口。</view></view>
+      <view class="card" wx:if="{{user.role === 'patient' || user.role === 'doctor' || user.role === 'health_manager'}}">
+        <button class="secondary" data-page="messages" bindtap="openPage">医患消息</button>
+        <button class="secondary" data-page="profile" bindtap="openPage">我的账号</button>
+      </view>
+    </block>
+
+    <block wx:if="{{activePanel === 'device'}}">
+    <button class="small secondary" bindtap="openHome">返回首页</button>
+    <view class="card">
+      <view class="section-title">患者与设备</view>
+      <picker wx:if="{{patients.length}}" range="{{patients}}" range-key="name" value="{{patientIndex}}" bindchange="onPatientChange">
+        <view class="picker">患者：{{patients[patientIndex].name || '请选择'}}</view>
+      </picker>
+      <view wx:else class="notice">没有可访问的患者，或当前账号角色暂不支持小程序采集。</view>
+      <button class="secondary" loading="{{busy}}" bindtap="loadDevices">刷新已绑定设备</button>
+      <picker wx:if="{{devices.length}}" range="{{devices}}" range-key="name" value="{{deviceIndex}}" bindchange="onDeviceChange">
+        <view class="picker">设备：{{devices[deviceIndex].name}}（{{devices[deviceIndex].model}}）</view>
+      </picker>
+      <view wx:if="{{!selectedDeviceId && patients.length}}" class="muted">请先在系统中登记并绑定 F300 设备，再回到这里选择。</view>
+    </view>
+
+    <view class="card">
+      <view class="section-title">蓝牙连接</view>
+      <view class="row spread"><view>状态</view><view class="value">{{bleStatus}}</view></view>
+      <view wx:if="{{hardwareId}}" class="row spread"><view>手环 MAC</view><view class="value">{{hardwareId}}</view></view>
+      <view wx:if="{{firmware}}" class="row spread"><view>固件</view><view class="value">{{firmware}}</view></view>
+      <button class="secondary" loading="{{scanning}}" disabled="{{!patients.length || busy}}" bindtap="scan">扫描附近设备</button>
+      <view wx:for="{{scanResults}}" wx:key="deviceId" class="device-row">
+        <view><view>{{item.name || item.localName || '未命名设备'}}</view><view class="muted">信号 {{item.RSSI}} dBm</view></view>
+        <button class="small primary" data-deviceid="{{item.deviceId}}" bindtap="connect">连接</button>
+      </view>
+      <view wx:if="{{connected}}" class="notice">连接并通过 SDK 认证后，MAC 会与系统设备绑定进行匹配。</view>
+      <checkbox-group wx:if="{{authenticated && !selectedDeviceId}}" bindchange="onBindingConfirmChange"><label class="confirm"><checkbox value="confirmed" checked="{{confirmBinding}}" />我确认这台 F300 由上方患者本人使用</label></checkbox-group>
+      <button wx:if="{{authenticated && !selectedDeviceId}}" class="primary" loading="{{busy}}" disabled="{{!confirmBinding}}" bindtap="bindConnectedDevice">将此 F300 绑定到所选患者</button>
+    </view>
+
+    <view class="card">
+      <view class="section-title">手动心率测量</view>
+      <view class="heart-rate">{{heartRate || '--'}} <text class="unit">bpm</text></view>
+      <view class="muted">测量时间取手机收到 SDK 回调的时间，不是设备内部时钟。</view>
+      <button class="primary" disabled="{{!authenticated || measuring || busy}}" bindtap="startHeartRate">开始测量</button>
+      <button class="secondary" disabled="{{!measuring}}" bindtap="stopHeartRate">结束测量</button>
+      <view wx:if="{{pendingReading}}" class="notice">已有一条待上传读数：{{pendingReading.value}} bpm，{{pendingReading.measured_at}}</view>
+      <checkbox-group wx:if="{{pendingReading}}" bindchange="onConfirmChange"><label class="confirm"><checkbox value="confirmed" checked="{{confirmUpload}}" />我确认这条读数属于上方所选患者</label></checkbox-group>
+      <button wx:if="{{pendingReading}}" class="primary" loading="{{busy}}" disabled="{{!confirmUpload || !authenticated}}" bindtap="uploadReading">上传这条读数</button>
+      <button wx:if="{{connected}}" class="danger" disabled="{{measuring}}" bindtap="disconnect">断开设备</button>
+    </view>
+    <view class="card" wx:if="{{selectedDeviceId}}">
+      <view class="section-title">已保存的心率记录</view>
+      <view wx:if="{{!recentReadings.length}}" class="muted">暂无已保存的心率记录。</view>
+      <view wx:for="{{recentReadings}}" wx:key="id" class="row spread device-row">
+        <view>{{item.value}} {{item.unit}}</view><view class="muted">{{item.timestamp}}</view>
+      </view>
+    </view>
+    </block>
+  </block>
+
+  <view wx:if="{{message}}" class="message">{{message}}</view>
+  <view wx:if="{{activePanel === 'device'}}" class="footnote">设备结果用于康复管理参考，尚不代表临床确认或医疗诊断。</view>
+</view>
+<role-nav wx:if="{{loggedIn && identityConfirmed}}" current="{{activePanel === 'home' ? 'home' : 'health'}}" />

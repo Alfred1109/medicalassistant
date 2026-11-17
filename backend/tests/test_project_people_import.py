@@ -1,5 +1,6 @@
 """Project roster import assigns subjects as patients and leaves members unspecified."""
 import unittest
+from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
 from bson import ObjectId
@@ -14,7 +15,7 @@ class Users:
     async def create_index(self, *args, **kwargs):
         return "unique_source_person"
 
-    async def find_one(self, query, projection=None):
+    async def find_one(self, query, projection=None, session=None):
         for doc in self.docs:
             matched = True
             for key, value in query.items():
@@ -35,19 +36,23 @@ class Users:
         rows = [doc for doc in self.docs if all(doc.get(key) == value for key, value in query.items())]
         return _Cursor(sorted(rows, key=lambda doc: doc.get("name") or ""))
 
-    async def update_many(self, query, update):
+    async def update_many(self, query, update, session=None):
         uid = query["$or"][0]["practitioners"]
         for doc in self.docs:
             if uid in doc.get("practitioners", []) or uid in doc.get("health_managers", []):
                 doc["practitioners"] = [item for item in doc.get("practitioners", []) if item != uid]
                 doc["health_managers"] = [item for item in doc.get("health_managers", []) if item != uid]
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, session=None):
         for doc in self.docs:
             if doc["_id"] == query["_id"]:
                 doc.update(update.get("$set") or {})
                 for key, value in (update.get("$push") or {}).items():
                     doc.setdefault(key, []).append(value)
+                from types import SimpleNamespace
+                return SimpleNamespace(matched_count=1)
+        from types import SimpleNamespace
+        return SimpleNamespace(matched_count=0)
 
 
 class _Cursor:
@@ -123,7 +128,13 @@ class ProjectPeopleImport(unittest.IsolatedAsyncioTestCase):
         patient = {"_id": ObjectId(), "role": "patient", "practitioners": [str(member["_id"])],
                    "health_managers": [], "source_person_key": None}
         db.users.docs.append(patient)
-        updated = await assign_imported_role(db, actor, str(member["_id"]), "health_manager", "复核-1")
+        async def fake_transaction(database, callback, **kwargs):
+            return await callback(None)
+        with patch("app.integrations.forms.people_import.run_transaction", new=fake_transaction), \
+             patch("app.services.conversation_policy.ConversationPolicy.mark_care_conversations_before_role_change",
+                   new=AsyncMock()):
+            updated = await assign_imported_role(
+                db, actor, str(member["_id"]), "health_manager", "复核-1")
         self.assertEqual(updated["role"], "health_manager")
         self.assertEqual(patient["practitioners"], [])
         self.assertEqual(member["patients"], [])

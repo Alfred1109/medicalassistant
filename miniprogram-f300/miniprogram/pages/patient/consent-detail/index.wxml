@@ -1,0 +1,23 @@
+<view class="page">
+  <view wx:if="{{loading && !loaded}}" class="state">正在读取同意书…</view>
+  <view wx:elif="{{error && !document}}" class="state error"><view>{{error}}</view><button class="retry" bindtap="loadDocument">重试</button><button class="secondary" bindtap="backToList">返回列表</button></view>
+  <block wx:elif="{{document}}">
+    <view class="card header"><view class="title">{{document.title}}</view><view class="status">{{document.status_label}}</view></view>
+    <view class="card">
+      <view class="section-title">文件全文</view>
+      <view class="body">{{document.body}}</view>
+      <view wx:if="{{document.signed_name}}" class="meta">记录姓名：{{document.signed_name}}</view>
+      <view wx:if="{{document.signed_at}}" class="meta">记录时间：{{document.signed_at}}</view>
+    </view>
+    <view wx:if="{{document.status === 'pending'}}" class="card actions">
+      <view class="notice">请先阅读全文，再选择同意或拒绝。你的选择会提交给系统并记录当前状态。</view>
+      <view class="label">签署姓名（同意时必填）</view>
+      <input class="input" maxlength="120" placeholder="填写你的姓名" value="{{signedName}}" bindinput="onSignedNameInput" />
+      <button class="accept" loading="{{submitting}}" disabled="{{submitting}}" bindtap="confirmAccept">阅读并同意</button>
+      <button class="decline" loading="{{submitting}}" disabled="{{submitting}}" bindtap="confirmDecline">拒绝</button>
+    </view>
+    <view wx:if="{{error}}" class="inline-error">{{error}}</view>
+    <view class="footnote">此页面显示和记录系统当前保存的同意状态，不代表已完成法律审查或电子签名认证。</view>
+  </block>
+</view>
+<role-nav current="profile" />

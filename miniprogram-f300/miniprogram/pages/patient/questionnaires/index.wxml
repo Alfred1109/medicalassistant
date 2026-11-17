@@ -1,0 +1,16 @@
+<view class="page">
+  <view class="title">我的问卷</view>
+  <view class="muted">这里只显示医护分配给你的问卷。</view>
+  <view wx:if="{{error}}" class="error">{{error}}</view>
+  <view wx:if="{{loading && !items.length}}" class="card">正在加载…</view>
+  <view wx:elif="{{!items.length && !error}}" class="card">暂无问卷任务。</view>
+  <view wx:for="{{items}}" wx:key="id" class="card">
+    <view class="task-title">{{item.visitName || '问卷任务'}}</view>
+    <view class="muted">状态：{{item.statusLabel}}</view>
+    <view wx:if="{{item.createdAt}}" class="muted">创建时间：{{item.createdAt}}</view>
+    <button wx:if="{{item.canLaunch}}" class="primary" data-id="{{item.id}}" bindtap="launch" loading="{{opening}}" disabled="{{opening}}">填写或继续</button>
+    <button wx:if="{{item.status === 'active'}}" data-id="{{item.id}}" bindtap="refreshStatus" disabled="{{opening}}">刷新提交状态</button>
+  </view>
+  <button wx:if="{{hasMore}}" bindtap="loadMore" loading="{{loading}}">加载更多</button>
+</view>
+<role-nav current="" />

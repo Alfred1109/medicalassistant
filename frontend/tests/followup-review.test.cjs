@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
+const { createHash } = require('node:crypto');
 const Module = require('node:module');
 const path = require('node:path');
 const { buildSync } = require('esbuild');
@@ -17,6 +18,14 @@ loaded.require = name => { const result = originalRequire(name); return name.sta
 loaded._compile(compiled, filename);
 const domain = loaded.exports;
 const record = { id: 'visit-1', patient_id: 'patient-1', provider_id: 'doctor-1', created_by: 'doctor-2', status: 'in_review', mutation_version: 4, description: '真实随访', follow_up_type: 'phone', scheduled_date: '2026-11-09T00:00:00Z', created_at: '', updated_at: '' };
+const stableJson = value => Array.isArray(value) ? `[${value.map(stableJson).join(',')}]` :
+  value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}` : JSON.stringify(value);
+const selfSnapshotHash = evidence => createHash('sha256').update(stableJson({
+  fill_mode: evidence.fill_mode, session_uuid: evidence.session_uuid, response_id: evidence.response_id,
+  remote_status: evidence.remote_status, submitted_at: evidence.submitted_at, updated_at: evidence.updated_at,
+  questionnaire_version_ref: evidence.questionnaire_version_ref, visit_code: evidence.visit_code ?? null,
+  answers: evidence.answers,
+})).digest('hex');
 test('review eligibility requires current medical role, review state and responsible practitioner', () => {
   assert.equal(domain.canReviewFollowUp(record, { id: 'doctor-1', role: 'doctor' }), true);
   assert.equal(domain.canReviewFollowUp(record, { id: 'doctor-2', role: 'health_manager' }), true);
@@ -28,6 +37,67 @@ test('external snapshot must match exact patient, task, response and confirmed s
   const task = { id: 'task-1', patientId: 'patient-1', status: 'confirmed', confirmation: { response_id: 42, remote_status: 'submitted', answers: [{ question_id: 1, answer_text: '真实回答' }] } };
   assert.equal(domain.verifiedReviewTask(visit, task), true);
   for (const invalid of [{ ...task, patientId: 'patient-2' }, { ...task, id: 'task-2' }, { ...task, status: 'submitted' }, { ...task, confirmation: { ...task.confirmation, response_id: 43 } }, { ...task, remoteQueryError: '无法核实' }, { ...task, remoteStatus: 'revoked' }]) assert.equal(domain.verifiedReviewTask(visit, invalid), false);
+});
+test('patient-self review fallback is 404-only and validates the linked session, version and answers', async () => {
+  const visit = { ...record, current_evidence: { source: 'external_form' },
+    effective_response: { task_id: 'task-1', response_id: 42 } };
+  const raw = {
+    id: 'task-1', status: 'confirmed', patientId: 'patient-1', followupVisitId: 'visit-1',
+    remoteRefs: { project_id: 1, center_id: 2, subject_id: 3, questionnaire_id: 4 },
+    session: { sessionId: 'session-1', status: 'submitted', expiresAt: null },
+    verifiedEvidence: {
+      fill_mode: 'patient_self', session_uuid: 'session-1', response_id: 42,
+      remote_status: 'submitted', is_voided: false, user_id: null,
+      submitted_at: '2026-11-17T10:00:00Z', updated_at: '2026-11-17T10:02:00Z',
+      questionnaire_version_ref: { form_id: 4, family_id: 4, version: 2, definition_sha256: 'a'.repeat(64) },
+      visit_code: null, answers: [{ question_id: 1, answer_text: '患者本人回答' }],
+      verified_at: '2026-11-17T10:03:00Z', snapshot_sha256: '',
+    },
+  };
+  raw.verifiedEvidence.snapshot_sha256 = selfSnapshotHash(raw.verifiedEvidence);
+  const notFound = Object.assign(new Error('普通任务未找到'), { response: { status: 404 } });
+  let selfReads = 0;
+  const task = await domain.loadFollowUpReviewTask(visit, 'task-1', {
+    getFillTask: async () => { throw notFound; },
+    getPatientSelfTask: async id => { selfReads += 1; assert.equal(id, 'task-1'); return raw; },
+  });
+  assert.equal(selfReads, 1);
+  assert.equal(task.evidenceSource, 'patient_self');
+  assert.equal(domain.verifiedReviewTask(visit, task), true);
+  const html = renderToStaticMarkup(React.createElement(domain.FollowUpReviewEvidence, { record: visit, task }));
+  for (const text of ['来源：患者本人填写', '已确认的回答快照', '患者本人回答']) assert.ok(html.includes(text), text);
+
+  const forbidden = Object.assign(new Error('禁止'), { response: { status: 403 } });
+  selfReads = 0;
+  await assert.rejects(() => domain.loadFollowUpReviewTask(visit, 'task-1', {
+    getFillTask: async () => { throw forbidden; },
+    getPatientSelfTask: async () => { selfReads += 1; return raw; },
+  }));
+  assert.equal(selfReads, 0);
+
+  selfReads = 0;
+  await assert.rejects(() => domain.loadFollowUpReviewTask(visit, 'task-1', {
+    getFillTask: async () => ({ id: 'other-task', patientId: 'patient-1', status: 'confirmed',
+      confirmation: { response_id: 42, remote_status: 'submitted', answers: [{ question_id: 1, answer_text: '回答' }] } }),
+    getPatientSelfTask: async () => { selfReads += 1; return raw; },
+  }));
+  assert.equal(selfReads, 0);
+
+  for (const tamper of [
+    { patientId: 'patient-2' }, { followupVisitId: 'visit-2' },
+    { session: { ...raw.session, sessionId: 'session-2' } },
+    { verifiedEvidence: { ...raw.verifiedEvidence, response_id: 43 } },
+    { verifiedEvidence: { ...raw.verifiedEvidence, fill_mode: 'clinician' } },
+    { verifiedEvidence: { ...raw.verifiedEvidence, questionnaire_version_ref: { ...raw.verifiedEvidence.questionnaire_version_ref, form_id: 99 } } },
+    { verifiedEvidence: { ...raw.verifiedEvidence, answers: [] } },
+    { verifiedEvidence: { ...raw.verifiedEvidence, answers: [{ question_id: 1, answer_text: '被篡改' }] } },
+  ]) {
+    const invalid = { ...raw, ...tamper };
+    await assert.rejects(() => domain.loadFollowUpReviewTask(visit, 'task-1', {
+      getFillTask: async () => { throw notFound; },
+      getPatientSelfTask: async () => invalid,
+    }));
+  }
 });
 test('manual review renders saved answers and history without executing embedded content', () => {
   const html = renderToStaticMarkup(React.createElement(domain.FollowUpReviewEvidence, { record: { ...record, current_evidence: { source: 'manual_entry', legacy: true }, completion_data: { source: 'manual_entry' }, follow_up_result: '<script>bad()</script>', notes: '真实备注', questions: [{ question_id: 'q1', question_text: '实际问题' }], answers: [{ question_id: 'q1', answer_value: false }], review: { history: [{ decision: 'returned', comment: '补充资料' }] } }, task: null }));

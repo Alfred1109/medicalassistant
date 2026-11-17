@@ -127,7 +127,7 @@ class DeviceSessionPublicationMongoTests(unittest.IsolatedAsyncioTestCase):
 
         await self.db.device_data.insert_one({
             "device_id": str(self.device_id), "timestamp": datetime.utcnow(),
-            "metadata": {"source": "automated"}, "quality_flags": [],
+            "metadata": {"source": "automated", "session_id": session["_id"]}, "quality_flags": [],
         })
         ended = await self.service.end_collection_session(self.device, session["_id"])
         self.assertEqual(ended["summary"]["readings_count"], 1)

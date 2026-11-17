@@ -1,0 +1,4 @@
+.role-nav-spacer { height: calc(110rpx + env(safe-area-inset-bottom)); }
+.role-nav { position: fixed; left: 0; right: 0; bottom: 0; display: flex; background: #fff; border-top: 1rpx solid #e4eaf0; padding: 12rpx 4rpx calc(12rpx + env(safe-area-inset-bottom)); z-index: 10; }
+.role-nav-item { flex: 1; text-align: center; color: #6c7a89; font-size: 24rpx; padding: 14rpx 0; }
+.role-nav-item.active { color: #1264d8; font-weight: 700; }

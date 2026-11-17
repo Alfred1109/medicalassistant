@@ -1,0 +1,32 @@
+{
+  "pages": [
+    "pages/index/index",
+    "pages/patient/home/index",
+    "pages/patient/plans/index",
+    "pages/patient/plan-detail/index",
+    "pages/patient/records/index",
+    "pages/patient/daily-records/index",
+    "pages/patient/followups/index",
+    "pages/patient/education/index",
+    "pages/patient/questionnaires/index",
+    "pages/patient/questionnaires/webview/index",
+    "pages/clinical/index/index",
+    "pages/clinical/tasks/index",
+    "pages/clinical/tasks/webview/index",
+    "pages/messages/index/index",
+    "pages/profile/index/index",
+    "pages/patient/consents/index",
+    "pages/patient/consent-detail/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "智能康复助手",
+    "navigationBarBackgroundColor": "#ffffff",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f4f6f8"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json",
+  "usingComponents": {
+    "role-nav": "/components/role-nav/index"
+  }
+}

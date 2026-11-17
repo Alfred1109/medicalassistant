@@ -3,13 +3,13 @@ import { Alert, Box, Button, CircularProgress, Dialog, DialogActions, DialogCont
 import { apiService } from '../../services/api';
 import { formIntegrationService, type FillTask } from '../../services/formIntegrationService';
 import type { FollowUpRecord } from '../../types/followup';
-import { buildFollowUpReviewRequest, canReviewFollowUp, followUpError, followUpEvidenceSource, verifiedReviewTask } from '../../utils/followupReview';
+import { buildFollowUpReviewRequest, canReviewFollowUp, followUpError, followUpEvidenceSource, loadFollowUpReviewTask, verifiedReviewTask, type ReviewEvidenceTask } from '../../utils/followupReview';
 import { getFollowUpStatusInfo } from '../../constants/followup';
 
 const valueText = (value: unknown): string => value === null || value === undefined || value === '' ? '未提供' :
   typeof value === 'object' ? JSON.stringify(value) : String(value);
 
-export function FollowUpReviewEvidence({ record, task }: { record: FollowUpRecord; task: FillTask | null }) {
+export function FollowUpReviewEvidence({ record, task }: { record: FollowUpRecord; task: ReviewEvidenceTask | FillTask | null }) {
   const source = followUpEvidenceSource(record);
   const manual = source === 'manual_entry';
   const answers = record.answers ?? [];
@@ -31,7 +31,7 @@ export function FollowUpReviewEvidence({ record, task }: { record: FollowUpRecor
         <Typography sx={{ whiteSpace: 'pre-wrap' }}>{valueText(answer.answer_text ?? answer.answer_value)}</Typography>
       </Box>)}
     </> : <>
-      <Alert severity="info">来源：外部表单。答卷引用用于追溯，只有下方成功加载的确认证据快照属于本次可见内容；当前源答卷状态仍以表单平台为准。</Alert>
+      <Alert severity="info">来源：{task && 'evidenceSource' in task && task.evidenceSource === 'patient_self' ? '患者本人填写' : '外部表单'}。答卷引用用于追溯，只有下方成功加载的确认证据快照属于本次可见内容；当前源答卷状态仍以表单平台为准。</Alert>
       <Typography>任务：{valueText(record.effective_response?.task_id)}</Typography>
       <Typography>答卷：{valueText(record.effective_response?.response_id)}</Typography>
       <Typography>提交时间：{valueText(record.effective_response?.submitted_at)}</Typography>
@@ -76,7 +76,7 @@ interface Props {
 
 export default function FollowUpReviewDialog({ followUpId, actor, onClose, onReviewed }: Props) {
   const [record, setRecord] = useState<FollowUpRecord | null>(null);
-  const [task, setTask] = useState<FillTask | null>(null);
+  const [task, setTask] = useState<ReviewEvidenceTask | FillTask | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,7 +103,10 @@ export default function FollowUpReviewDialog({ followUpId, actor, onClose, onRev
             setEvidenceError('未提供可核实的答卷任务引用，当前不能批准。');
           } else {
             try {
-              const loadedTask = await formIntegrationService.getFillTask(taskId);
+              const loadedTask = await loadFollowUpReviewTask(data, taskId, {
+                getFillTask: id => formIntegrationService.getFillTask(id),
+                getPatientSelfTask: id => formIntegrationService.getPatientSelfTask(id),
+              });
               if (cancelled) return;
               if (!verifiedReviewTask(data, loadedTask) || !loadedTask.confirmation?.answers.length) {
                 setEvidenceError('无法核实当前答卷内容，或确认快照没有可见回答。请核查源表单，当前不能批准。');

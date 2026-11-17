@@ -1,0 +1,30 @@
+<view class="page">
+  <view class="heading"><view class="title">日常记录</view><view class="subtitle">记录你当天的身体感受和训练情况。</view></view>
+  <view class="card">
+    <view class="section-title">{{editingRecordId ? '编辑记录' : '新增记录'}}</view>
+    <picker mode="date" value="{{date}}" bindchange="onDateChange"><view class="field">日期：{{date}}</view></picker>
+    <view class="label">疼痛程度（0–10）</view><input class="field" type="number" maxlength="2" placeholder="填写整数" value="{{painLevel}}" bindinput="onPainInput" />
+    <view class="label">心情</view><input class="field" maxlength="100" placeholder="描述今天的心情" value="{{mood}}" bindinput="onMoodInput" />
+    <view class="label">睡眠</view><input class="field" maxlength="100" placeholder="描述昨晚睡眠情况" value="{{sleep}}" bindinput="onSleepInput" />
+    <view class="switch-row"><view>今天完成了康复训练</view><switch checked="{{exerciseCompleted}}" color="#17766a" bindchange="onExerciseChange" /></view>
+    <view class="label">备注</view><textarea class="textarea" maxlength="2000" placeholder="记录其他身体变化或情况" value="{{note}}" bindinput="onNoteInput" />
+    <view wx:if="{{error}}" class="error">{{error}}</view><view wx:if="{{success}}" class="success">{{success}}</view>
+    <button class="primary" loading="{{saving}}" disabled="{{saving || deletingRecordId || deleteConfirming}}" bindtap="saveRecord">{{editingRecordId ? '保存修改' : '保存记录'}}</button>
+    <button wx:if="{{editingRecordId}}" class="secondary" disabled="{{saving}}" bindtap="cancelEdit">取消编辑</button>
+  </view>
+  <view class="section-heading">历史记录</view>
+  <view wx:if="{{loading && !loaded}}" class="state">正在读取日常记录…</view>
+  <view wx:if="{{loaded && records.length === 0 && !error}}" class="state">目前还没有日常记录。</view>
+  <view wx:for="{{records}}" wx:key="id" class="card history">
+    <view class="row"><view class="record-date">{{item.date}}</view><view class="pain">疼痛 {{item.pain_level}} / 10</view></view>
+    <view class="meta">心情：{{item.mood}}　睡眠：{{item.sleep}}</view>
+    <view class="meta">训练：{{item.exercise_completed ? '已记录完成' : '未记录完成'}}</view>
+    <view class="note">{{item.note}}</view>
+    <view class="record-actions">
+      <button class="secondary" data-id="{{item.id}}" disabled="{{saving || deletingRecordId || deleteConfirming}}" bindtap="editRecord">编辑</button>
+      <button class="delete" data-id="{{item.id}}" loading="{{deletingRecordId === item.id}}" disabled="{{saving || deletingRecordId || deleteConfirming}}" bindtap="confirmDelete">删除</button>
+    </view>
+  </view>
+  <view wx:if="{{loaded && error && !saving}}" class="load-error">{{error}}<button class="retry" bindtap="loadRecords">重试读取</button></view>
+</view>
+<role-nav current="health" />

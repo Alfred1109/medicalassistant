@@ -17,7 +17,8 @@ from app.schemas.user import UserResponse
 from app.db.mongodb import get_database
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorClient
 from app.integrations.identity.config import oidc_settings
-from app.integrations.identity.access import unified_authentication, trusted_origin, SESSION_COOKIE
+from app.integrations.identity.access import (unified_authentication, trusted_origin, SESSION_COOKIE,
+                                              mini_bearer_route)
 from app.integrations.identity.service import OidcClient, OidcUnavailable
 
 # OAuth2 password bearer for token validation
@@ -77,7 +78,21 @@ async def get_current_user(
     if unified_authentication():
         # Legacy Bearer credentials are never a fallback when the source is down.
         if request.headers.get("authorization"):
-            raise credentials_exception
+            if not mini_bearer_route(request.method, request.scope.get("path", "")) or not token:
+                raise credentials_exception
+            try:
+                mini_session, actor = await OidcClient(db, oidc_settings).actor_for_mini_session(token)
+            except OidcUnavailable:
+                raise HTTPException(503, detail={"code": "IDENTITY_SOURCE_UNAVAILABLE"}) from None
+            if mini_session is None or actor is None:
+                raise credentials_exception
+            from app.core.user_record import user_response_from_document
+            request.state.identity_transport = "mini_bearer"
+            request.state.identity_subject = None
+            request.state.identity_issuer = oidc_settings.issuer
+            request.state.authenticated_actor_id = str(actor["_id"])
+            request.state.authenticated_actor_role = actor["role"]
+            return user_response_from_document(actor)
         try:
             record, actor = await OidcClient(db, oidc_settings).actor_for_session(request.cookies.get(SESSION_COOKIE))
         except OidcUnavailable:

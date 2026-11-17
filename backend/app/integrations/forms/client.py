@@ -7,6 +7,7 @@
 """
 
 from typing import Any, Dict, Optional
+import re
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -172,6 +173,39 @@ class FormPlatformClient:
 
     async def cancel_fill_session(self, session_uuid: str) -> Dict[str, Any]:
         return await self._request("POST", f"/integration/v1/fill-sessions/{session_uuid}/cancel")
+
+    async def create_patient_self_fill_session(self, payload: Dict[str, Any], *,
+                                               idempotency_key: str) -> Dict[str, Any]:
+        """Create/recover a source-side patient-owned session; no clinician token is sent."""
+        return await self._request("POST", "/integration/v1/patient-self-fill-sessions", payload,
+                                   extra_headers={"Idempotency-Key": idempotency_key})
+
+    async def get_patient_self_fill_session(self, session_id: str) -> Dict[str, Any]:
+        if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+            raise FormPlatformError("患者本人填报会话标识无效", status_code=422)
+        return await self._request("GET", f"/integration/v1/patient-self-fill-sessions/{session_id}")
+
+    async def get_patient_self_fill_response(self, session_id: str) -> Dict[str, Any]:
+        """Read the submitted answer snapshot through its patient-owned session."""
+        if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+            raise FormPlatformError("患者本人填报会话标识无效", status_code=422)
+        return await self._request(
+            "GET", f"/integration/v1/patient-self-fill-sessions/{session_id}/response")
+
+    async def resume_patient_self_fill_session(self, session_id: str, payload: Dict[str, Any], *,
+                                               idempotency_key: str) -> Dict[str, Any]:
+        """Rotate the one-use launch proof for an existing still-active patient draft."""
+        if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+            raise FormPlatformError("患者本人填报会话标识无效", status_code=422)
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
+            raise FormPlatformError("患者本人恢复请求缺少幂等键", status_code=422)
+        return await self._request("POST", f"/integration/v1/patient-self-fill-sessions/{session_id}/resume", payload,
+                                   extra_headers={"Idempotency-Key": idempotency_key})
+
+    async def revoke_patient_self_fill_session(self, session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+            raise FormPlatformError("患者本人填报会话标识无效", status_code=422)
+        return await self._request("POST", f"/integration/v1/patient-self-fill-sessions/{session_id}/revoke", payload)
 
     async def get_response(self, response_id: int) -> Dict[str, Any]:
         return await self._request("GET", f"/integration/v1/responses/{response_id}")

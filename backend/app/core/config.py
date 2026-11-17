@@ -153,6 +153,11 @@ class Settings(BaseSettings):
     FORM_PLATFORM_TIMEOUT_SECONDS: float = float(os.getenv("FORM_PLATFORM_TIMEOUT_SECONDS", "10"))
     # 仅隔离联调的自签名证书场景允许关闭校验；生产必须保持 True
     FORM_PLATFORM_VERIFY_TLS: bool = os.getenv("FORM_PLATFORM_VERIFY_TLS", "True").lower() in ("true", "1", "t")
+    # Independent secret for source-platform authorization checks on patient-owned fill actions.
+    REHAB_SELF_FILL_CALLBACK_SECRET: Optional[SecretStr] = (
+        SecretStr(os.getenv("REHAB_SELF_FILL_CALLBACK_SECRET"))
+        if os.getenv("REHAB_SELF_FILL_CALLBACK_SECRET") else None
+    )
 
     # LLM API配置
     LLM_API_KEY: Optional[SecretStr] = None

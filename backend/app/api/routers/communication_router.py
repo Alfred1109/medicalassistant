@@ -31,6 +31,10 @@ class ConversationCreate(BaseModel):
     participant_id: str = Field(..., description="对话参与者ID")
     type: str = Field("chat", description="对话类型")
 
+class AuthorizedConversationCreate(BaseModel):
+    participant_id: str = Field(..., min_length=1, description="当前归属范围内的对方账号ID")
+    type: str = Field("chat", description="对话类型，仅支持普通沟通")
+
 class OfflineSync(BaseModel):
     last_sync_time: datetime = Field(..., description="上次同步时间")
 
@@ -45,12 +49,35 @@ async def get_conversations(
 ):
     """获取当前用户的对话列表"""
     user_id = str(current_user.id)
-    
+
     conversations = await CommunicationService.get_conversations(
         db, user_id, limit, skip, status
     )
-    
+
     return conversations
+
+# Mini program contact directory: only assigned active people with a verified
+# account identity are returned; no arbitrary user search or name lookup.
+@router.get("/contacts")
+async def get_care_contacts(
+    db: AsyncIOMotorClient = Depends(get_database),
+    current_user: UserResponse = Depends(get_current_active_user),
+):
+    return await CommunicationService.get_care_contacts(
+        db, str(current_user.id), current_user.role)
+
+# Scoped alternative to the legacy POST /conversations. Keep that existing
+# endpoint unchanged for web/legacy clients; this route enforces assigned-contact
+# membership inside the same transaction as the new conversation.
+@router.post("/authorized-conversations", status_code=201)
+async def create_authorized_conversation(
+    conversation: AuthorizedConversationCreate,
+    db: AsyncIOMotorClient = Depends(get_database),
+    current_user: UserResponse = Depends(get_current_active_user),
+):
+    return await CommunicationService.create_authorized_conversation(
+        db, str(current_user.id), current_user.role,
+        conversation.participant_id, conversation.type)
 
 # 获取特定对话详情
 @router.get("/conversations/{conversation_id}")
@@ -61,14 +88,14 @@ async def get_conversation(
 ):
     """获取特定对话详情"""
     user_id = str(current_user.id)
-    
+
     conversation = await CommunicationService.get_conversation(
         db, conversation_id, user_id
     )
-    
+
     if not conversation:
         raise HTTPException(status_code=404, detail="对话不存在或无权访问")
-    
+
     return conversation
 
 # 创建新对话
@@ -80,18 +107,18 @@ async def create_conversation(
 ):
     """创建新对话"""
     user_id = str(current_user.id)
-    
+
     # 检查参与者是否存在（账号层语义保持不动）：参与者以账号身份入会
     # （app/patients/README.md：会话成员 ID 保持账号 ID）；canonical 波段
     # 需经 patient_account_links 解析账号↔患者实体。
     participant = await db.users.find_one({"_id": conversation.participant_id})
     if not participant:
         raise HTTPException(status_code=404, detail="指定的参与者不存在")
-    
+
     conversation_id = await CommunicationService.create_conversation(
         db, user_id, conversation.participant_id, conversation.type
     )
-    
+
     return {"id": conversation_id}
 
 # 获取对话中的消息
@@ -105,11 +132,11 @@ async def get_messages(
 ):
     """获取对话中的消息"""
     user_id = str(current_user.id)
-    
+
     messages = await CommunicationService.get_messages(
         db, conversation_id, user_id, limit, before_id
     )
-    
+
     return messages
 
 # 发送新消息
@@ -122,7 +149,7 @@ async def send_message(
 ):
     """发送新消息"""
     user_id = str(current_user.id)
-    
+
     try:
         message_response = await CommunicationService.send_message(
             db, conversation_id, user_id, message.content, message.type,
@@ -145,15 +172,15 @@ async def mark_message_as_read(
 ):
     """将特定消息标记为已读"""
     user_id = str(current_user.id)
-    
+
     try:
         success = await CommunicationService.mark_message_as_read(db, message_id, user_id)
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="消息不存在或无权操作")
-    
+
     return {"status": "success"}
 
 # 标记对话所有消息已读
@@ -165,12 +192,12 @@ async def mark_conversation_as_read(
 ):
     """将对话中所有消息标记为已读"""
     user_id = str(current_user.id)
-    
+
     try:
         marked_count = await CommunicationService.mark_conversation_as_read(db, conversation_id, user_id)
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
-    
+
     return {"marked_count": marked_count}
 
 # 删除消息
@@ -182,14 +209,14 @@ async def delete_message(
 ):
     """删除消息（软删除）"""
     user_id = str(current_user.id)
-    
+
     success = await CommunicationService.delete_message(
         db, message_id, user_id
     )
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="消息不存在或无权删除")
-    
+
     return {"status": "success"}
 
 # 获取未读消息数量
@@ -200,11 +227,11 @@ async def get_unread_count(
 ):
     """获取用户所有对话的未读消息总数"""
     user_id = str(current_user.id)
-    
+
     count = await CommunicationService.get_total_unread_messages_count(
         db, user_id
     )
-    
+
     return {"count": count}
 
 # 同步离线消息
@@ -259,4 +286,4 @@ async def download_attachment(
     result = FileResponse(path, media_type=content_type, filename=name)
     result.headers["Cache-Control"] = "no-store"
     result.headers["Referrer-Policy"] = "no-referrer"
-    return result 
+    return result

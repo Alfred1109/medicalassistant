@@ -1,0 +1,30 @@
+.page { min-height: 100vh; padding: 32rpx 28rpx 64rpx; background: #f4f7fb; box-sizing: border-box; }
+.hero { padding: 40rpx 28rpx 42rpx; border-radius: 28rpx; color: #fff; background: linear-gradient(135deg, #146c62, #2ba58e); }
+.eyebrow { font-size: 21rpx; letter-spacing: 2rpx; opacity: .8; }
+.title { margin-top: 28rpx; font-size: 42rpx; font-weight: 700; }
+.subtitle { margin-top: 16rpx; font-size: 26rpx; line-height: 1.6; opacity: .9; }
+.sections { margin-top: 22rpx; }
+.data-section { margin: 18rpx 0; padding: 24rpx 26rpx; border-radius: 20rpx; background: #fff; box-shadow: 0 8rpx 24rpx rgba(31, 59, 82, .05); }
+.section-heading { margin-bottom: 12rpx; color: #203b4a; font-size: 27rpx; font-weight: 650; }
+.mini-state { padding: 14rpx 0; color: #778892; font-size: 23rpx; line-height: 1.5; }
+.data-row, .todo-row, .plan-row { padding: 18rpx 0; border-top: 1rpx solid #edf0f2; }
+.data-row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12rpx; }
+.data-name, .todo-title { color: #2b4654; font-size: 24rpx; font-weight: 600; }
+.data-value { color: #176f65; font-size: 24rpx; font-weight: 650; }
+.data-meta { margin-top: 8rpx; color: #829099; font-size: 21rpx; line-height: 1.5; }
+.quality { margin-top: 8rpx; color: #9a6a26; font-size: 21rpx; }
+.todo-status { margin-top: 8rpx; color: #478172; font-size: 21rpx; }
+.plan-row { padding-bottom: 4rpx; }
+.more { margin-top: 14rpx; color: #176f65; font-size: 23rpx; font-weight: 600; text-align: right; }
+.retry { display: inline-block; height: 48rpx; margin: 6rpx 0 0 12rpx; padding: 0 14rpx; color: #17695f; background: #e8f3f1; font-size: 20rpx; line-height: 48rpx; }
+.capture-card { position: relative; margin: 16rpx 0 24rpx; padding: 28rpx; border-radius: 20rpx; color: #fff; background: #2479b5; box-shadow: 0 8rpx 24rpx rgba(31, 59, 82, .08); }
+.capture-title { font-size: 29rpx; font-weight: 650; }
+.capture-description { margin-top: 10rpx; font-size: 22rpx; opacity: .9; }
+.capture-arrow { position: absolute; top: 30rpx; right: 24rpx; font-size: 23rpx; }
+.section-card { display: flex; align-items: center; justify-content: space-between; margin: 16rpx 0; padding: 30rpx 28rpx; border-radius: 20rpx; background: #fff; box-shadow: 0 8rpx 24rpx rgba(31, 59, 82, .05); }
+.section-title { color: #172d3d; font-size: 30rpx; font-weight: 650; }
+.section-description { margin-top: 10rpx; color: #738390; font-size: 23rpx; }
+.arrow { color: #86a29f; font-size: 48rpx; }
+.state { margin-top: 24rpx; padding: 26rpx; border-radius: 16rpx; background: #fff; color: #735e35; font-size: 26rpx; line-height: 1.6; }
+.error { color: #a13e3e; }
+.footnote { padding: 22rpx 8rpx; color: #89949d; font-size: 22rpx; line-height: 1.6; }

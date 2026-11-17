@@ -42,7 +42,7 @@ export interface FillTask {
     remote_status: string;
     visit_code?: string | null;
     submitted_at?: string | null;
-    answers: { question_id: number; answer_text: string }[];
+    answers: { question_id: number; answer_text: string | null }[];
     verified_at: string;
   } | null;
   lastError?: string | null;
@@ -51,6 +51,35 @@ export interface FillTask {
   createdAt: string | null;
   updatedAt: string | null;
   confirmedAt: string | null;
+}
+
+export interface PatientSelfTask {
+  id: string;
+  status: string;
+  patientId: string;
+  followupVisitId: string | null;
+  remoteRefs: FillTaskRemoteRefs;
+  session: { sessionId: string | null; status: string | null; expiresAt: string | null };
+  verifiedEvidence?: {
+    fill_mode: string;
+    session_uuid: string;
+    response_id: number;
+    remote_status: string;
+    is_voided: boolean;
+    user_id: number | null;
+    submitted_at: string;
+    updated_at: string;
+    questionnaire_version_ref: {
+      form_id: number;
+      family_id: number;
+      version: number;
+      definition_sha256: string;
+    };
+    visit_code?: string | null;
+    answers: { question_id: number; answer_text: string | null }[];
+    verified_at: string;
+    snapshot_sha256: string;
+  };
 }
 
 export interface CreateFillTaskPayload {
@@ -262,6 +291,10 @@ export const formIntegrationService = {
 
   async getFillTask(taskId: string): Promise<FillTask> {
     return apiClient.get<FillTask>(`/integrations/forms/fill-tasks/${taskId}`);
+  },
+
+  async getPatientSelfTask(taskId: string): Promise<PatientSelfTask> {
+    return apiClient.get<PatientSelfTask>(`/integrations/forms/patient-self/tasks/${encodeURIComponent(taskId)}`);
   },
 
   async launchFillTask(taskId: string): Promise<FillTaskLaunch> {

@@ -7,7 +7,7 @@ import time
 import unittest
 from contextlib import contextmanager, ExitStack
 from unittest.mock import AsyncMock, patch
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 from types import SimpleNamespace
@@ -22,7 +22,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.integrations.identity.config import OidcSettings
 from app.integrations.identity.bindings import manage_binding
-from app.integrations.identity.router import router, oidc_client
+from app.integrations.identity.router import router, oidc_client, public_api_url
+from app.integrations.identity.access import mini_bearer_route, mini_proof_route
 from app.integrations.identity.service import OidcClient, OidcFailure, OidcUnavailable, digest, ensure_identity_indexes
 
 
@@ -38,6 +39,37 @@ class OidcConfigurationTests(unittest.TestCase):
             config[key] = "http://127.0.0.1:12345"
             with self.assertRaises(ValueError):
                 OidcSettings(_env_file=None, **config)
+
+    def test_mini_credentials_are_scoped_to_explicit_routes_and_methods(self):
+        self.assertTrue(mini_proof_route("POST", "/api/auth/mini/transactions"))
+        self.assertTrue(mini_proof_route("POST", "/api/auth/mini/transactions/abc_123/poll"))
+        self.assertFalse(mini_proof_route("POST", "/api/auth/mini/transactions/abc_123/approve"))
+        self.assertFalse(mini_proof_route("GET", "/api/auth/mini/transactions"))
+        self.assertTrue(mini_bearer_route("GET", "/api/users/me"))
+        self.assertTrue(mini_bearer_route("POST", "/api/devices/0123456789abcdef01234567/veepoo/readings"))
+        self.assertTrue(mini_bearer_route("GET", "/api/devices/0123456789abcdef01234567/data"))
+        self.assertTrue(mini_bearer_route("GET", "/api/rehabilitation/publications/my-plans"))
+        self.assertTrue(mini_bearer_route("POST", "/api/rehabilitation/plans/0123456789abcdef01234567/patient-feedback"))
+        self.assertTrue(mini_bearer_route("POST", "/api/rehabilitation/plans/0123456789abcdef01234567/patient-feedback/media"))
+        self.assertTrue(mini_bearer_route("GET", "/api/rehabilitation/plans/0123456789abcdef01234567/patient-feedback/media/0123456789abcdef0123456789abcdef"))
+        self.assertTrue(mini_bearer_route("POST", "/api/rehabilitation/plans/0123456789abcdef01234567/patient-feedback/1123456789abcdef01234567/supplements"))
+        self.assertTrue(mini_bearer_route("GET", "/api/rehabilitation/plans/0123456789abcdef01234567/training-cycles"))
+        self.assertFalse(mini_bearer_route("POST", "/api/rehabilitation/plans/0123456789abcdef01234567/training-cycles/1123456789abcdef01234567/acceptance"))
+        self.assertFalse(mini_bearer_route("POST", "/api/rehabilitation/plans/0123456789abcdef01234567/patient-feedback/not-an-id/supplements"))
+        self.assertFalse(mini_bearer_route("DELETE", "/api/rehabilitation/plans/0123456789abcdef01234567/patient-feedback/media"))
+        self.assertFalse(mini_bearer_route("GET", "/api/rehabilitation/plans/0123456789abcdef01234567/patient-feedback/media/not-an-id"))
+        self.assertTrue(mini_bearer_route("POST", "/api/health-records/followups/0123456789abcdef01234567/review"))
+        self.assertTrue(mini_bearer_route("POST", "/api/communications/conversations/0123456789abcdef01234567/messages"))
+        self.assertFalse(mini_bearer_route("POST", "/api/rehabilitation/plans/0123456789abcdef01234567/approve"))
+        self.assertFalse(mini_bearer_route("DELETE", "/api/communications/messages/0123456789abcdef01234567"))
+        self.assertFalse(mini_bearer_route("DELETE", "/api/devices/0123456789abcdef01234567/unbind"))
+        self.assertFalse(mini_bearer_route("POST", "/api/users/me"))
+
+    def test_public_mini_urls_keep_configured_root_path(self):
+        config = SimpleNamespace(public_base_url="https://care.test/medical")
+        with patch("app.integrations.identity.router.oidc_settings", config):
+            self.assertEqual(public_api_url("auth/mini/transactions/abc/approve"),
+                             "https://care.test/medical/api/auth/mini/transactions/abc/approve")
 
 
 @unittest.skipUnless(URI, "set isolated local REHAB_TEST_OIDC_MONGO_URI")
@@ -106,8 +138,12 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json={})
         return httpx.Response(404)
 
-    async def begin(self):
-        target, browser = await self.service.start()
+    async def begin(self, mini_transaction_id=None):
+        if mini_transaction_id:
+            await self.db.oidc_mini_login_transactions.update_one(
+                {"_id": digest(mini_transaction_id), "status": "pending"},
+                {"$set": {"status": "oidc_started"}})
+        target, browser = await self.service.start(mini_transaction_id=mini_transaction_id)
         query = parse_qs(urlsplit(target).query)
         self.assertEqual(query["code_challenge_method"], ["S256"])
         self.assertEqual(query["scope"], ["openid"])
@@ -163,6 +199,66 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
         await self.service.logout(sid, csrf)
         self.assertFalse(self.source_active)
         self.assertIsNone(await self.service.session(sid))
+
+    async def test_mini_handoff_requires_browser_and_mini_confirmation_and_is_single_use(self):
+        _, _, actor_id = await self.bound_session()
+        verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+        challenge = self.service.mini_challenge(verifier)
+        transaction_id = await self.service.create_mini_transaction(challenge)
+        self.assertIsNone(await self.service.mini_transaction(transaction_id, "A" * 43))
+
+        state, code, browser = await self.begin(transaction_id)
+        callback_sid, _, _, linked_id = await self.service.callback(
+            state, code, browser, include_transaction=True)
+        self.assertEqual(linked_id, transaction_id)
+        record, actor = await self.service.actor_for_session(callback_sid)
+        self.assertEqual(str(actor["_id"]), str(actor_id))
+        self.assertTrue(await self.service.set_mini_login_result(
+            transaction_id, record["_id"], approved_binding=True))
+        pending, status = await self.service.mini_transaction_status(transaction_id, verifier)
+        self.assertEqual(status, "awaiting_confirmation")
+        with self.assertRaises(OidcFailure):
+            await self.service.exchange_mini_transaction(transaction_id, verifier)
+
+        approved_actor = await self.service.approve_mini_transaction(transaction_id, callback_sid)
+        self.assertEqual(str(approved_actor["_id"]), str(actor_id))
+        token, expires_in, exchanged_actor = await self.service.exchange_mini_transaction(transaction_id, verifier)
+        self.assertGreater(expires_in, 0)
+        self.assertEqual(str(exchanged_actor["_id"]), str(actor_id))
+        self.assertNotIn(token, repr(await self.db.oidc_mini_sessions.find_one({"_id": digest(token)})))
+        with self.assertRaises(OidcFailure):
+            await self.service.exchange_mini_transaction(transaction_id, verifier)
+        mini_session, mini_actor = await self.service.actor_for_mini_session(token)
+        self.assertIsNotNone(mini_session)
+        self.assertEqual(str(mini_actor["_id"]), str(actor_id))
+
+        self.source_active = False
+        self.assertEqual(await self.service.actor_for_mini_session(token), (None, None))
+        self.assertFalse(await self.service.revoke_mini_session(token))
+
+    async def test_mini_handoff_requires_reviewed_binding_and_wrong_browser(self):
+        verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+        transaction_id = await self.service.create_mini_transaction(self.service.mini_challenge(verifier))
+        state, code, browser = await self.begin(transaction_id)
+        sid, _, _, linked_id = await self.service.callback(state, code, browser, include_transaction=True)
+        record, actor = await self.service.actor_for_session(sid)
+        self.assertIsNone(actor)
+        self.assertEqual(linked_id, transaction_id)
+        self.assertTrue(await self.service.set_mini_login_result(transaction_id, record["_id"], approved_binding=False))
+        transaction, status = await self.service.mini_transaction_status(transaction_id, verifier)
+        self.assertEqual(status, "denied")
+        with self.assertRaises(OidcFailure):
+            await self.service.exchange_mini_transaction(transaction_id, verifier)
+
+    async def test_mini_transaction_expiry_and_verifier_possession(self):
+        verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+        transaction_id = await self.service.create_mini_transaction(self.service.mini_challenge(verifier))
+        transaction = await self.db.oidc_mini_login_transactions.find_one({"_id": digest(transaction_id)})
+        await self.db.oidc_mini_login_transactions.update_one(
+            {"_id": transaction["_id"]}, {"$set": {"expires_at": datetime.utcnow() - timedelta(seconds=1)}})
+        stored, status = await self.service.mini_transaction_status(transaction_id, verifier)
+        self.assertEqual(status, "expired")
+        self.assertIsNone(await self.service.mini_transaction(transaction_id, "Z" * 43))
 
     async def test_state_cookie_and_transaction_expiry_are_required(self):
         state, code, browser = await self.begin()
@@ -272,6 +368,118 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
         await self.db.oidc_application_sessions.delete_one({'_id': digest(sid)})
         with self.assertRaises(OidcFailure):
             await delegation.lock(self.db, None)
+
+    async def test_mini_fill_delegation_reuses_live_reviewed_source_session(self):
+        _, _, actor_id = await self.bound_session()
+        actor = SimpleNamespace(id=str(actor_id), role="doctor")
+        verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+        transaction_id = await self.service.create_mini_transaction(self.service.mini_challenge(verifier))
+        state, code, browser = await self.begin(transaction_id)
+        mini_sid, _, _, _ = await self.service.callback(state, code, browser, include_transaction=True)
+        record, mini_actor = await self.service.actor_for_session(mini_sid)
+        self.assertEqual(str(mini_actor["_id"]), str(actor_id))
+        self.assertTrue(await self.service.set_mini_login_result(transaction_id, record["_id"], approved_binding=True))
+        await self.service.approve_mini_transaction(transaction_id, mini_sid)
+        token, _, _ = await self.service.exchange_mini_transaction(transaction_id, verifier)
+
+        delegation = await self.service.fill_delegation_for_mini_session(token, actor)
+        self.assertEqual(delegation.session_hash, digest(mini_sid))
+        self.assertEqual(delegation.token, "source-token-never-stored")
+        self.assertNotIn(delegation.token, repr(delegation))
+        await delegation.revalidate()
+        await delegation.lock(self.db, None)
+        self.assertEqual((await self.db.oidc_mini_sessions.find_one({"_id": digest(token)}))["fill_use_revision"], 1)
+
+        from app.integrations.forms.mini_bridge import issue_launch_bridge, consume_launch_bridge
+        patient_id = str(ObjectId())
+        await self.db.users.update_one({"_id": actor_id}, {"$set": {"is_active": True}})
+        await self.db.users.insert_one({"_id": ObjectId(patient_id), "role": "patient",
+                                        "is_active": True, "practitioners": [str(actor_id)]})
+        link_id, binding_id = ObjectId(), ObjectId()
+        reference = {"project_id": 1, "center_id": 2, "subject_id": 3,
+                     "source": {"system": "questionnaire", "environment": "test"}}
+        version_ref = {"form_id": 4, "family_id": 4, "version": 1,
+                       "version_state": "current", "definition_sha256": "a" * 64}
+        review = {"verified_by": "test-reviewer", "verified_at": datetime.utcnow(),
+                  "evidence_reference": "review/test", "source_origin": "https://identity.test"}
+        await self.db.external_patient_links.insert_one({"_id": link_id, "local_patient_id": patient_id,
+            "status": "verified", "reference": reference, "references": [reference], **review})
+        await self.db.external_form_bindings.insert_one({"_id": binding_id, "status": "active",
+            "project_id": 1, "form_id": 4, "version": 1, "version_ref": version_ref,
+            "purpose": "followup", "source": reference["source"], **review})
+        task_id = ObjectId()
+        task = {
+            "_id": task_id, "patient_id": patient_id, "status": "session_created", "allowed_origin": "https://care.example",
+            "operator": {"user_id": str(actor_id)}, "session": {"session_uuid": "session_123"},
+            "remote_refs": {"project_id": 1, "center_id": 2, "subject_id": 3, "questionnaire_id": 4},
+            "reviewed_context": {"patient_link_id": str(link_id), "form_binding_id": str(binding_id),
+                                 "reference": reference, "version_ref": version_ref, "purpose": "followup"},
+            "identity_context": {"issuer": delegation.record["issuer"], "subject": delegation.record["subject"],
+                                 "session_hash": delegation.record["_id"],
+                                 "binding_revision": delegation.record["binding_revision"]},
+        }
+        await self.db.integration_fill_tasks.insert_one(task)
+        launch = {
+            "taskId": str(task_id), "mode": "launch", "action": "https://identity.test/integration/embed/session_123",
+            "sessionUuid": "session_123", "expiresAt": (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(),
+            "allowedOrigin": "https://care.example", "token": "one-use-form-token",
+        }
+        ticket = await issue_launch_bridge(self.db, launch, task, delegation, self.config)
+        self.assertNotIn("one-use-form-token", ticket)
+        self.assertEqual((await consume_launch_bridge(self.db, ticket, "wrong-browser-cookie", self.service, self.config)).status_code, 403)
+        response = await consume_launch_bridge(self.db, ticket, mini_sid, self.service, self.config)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'method="post"', response.body)
+        self.assertIn(b"one-use-form-token", response.body)
+        self.assertEqual((await consume_launch_bridge(self.db, ticket, mini_sid, self.service, self.config)).status_code, 410)
+
+        revoked_assignment_ticket = await issue_launch_bridge(self.db, launch, task, delegation, self.config)
+        await self.db.users.update_one({"_id": ObjectId(patient_id)}, {"$set": {"practitioners": []}})
+        denied_assignment = await consume_launch_bridge(self.db, revoked_assignment_ticket, mini_sid, self.service, self.config)
+        self.assertEqual(denied_assignment.status_code, 403)
+        self.assertNotIn(b"one-use-form-token", denied_assignment.body)
+
+        await self.db.users.update_one({"_id": ObjectId(patient_id)}, {"$set": {"practitioners": [str(actor_id)]}})
+        revoked_binding_ticket = await issue_launch_bridge(self.db, launch, task, delegation, self.config)
+        await self.db.external_form_bindings.update_one({"_id": binding_id}, {"$set": {"status": "revoked"}})
+        denied_binding = await consume_launch_bridge(self.db, revoked_binding_ticket, mini_sid, self.service, self.config)
+        self.assertEqual(denied_binding.status_code, 409)
+        self.assertNotIn(b"one-use-form-token", denied_binding.body)
+
+        with self.assertRaises(OidcFailure):
+            await self.service.fill_delegation_for_mini_session(token, SimpleNamespace(id=str(ObjectId()), role="doctor"))
+        await self.service.revoke_mini_session(token)
+        with self.assertRaises(OidcFailure):
+            await delegation.revalidate()
+
+    async def test_forms_router_selects_mini_delegation_only_for_authenticated_mini_transport(self):
+        from app.integrations.forms.router import current_fill_delegation
+        self.config.authentication_mode = "oidc"
+        actor = SimpleNamespace(id=str(ObjectId()), role="doctor")
+        delegation = object()
+        client = SimpleNamespace(
+            fill_delegation_for_mini_session=AsyncMock(return_value=delegation),
+            fill_delegation=AsyncMock(return_value=delegation),
+        )
+        with patch("app.integrations.identity.config.oidc_settings", self.config), \
+                patch("app.integrations.identity.access.oidc_settings", self.config), \
+                patch("app.integrations.identity.service.OidcClient", return_value=client):
+            mini_request = SimpleNamespace(
+                state=SimpleNamespace(identity_transport="mini_bearer"),
+                headers={"authorization": "Bearer mini-session-token"}, cookies={},
+            )
+            result = await current_fill_delegation(mini_request, self.db, actor)
+            self.assertIs(result, delegation)
+            client.fill_delegation_for_mini_session.assert_awaited_once_with("mini-session-token", actor)
+            client.fill_delegation.assert_not_awaited()
+
+            browser_request = SimpleNamespace(
+                state=SimpleNamespace(identity_transport=None), headers={},
+                cookies={"__Host-rehab_session": "browser-session-cookie"},
+            )
+            result = await current_fill_delegation(browser_request, self.db, actor)
+            self.assertIs(result, delegation)
+            client.fill_delegation.assert_awaited_once_with("browser-session-cookie", actor)
 
     async def test_binding_is_explicit_reviewed_and_never_inherits_roles(self):
         pending_sid, _, _ = await self.service.callback(*(await self.begin()))
@@ -605,3 +813,120 @@ class OidcClientTests(unittest.IsolatedAsyncioTestCase):
                 result = await browser.post("/api/auth/logout", headers={"origin": "https://care.test", "x-csrf-token": csrf})
                 self.assertEqual(result.status_code, 204)
                 self.assertEqual((await browser.get("/api/auth/session")).status_code, 401)
+
+    async def test_mini_handoff_http_chain_root_path_csrf_and_scope(self):
+        _, _, patient_id = await self.bound_session(role="patient")
+        from app.main import app
+        from app.api.routers.device_router import get_device_ingestion_service
+        from app.services.device_ingestion_service import DeviceIngestionService
+
+        class PrefixProxy:
+            """Model the trusted proxy stripping /medical into ASGI root_path."""
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+            async def __call__(self, scope, receive, send):
+                if scope["type"] == "http" and scope["path"].startswith("/medical/"):
+                    scope = dict(scope)
+                    scope["root_path"] = "/medical"
+                    scope["path"] = scope["path"][len("/medical"):]
+                await self.wrapped(scope, receive, send)
+
+        with self.unified_application():
+            app.dependency_overrides[get_device_ingestion_service] = lambda: DeviceIngestionService(db=self.db)
+            transport = httpx.ASGITransport(app=PrefixProxy(app))
+            async with httpx.AsyncClient(transport=transport, base_url="https://care.test") as mini, \
+                    httpx.AsyncClient(transport=transport, base_url="https://care.test") as browser:
+                verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+                challenge = self.service.mini_challenge(verifier)
+                started = await mini.post("/medical/api/auth/mini/transactions",
+                    json={"code_challenge": challenge}, headers={"origin": "https://servicewechat.com"})
+                self.assertEqual(started.status_code, 200, started.text)
+                handoff = started.json()
+                self.assertTrue(handoff["webview_url"].startswith("https://care.test/medical/api/"))
+                tx_id = handoff["transaction_id"]
+
+                authorize = await browser.get(handoff["webview_url"])
+                self.assertEqual(authorize.status_code, 303, authorize.text)
+                authorization_url = authorize.headers["location"]
+                # The ID is a public locator, but another browser cannot retry
+                # without possession of the original OIDC transaction cookie.
+                other_browser_retry = await mini.get(handoff["webview_url"])
+                self.assertEqual(other_browser_retry.status_code, 410, other_browser_retry.text)
+                same_browser_retry = await browser.get(handoff["webview_url"])
+                self.assertEqual(same_browser_retry.status_code, 303, same_browser_retry.text)
+                self.assertEqual(same_browser_retry.headers["location"], authorization_url)
+                query = parse_qs(urlsplit(authorize.headers["location"]).query)
+                oidc_transaction = await self.db.oidc_login_transactions.find_one({
+                    "_id": digest(query["state"][0])})
+                self.assertIn("mini_authorization_encrypted", oidc_transaction)
+                self.assertNotIn(authorization_url, repr(oidc_transaction))
+                self.assertNotIn(query["state"][0], repr(oidc_transaction))
+                self.assertNotIn(browser.cookies.get("__Host-rehab_oidc"), repr(oidc_transaction))
+                code = uuid4().hex
+                self.codes[code] = {"nonce": query["nonce"][0], "challenge": query["code_challenge"][0]}
+                callback = await browser.get("/medical/api/auth/oidc/callback", params={
+                    "state": query["state"][0], "code": code})
+                self.assertEqual(callback.status_code, 303, callback.text)
+                consumed_retry = await browser.get(handoff["webview_url"])
+                self.assertEqual(consumed_retry.status_code, 410, consumed_retry.text)
+                confirm_url = callback.headers["location"]
+                self.assertIn("/medical/api/auth/mini/transactions/" + tx_id + "/confirm", confirm_url)
+                confirmation = await browser.get(confirm_url)
+                self.assertEqual(confirmation.status_code, 200, confirmation.text)
+                self.assertIn("Reviewed actor", confirmation.text)
+                self.assertIn("/medical/api/auth/mini/transactions/", confirmation.text)
+
+                csrf = browser.cookies.get("__Host-rehab_csrf")
+                approved = await browser.post("/medical/api/auth/mini/transactions/" + tx_id + "/approve",
+                    headers={"origin": "https://care.test", "x-csrf-token": csrf})
+                self.assertEqual(approved.status_code, 200, approved.text)
+                wrong_proof = await mini.post(f"/medical/api/auth/mini/transactions/{tx_id}/poll",
+                    json={"verifier": "A" * 43}, headers={"origin": "https://servicewechat.com"})
+                self.assertEqual(wrong_proof.status_code, 401, wrong_proof.text)
+                poll = await mini.post(f"/medical/api/auth/mini/transactions/{tx_id}/poll",
+                    json={"verifier": verifier}, headers={"origin": "https://servicewechat.com"})
+                self.assertEqual(poll.status_code, 200, poll.text)
+                self.assertEqual(poll.json()["status"], "ready")
+                self.assertEqual(poll.json()["user"]["display_name"], "Reviewed actor")
+
+                exchange = await mini.post(f"/medical/api/auth/mini/transactions/{tx_id}/exchange",
+                    json={"verifier": verifier}, headers={"origin": "https://servicewechat.com"})
+                self.assertEqual(exchange.status_code, 200, exchange.text)
+                token = exchange.json()["access_token"]
+                self.assertNotIn(token, handoff["webview_url"])
+                self.assertNotIn(token, confirm_url)
+                replay = await mini.post(f"/medical/api/auth/mini/transactions/{tx_id}/exchange",
+                    json={"verifier": verifier}, headers={"origin": "https://servicewechat.com"})
+                self.assertEqual(replay.status_code, 401, replay.text)
+
+                current = await mini.get("/medical/api/users/me", headers={"authorization": f"Bearer {token}"})
+                self.assertEqual(current.status_code, 200, current.text)
+                self.assertEqual(current.json()["id"], str(patient_id))
+
+                hardware_id = "F300:ONEID:AA:BB:CC:DD"
+                bound = await mini.post("/medical/api/devices/bind", headers={
+                    "authorization": f"Bearer {token}", "origin": "https://servicewechat.com"}, json={
+                    "device_type": "手环", "name": "F300 实机", "manufacturer": "Veepoo",
+                    "model": "F300", "connection_type": "bluetooth",
+                    "settings": {"claimed_hardware_id": hardware_id},
+                })
+                self.assertEqual(bound.status_code, 200, bound.text)
+                device_id = bound.json()["id"]
+                uploaded = await mini.post(f"/medical/api/devices/{device_id}/veepoo/readings", headers={
+                    "authorization": f"Bearer {token}", "origin": "https://servicewechat.com"}, json={
+                    "hardware_id": hardware_id,
+                    "readings": [{"data_type": "heart_rate", "value": 82, "unit": "bpm",
+                        "measured_at": datetime.now(timezone.utc).isoformat(), "sdk_type": 51,
+                        "record_key": "oneid-mini-http-e2e-1", "raw_payload": {"heartRate": 82}}],
+                })
+                self.assertEqual(uploaded.status_code, 200, uploaded.text)
+                self.assertEqual(uploaded.json()["accepted_count"], 1)
+                self.assertEqual(uploaded.json()["clinical_facts_created"], 1)
+
+                forbidden = await mini.get("/medical/api/auth/access-applications/mine",
+                    headers={"authorization": f"Bearer {token}"})
+                self.assertEqual(forbidden.status_code, 401, forbidden.text)
+
+                browser_csrf_reject = await browser.post("/medical/api/auth/logout",
+                    headers={"origin": "https://attacker.test"})
+                self.assertEqual(browser_csrf_reject.status_code, 403, browser_csrf_reject.text)

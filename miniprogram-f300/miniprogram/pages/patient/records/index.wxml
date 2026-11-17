@@ -1,0 +1,16 @@
+<view class="page">
+  <view class="heading"><view class="title">健康档案</view><view class="subtitle">由你的康复团队记录的健康信息。</view></view>
+  <view wx:if="{{loading && !loaded}}" class="state">正在读取健康档案…</view>
+  <view wx:elif="{{error}}" class="state error"><view>{{error}}</view><button class="retry" bindtap="loadRecords">重试</button></view>
+  <view wx:elif="{{loaded && records.length === 0}}" class="state">目前没有可查看的健康档案记录。</view>
+  <view wx:for="{{records}}" wx:key="id" class="card">
+    <view class="record-title">{{item.title}}</view>
+    <view class="meta">{{item.record_type}}　{{item.created_at || item.updated_at}}</view>
+    <view class="content">{{item.content}}</view>
+    <view wx:if="{{item.tags.length}}" class="tags">标签：<text wx:for="{{item.tags}}" wx:for-item="tag" wx:key="index">{{tag}}<text wx:if="{{index + 1 < item.tags.length}}">、</text></text></view>
+    <view wx:if="{{item.attachments.length}}" class="meta">附件 {{item.attachments.length}} 项（请通过系统联系医护获取）</view>
+  </view>
+  <view wx:if="{{hasMore}}" class="load-more"><view wx:if="{{moreError}}" class="error-text">{{moreError}}</view><button loading="{{loadingMore}}" disabled="{{loadingMore}}" bindtap="loadMore">加载更多</button></view>
+  <view wx:if="{{loading && loaded}}" class="footnote">正在刷新…</view>
+</view>
+<role-nav current="health" />

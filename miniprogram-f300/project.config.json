@@ -1,0 +1,18 @@
+{
+  "description": "Rehabman F300 BLE sync prototype",
+  "miniprogramRoot": "miniprogram/",
+  "compileType": "miniprogram",
+  "appid": "wxcdfbfc3bc5a445fa",
+  "libVersion": "3.16.2",
+  "setting": {
+    "es6": true,
+    "enhance": true,
+    "minified": true,
+    "minifyWXML": true,
+    "minifyWXSS": true
+  },
+  "packOptions": {
+    "ignore": [],
+    "include": []
+  }
+}

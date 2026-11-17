@@ -1,0 +1,23 @@
+.page { padding: 28rpx 24rpx 60rpx; }
+.hero { padding: 24rpx 8rpx 18rpx; }
+.title { font-size: 42rpx; font-weight: 700; }
+.subtitle { color: #66727f; font-size: 26rpx; margin-top: 12rpx; line-height: 1.5; }
+.card { background: #fff; border-radius: 18rpx; padding: 28rpx; margin: 18rpx 0; box-shadow: 0 6rpx 22rpx rgba(24, 43, 61, .05); }
+.section-title { font-size: 31rpx; font-weight: 650; margin-bottom: 18rpx; }
+.input, .picker { background: #f4f6f8; border-radius: 12rpx; padding: 22rpx; margin: 14rpx 0; min-height: 40rpx; }
+.row { display: flex; align-items: center; gap: 16rpx; }
+.spread { justify-content: space-between; }
+.value { color: #1d5fbf; font-weight: 600; }
+.muted { color: #77818b; font-size: 24rpx; line-height: 1.5; }
+button { line-height: 2.4; }
+button.primary { background: #1677ff; color: #fff; }
+button.secondary { background: #eaf2ff; color: #145fc2; }
+button.small { font-size: 24rpx; line-height: 2; margin: 0; }
+button.danger { background: #fff0ef; color: #bb352d; }
+.device-row { display: flex; align-items: center; justify-content: space-between; border-top: 1rpx solid #edf0f2; padding-top: 18rpx; margin-top: 18rpx; }
+.heart-rate { font-size: 74rpx; font-weight: 700; color: #1677ff; text-align: center; padding: 18rpx; }
+.unit { font-size: 28rpx; color: #73808c; font-weight: 400; }
+.notice { margin: 18rpx 0; padding: 18rpx; color: #805d12; background: #fff8df; border-radius: 12rpx; font-size: 24rpx; line-height: 1.5; }
+.confirm { display: flex; align-items: center; font-size: 25rpx; margin: 16rpx 0; }
+.message { padding: 18rpx; color: #364450; font-size: 25rpx; }
+.footnote { color: #89939c; font-size: 22rpx; line-height: 1.5; padding: 10rpx; }

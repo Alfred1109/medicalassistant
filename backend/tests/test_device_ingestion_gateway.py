@@ -16,6 +16,7 @@ from app.services.device_ingestion_service import (
     device_ingestion_service,
     DeviceIngestionError,
     SOURCE_AUTOMATED,
+    SOURCE_VEEPOO_WECHAT,
 )
 from app.services import device_ingestion_service as ingestion_module
 from tests.device_ingestion_fake import FakeDatabase
@@ -317,6 +318,51 @@ class GatewayEndpointTests(IngestionServiceTestBase):
         response = client.post(
             f"/api/devices/{DEVICE_OID}/gateway/replay-simulated")
         self.assertEqual(response.status_code, 403)
+
+
+class VeePooF300IngestionTests(IngestionServiceTestBase):
+    async def test_live_heart_rate_is_normalized_and_uses_phone_capture_time(self):
+        device = make_device(model="F300", settings={"veepoo_hardware_id": "F3:00:11:22:33:44"})
+        captured = {}
+
+        async def capture(device_arg, parsed, *, source, actor=None, expected_hardware_id=None):
+            captured.update(device=device_arg, parsed=parsed, source=source, actor=actor,
+                            expected_hardware_id=expected_hardware_id)
+            return {"success": True}
+
+        self.service._process_parsed_frames = capture
+        actor = object()
+        measured_at = datetime.now().astimezone()
+        result = await self.service.ingest_veepoo_readings(device, [{
+            "data_type": "heart_rate", "value": 81, "unit": "bpm",
+            "measured_at": measured_at, "sdk_type": 51,
+            "record_key": "f300-test-event",
+            "raw_payload": {"heartRate": 81},
+        }], actor=actor)
+
+        reading = captured["parsed"][0].readings[0]
+        self.assertEqual(result, {"success": True})
+        self.assertEqual(captured["source"], SOURCE_VEEPOO_WECHAT)
+        self.assertIs(captured["actor"], actor)
+        self.assertEqual(captured["expected_hardware_id"], "F3:00:11:22:33:44")
+        self.assertEqual(reading.data_type, "heart_rate")
+        self.assertEqual(reading.value, 81)
+        self.assertEqual(reading.unit, "bpm")
+        self.assertEqual(reading.timestamp, measured_at)
+        self.assertEqual(reading.metadata["capture_time_source"], "phone_callback")
+        self.assertEqual(reading.metadata["record_key"], "f300-test-event")
+
+    async def test_hardware_identity_is_only_pinned_for_f300(self):
+        with self.assertRaises(DeviceIngestionError):
+            await self.service.pin_veepoo_hardware_id(
+                make_device(model="JMD-540"), "AA:BB:CC:DD", actor=object())
+
+    async def test_hardware_identity_rejects_unencodable_unicode_without_crashing(self):
+        device = make_device(model="F300")
+        with self.assertRaises(DeviceIngestionError) as ctx:
+            await self.service.pin_veepoo_hardware_id(
+                device, "F300-\ud800", actor=object())
+        self.assertEqual(ctx.exception.status_code, 422)
 
 
 if __name__ == "__main__":

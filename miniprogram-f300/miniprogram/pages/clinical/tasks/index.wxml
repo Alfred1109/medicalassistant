@@ -1,0 +1,46 @@
+<view class="page">
+  <view class="header"><view><view class="title">问卷填报任务</view><view class="muted">{{roleLabel}} · 仅显示当前有权限访问的任务</view></view><button class="primary small" bindtap="openCreate">新建</button></view>
+  <view class="actions"><button class="{{taskMode === 'staff' ? 'primary' : 'secondary'}} small" data-mode="staff" bindtap="selectMode">医护代填</button><button class="{{taskMode === 'patient' ? 'primary' : 'secondary'}} small" data-mode="patient" bindtap="selectMode">患者自填</button></view>
+  <view wx:if="{{error}}" class="notice error">{{error}}</view>
+  <view wx:if="{{message}}" class="notice success">{{message}}</view>
+  <view wx:if="{{loading}}" class="card muted">正在读取任务…</view>
+  <view wx:elif="{{tasks.length === 0}}" class="card empty">{{error ? '任务加载失败，请下拉重试。' : '暂无填报任务。'}}</view>
+  <view wx:for="{{tasks}}" wx:key="id" class="card task">
+    <view class="task-head"><view class="task-title">{{item.title}}</view><view class="status">{{item.statusLabel}}</view></view>
+    <view class="muted">患者档案：{{item.patientId}}</view>
+    <view wx:if="{{item.remoteRefs}}" class="muted">项目 {{item.remoteRefs.project_id}} · 中心 {{item.remoteRefs.center_id}} · 受试者 {{item.remoteRefs.subject_id}} · 问卷 {{item.remoteRefs.questionnaire_id}}</view>
+    <view class="muted">任务：{{item.id}}</view>
+    <view class="muted">创建：{{item.createdAt || '未记录'}}　更新：{{item.updatedAt || '未记录'}}</view>
+    <view wx:if="{{item.remoteStatus}}" class="muted">源端状态：{{item.remoteStatus}}</view>
+    <view wx:if="{{item.lastError}}" class="notice">最近一次源端错误：{{item.lastError}}</view>
+    <view class="actions">
+      <button wx:if="{{taskMode === 'staff' && (item.status === 'session_created' || item.status === 'waiting_fill')}}" class="primary small" data-id="{{item.id}}" loading="{{saving}}" bindtap="launchTask">打开或继续</button>
+      <button wx:if="{{taskMode === 'staff' && item.status !== 'confirmed' && item.status !== 'cancelled' && item.status !== 'failed'}}" class="secondary small" data-id="{{item.id}}" loading="{{saving}}" bindtap="confirmTask">核实提交</button>
+      <button wx:if="{{taskMode === 'staff' && item.status !== 'confirmed' && item.status !== 'cancelled' && item.status !== 'failed'}}" class="danger small" data-id="{{item.id}}" disabled="{{saving}}" bindtap="cancelTask">取消任务</button>
+      <button wx:if="{{taskMode === 'patient' && (item.status === 'assigned' || item.status === 'active' || item.status === 'revoking' || item.status === 'revoke_failed')}}" class="danger small" data-id="{{item.id}}" disabled="{{saving}}" bindtap="revokePatientTask">取消分配</button>
+      <button wx:if="{{taskMode === 'patient' && item.status === 'active'}}" class="secondary small" data-id="{{item.id}}" loading="{{saving}}" bindtap="refreshPatientTask">核实提交状态</button>
+      <button wx:if="{{taskMode === 'patient' && item.status === 'submitted'}}" class="primary small" data-id="{{item.id}}" loading="{{saving}}" bindtap="confirmPatientTask">核验患者答卷</button>
+    </view>
+  </view>
+  <button wx:if="{{hasMore}}" class="secondary more" loading="{{loading}}" bindtap="loadMore">加载更多</button>
+
+  <view wx:if="{{createOpen}}" class="modal-mask"><view class="modal">
+    <view class="title">{{taskMode === 'patient' ? '分配患者本人填写' : '新建医护代填任务'}}</view>
+    <view class="muted">患者与问卷只从已审核的关联中选择；服务端会再次核验范围、版本和源身份。</view>
+    <view wx:if="{{candidateLoading}}" class="muted">正在读取可用关联…</view>
+    <view wx:elif="{{candidates.length === 0}}" class="empty">{{error || '当前没有已审核的患者和问卷关联。'}}</view>
+    <block wx:if="{{candidates.length}}">
+      <picker range="{{candidates}}" range-key="name" value="{{patientIndex < 0 ? 0 : patientIndex}}" bindchange="onPatientChange"><view class="picker">患者：{{patientIndex < 0 ? '请选择患者' : candidates[patientIndex].name}}　›</view></picker>
+      <picker wx:if="{{patientIndex >= 0}}" range="{{referenceOptions}}" range-key="display" value="{{referenceIndex < 0 ? 0 : referenceIndex}}" bindchange="onReferenceChange"><view class="picker">项目来源：{{referenceIndex < 0 ? '请选择已核实来源' : referenceOptions[referenceIndex].display}}　›</view></picker>
+      <picker wx:if="{{referenceIndex >= 0}}" range="{{formOptions}}" range-key="display" value="{{formIndex < 0 ? 0 : formIndex}}" bindchange="onFormChange"><view class="picker">问卷：{{formIndex < 0 ? '请选择审核问卷' : formOptions[formIndex].display}}　›</view></picker>
+      <picker wx:if="{{patientIndex >= 0}}" range="{{followupOptions}}" range-key="description" value="{{followupIndex}}" bindchange="onFollowupChange"><view class="picker">关联随访：{{followupOptions[followupIndex].description}}　›</view></picker>
+      <view wx:if="{{followupLoading}}" class="muted">读取随访…</view>
+      <view wx:if="{{followupError}}" class="notice error">{{followupError}}<button class="secondary small" disabled="{{followupLoading}}" bindtap="retryPatientFollowups">重试读取随访</button></view>
+      <view wx:if="{{followupTotal > 0}}" class="muted">已读取 {{followupSkip}} / {{followupTotal}} 条随访记录，可关联 {{followups.length}} 条。</view>
+      <button wx:if="{{followupHasMore}}" class="secondary more" loading="{{followupLoading}}" disabled="{{followupLoading}}" bindtap="loadMorePatientFollowups">加载更多关联随访</button>
+      <button wx:if="{{candidateHasMore}}" class="secondary more" loading="{{candidateLoading}}" bindtap="loadMoreCandidates">加载更多可填报患者（{{candidates.length}}/{{candidateTotal}}）</button>
+    </block>
+    <view class="actions"><button class="secondary" disabled="{{saving}}" bindtap="closeCreate">取消</button><button class="primary" loading="{{saving}}" disabled="{{patientIndex < 0 || referenceIndex < 0 || formIndex < 0 || candidateLoading}}" bindtap="createTask">创建任务</button></view>
+  </view></view>
+  <role-nav current="" />
+</view>

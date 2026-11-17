@@ -136,7 +136,8 @@ class ReplicaCase(unittest.IsolatedAsyncioTestCase):
         self.cid = str(ObjectId())
         await self.db_a.users.insert_many([
             {'_id': ObjectId(self.alice_id), 'name': 'Alice', 'role': 'doctor', 'is_active': True},
-            {'_id': ObjectId(self.bob_id), 'name': 'Bob', 'role': 'patient', 'is_active': True},
+            {'_id': ObjectId(self.bob_id), 'name': 'Bob', 'role': 'patient', 'is_active': True,
+             'practitioners': [self.alice_id], 'health_managers': []},
         ])
         await self.db_a.conversations.insert_one({
             '_id': ObjectId(self.cid),
@@ -434,6 +435,117 @@ class ServiceLayerRevocationTests(ReplicaCase):
         self.assertEqual(await self.db_a.messages.count_documents({}), 1)
         self.assertEqual(result['content'], 'ok')
 
+    async def test_removed_assignment_keeps_history_and_blocks_new_sends(self):
+        """撤销医患归属后保留可读历史，并拒绝双方的新消息。"""
+        from datetime import datetime
+        before = await CommunicationService.get_conversations(
+            self.db_a, self.alice_id)
+        self.assertTrue(next(row for row in before if row["id"] == self.cid)["can_send"])
+        await self.db_a.messages.insert_one({
+            '_id': ObjectId(), 'conversation_id': self.cid,
+            'sender_id': self.alice_id, 'recipient_id': self.bob_id,
+            'content': '历史消息', 'timestamp': datetime.utcnow(),
+            'read': False, 'deleted': False,
+        })
+        await self.db_a.users.update_one(
+            {'_id': ObjectId(self.bob_id)}, {'$pull': {'practitioners': self.alice_id}})
+
+        history = await CommunicationService.get_messages(
+            self.db_a, self.cid, self.bob_id)
+        self.assertEqual([item['content'] for item in history], ['历史消息'])
+        after = await CommunicationService.get_conversations(
+            self.db_a, self.alice_id)
+        status = next(row for row in after if row["id"] == self.cid)
+        self.assertFalse(status["can_send"])
+        self.assertEqual(status["send_block_reason"], "care_relationship_ended")
+        detail = await CommunicationService.get_conversation(
+            self.db_a, self.cid, self.bob_id)
+        self.assertFalse(detail["can_send"])
+        self.assertEqual(detail["send_block_reason"], "care_relationship_ended")
+        for sender_id in (self.alice_id, self.bob_id):
+            with self.assertRaisesRegex(ValueError, '不是对话参与者'):
+                await CommunicationService.send_message(
+                    self.db_a, self.cid, sender_id, '撤权后不可发')
+        self.assertEqual(await self.db_a.messages.count_documents({}), 1)
+
+    async def test_non_care_conversation_remains_writable(self):
+        coworker_id = str(ObjectId())
+        await self.db_a.users.insert_one({
+            "_id": ObjectId(coworker_id), "name": "Carol",
+            "role": "doctor", "is_active": True,
+        })
+        conversation_id = str(ObjectId())
+        await self.db_a.conversations.insert_one({
+            "_id": ObjectId(conversation_id), "participant1_id": self.alice_id,
+            "participant2_id": coworker_id, "type": "chat", "status": "active",
+        })
+
+        rows = await CommunicationService.get_conversations(self.db_a, self.alice_id)
+        status = next(row for row in rows if row["id"] == conversation_id)
+        self.assertTrue(status["can_send"])
+        self.assertIsNone(status["send_block_reason"])
+        message = await CommunicationService.send_message(
+            self.db_a, conversation_id, self.alice_id, "同事沟通")
+        self.assertEqual(message["content"], "同事沟通")
+
+    async def test_status_snapshot_can_become_stale_but_send_rechecks_after_revoke(self):
+        """列表提示可能先于撤权；写操作仍按最新关系复核并拒绝。"""
+        rows = await CommunicationService.get_conversations(self.db_a, self.alice_id)
+        self.assertTrue(next(row for row in rows if row["id"] == self.cid)["can_send"])
+        await self.db_a.users.update_one(
+            {"_id": ObjectId(self.bob_id)}, {"$pull": {"practitioners": self.alice_id}})
+        with self.assertRaisesRegex(ValueError, "不是对话参与者"):
+            await CommunicationService.send_message(
+                self.db_a, self.cid, self.alice_id, "必须由服务端拦截")
+        current = await CommunicationService.get_conversation(
+            self.db_a, self.cid, self.alice_id)
+        self.assertFalse(current["can_send"])
+
+    async def test_cross_patient_staff_send_is_rejected(self):
+        """会话成员身份不等于当前归属；不可向非本人管理关系患者写消息。"""
+        other_patient_id = str(ObjectId())
+        await self.db_a.users.insert_one({
+            '_id': ObjectId(other_patient_id), 'role': 'patient', 'is_active': True,
+            'practitioners': [], 'health_managers': [],
+        })
+        other_cid = str(ObjectId())
+        await self.db_a.conversations.insert_one({
+            '_id': ObjectId(other_cid), 'participant1_id': self.alice_id,
+            'participant2_id': other_patient_id,
+        })
+        with self.assertRaisesRegex(ValueError, '不是对话参与者'):
+            await CommunicationService.send_message(
+                self.db_a, other_cid, self.alice_id, '跨患者发送')
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+
+    async def test_assignment_revoke_after_recheck_conflicts_before_message_write(self):
+        """legacy 患者账号上的关系撤销与发送栅栏共文档，冲突后重验拒绝。"""
+        original_update = AsyncIOMotorCollection.update_one
+        reached, proceed = asyncio.Event(), asyncio.Event()
+        paused = False
+
+        async def intercept(collection, query, update, **kwargs):
+            nonlocal paused
+            if (not paused and collection.name == 'users'
+                    and '_communication_access_fence' in update.get('$inc', {})):
+                paused = True
+                reached.set()
+                await asyncio.wait_for(proceed.wait(), 5)
+            return await original_update(collection, query, update, **kwargs)
+
+        with patch.object(AsyncIOMotorCollection, 'update_one', intercept):
+            task = asyncio.create_task(CommunicationService.send_message(
+                self.db_a, self.cid, self.alice_id, 'raced legacy revoke'))
+            await asyncio.wait_for(reached.wait(), 5)
+            await self.db_b.users.update_one(
+                {'_id': ObjectId(self.bob_id)},
+                {'$pull': {'practitioners': self.alice_id}})
+            proceed.set()
+            with self.assertRaisesRegex(ValueError, '不是对话参与者'):
+                await asyncio.wait_for(task, 10)
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+        self.assertEqual(await self.db_a.notifications.count_documents({}), 0)
+
     async def test_concurrent_first_writes_from_two_processes_deduplicated(self):
         """两个独立客户端（模拟两进程）并发同键首写：唯一索引拦截，恰好一封。"""
         results = await asyncio.gather(
@@ -445,6 +557,241 @@ class ServiceLayerRevocationTests(ReplicaCase):
         self.assertEqual(len({item['id'] for item in results}), 1)
         self.assertEqual(await self.db_a.messages.count_documents({}), 1)
         self.assertEqual(await self.db_a.notifications.count_documents({}), 1)
+
+
+class RoleChangeConversationMarkerTests(ReplicaCase):
+    async def _prepare_user_service_response(self):
+        from datetime import datetime
+        await self.db_a.users.update_one(
+            {'_id': ObjectId(self.alice_id)},
+            {'$set': {'email': 'alice@example.com', 'created_at': datetime.utcnow(),
+                      'updated_at': datetime.utcnow()}})
+
+    async def test_legacy_web_create_persists_current_role_snapshot_without_scope_change(self):
+        conversation_id = await CommunicationService.create_conversation(
+            self.db_a, self.alice_id, self.bob_id)
+        conversation = await self.db_a.conversations.find_one(
+            {'_id': ObjectId(conversation_id)})
+        self.assertEqual(conversation.get('communication_scope'), 'patient_staff')
+        self.assertEqual(conversation.get('participant_roles'), {
+            self.alice_id: 'doctor', self.bob_id: 'patient'})
+
+    async def test_read_backfills_currently_identifiable_legacy_care_conversation(self):
+        decision = await ConversationPolicy.authorize(
+            self.db_a, self.cid, self.bob_id, layer='outbound')
+        self.assertTrue(decision.allowed)
+        conversation = await self.db_a.conversations.find_one({'_id': ObjectId(self.cid)})
+        self.assertEqual(conversation.get('communication_scope'), 'patient_staff')
+        self.assertEqual(conversation.get('participant_roles'), {
+            self.alice_id: 'doctor', self.bob_id: 'patient'})
+
+    async def test_role_change_marks_identifiable_care_conversation_atomically(self):
+        from app.schemas.user import UserUpdate
+        from app.services.user_service import UserService
+
+        service = UserService(self.db_a)
+        await self._prepare_user_service_response()
+        updated = await service.update_user(self.alice_id, UserUpdate(role='admin'))
+        self.assertEqual(updated.role, 'admin')
+        conversation = await self.db_a.conversations.find_one({'_id': ObjectId(self.cid)})
+        self.assertEqual(conversation.get('communication_scope'), 'patient_staff')
+        self.assertEqual(conversation.get('participant_roles'), {
+            self.alice_id: 'doctor', self.bob_id: 'patient'})
+        decision = await ConversationPolicy.authorize(
+            self.db_a, self.cid, self.alice_id, layer='inbound')
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.care_relationship)
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+
+
+    async def test_standard_role_change_race_serializes_before_send(self):
+        from app.schemas.user import UserUpdate
+        from app.services.user_service import UserService
+        await self._prepare_user_service_response()
+        original_update = AsyncIOMotorCollection.update_one
+        reached, proceed = asyncio.Event(), asyncio.Event()
+        paused = False
+
+        async def intercept(collection, query, update, **kwargs):
+            nonlocal paused
+            if (not paused and collection.name == 'users'
+                    and '_communication_access_fence' in update.get('$inc', {})):
+                paused = True
+                reached.set()
+                await asyncio.wait_for(proceed.wait(), 5)
+            return await original_update(collection, query, update, **kwargs)
+
+        with patch.object(AsyncIOMotorCollection, 'update_one', intercept):
+            send = asyncio.create_task(CommunicationService.send_message(
+                self.db_a, self.cid, self.alice_id, 'role race'))
+            await asyncio.wait_for(reached.wait(), 5)
+            changed = await UserService(self.db_b).update_user(
+                self.alice_id, UserUpdate(role='admin'))
+            self.assertEqual(changed.role, 'admin')
+            proceed.set()
+            with self.assertRaisesRegex(ValueError, '不是对话参与者'):
+                await asyncio.wait_for(send, 10)
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+
+    async def test_imported_role_change_race_serializes_before_send(self):
+        from app.integrations.forms.people_import import assign_imported_role
+        await self.db_a.users.update_one(
+            {'_id': ObjectId(self.alice_id)},
+            {'$set': {'source_person_key': 'member:test', 'patients': [self.bob_id]}})
+        actor = SimpleNamespace(id='admin-replica-test')
+        original_update = AsyncIOMotorCollection.update_one
+        reached, proceed = asyncio.Event(), asyncio.Event()
+        paused = False
+
+        async def intercept(collection, query, update, **kwargs):
+            nonlocal paused
+            if (not paused and collection.name == 'users'
+                    and '_communication_access_fence' in update.get('$inc', {})):
+                paused = True
+                reached.set()
+                await asyncio.wait_for(proceed.wait(), 5)
+            return await original_update(collection, query, update, **kwargs)
+
+        with patch.object(AsyncIOMotorCollection, 'update_one', intercept):
+            send = asyncio.create_task(CommunicationService.send_message(
+                self.db_a, self.cid, self.alice_id, 'import role race'))
+            await asyncio.wait_for(reached.wait(), 5)
+            changed = await assign_imported_role(
+                self.db_b, actor, self.alice_id, 'unassigned', 'role-review-replica')
+            self.assertEqual(changed['role'], 'unassigned')
+            proceed.set()
+            with self.assertRaisesRegex(ValueError, '不是对话参与者'):
+                await asyncio.wait_for(send, 10)
+        conversation = await self.db_a.conversations.find_one({'_id': ObjectId(self.cid)})
+        self.assertEqual(conversation.get('communication_scope'), 'patient_staff')
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+
+
+class AuthorizedConversationConcurrencyTests(ReplicaCase):
+    async def test_concurrent_first_create_for_same_pair_reuses_one_conversation(self):
+        """同一已授权医患 pair 并发首建，由共享关系文档写栅栏序列化。"""
+        from app.services.communication_service import CommunicationService
+        new_patient_id = str(ObjectId())
+        await self.db_a.users.insert_one({
+            '_id': ObjectId(new_patient_id), 'name': 'New patient',
+            'role': 'patient', 'is_active': True,
+            'practitioners': [self.alice_id], 'health_managers': [],
+        })
+        results = await asyncio.gather(
+            CommunicationService.create_authorized_conversation(
+                self.db_a, self.alice_id, 'doctor', new_patient_id),
+            CommunicationService.create_authorized_conversation(
+                self.db_b, self.alice_id, 'doctor', new_patient_id),
+        )
+        self.assertEqual(results[0]['id'], results[1]['id'])
+        self.assertEqual(await self.db_a.conversations.count_documents({
+            '$or': [
+                {'participant1_id': self.alice_id, 'participant2_id': new_patient_id},
+                {'participant1_id': new_patient_id, 'participant2_id': self.alice_id},
+            ]
+        }), 1)
+
+
+class CanonicalCommunicationRevocationTests(ReplicaCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from datetime import datetime
+        self.patient_id = 'clinical-patient-' + uuid4().hex
+        self.link_id = ObjectId()
+        await self.db_a.patient_domain_state.insert_one({
+            '_id': 'clinical-patients-v1', 'mode': 'canonical', 'schema_version': 1,
+        })
+        await self.db_a.clinical_patients.insert_one({
+            '_id': ObjectId(), 'patient_id': self.patient_id, 'status': 'active',
+            'practitioners': [self.alice_id], 'health_managers': [],
+            'medical_info': {}, 'demographic_info': {}, 'emergency_contact': {},
+        })
+        await self.db_a.patient_account_links.insert_one({
+            '_id': self.link_id, 'account_id': self.bob_id,
+            'account_document_id': ObjectId(self.bob_id), 'patient_id': self.patient_id,
+            'source': 'explicit_binding', 'schema_version': 1, 'status': 'verified',
+            'audit': [{'operation': 'explicit_binding', 'reviewer': 'replica-test',
+                       'evidence_reference': 'fixture', 'at': datetime.utcnow()}],
+        })
+
+    async def test_canonical_assignment_revoke_preserves_history_and_denies_sends(self):
+        from datetime import datetime
+        before = await CommunicationService.get_conversation(
+            self.db_a, self.cid, self.alice_id)
+        self.assertTrue(before["can_send"])
+        await self.db_a.messages.insert_one({
+            '_id': ObjectId(), 'conversation_id': self.cid,
+            'sender_id': self.alice_id, 'recipient_id': self.bob_id,
+            'content': 'canonical history', 'timestamp': datetime.utcnow(),
+            'read': False, 'deleted': False,
+        })
+        await self.db_b.clinical_patients.update_one(
+            {'patient_id': self.patient_id}, {'$pull': {'practitioners': self.alice_id}})
+        history = await CommunicationService.get_messages(self.db_a, self.cid, self.bob_id)
+        self.assertEqual([item['content'] for item in history], ['canonical history'])
+        for sender_id in (self.alice_id, self.bob_id):
+            current = await CommunicationService.get_conversation(
+                self.db_a, self.cid, sender_id)
+            self.assertFalse(current["can_send"])
+            self.assertEqual(current["send_block_reason"], "care_relationship_ended")
+            with self.assertRaisesRegex(ValueError, '不是对话参与者'):
+                await CommunicationService.send_message(
+                    self.db_a, self.cid, sender_id, 'blocked canonical')
+        self.assertEqual(await self.db_a.messages.count_documents({}), 1)
+
+    async def test_canonical_assignment_revoke_after_recheck_conflicts(self):
+        """canonical assignment removal writes the same patient doc fence as send."""
+        original_update = AsyncIOMotorCollection.update_one
+        reached, proceed = asyncio.Event(), asyncio.Event()
+        paused = False
+
+        async def intercept(collection, query, update, **kwargs):
+            nonlocal paused
+            if (not paused and collection.name == 'users'
+                    and '_communication_access_fence' in update.get('$inc', {})):
+                paused = True
+                reached.set()
+                await asyncio.wait_for(proceed.wait(), 5)
+            return await original_update(collection, query, update, **kwargs)
+
+        with patch.object(AsyncIOMotorCollection, 'update_one', intercept):
+            task = asyncio.create_task(CommunicationService.send_message(
+                self.db_a, self.cid, self.alice_id, 'raced canonical assignment'))
+            await asyncio.wait_for(reached.wait(), 5)
+            await self.db_b.clinical_patients.update_one(
+                {'patient_id': self.patient_id},
+                {'$pull': {'practitioners': self.alice_id}})
+            proceed.set()
+            with self.assertRaisesRegex(ValueError, '不是对话参与者'):
+                await asyncio.wait_for(task, 10)
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+        self.assertEqual(await self.db_a.notifications.count_documents({}), 0)
+
+    async def test_canonical_link_revoke_after_transaction_recheck_aborts_send(self):
+        original_update = AsyncIOMotorCollection.update_one
+        reached, proceed = asyncio.Event(), asyncio.Event()
+        paused = False
+
+        async def intercept(collection, query, update, **kwargs):
+            nonlocal paused
+            if (not paused and collection.name == 'users'
+                    and '_communication_access_fence' in update.get('$inc', {})):
+                paused = True
+                reached.set()
+                await asyncio.wait_for(proceed.wait(), 5)
+            return await original_update(collection, query, update, **kwargs)
+
+        with patch.object(AsyncIOMotorCollection, 'update_one', intercept):
+            task = asyncio.create_task(CommunicationService.send_message(
+                self.db_a, self.cid, self.alice_id, 'raced canonical'))
+            await asyncio.wait_for(reached.wait(), 5)
+            await self.db_b.patient_account_links.update_one(
+                {'_id': self.link_id}, {'$set': {'status': 'disabled'}})
+            proceed.set()
+            with self.assertRaisesRegex(ValueError, '不是对话参与者'):
+                await asyncio.wait_for(task, 10)
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+        self.assertEqual(await self.db_a.notifications.count_documents({}), 0)
 
 
 class TransactionalSendRevocationTests(ReplicaCase):
@@ -486,7 +833,7 @@ class TransactionalSendRevocationTests(ReplicaCase):
             await self.db_b.users.update_one(
                 {'_id': ObjectId(self.alice_id)}, {'$set': {'is_active': False}})
             proceed.set()
-            with self.assertRaisesRegex(ValueError, '账号不可用'):
+            with self.assertRaisesRegex(ValueError, '账号不可用|不是对话参与者'):
                 await asyncio.wait_for(task, 10)
 
         self.assertEqual(await self.db_a.messages.count_documents({}), 0)
@@ -498,22 +845,22 @@ class TransactionalSendRevocationTests(ReplicaCase):
             await CommunicationService.send_message(
                 self.db_a, self.cid, self.alice_id, 'blocked')
 
-    async def test_revocation_inside_snapshot_after_recheck_lands_write(self):
-        """撤权落在事务快照后、提交前：快照隔离残余窗口，消息照常提交。"""
-        original_insert = AsyncIOMotorCollection.insert_one
+    async def test_revocation_after_recheck_conflicts_and_retries_before_write(self):
+        """事务复核后停用账号会与账号栅栏冲突；重试读到撤权并整体拒绝。"""
+        original_update = AsyncIOMotorCollection.update_one
         reached, proceed = asyncio.Event(), asyncio.Event()
         paused = False
 
-        async def intercept(collection, document, **kwargs):
+        async def intercept(collection, query, update, **kwargs):
             nonlocal paused
-            if (not paused and collection.name == 'messages'
-                    and document.get('conversation_id') == self.cid):
+            if (not paused and collection.name == 'users'
+                    and '_communication_access_fence' in update.get('$inc', {})):
                 paused = True
                 reached.set()
                 await asyncio.wait_for(proceed.wait(), 5)
-            return await original_insert(collection, document, **kwargs)
+            return await original_update(collection, query, update, **kwargs)
 
-        with patch.object(AsyncIOMotorCollection, 'insert_one', intercept):
+        with patch.object(AsyncIOMotorCollection, 'update_one', intercept):
             task = asyncio.create_task(CommunicationService.send_message(
                 self.db_a, self.cid, self.alice_id, 'raced'))
             await asyncio.wait_for(reached.wait(), 5)
@@ -521,18 +868,13 @@ class TransactionalSendRevocationTests(ReplicaCase):
             await self.db_b.users.update_one(
                 {'_id': ObjectId(self.alice_id)}, {'$set': {'is_active': False}})
             proceed.set()
-            result = await asyncio.wait_for(task, 10)
+            with self.assertRaisesRegex(ValueError, '账号不可用'):
+                await asyncio.wait_for(task, 10)
 
-        # 残余窗口现状：写入照常提交（原子：消息+摘要一起），离线通知副作用
-        # 照常产生（撤权对下一条消息才生效）
-        self.assertEqual(result['content'], 'raced')
-        self.assertEqual(await self.db_a.messages.count_documents({}), 1)
-        self.assertEqual(await self.db_a.notifications.count_documents({}), 1)
-        # 撤权对下一条消息立即生效（事务内复核读取到停用后的状态）
-        with self.assertRaisesRegex(ValueError, '账号不可用'):
-            await CommunicationService.send_message(
-                self.db_a, self.cid, self.alice_id, 'blocked')
-        self.assertEqual(await self.db_a.messages.count_documents({}), 1)
+        self.assertEqual(await self.db_a.messages.count_documents({}), 0)
+        self.assertEqual(await self.db_a.notifications.count_documents({}), 0)
+        conversation = await self.db_a.conversations.find_one({'_id': ObjectId(self.cid)})
+        self.assertEqual(conversation.get('last_message_preview', ''), '')
 
 
 # ---------------------------------------------------------------------------

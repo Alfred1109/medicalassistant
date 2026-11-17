@@ -142,32 +142,32 @@ class FakeCollection:
         self.indexes.append((list(keys), dict(kwargs)))
         return kwargs.get("name", "_".join(f"{k}_{d}" for k, d in keys))
 
-    async def find_one(self, query):
+    async def find_one(self, query, **kwargs):
         for doc in self.docs:
             if _matches(doc, query):
                 return dict(doc)
         return None
 
-    async def insert_one(self, doc):
+    async def insert_one(self, doc, **kwargs):
         stored = dict(doc)
         self.docs.append(stored)
         return SimpleNamespace(inserted_id=stored.get("_id"))
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, **kwargs):
         modified = 0
         for doc in self.docs:
             if _matches(doc, query):
                 doc.update(update.get("$set", {}))
                 modified += 1
-        return SimpleNamespace(modified_count=modified)
+        return SimpleNamespace(modified_count=modified, matched_count=modified)
 
-    async def update_many(self, query, update):
+    async def update_many(self, query, update, **kwargs):
         modified = 0
         for doc in self.docs:
             if _matches(doc, query):
                 doc.update(update.get("$set", {}))
                 modified += 1
-        return SimpleNamespace(modified_count=modified)
+        return SimpleNamespace(modified_count=modified, matched_count=modified)
 
     async def count_documents(self, query):
         return sum(1 for doc in self.docs if _matches(doc, query))
@@ -177,12 +177,34 @@ class FakeCollection:
         return FakeCursor([dict(doc) for doc in self.docs if _matches(doc, query)])
 
 
+class FakeSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def with_transaction(self, callback, **kwargs):
+        return await callback(self)
+
+
+class FakeClient:
+    def __init__(self):
+        async def hello(command):
+            return {"ok": 1.0, "setName": "contract-replica"}
+        self.admin = SimpleNamespace(command=hello)
+
+    async def start_session(self):
+        return FakeSession()
+
+
 class FakeDB:
     def __init__(self):
         self.conversations = FakeCollection()
         self.messages = FakeCollection()
         self.users = FakeCollection()
         self.notifications = FakeCollection()
+        self.client = FakeClient()
 
     def __getattr__(self, name):
         collection = FakeCollection()
@@ -206,7 +228,19 @@ def make_user(name, role):
 
 
 def seed_conversation(db, user_a, user_b):
-    """直接构造一条结构 B 会话文档，返回 conversation_id。"""
+    """直接构造一条结构 B 会话；医患 fixture 同时写入真实归属关系。"""
+    roles = (user_a.get("role"), user_b.get("role"))
+    if ("patient" in roles
+            and any(role in {"doctor", "health_manager"} for role in roles)):
+        patient = user_a if user_a.get("role") == "patient" else user_b
+        practitioner = user_b if patient is user_a else user_a
+        patient_doc = next((doc for doc in db.users.docs
+                            if str(doc.get("_id")) == str(patient["_id"])), None)
+        if patient_doc is not None:
+            field = "health_managers" if practitioner.get("role") == "health_manager" else "practitioners"
+            assigned = patient_doc.setdefault(field, [])
+            if str(practitioner["_id"]) not in [str(value) for value in assigned]:
+                assigned.append(str(practitioner["_id"]))
     conversation_id = str(ObjectId())
     db.conversations.docs.append({
         "_id": ObjectId(conversation_id),
@@ -234,20 +268,20 @@ class UniqueRaceCollection(FakeCollection):
         super().__init__()
         self.suppress_next_find_one = False
 
-    async def find_one(self, query):
+    async def find_one(self, query, **kwargs):
         if self.suppress_next_find_one:
             self.suppress_next_find_one = False
             return None
-        return await super().find_one(query)
+        return await super().find_one(query, **kwargs)
 
-    async def insert_one(self, doc):
+    async def insert_one(self, doc, **kwargs):
         if doc.get("client_message_id"):
             for existing in self.docs:
                 if (existing.get("conversation_id"), existing.get("sender_id"),
                         existing.get("client_message_id")) == \
                         (doc["conversation_id"], doc["sender_id"], doc["client_message_id"]):
                     raise DuplicateKeyError("E11000 duplicate key")
-        return await super().insert_one(doc)
+        return await super().insert_one(doc, **kwargs)
 
 
 class ExplodingUpdateManyCollection(FakeCollection):
@@ -547,7 +581,7 @@ class StandaloneDegradationTests(unittest.IsolatedAsyncioTestCase):
     async def test_standalone_write_lands_sequentially_without_session(self):
         db = self._standalone_db()
         alice = make_user("Alice", "doctor")
-        bob = make_user("Bob", "patient")
+        bob = make_user("Bob", "doctor")
         db.users.docs.extend([dict(alice), dict(bob)])
         conversation_id = seed_conversation(db, alice, bob)
 
@@ -571,8 +605,8 @@ class StandaloneDegradationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db.messages.docs), 1)
         self.assertEqual(len(db.notifications.docs), 1)
 
-    async def test_probe_failure_degrades_instead_of_rejecting(self):
-        """事务能力探测失败（网络抖动/无 admin 句柄）：降级顺序写，不 503。"""
+    async def test_probe_failure_degrades_for_non_care_collaboration(self):
+        """无事务时医护间非医患会话继续沿用历史顺序写。"""
         db = FakeDB()
 
         async def broken(command):
@@ -580,7 +614,7 @@ class StandaloneDegradationTests(unittest.IsolatedAsyncioTestCase):
 
         db.client = SimpleNamespace(admin=SimpleNamespace(command=broken))
         alice = make_user("Alice", "doctor")
-        bob = make_user("Bob", "patient")
+        bob = make_user("Bob", "doctor")
         db.users.docs.extend([dict(alice), dict(bob)])
         conversation_id = seed_conversation(db, alice, bob)
 
@@ -589,6 +623,20 @@ class StandaloneDegradationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["content"], "degraded")
         self.assertEqual(len(db.messages.docs), 1)
         self.assertEqual(len(db.notifications.docs), 1)
+
+    async def test_care_message_is_rejected_without_transaction_support(self):
+        from app.core.exceptions import AppBaseException
+        db = self._standalone_db()
+        alice = make_user("Alice", "doctor")
+        bob = make_user("Bob", "patient")
+        db.users.docs.extend([dict(alice), dict(bob)])
+        conversation_id = seed_conversation(db, alice, bob)
+        with self.assertRaises(AppBaseException) as raised:
+            await CommunicationService.send_message(
+                db, conversation_id, str(alice["_id"]), "must be transactional")
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(raised.exception.error_code, "COMMUNICATION_TRANSACTION_UNAVAILABLE")
+        self.assertEqual(len(db.messages.docs), 0)
 
 
 class ObjectIdPaginationTests(unittest.IsolatedAsyncioTestCase):
@@ -1214,7 +1262,9 @@ class ConversationPolicyDecisionTests(unittest.IsolatedAsyncioTestCase):
         db = FakeDB()
         alice = make_user("Alice", "doctor")
         bob = make_user("Bob", "patient")
-        db.users.docs.extend([dict(alice), dict(bob)])
+        db.users.docs.extend([dict(alice), {**dict(bob),
+                                            "practitioners": [str(alice["_id"])],
+                                            "health_managers": []}])
         conversation_id = str(ObjectId())
         db.conversations.docs.append({
             "_id": ObjectId(conversation_id),
@@ -1231,8 +1281,13 @@ class ConversationPolicyDecisionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await CommunicationService.is_conversation_participant(
             db, conversation_id, str(alice["_id"])))
-        sent = await CommunicationService.send_message(
-            db, conversation_id, str(alice["_id"]), "array-shape")
+        async def fake_transaction(database, callback, **kwargs):
+            return await callback(object())
+        with patch("app.services.communication_service._transactions_supported",
+                   new=AsyncMock(return_value=True)), \
+             patch("app.services.communication_service.run_transaction", new=fake_transaction):
+            sent = await CommunicationService.send_message(
+                db, conversation_id, str(alice["_id"]), "array-shape")
         self.assertEqual(sent["recipient_id"], str(bob["_id"]))
 
     async def test_missing_user_record_is_denied(self):

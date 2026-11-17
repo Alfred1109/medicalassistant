@@ -132,13 +132,13 @@ class EndSessionTests(SessionTestBase):
         return await self.service.start_collection_session(
             self._device(), PATIENT_ID, **kwargs)
 
-    def _seed_session_reading(self, session_id, value=72, flags=None):
+    def _seed_session_reading(self, session_id, value=72, flags=None, source="automated"):
         self.db["device_data"].docs.append({
             "_id": ObjectId(), "device_id": DEVICE_OID,
             "patient_id": PATIENT_ID, "data_type": "heart_rate",
             "value": value, "unit": "bpm",
             "timestamp": datetime.utcnow(),
-            "metadata": {"source": "automated", "session_id": session_id},
+            "metadata": {"source": source, "session_id": session_id},
             "quality_flags": flags or [],
             "created_at": datetime.utcnow(),
         })
@@ -172,6 +172,13 @@ class EndSessionTests(SessionTestBase):
         self.assertNotIn("rehab_progress_logged", ended["summary"])
         self.assertEqual(self.db["rehab_plans"].docs[0]["published_version_id"],
                          StartSessionTests.VERSION_ID)
+        self.assertEqual(ended["summary"]["readings_count"], 1)
+
+    async def test_summary_includes_f300_only_for_this_session(self):
+        session = await self._start()
+        self._seed_session_reading(session["_id"], source="veepoo_wechat")
+        self._seed_session_reading(str(ObjectId()), source="veepoo_wechat")
+        ended = await self.service.end_collection_session(self._device(), session["_id"])
         self.assertEqual(ended["summary"]["readings_count"], 1)
 
     async def test_cancel_session_marks_cancelled(self):

@@ -145,12 +145,36 @@ class UserService:
             update_data["permissions"] = permissions
         
         update_data["updated_at"] = datetime.utcnow()
-        
-        await self.collection.update_one(
-            {"_id": ObjectId(user_id)},
-            {"$set": update_data}
-        )
-        
+
+        if "role" in update_data:
+            from app.db.transactions import run_transaction
+            from app.services.conversation_policy import ConversationPolicy
+            user_oid = ObjectId(user_id)
+
+            async def update_role_transaction(session):
+                current = await self.collection.find_one({"_id": user_oid}, session=session)
+                if not current:
+                    return False
+                if current.get("role") != update_data["role"]:
+                    await ConversationPolicy.mark_care_conversations_before_role_change(
+                        self.db, current, current.get("role"), session=session)
+                changed = await self.collection.update_one(
+                    {"_id": user_oid, "role": current.get("role")},
+                    {"$set": update_data}, session=session)
+                if changed.matched_count != 1:
+                    raise ValueError("角色在并发更新中已变化，请重新加载后重试")
+                return True
+
+            updated = await run_transaction(
+                self.db, update_role_transaction,
+                error_code="USER_ROLE_CHANGE_TRANSACTION_UNAVAILABLE",
+                error_message="角色变更未能安全提交，请重试；数据库必须支持副本集事务")
+            if not updated:
+                return None
+        else:
+            await self.collection.update_one(
+                {"_id": ObjectId(user_id)}, {"$set": update_data})
+
         return await self.get_user_by_id(user_id)
 
     async def change_own_password(self, user_id: str, current_password: str, new_password: str) -> None:

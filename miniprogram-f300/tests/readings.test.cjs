@@ -1,0 +1,18 @@
+const assert = require('node:assert/strict');
+const { heartRateCallbackFailure, normalizeHeartRateCallback } = require('../miniprogram/utils/readings');
+const sample = normalizeHeartRateCallback({ type: 51, content: { heartRate: 88, heartState: 0, watchState: 0 } }, 'F300-MAC', '2026-11-17T10:20:30.123+08:00');
+assert.equal(sample.data_type, 'heart_rate');
+assert.equal(sample.value, '88');
+assert.equal(sample.unit, 'bpm');
+assert.match(sample.measured_at, /[+-]08:00$/);
+assert.equal(sample.sdk_type, 51);
+assert.equal(sample.raw_payload.capture_time_source, 'phone_callback');
+assert.equal(sample.record_key, 'F300-MAC:heart_rate:1794882030123');
+assert.equal(normalizeHeartRateCallback({ type: 5, content: {} }, 'F300-MAC', Date.now()), null);
+assert.equal(normalizeHeartRateCallback({ type: 51, content: { heartRate: 10 } }, 'F300-MAC', Date.now()), null);
+assert.equal(normalizeHeartRateCallback({ type: 51, content: { heartRate: 88 } }, '', Date.now()), null);
+assert.equal(heartRateCallbackFailure({ type: 51, content: { heartRate: 88, deviceBusy: true } }), 'device_busy');
+assert.equal(normalizeHeartRateCallback({ type: 51, content: { heartRate: 88, deviceBusy: true } }, 'F300-MAC', Date.now()), null);
+assert.equal(heartRateCallbackFailure({ type: 51, content: { heartRate: 88, notWear: true } }), 'not_worn');
+assert.equal(normalizeHeartRateCallback({ type: 51, content: { heartRate: 88, notWear: true } }, 'F300-MAC', Date.now()), null);
+console.log('PASS: callback conversion, local offset, stable retry key, invalid value rejection, busy and not-worn rejection');

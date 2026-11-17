@@ -1,0 +1,86 @@
+<view class="page">
+  <view class="header">
+    <view>
+      <view class="title">医患沟通</view>
+      <view wx:if="{{session}}" class="subtitle">{{session.user.name || session.user.display_name || session.user.email}} · {{roleLabel}}</view>
+    </view>
+    <button class="refresh" loading="{{loading}}" bindtap="refreshCurrent">刷新</button>
+  </view>
+
+  <view wx:if="{{error}}" class="notice error">{{error}}</view>
+  <view wx:if="{{notice}}" class="notice">{{notice}}</view>
+
+  <view wx:if="{{session}}" class="layout">
+    <view class="list-card">
+      <view class="list-heading"><view class="list-title"><text>会话</text><text class="count">{{conversations.length}}</text></view><button class="new-chat" bindtap="showContactDirectoryNotice">新建</button></view>
+      <view wx:if="{{loading && !conversations.length}}" class="empty">正在加载会话…</view>
+      <view wx:elif="{{!conversations.length}}" class="empty">
+        <view>还没有沟通会话</view>
+        <view class="muted">从当前系统已授权的联系人中发起沟通。</view>
+        <button class="contact-button" bindtap="showContactDirectoryNotice">联系医护 / 新建会话</button>
+      </view>
+      <view wx:else class="conversation-list">
+        <view wx:for="{{conversations}}" wx:key="id" class="conversation {{activeId === item.id ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="selectConversation">
+          <view class="conversation-top">
+            <text class="name">{{item.other_user.name || '系统用户'}}</text>
+            <text wx:if="{{item.unread_count > 0}}" class="badge">{{item.unread_count}}</text>
+          </view>
+          <view class="preview">{{item.last_message_preview || '暂无消息'}}</view>
+          <view wx:if="{{item.can_send === false}}" class="read-only-label">仅查看 · {{item.send_block_reason === 'care_relationship_ended' ? '管理关系已解除' : item.send_block_reason === 'account_invalid' ? '账号不可用' : '当前不可发送'}}</view>
+        </view>
+      </view>
+      <button wx:if="{{hasMoreConversations}}" class="older" loading="{{loadingMoreConversations}}" bindtap="loadMoreConversations">加载更多会话</button>
+    </view>
+
+    <view class="chat-card">
+      <view wx:if="{{!activeId}}" class="empty chat-empty">选择一个会话查看消息</view>
+      <block wx:else>
+        <view class="chat-heading">
+          <view class="name">{{activeConversation.other_user.name || '系统用户'}}</view>
+          <view class="muted">{{activeConversation.other_user.role === 'doctor' ? '医生' : activeConversation.other_user.role === 'health_manager' ? '健康管理师' : activeConversation.other_user.role === 'patient' ? '患者' : ''}}</view>
+        </view>
+        <scroll-view class="messages" scroll-y="true" scroll-into-view="{{messages.length ? 'message-' + messages.length : ''}}">
+          <button wx:if="{{canLoadEarlier}}" class="older" loading="{{loadingEarlier}}" bindtap="loadEarlier">加载更早消息</button>
+          <view wx:if="{{loadingMessages && !messages.length}}" class="empty">正在加载消息…</view>
+          <view wx:elif="{{messagesError && !messages.length}}" class="empty error-text">{{messagesError}}</view>
+          <view wx:elif="{{!messages.length}}" class="empty">暂无消息，发送一条消息开始沟通。</view>
+          <view wx:for="{{messages}}" wx:key="id" id="message-{{index + 1}}" class="message-row {{item.sender_id === session.user.id ? 'mine' : ''}}">
+            <view class="bubble {{item.sender_id === session.user.id ? 'mine-bubble' : ''}}">
+              <view wx:if="{{item.deleted}}" class="message-content muted">此消息已被删除</view>
+              <view wx:else class="message-content">{{item.content}}</view>
+              <view class="timestamp">{{item.timestamp}}</view>
+            </view>
+          </view>
+          <view wx:if="{{messagesError && messages.length}}" class="inline-error">{{messagesError}}</view>
+        </scroll-view>
+        <view wx:if="{{activeConversation.can_send === false}}" class="read-only-notice">
+          {{activeConversation.send_status_text}}
+        </view>
+        <view wx:else class="composer">
+          <textarea class="input" value="{{draft}}" maxlength="2000" auto-height="true" placeholder="输入消息" bindinput="onDraftInput" />
+          <button class="send" loading="{{sending}}" disabled="{{sending || !canSend || !sendAllowed}}" bindtap="sendMessage">发送</button>
+        </view>
+      </block>
+    </view>
+  </view>
+
+  <view wx:if="{{contactPickerOpen}}" class="modal-mask" bindtap="closeContactPicker">
+    <view class="contact-modal" catchtap="stopPropagation">
+      <view class="modal-heading"><text>选择联系人</text><text class="close" bindtap="closeContactPicker">关闭</text></view>
+      <view class="muted">列表仅包含当前患者归属的医护或医护当前管理且已绑定账号的患者。</view>
+      <view wx:if="{{contactsError}}" class="inline-error">{{contactsError}}</view>
+      <view wx:if="{{contactsLoading}}" class="empty">正在加载授权联系人…</view>
+      <view wx:elif="{{!contacts.length}}" class="empty">当前没有已绑定且获授权的联系人。</view>
+      <view wx:else class="contact-list">
+        <view wx:for="{{contacts}}" wx:key="id" class="contact-row" data-id="{{item.id}}" bindtap="selectContact">
+          <view><view class="name">{{item.name}}</view><view class="muted">{{item.role === 'doctor' ? '医生' : item.role === 'health_manager' ? '健康管理师' : item.role === 'patient' ? '患者' : ''}}</view></view>
+          <button class="contact-start" loading="{{sending}}" disabled="{{sending}}">发起沟通</button>
+        </view>
+      </view>
+      <button class="secondary" loading="{{contactsLoading}}" bindtap="loadContacts">刷新联系人</button>
+    </view>
+  </view>
+
+  <view class="footnote">消息仅在你已加入的会话中显示；附件和实时消息推送暂未接入小程序。</view>
+  <role-nav current="messages" />
+</view>

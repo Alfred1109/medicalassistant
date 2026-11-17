@@ -1,0 +1,20 @@
+<view class="page">
+  <view class="heading"><view class="title">康复指导</view><view class="subtitle">以下内容来自医护已发布的康复方案。</view></view>
+  <view wx:if="{{loading && !loaded}}" class="state">正在读取康复指导…</view>
+  <view wx:elif="{{error}}" class="state error"><view>{{error}}</view><button class="retry" bindtap="loadEducation">重试</button></view>
+  <view wx:elif="{{loaded && plans.length === 0 && !hasMore}}" class="state">目前没有已发布的患者指导内容。</view>
+  <view wx:elif="{{loaded && plans.length === 0 && hasMore}}" class="state">当前页没有方案附带患者指导，可继续查看后续方案。</view>
+  <view wx:for="{{plans}}" wx:key="id" class="card">
+    <view class="plan-title">{{item.content.name}}</view>
+    <view wx:if="{{item.content.patient_instructions}}" class="guidance">{{item.content.patient_instructions}}</view>
+    <view wx:for="{{item.guidance_items}}" wx:for-item="guidance" wx:key="item_id" class="guidance-item">
+      <view class="item-title">{{guidance.name}}</view>
+      <view wx:if="{{guidance.description}}" class="guidance">{{guidance.description}}</view>
+      <view wx:if="{{guidance.patient_instructions}}" class="guidance">{{guidance.patient_instructions}}</view>
+      <view wx:for="{{guidance.execution_requirements}}" wx:for-item="requirement" wx:key="index" class="requirement">· {{requirement}}</view>
+      <video wx:if="{{guidance.guidance_video_url}}" class="video" src="{{guidance.guidance_video_url}}" controls show-center-play-btn="true" />
+    </view>
+  </view>
+  <view wx:if="{{hasMore}}" class="load-more"><view wx:if="{{moreError}}" class="error-text">{{moreError}}</view><button loading="{{loadingMore}}" disabled="{{loadingMore}}" bindtap="loadMore">加载更多方案</button></view>
+</view>
+<role-nav current="plans" />

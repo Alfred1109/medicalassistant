@@ -1,0 +1,4 @@
+<view wx:if="{{items.length}}" class="role-nav-spacer"></view>
+<view wx:if="{{items.length}}" class="role-nav">
+  <view wx:for="{{items}}" wx:key="key" class="role-nav-item {{current === item.key ? 'active' : ''}}" data-key="{{item.key}}" bindtap="navigate">{{item.label}}</view>
+</view>

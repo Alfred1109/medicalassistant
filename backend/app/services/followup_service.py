@@ -166,8 +166,12 @@ def select_effective_response(fill_task_docs):
     for doc in fill_task_docs or []:
         if doc.get("status") != "confirmed":
             continue  # 已提交但未核实（submitted）不算数，设计稿 §2.2 耦合规则
-        sessions = doc.get("fill_sessions") or []
-        confirmations = [s.get("confirmation") for s in sessions if s.get("confirmation")]
+        if doc.get("task_type") == "patient_self":
+            confirmation = doc.get("confirmation") or {}
+            confirmations = [confirmation] if confirmation.get("fill_mode") == "patient_self" else []
+        else:
+            sessions = doc.get("fill_sessions") or []
+            confirmations = [s.get("confirmation") for s in sessions if s.get("confirmation")]
         if not confirmations:
             continue
         confirmation = confirmations[-1]  # 同任务多会话取最后一次确认
@@ -855,6 +859,29 @@ class FollowupService:
                 or confirmation.get("response_id") != reference.get("response_id")
                 or confirmation.get("remote_status") not in {"submitted", "restored"}):
             raise followup_conflict("当前答卷与本地确认证据不一致，请退回重新提交")
+        if task.get("task_type") == "patient_self":
+            patient_self = task.get("patient_self") or {}
+            context = task.get("reviewed_context") or {}
+            version = context.get("version_ref") or {}
+            expected_version = {key: version.get(key) for key in
+                                ("form_id", "family_id", "version", "definition_sha256")}
+            if (confirmation.get("fill_mode") != "patient_self"
+                    or patient_self.get("status") != "submitted"
+                    or patient_self.get("source_status") != "submitted"
+                    or patient_self.get("source_session_id") != confirmation.get("session_uuid")
+                    or patient_self.get("source_response_id") != confirmation.get("response_id")
+                    or confirmation.get("is_voided") is not False
+                    or confirmation.get("user_id", object()) is not None
+                    or confirmation.get("questionnaire_version_ref") != expected_version
+                    or not isinstance(confirmation.get("snapshot_sha256"), str)
+                    or len(confirmation["snapshot_sha256"]) != 64
+                    or not (patient_self.get("patient_actor_id")
+                            and patient_self.get("patient_actor_subject")
+                            and patient_self.get("patient_issuer"))):
+                raise followup_conflict("患者本人答卷快照与患者任务不一致，请重新核验")
+            from app.integrations.forms.patient_self import _response_snapshot_digest
+            if _response_snapshot_digest(confirmation) != confirmation["snapshot_sha256"]:
+                raise followup_conflict("患者本人答卷快照校验失败，请重新核验")
         from app.integrations.forms.service import require_task_reviewed_context, FormIntegrationError
         try:
             await require_task_reviewed_context(self.db, task, session=session)

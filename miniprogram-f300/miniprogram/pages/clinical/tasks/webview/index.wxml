@@ -1,0 +1,6 @@
+<view class="page">
+  <view wx:if="{{error}}" class="notice">{{error}}</view>
+  <view wx:if="{{!url && !error}}" class="notice">正在校验问卷入口…</view>
+  <web-view wx:if="{{url && !error}}" src="{{url}}" binderror="onWebviewError" />
+  <button class="close" bindtap="close">返回任务列表</button>
+</view>

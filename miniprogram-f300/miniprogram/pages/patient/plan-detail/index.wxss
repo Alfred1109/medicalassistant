@@ -1,0 +1,25 @@
+.page { min-height: 100vh; padding: 28rpx 24rpx 60rpx; background: #f4f7fb; box-sizing: border-box; }
+.hero, .card, .state { margin: 16rpx 0; padding: 28rpx; border-radius: 20rpx; background: #fff; box-shadow: 0 8rpx 24rpx rgba(31, 59, 82, .05); }
+.hero { color: #fff; background: linear-gradient(135deg, #176e66, #2b9b88); }
+.title { font-size: 36rpx; font-weight: 700; }
+.goal { margin-top: 18rpx; font-size: 25rpx; line-height: 1.6; }
+.section-title { margin-bottom: 18rpx; color: #173344; font-size: 30rpx; font-weight: 650; }
+.body, .instructions { color: #4d626f; font-size: 25rpx; line-height: 1.65; white-space: pre-wrap; }
+.instructions { margin-top: 18rpx; padding: 18rpx; border-radius: 12rpx; background: #eff8f6; }
+.label, .subheading { margin-bottom: 8rpx; color: #176f65; font-size: 24rpx; font-weight: 650; }
+.meta { margin-top: 12rpx; color: #81909a; font-size: 22rpx; }
+.item { margin-top: 20rpx; padding-top: 20rpx; border-top: 1rpx solid #edf0f2; }
+.item-name { display: inline-block; color: #203b4a; font-size: 27rpx; font-weight: 650; }
+.tag { display: inline-block; margin-left: 14rpx; padding: 4rpx 12rpx; border-radius: 20rpx; background: #eef4f3; color: #55736e; font-size: 20rpx; }
+.requirement { margin-top: 10rpx; color: #536873; font-size: 24rpx; line-height: 1.5; }
+.video { width: 100%; margin-top: 18rpx; border-radius: 12rpx; }
+.hint, .empty { margin: 12rpx 0; color: #7a8992; font-size: 23rpx; line-height: 1.55; }
+.picker, .textarea { margin-top: 16rpx; padding: 20rpx; border-radius: 12rpx; background: #f4f7f8; color: #405762; font-size: 25rpx; }
+.textarea { box-sizing: border-box; width: 100%; min-height: 140rpx; }
+.primary { margin-top: 18rpx; color: #fff; background: #17766a; font-size: 26rpx; }
+.feedback-item { padding: 16rpx 0; border-top: 1rpx solid #edf0f2; }
+.row { display: flex; justify-content: space-between; color: #36515f; font-size: 24rpx; }
+.inline-error, .error { color: #a13e3e; }
+.state { color: #71808a; font-size: 25rpx; line-height: 1.6; }
+.retry { margin-top: 20rpx; color: #17695f; background: #e8f3f1; font-size: 24rpx; }
+.subheading { margin-top: 28rpx; }

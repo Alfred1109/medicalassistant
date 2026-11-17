@@ -64,6 +64,24 @@ FLAG_UNREGISTERED_METRIC = "unregistered_metric"
 #: 自动采集来源标记（metadata.source）
 SOURCE_AUTOMATED = "automated"
 SOURCE_AUTOMATED_SIMULATED = "automated_simulated_replay"
+SOURCE_VEEPOO_WECHAT = "veepoo_wechat"
+
+
+def _hardware_id_bytes(value: Any) -> Optional[bytes]:
+    """Encode a hardware identifier without restricting it to an ASCII format."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+
+
+def _same_hardware_id(left: Any, right: Any) -> bool:
+    left_bytes = _hardware_id_bytes(left)
+    right_bytes = _hardware_id_bytes(right)
+    return (left_bytes is not None and right_bytes is not None
+            and secrets.compare_digest(left_bytes, right_bytes))
 
 
 class DeviceIngestionError(Exception):
@@ -233,8 +251,121 @@ class DeviceIngestionService:
         return await self._process_parsed_frames(device, parsed_frames,
                                                  source=source)
 
+    async def pin_veepoo_hardware_id(
+        self, device: Dict[str, Any], hardware_id: str, *, actor,
+    ) -> Dict[str, Any]:
+        """Bind the first user-confirmed Veepoo identity to an F300 record.
+
+        This associates an authenticated account's selected watch with its
+        already-bound device record. It is not cryptographic BLE attestation.
+        Later uploads must present the same SDK-reported hardware identifier.
+        """
+        if str(device.get("model") or "").strip().casefold() != "f300":
+            raise DeviceIngestionError("此设备不是已登记的 F300", 422)
+        if device.get("status") == "deleted" or not device.get("patient_id"):
+            raise DeviceIngestionError("设备未绑定有效患者", 409)
+        if (not isinstance(hardware_id, str) or not hardware_id.strip()
+                or len(hardware_id) > 128 or _hardware_id_bytes(hardware_id) is None):
+            raise DeviceIngestionError("缺少有效的 Veepoo 设备标识", 422)
+
+        from app.db.transactions import run_transaction
+
+        db = await self._database()
+        device_internal_id = str(device["_id"])
+        hardware_id = hardware_id.strip()
+
+        async def persist(session):
+            current = await db.devices.find_one(
+                {"_id": ObjectId(device_internal_id)}, session=session)
+            if (not current or current.get("status") == "deleted"
+                    or str(current.get("patient_id")) != str(device.get("patient_id"))
+                    or str(current.get("model") or "").strip().casefold() != "f300"):
+                raise DeviceIngestionError("设备归属或状态已变化", 409)
+            from app.core.device_access import ensure_device_access
+            from .device_service import DEVICE_READ_ROLES
+            await ensure_device_access(
+                db, current, actor, DEVICE_READ_ROLES,
+                write=True, session=session, fence=True)
+            settings = current.get("settings") or {}
+            if not isinstance(settings, dict):
+                raise DeviceIngestionError("设备设置结构无效，无法关联手环", 409)
+            claimed_id = settings.get("claimed_hardware_id")
+            if claimed_id is not None and not _same_hardware_id(claimed_id, hardware_id):
+                raise DeviceIngestionError("手环标识与绑定时确认的设备不一致", 409)
+            saved_id = settings.get("veepoo_hardware_id")
+            if saved_id is not None:
+                if not _same_hardware_id(saved_id, hardware_id):
+                    raise DeviceIngestionError("当前手环与已关联设备不匹配", 409)
+                return current
+
+            fence = current.get("_device_write_fence", 0)
+            if type(fence) is not int or fence < 0:
+                raise DeviceIngestionError("设备写入并发状态无效", 503)
+            selector = {
+                "_id": ObjectId(device_internal_id),
+                "patient_id": current.get("patient_id"),
+                "status": current.get("status"),
+                "settings": current.get("settings"),
+                "$or": ([{"_device_write_fence": 0},
+                         {"_device_write_fence": {"$exists": False}}]
+                        if fence == 0 else [{"_device_write_fence": fence}]),
+            }
+            updated_settings = {**settings, "veepoo_hardware_id": hardware_id}
+            changed = await db.devices.update_one(
+                selector,
+                {"$set": {"settings": updated_settings,
+                          "updated_at": datetime.utcnow()},
+                 "$inc": {"_device_write_fence": 1}},
+                session=session)
+            if changed.matched_count != 1:
+                raise DeviceIngestionError("设备归属或设置已变化，请重新同步", 409)
+            current["settings"] = updated_settings
+            return current
+
+        return await run_transaction(
+            db, persist, error_code="DEVICE_TRANSACTION_UNAVAILABLE",
+            error_message="设备关联事务未能确认，请核查状态后重试")
+
+    async def ingest_veepoo_readings(
+        self, device: Dict[str, Any], readings: List[Dict[str, Any]], *, actor,
+    ) -> Dict[str, Any]:
+        """Process normalized readings from the Veepoo WeChat F300 SDK."""
+        from .device_protocol.base import AdapterParseResult, StandardReading
+
+        if not readings or len(readings) > MAX_FRAMES_PER_BATCH:
+            raise DeviceIngestionError(
+                f"上报读数必须为 1..{MAX_FRAMES_PER_BATCH}", 400)
+        settings = device.get("settings") or {}
+        expected_hardware_id = settings.get("veepoo_hardware_id")
+        if not isinstance(expected_hardware_id, str) or not expected_hardware_id:
+            raise DeviceIngestionError("F300 尚未关联 Veepoo 设备标识", 409)
+        parsed = []
+        for index, item in enumerate(readings):
+            if not isinstance(item, dict):
+                raise DeviceIngestionError(f"第 {index + 1} 条读数格式无效", 422)
+            try:
+                metadata = {
+                    "adapter_id": "veepoo-wechat-f300-v1",
+                    "sdk_type": item["sdk_type"],
+                    "capture_time_source": "phone_callback",
+                    "record_key": item.get("record_key"),
+                    "raw_payload": item.get("raw_payload") or {},
+                }
+                reading = StandardReading(
+                    data_type=item["data_type"], value=float(item["value"]),
+                    unit=item["unit"], timestamp=item["measured_at"],
+                    metadata=metadata)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DeviceIngestionError(
+                    f"第 {index + 1} 条读数缺少有效字段", 422) from exc
+            parsed.append(AdapterParseResult(readings=[reading]))
+        return await self._process_parsed_frames(
+            device, parsed, source=SOURCE_VEEPOO_WECHAT, actor=actor,
+            expected_hardware_id=expected_hardware_id)
+
     async def _process_parsed_frames(
-        self, device: Dict[str, Any], parsed_frames, *, source: str,
+        self, device: Dict[str, Any], parsed_frames, *, source: str, actor=None,
+        expected_hardware_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """解析结果 → 质量管道 → 入库 → 分析链（真实上报与模拟回放共用）。"""
         db = await self._database()
@@ -266,7 +397,8 @@ class DeviceIngestionService:
                 outcome = await self._process_reading(
                     db, device_internal_id, str(device.get("patient_id")),
                     reading, config, latest_ts, session_id, source,
-                    frame_index, in_batch_seen, device)
+                    frame_index, in_batch_seen, device, actor=actor,
+                    expected_hardware_id=expected_hardware_id)
                 if outcome["action"] == "written" and (source == SOURCE_AUTOMATED_SIMULATED
                                                          or outcome["clinical_fact_created"]):
                     ts = outcome["timestamp"]
@@ -284,6 +416,7 @@ class DeviceIngestionService:
         reading, config: Dict[str, Any], latest_ts: Optional[datetime],
         session_id: Optional[str], source: str, frame_index: int,
         in_batch_seen: set, expected_device: Dict[str, Any],
+        *, actor=None, expected_hardware_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """单条标准化读数：质量校验 → 幂等去重 → 入库（或标记/拒绝）。"""
         data_type = reading.data_type
@@ -339,6 +472,19 @@ class DeviceIngestionService:
             current = await db.devices.find_one({"_id": ObjectId(device_internal_id)}, session=session)
             if not current or current.get("status") == "deleted":
                 raise DeviceIngestionError("设备已解绑或不存在，未保存本条读数", 409)
+            if actor is not None:
+                from app.core.device_access import ensure_device_access
+                from .device_service import DEVICE_READ_ROLES
+                await ensure_device_access(
+                    db, current, actor, DEVICE_READ_ROLES,
+                    write=True, session=session, fence=True)
+            if expected_hardware_id is not None:
+                current_settings = current.get("settings") or {}
+                current_hardware_id = current_settings.get("veepoo_hardware_id") \
+                    if isinstance(current_settings, dict) else None
+                if not _same_hardware_id(current_hardware_id, expected_hardware_id):
+                    raise DeviceIngestionError(
+                        "F300 设备标识在上报期间已变化，未保存本条读数", 409)
             if not isinstance(current.get("patient_id"), (str, ObjectId)) or not str(current["patient_id"]):
                 raise DeviceIngestionError("设备尚未关联患者，未保存本条读数", 409)
             fence = current.get("_device_write_fence", 0)
@@ -590,8 +736,10 @@ class DeviceIngestionService:
         ended_at = datetime.utcnow()
         window_query = {
             "device_id": device_internal_id,
+            "metadata.session_id": session_id,
             "metadata.source": {"$in": [SOURCE_AUTOMATED,
-                                        SOURCE_AUTOMATED_SIMULATED]},
+                                        SOURCE_AUTOMATED_SIMULATED,
+                                        SOURCE_VEEPOO_WECHAT]},
             "timestamp": {"$gte": session["started_at"], "$lte": ended_at},
         }
         session_docs = await db.device_data.find(window_query).to_list(None)

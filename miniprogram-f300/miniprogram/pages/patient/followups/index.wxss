@@ -1,0 +1,20 @@
+.page { min-height: 100vh; padding: 30rpx 26rpx 60rpx; background: #f4f7fb; box-sizing: border-box; }
+.heading { padding: 14rpx 8rpx 22rpx; }
+.title { color: #173344; font-size: 40rpx; font-weight: 700; }
+.subtitle { margin-top: 12rpx; color: #75838c; font-size: 24rpx; }
+.card, .state { margin: 18rpx 0; padding: 28rpx; border-radius: 20rpx; background: #fff; box-shadow: 0 8rpx 24rpx rgba(31, 59, 82, .05); }
+.row { display: flex; align-items: center; justify-content: space-between; }
+.type { color: #203b4a; font-size: 28rpx; font-weight: 650; }
+.status { padding: 8rpx 14rpx; border-radius: 24rpx; background: #edf5f3; color: #39736b; font-size: 21rpx; }
+.scheduled { margin-top: 18rpx; color: #536a76; font-size: 24rpx; }
+.body, .summary { margin-top: 16rpx; color: #536a76; font-size: 24rpx; line-height: 1.6; white-space: pre-wrap; }
+.summary { padding: 16rpx; border-radius: 12rpx; background: #f4f8f7; }
+.label { margin-bottom: 8rpx; color: #39736b; font-size: 22rpx; font-weight: 650; }
+.meta { margin-top: 14rpx; color: #81909a; font-size: 22rpx; }
+.state { color: #71808a; font-size: 25rpx; line-height: 1.6; }
+.error { color: #a13e3e; }
+.retry { margin: 20rpx 0 0; background: #e8f3f1; color: #17695f; font-size: 24rpx; }
+.footnote { padding: 18rpx; color: #829099; text-align: center; font-size: 22rpx; }
+.load-more { padding: 18rpx; text-align: center; }
+.load-more button { color: #17695f; background: #e8f3f1; font-size: 24rpx; }
+.error-text { color: #a13e3e; font-size: 22rpx; }

@@ -5,7 +5,9 @@ from bson import ObjectId
 from fastapi import HTTPException
 from pymongo.errors import DuplicateKeyError
 
-from app.core.patient_access import ensure_patient_access, load_patient_doc
+from app.core.patient_access import patient_domain_context
+from app.core.fences import PatientFenceStore, legacy_document_fence
+from app.db.transactions import run_transaction
 
 # 标签业务唯一键 (name, category) 的唯一索引名。索引不进应用启动路径
 # （app/db/indexes.py 不登记）：须先经 scripts/label_uniqueness_audit.py
@@ -128,16 +130,18 @@ async def list_templates(db):
 
 
 async def issue_consent(db, actor, template_id, patient_id):
+    context = await patient_domain_context(db)
     if actor.role == "doctor":
-        patient = await ensure_patient_access(db, patient_id, str(actor.id), "doctor")
+        patient = await context.ensure_patient_access(patient_id, str(actor.id), "doctor")
     elif actor.role == "admin":
-        patient = await load_patient_doc(db, patient_id)
+        patient = await context.load_patient_doc(patient_id)
     else:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
     template = await db.consent_templates.find_one({"_id": _id(template_id), "active": True})
     if not template:
         raise HTTPException(404, detail={"code": "TEMPLATE_NOT_FOUND"})
-    document = {"_id": ObjectId(), "template_id": str(template["_id"]), "patient_id": str(patient["_id"]),
+    document = {"_id": ObjectId(), "template_id": str(template["_id"]),
+                "patient_id": context.entity_id(patient),
                 "patient_name": patient.get("name") or "", "title": template["title"], "body": template["body"],
                 "status": "pending", "created_by": str(actor.id), "created_at": _now()}
     await db.consent_documents.insert_one(document)
@@ -146,12 +150,15 @@ async def issue_consent(db, actor, template_id, patient_id):
 
 async def list_consents(db, actor, patient_id=None):
     if actor.role == "patient":
-        query = {"patient_id": str(actor.id)}
+        context = await patient_domain_context(db)
+        resolved_patient_id = await context.ensure_self_patient_access(actor, patient_id)
+        query = {"patient_id": resolved_patient_id}
     elif actor.role == "admin":
         query = {"patient_id": patient_id} if patient_id else {}
     elif actor.role == "doctor":
         if patient_id:
-            await ensure_patient_access(db, patient_id, str(actor.id), "doctor")
+            context = await patient_domain_context(db)
+            await context.ensure_patient_access(patient_id, str(actor.id), "doctor")
             query = {"patient_id": str(patient_id)}
         else:
             query = {"created_by": str(actor.id)}
@@ -164,10 +171,12 @@ async def read_consent(db, actor, document_id):
     row = await db.consent_documents.find_one({"_id": _id(document_id)})
     if not row:
         raise HTTPException(404, detail={"code": "CONSENT_NOT_FOUND"})
-    if actor.role == "patient" and row["patient_id"] != str(actor.id):
-        raise HTTPException(403, detail={"code": "PATIENT_NOT_ASSIGNED"})
+    if actor.role == "patient":
+        context = await patient_domain_context(db)
+        await context.ensure_self_patient_access(actor, row["patient_id"])
     if actor.role == "doctor" and row.get("created_by") != str(actor.id):
-        await ensure_patient_access(db, row["patient_id"], str(actor.id), "doctor")
+        context = await patient_domain_context(db)
+        await context.ensure_patient_access(row["patient_id"], str(actor.id), "doctor")
     if actor.role not in {"patient", "doctor", "admin"}:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
     return row
@@ -176,15 +185,70 @@ async def read_consent(db, actor, document_id):
 async def sign_consent(db, actor, document_id, signed_name, accepted):
     if actor.role != "patient":
         raise HTTPException(403, detail={"code": "PATIENT_SIGNATURE_ONLY"})
-    row = await read_consent(db, actor, document_id)
-    if row["status"] != "pending":
-        return _document(row)
     signed_name = signed_name.strip()
     if accepted and not signed_name:
         raise HTTPException(422, detail={"code": "SIGNATURE_NAME_REQUIRED"})
     status = "signed" if accepted else "declined"
-    await db.consent_documents.update_one(
-        {"_id": row["_id"], "status": "pending"},
-        {"$set": {"status": status, "signed_name": signed_name, "signed_at": _now()}})
-    row.update(status=status, signed_name=signed_name, signed_at=_now())
-    return _document(row)
+
+    async def apply(session):
+        consent = await db.consent_documents.find_one({"_id": _id(document_id)}, session=session)
+        if consent is None:
+            raise HTTPException(404, detail={"code": "CONSENT_NOT_FOUND"})
+        context = await patient_domain_context(db, session=session)
+        await context.ensure_self_patient_access(actor, consent["patient_id"])
+        if consent.get("status") != "pending":
+            raise HTTPException(409, detail={"code": "CONSENT_CONCURRENT_UPDATE",
+                                             "current_status": consent.get("status")})
+
+        # Revalidate and serialize the authorization carrier in the same
+        # transaction as the consent transition. Canonical link revocation is
+        # an atomic verified -> disabled update on this exact document; touching
+        # it here makes concurrent revocation conflict with this transaction.
+        if context.is_canonical:
+            account_id = str(actor.id)
+            account = await db.users.find_one({"_id": _id(account_id)}, session=session)
+            if not account or account.get("role") != "patient" or account.get("is_active", True) is not True:
+                raise HTTPException(403, detail={"code": "PATIENT_NOT_ASSIGNED"})
+            await legacy_document_fence(
+                db.users, account, "_access_fence", session=session,
+                error_code="CONSENT_ACCOUNT_FENCE_INVALID",
+                error_message="患者账号并发状态异常")
+            link = await db.patient_account_links.find_one({
+                "account_id": account_id, "patient_id": consent["patient_id"],
+                "status": "verified",
+            }, session=session)
+            if not link:
+                raise HTTPException(403, detail={"code": "PATIENT_NOT_ASSIGNED"})
+            link_update = await db.patient_account_links.update_one(
+                {"_id": link["_id"], "account_id": account_id,
+                 "patient_id": consent["patient_id"], "status": "verified"},
+                {"$inc": {"_consent_access_fence": 1}}, session=session)
+            if link_update.matched_count != 1:
+                raise HTTPException(409, detail={"code": "CONSENT_AUTHORIZATION_CHANGED"})
+            await PatientFenceStore(db).bump(
+                consent["patient_id"], "consent", session=session,
+                extra_query={"status": "active"})
+        else:
+            patient = await context.load_patient_doc(consent["patient_id"])
+            await legacy_document_fence(
+                db.users, patient, "_access_fence", session=session,
+                error_code="CONSENT_ACCOUNT_FENCE_INVALID",
+                error_message="患者账号并发状态异常")
+
+        signed_at = _now()
+        result = await db.consent_documents.update_one(
+            {"_id": consent["_id"], "status": "pending"},
+            {"$set": {"status": status, "signed_name": signed_name, "signed_at": signed_at}},
+            session=session)
+        if result.matched_count != 1:
+            current = await db.consent_documents.find_one({"_id": consent["_id"]}, session=session)
+            raise HTTPException(409, detail={"code": "CONSENT_CONCURRENT_UPDATE",
+                                             "current_status": current.get("status") if current else None})
+        current = await db.consent_documents.find_one({"_id": consent["_id"]}, session=session)
+        if current is None:
+            raise HTTPException(404, detail={"code": "CONSENT_NOT_FOUND"})
+        return _document(current)
+
+    return await run_transaction(db, apply,
+        error_code="CONSENT_TRANSACTION_UNAVAILABLE",
+        error_message="知情同意状态未能确认，请重新读取后再试；数据库必须支持事务")

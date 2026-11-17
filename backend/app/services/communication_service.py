@@ -13,11 +13,20 @@ import os
 import uuid
 import weakref
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.core.exceptions import AppBaseException
-from app.core.patient_identity import identity_key, load_identity_groups
+from app.core.patient_identity import identity_key, load_identity_groups, resolve_unique_account
+from app.core.patient_access import (
+    assigned_scope_ids,
+    ensure_self_patient_access,
+    linked_account_id,
+    load_patient_doc,
+    patient_domain_mode,
+)
 from app.db.transactions import run_transaction
 from app.patients.legacy import LegacyPatientIdentityError
+from app.patients.repository import ClinicalPatientRepository
 from app.services.notification_service import NotificationService
 from app.services.conversation_policy import (
     ConversationPolicy,
@@ -244,6 +253,186 @@ class CommunicationService:
         return documents[0] if documents else None
 
     @staticmethod
+    async def get_care_contacts(db, user_id: str, user_role: str, *, session=None) -> List[Dict[str, str]]:
+        """Return only the current, explicitly assigned patient/staff contacts.
+
+        Account IDs remain the conversation identity. Patient entity IDs are
+        resolved through the patient access kernel; canonical patient contacts
+        require a verified, reverse-checked account link. No name matching or
+        same-ID inference is used in canonical mode.
+        """
+        if user_role not in {"patient", "doctor", "health_manager"}:
+            raise AppBaseException("当前账号不支持医患沟通", status_code=403,
+                                   error_code="COMMUNICATION_ROLE_FORBIDDEN")
+
+        actor = await resolve_unique_account(db, user_id, session=session)
+        if (not actor or actor.get("role") != user_role
+                or actor.get("is_active", True) is not True
+                or str(actor.get("_id")) != str(user_id)):
+            raise AppBaseException("当前账号不可用", status_code=403,
+                                   error_code="COMMUNICATION_ACCOUNT_UNAVAILABLE")
+
+        contacts: Dict[str, Dict[str, str]] = {}
+        if user_role == "patient":
+            patient_actor = SimpleNamespace(id=actor["_id"], role=user_role)
+            patient_id = await ensure_self_patient_access(db, patient_actor, session=session)
+            patient = await load_patient_doc(db, patient_id, session=session)
+            assignments = (
+                ("doctor", patient.get("practitioners") or []),
+                ("health_manager", patient.get("health_managers") or []),
+            )
+            identifiers = [str(value) for _, values in assignments for value in values if value]
+            groups = await load_identity_groups(db, identifiers, session=session)
+            for role, values in assignments:
+                for identifier in values:
+                    if not identifier:
+                        continue
+                    key = identity_key(identifier)
+                    documents = groups.get(key, [])
+                    if len(documents) > 1:
+                        raise AppBaseException("联系人账号标识存在歧义，已拒绝展示", status_code=503,
+                                               error_code="COMMUNICATION_CONTACT_AMBIGUOUS")
+                    if not documents:
+                        continue
+                    account = documents[0]
+                    if (account.get("role") != role or account.get("is_active", True) is not True):
+                        continue
+                    account_id = str(account["_id"])
+                    name = account.get("name") or account.get("email")
+                    contacts[account_id] = {
+                        "id": account_id,
+                        "name": name.strip() if isinstance(name, str) and name.strip() else role,
+                        "role": role,
+                    }
+        else:
+            patient_ids = await assigned_scope_ids(db, user_id, user_role, session=session)
+            mode = await patient_domain_mode(db, session=session)
+            if mode == "canonical":
+                repository = ClinicalPatientRepository(db)
+                account_ids = []
+                for patient_id in patient_ids:
+                    account_id = await linked_account_id(db, patient_id, session=session)
+                    if not account_id:
+                        continue
+                    # resolve_self verifies source/audit/reverse account and active patient.
+                    patient = await repository.resolve_self(account_id, session=session)
+                    if patient and str(patient.get("patient_id")) == str(patient_id):
+                        account_ids.append(account_id)
+            else:
+                account_ids = [str(value) for value in patient_ids]
+
+            groups = await load_identity_groups(db, account_ids, session=session)
+            for identifier in account_ids:
+                documents = groups.get(identity_key(identifier), [])
+                if len(documents) > 1:
+                    raise AppBaseException("患者账号标识存在歧义，已拒绝展示", status_code=503,
+                                           error_code="COMMUNICATION_CONTACT_AMBIGUOUS")
+                if not documents:
+                    continue
+                account = documents[0]
+                if account.get("role") != "patient" or account.get("is_active", True) is not True:
+                    continue
+                account_id = str(account["_id"])
+                name = account.get("name") or account.get("email")
+                contacts[account_id] = {
+                    "id": account_id,
+                    "name": name.strip() if isinstance(name, str) and name.strip() else "patient",
+                    "role": "patient",
+                }
+
+        return sorted(contacts.values(), key=lambda item: (item["name"].casefold(), item["id"]))
+
+    @staticmethod
+    async def _notify_conversation_created(db, conversation_id, sender_id, sender,
+                                           recipient_id, sender_role):
+        await NotificationService.create_notification(
+            db=db,
+            title="新会话",
+            content=f"{(sender or {}).get('name', 'Unknown')} 发起了沟通会话，可以开始交流。",
+            sender_id=sender_id,
+            sender_name=(sender or {}).get("name", "Unknown"),
+            sender_role=sender_role or (sender or {}).get("role", "unknown"),
+            recipient_id=recipient_id,
+            notification_type="message",
+            priority="normal",
+            related_entity_id=conversation_id,
+            related_entity_type="conversation",
+        )
+
+    @staticmethod
+    async def create_authorized_conversation(db, user_id: str, user_role: str,
+                                             participant_id: str, conversation_type: str = "chat") -> Dict[str, Any]:
+        """Create or reuse a conversation only between current assigned contacts.
+
+        The actor, active identity link/assignment and insert share one Mongo
+        transaction. Relationship checks write fences to the same account,
+        patient and verified-link documents changed by revocation, so concurrent
+        revocation aborts and retries this transaction before creation can commit.
+        """
+        if conversation_type != "chat":
+            raise AppBaseException("当前仅支持普通沟通会话", status_code=422,
+                                   error_code="COMMUNICATION_TYPE_UNSUPPORTED")
+        if not isinstance(participant_id, str) or not participant_id.strip():
+            raise AppBaseException("请选择有效联系人", status_code=422,
+                                   error_code="COMMUNICATION_CONTACT_REQUIRED")
+        participant_id = participant_id.strip()
+
+        async def transaction(session):
+            contacts = await CommunicationService.get_care_contacts(
+                db, user_id, user_role, session=session)
+            target = next((item for item in contacts if item["id"] == participant_id), None)
+            if target is None:
+                raise AppBaseException("对方不是当前授权联系人", status_code=403,
+                                       error_code="COMMUNICATION_CONTACT_FORBIDDEN")
+
+            allowed = await ConversationPolicy._authorize_patient_staff_pair(
+                db, {"participant1_id": user_id, "participant2_id": participant_id},
+                session=session, write_fences=True)
+            if not allowed:
+                raise AppBaseException("医患归属或账号关联已变化，请刷新联系人", status_code=403,
+                                       error_code="COMMUNICATION_CONTACT_FORBIDDEN")
+
+            pair_filter = {"type": conversation_type, "$or": [
+                {"participant1_id": user_id, "participant2_id": participant_id},
+                {"participant1_id": participant_id, "participant2_id": user_id},
+            ]}
+            existing = await db.conversations.find_one(pair_filter, session=session)
+            if existing:
+                return {"id": str(existing["_id"]), "created": False}
+
+            now = datetime.utcnow()
+            conversation = {
+                "_id": ObjectId(),
+                "participant1_id": user_id,
+                "participant2_id": participant_id,
+                "type": conversation_type,
+                "status": "active",
+                "created_at": now,
+                "last_message_time": now,
+                "last_message_preview": "",
+                "metadata": {},
+                "communication_scope": "patient_staff",
+                "participant_roles": {user_id: user_role,
+                                      participant_id: target["role"]},
+            }
+            await db.conversations.insert_one(conversation, session=session)
+            return {"id": str(conversation["_id"]), "created": True}
+
+        result = await run_transaction(
+            db, transaction,
+            error_code="COMMUNICATION_TRANSACTION_UNAVAILABLE",
+            error_message="安全创建会话未能确认提交，请重试；数据库必须支持副本集事务",
+        )
+        if result["created"]:
+            try:
+                sender = await resolve_unique_account(db, user_id)
+                await CommunicationService._notify_conversation_created(
+                    db, result["id"], user_id, sender, participant_id, user_role)
+            except Exception as error:
+                logger.warning(f"新会话通知创建失败: {error}")
+        return {"id": result["id"]}
+
+    @staticmethod
     async def is_conversation_participant(
         db: AsyncIOMotorClient,
         conversation_id: str,
@@ -281,7 +470,7 @@ class CommunicationService:
         if message.get("client_message_id"):
             formatted["client_message_id"] = message["client_message_id"]
         return formatted
-    
+
     @staticmethod
     async def get_conversations(
         db: AsyncIOMotorClient,
@@ -297,18 +486,20 @@ class CommunicationService:
                 {"participant2_id": user_id}
             ]
         }
-        
+
         if status:
             query["status"] = status
-        
+
         cursor = db.conversations.find(query)
         cursor = cursor.sort("last_message_time", -1).skip(skip).limit(limit)
-        
+
         conversations = await cursor.to_list(length=limit)
         for conversation in conversations:
             conversation["id"] = str(conversation["_id"])
             del conversation["_id"]
-            
+            conversation.update(await ConversationPolicy.send_capability(
+                db, conversation["id"], user_id))
+
             # 添加未读消息数量
             if conversation["participant1_id"] == user_id:
                 other_user_id = conversation["participant2_id"]
@@ -320,7 +511,7 @@ class CommunicationService:
                 conversation["unread_count"] = await CommunicationService.get_unread_messages_count(
                     db, conversation["id"], user_id
                 )
-            
+
             # 获取对话对象的基本信息（经 legacy 身份分组读取，双字面兼容）
             other_user = await CommunicationService._participant_profile(db, other_user_id)
             if other_user:
@@ -330,9 +521,9 @@ class CommunicationService:
                     "role": other_user.get("role", "unknown"),
                     "avatar": other_user.get("avatar", None),
                 }
-        
+
         return conversations
-    
+
     @staticmethod
     async def get_conversation(
         db: AsyncIOMotorClient,
@@ -350,11 +541,13 @@ class CommunicationService:
 
         conversation["id"] = str(conversation["_id"])
         del conversation["_id"]
-        
+        conversation.update(await ConversationPolicy.send_capability(
+            db, conversation["id"], user_id))
+
         # 获取对话参与者信息（经 legacy 身份分组读取，双字面兼容）
         participant1 = await CommunicationService._participant_profile(db, conversation["participant1_id"])
         participant2 = await CommunicationService._participant_profile(db, conversation["participant2_id"])
-        
+
         if participant1:
             conversation["participant1"] = {
                 "id": str(participant1["_id"]),
@@ -362,7 +555,7 @@ class CommunicationService:
                 "role": participant1.get("role", "unknown"),
                 "avatar": participant1.get("avatar", None),
             }
-        
+
         if participant2:
             conversation["participant2"] = {
                 "id": str(participant2["_id"]),
@@ -370,14 +563,14 @@ class CommunicationService:
                 "role": participant2.get("role", "unknown"),
                 "avatar": participant2.get("avatar", None),
             }
-        
+
         # 添加未读消息数量
         conversation["unread_count"] = await CommunicationService.get_unread_messages_count(
             db, conversation["id"], user_id
         )
-        
+
         return conversation
-    
+
     @staticmethod
     async def create_conversation(
         db: AsyncIOMotorClient,
@@ -400,10 +593,27 @@ class CommunicationService:
             ],
             "type": conversation_type
         })
-        
+
         if existing:
             return str(existing["_id"])
-        
+
+        # 保存可确认的创建时角色，令后续角色变更不会使医患会话退化为
+        # 普通会话。此处只添加分类证据，不改变传统 Web 端的创建权限/流程。
+        from app.core.patient_identity import resolve_unique_account
+        first_account = await resolve_unique_account(db, participant1_id)
+        second_account = await resolve_unique_account(db, participant2_id)
+        participant_roles = {}
+        communication_scope = None
+        if first_account and second_account:
+            participant_roles = {
+                str(first_account["_id"]): first_account.get("role"),
+                str(second_account["_id"]): second_account.get("role"),
+            }
+            roles = list(participant_roles.values())
+            if ("patient" in roles
+                    and any(role in {"doctor", "health_manager"} for role in roles)):
+                communication_scope = "patient_staff"
+
         # 创建新对话（时间统一 UTC）
         now = datetime.utcnow()
         conversation = {
@@ -417,30 +627,22 @@ class CommunicationService:
             "last_message_preview": "",
             "metadata": {}
         }
-        
+        if participant_roles:
+            conversation["participant_roles"] = participant_roles
+        if communication_scope:
+            conversation["communication_scope"] = communication_scope
+
         result = await db.conversations.insert_one(conversation)
         conversation_id = str(result.inserted_id)
 
         # 真实业务事件触发点：新会话建立 → 通知受邀参与者（participant2）。
         # 通知失败不影响会话创建（notification_service 内部已兜底 WS 推送失败）。
         try:
-            # 账号层读取：发起人是审计操作人账号（会话成员/审计操作人保持账号
-            # ID，见 app/patients/README.md），仅取通知展示用的 name/role，
-            # 保留直查语义；canonical 波段经 patient_account_links 解析。
+            # Keep notification after persistence: it also emits external WS/mail
+            # effects and must not run inside the transaction callback.
             sender = await db.users.find_one({"_id": ObjectId(participant1_id)})
-            await NotificationService.create_notification(
-                db=db,
-                title="新会话",
-                content=f"{(sender or {}).get('name', 'Unknown')} 发起了沟通会话，可以开始交流。",
-                sender_id=participant1_id,
-                sender_name=(sender or {}).get("name", "Unknown"),
-                sender_role=(sender or {}).get("role", "unknown"),
-                recipient_id=participant2_id,
-                notification_type="message",
-                priority="normal",
-                related_entity_id=conversation_id,
-                related_entity_type="conversation"
-            )
+            await CommunicationService._notify_conversation_created(
+                db, conversation_id, participant1_id, sender, participant2_id, None)
         except Exception as e:
             logger.warning(f"新会话通知创建失败: {str(e)}")
 
@@ -476,10 +678,10 @@ class CommunicationService:
         # 获取消息（按 _id 降序取最近 limit 条）
         cursor = db.messages.find(query)
         cursor = cursor.sort("_id", -1).limit(limit)
-        
+
         messages = await cursor.to_list(length=limit)
         messages.reverse()  # 将消息按时间正序排列
-        
+
         # 保留读取即已读行为，并复用显式标读的授权、落库和事件路径。
         incoming_ids = [str(message["_id"]) for message in messages
                         if message.get("recipient_id") == user_id and not message.get("read", False)]
@@ -496,7 +698,7 @@ class CommunicationService:
                 message["read_at"] = message["read_at"].isoformat()
 
         return messages
-    
+
     # ------------------------------------------------------------------
     # 会话附件（T76）
     # ------------------------------------------------------------------
@@ -751,6 +953,10 @@ class CommunicationService:
             if replay is not None:
                 return replay
         else:
+            if decision.care_relationship:
+                raise AppBaseException(
+                    "医患消息写入需要可用的 MongoDB 副本集事务", status_code=503,
+                    error_code="COMMUNICATION_TRANSACTION_UNAVAILABLE")
             # 降级路径（standalone / 无事务替身）：修复前现状顺序写。
             # 取舍见模块级注释——授权已逐帧实时查库，索引幂等兜底不变。
             # DuplicateKeyError：并发投递通过了先查后插的检查窗口，被唯一索引
@@ -788,7 +994,7 @@ class CommunicationService:
 
         # 准备返回的消息格式（广播载荷与响应共用，携带真实服务端 id/时间戳）
         message_response = CommunicationService._format_message(message)
-        
+
         # 通过WebSocket推送消息（如果有连接管理器）。
         # 本段是提交后置段（T48/D2）：事务已提交 / 降级路径已落库之后才执行，
         # 全部为 best-effort 副作用（WS 广播 + 离线通知），失败仅告警不回滚
@@ -807,14 +1013,14 @@ class CommunicationService:
                 },
                 conversation_id
             )
-            
+
             # 如果接收者不在线，发送通知
             active_users = manager.get_active_users_in_chat(conversation_id)
             if recipient_id not in active_users:
                 # 账号层读取：发送者是审计操作人账号，仅取通知展示用的 name/role，
                 # 保留直查语义（同 create_conversation）。
                 sender = await db.users.find_one({"_id": ObjectId(sender_id)})
-                
+
                 if sender:
                     # 创建通知
                     await NotificationService.create_notification(
@@ -832,7 +1038,7 @@ class CommunicationService:
                     )
         except Exception as e:
             logger.warning(f"通过WebSocket推送消息失败: {str(e)}")
-        
+
         return message_response
 
     @staticmethod
@@ -917,7 +1123,7 @@ class CommunicationService:
             "deleted": False
         })
         return count
-    
+
     @staticmethod
     async def get_total_unread_messages_count(
         db: AsyncIOMotorClient,
@@ -930,7 +1136,7 @@ class CommunicationService:
             "deleted": False
         })
         return count
-    
+
     @staticmethod
     async def _mark_messages_as_read(
         db: AsyncIOMotorClient,
@@ -1103,7 +1309,7 @@ class CommunicationService:
                 {"participant2_id": user_id}
             ]
         }).to_list(length=100)  # 限制同步的对话数量
-        
+
         conversation_ids = [str(conv["_id"]) for conv in conversations]
 
         # 查询离线期间的新消息：与 get_messages 一致改按 _id 比较（ObjectId
@@ -1120,7 +1326,7 @@ class CommunicationService:
 
         cursor = db.messages.find(query).sort("_id", 1)
         offline_messages = await cursor.to_list(length=1000)  # 限制同步的消息数量
-        
+
         # 格式化消息
         messages = []
         for message in offline_messages:
@@ -1137,5 +1343,5 @@ class CommunicationService:
                 "attachments": message["attachments"],
                 "metadata": message["metadata"]
             })
-        
-        return messages 
+
+        return messages

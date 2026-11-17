@@ -202,31 +202,47 @@ async def assign_imported_role(db, actor, user_id, role, evidence_reference):
         raise HTTPException(422, detail={"code": "INVALID_ROLE"})
     if not ObjectId.is_valid(user_id):
         raise HTTPException(422, detail={"code": "INVALID_USER_ID"})
-    user = await db.users.find_one({"_id": ObjectId(user_id), "source_person_key": {"$type": "string"}})
-    if not user:
-        raise HTTPException(404, detail={"code": "IMPORTED_PERSON_NOT_FOUND"})
-    if user.get("role") == role:
-        return _public(user)
-    uid = str(user["_id"])
-    now = datetime.now(timezone.utc)
-    review = {"role": role, "previous_role": user.get("role"), "actor_id": str(actor.id),
-              "evidence_reference": evidence_reference, "at": now}
-    # domain-dispatch: 迁移完成后可删
-    if await patient_domain_mode(db) == "canonical":
-        # 角色变更清空患者归属的不变量在 canonical 下同样成立：canonical 患者
-        # 的医护关系在 clinical_patients，不清除会让已改岗成员继续可见。
-        await db[PATIENTS].update_many(
+    selector = {"_id": ObjectId(user_id), "source_person_key": {"$type": "string"}}
+
+    async def change_role(session):
+        user = await db.users.find_one(selector, session=session)
+        if not user:
+            raise HTTPException(404, detail={"code": "IMPORTED_PERSON_NOT_FOUND"})
+        if user.get("role") == role:
+            return user
+
+        from app.services.conversation_policy import ConversationPolicy
+        await ConversationPolicy.mark_care_conversations_before_role_change(
+            db, user, user.get("role"), session=session)
+
+        uid = str(user["_id"])
+        now = datetime.now(timezone.utc)
+        review = {"role": role, "previous_role": user.get("role"), "actor_id": str(actor.id),
+                  "evidence_reference": evidence_reference, "at": now}
+        # domain-dispatch: 迁移完成后可删
+        if await patient_domain_mode(db, session=session) == "canonical":
+            await db[PATIENTS].update_many(
+                {"$or": [{"practitioners": uid}, {"health_managers": uid}]},
+                {"$pull": {"practitioners": uid, "health_managers": uid},
+                 "$set": {"updated_at": now}}, session=session)
+        await db.users.update_many(
             {"$or": [{"practitioners": uid}, {"health_managers": uid}]},
-            {"$pull": {"practitioners": uid, "health_managers": uid}, "$set": {"updated_at": now}})
-    await db.users.update_many(
-        {"$or": [{"practitioners": uid}, {"health_managers": uid}]},
-        {"$pull": {"practitioners": uid, "health_managers": uid}, "$set": {"updated_at": now}})
-    await db.users.update_one(
-        {"_id": user["_id"]},
-        {"$set": {"role": role, "patients": [], "practitioners": [], "health_managers": [], "updated_at": now},
-         "$push": {"role_reviews": review}})
-    user.update(role=role, patients=[], practitioners=[], health_managers=[])
-    return _public(user)
+            {"$pull": {"practitioners": uid, "health_managers": uid},
+             "$set": {"updated_at": now}}, session=session)
+        changed = await db.users.update_one(
+            {"_id": user["_id"], "role": user.get("role")},
+            {"$set": {"role": role, "patients": [], "practitioners": [],
+                       "health_managers": [], "updated_at": now},
+             "$push": {"role_reviews": review}}, session=session)
+        if changed.matched_count != 1:
+            raise RuntimeError("Imported account role changed concurrently")
+        return await db.users.find_one({"_id": user["_id"]}, session=session)
+
+    updated = await run_transaction(
+        db, change_role,
+        error_code="USER_ROLE_CHANGE_TRANSACTION_UNAVAILABLE",
+        error_message="角色变更未能安全提交，请重试；数据库必须支持副本集事务")
+    return _public(updated)
 
 
 async def _imported_person(db, user_id):

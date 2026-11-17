@@ -1,0 +1,16 @@
+.page { min-height: 100vh; padding: 30rpx 26rpx 60rpx; background: #f4f7fb; box-sizing: border-box; }
+.heading { padding: 14rpx 8rpx 22rpx; }
+.title { color: #173344; font-size: 40rpx; font-weight: 700; }
+.subtitle { margin-top: 12rpx; color: #75838c; font-size: 24rpx; }
+.card, .state { margin: 18rpx 0; padding: 28rpx; border-radius: 20rpx; background: #fff; box-shadow: 0 8rpx 24rpx rgba(31, 59, 82, .05); }
+.record-title { color: #173344; font-size: 29rpx; font-weight: 650; }
+.meta { margin-top: 12rpx; color: #81909a; font-size: 22rpx; }
+.content { margin-top: 18rpx; color: #4d626f; font-size: 25rpx; line-height: 1.65; white-space: pre-wrap; }
+.tags { margin-top: 14rpx; color: #637680; font-size: 22rpx; }
+.state { color: #71808a; font-size: 25rpx; line-height: 1.6; }
+.error { color: #a13e3e; }
+.retry { margin: 20rpx 0 0; background: #e8f3f1; color: #17695f; font-size: 24rpx; }
+.footnote { padding: 18rpx; color: #829099; text-align: center; font-size: 22rpx; }
+.load-more { padding: 18rpx; text-align: center; }
+.load-more button { color: #17695f; background: #e8f3f1; font-size: 24rpx; }
+.error-text { color: #a13e3e; font-size: 22rpx; }

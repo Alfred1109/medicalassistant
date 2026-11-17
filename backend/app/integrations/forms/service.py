@@ -680,7 +680,7 @@ async def get_fill_task(db: AsyncIOMotorDatabase, task_id: str,
     except (bson_errors.InvalidId, TypeError):
         raise FormIntegrationError("任务不存在", error_code="TASK_NOT_FOUND", status_code=404)
 
-    doc = await db[models.COLLECTION_NAME].find_one({"_id": query_id})
+    doc = await db[models.COLLECTION_NAME].find_one({"_id": query_id, "task_type": {"$ne": "patient_self"}})
     if not doc:
         raise FormIntegrationError("任务不存在", error_code="TASK_NOT_FOUND", status_code=404)
     operator_id = str(operator.id)
@@ -1014,7 +1014,9 @@ async def list_fill_tasks(db: AsyncIOMotorDatabase, operator: Any,
     if status is not None and status not in models.TASK_STATUSES:
         raise FormIntegrationError(f"未知任务状态：{status}",
                                    error_code="INVALID_STATUS_FILTER", status_code=422)
-    query: Dict[str, Any] = {}
+    # Patient-owned tasks are a separate authorization model; preserve old documents
+    # with no discriminator while excluding every explicitly typed self-fill task.
+    query: Dict[str, Any] = {"task_type": {"$ne": "patient_self"}}
     if operator.role != "admin":
         query["operator.user_id"] = str(operator.id)
     if status is not None:

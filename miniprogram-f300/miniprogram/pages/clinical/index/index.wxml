@@ -1,0 +1,129 @@
+<view class="page">
+  <view class="hero">
+    <view class="title">{{roleLabel}}工作台</view>
+    <view class="subtitle">查看当前账号负责的患者、健康档案和随访记录。</view>
+    <button class="secondary small task-link" bindtap="openTasks">问卷填报任务</button>
+  </view>
+  <view wx:if="{{error}}" class="notice error">{{error}}</view>
+  <view wx:if="{{message}}" class="notice success">{{message}}</view>
+  <view wx:if="{{reviewLoading}}" class="notice">正在核实随访和答卷证据…</view>
+
+  <view wx:if="{{(viewMode === 'followups' || viewMode === 'workbench') && !selectedPatientId}}" class="card">
+    <view class="section-heading"><view class="section-title">{{viewMode === 'workbench' ? '待办工作台' : '随访记录'}}</view><button class="primary small" bindtap="choosePatientForNewFollowup">安排随访</button></view>
+    <view class="muted">{{viewMode === 'workbench' ? '待随访、待填写、待审阅和逾期节点。' : '显示所有状态的授权随访记录。'}}当前账号只能访问负责患者。</view>
+    <view wx:if="{{overviewLoading}}" class="muted">正在读取随访记录…</view>
+    <view wx:elif="{{overviewItems.length === 0}}" class="empty">{{error ? '暂时无法读取随访记录，请下拉重试。' : '当前授权范围内暂无随访记录。'}}</view>
+    <view wx:for="{{overviewItems}}" wx:key="id" class="followup">
+      <view class="followup-head"><view class="followup-title">{{item.patientName}} · {{item.typeLabel}} · {{item.statusLabel}}</view><view class="muted">{{item.dateLabel}}</view></view>
+      <view class="description">{{item.descriptionLabel}}</view>
+      <view wx:if="{{item.resultLabel}}" class="result">结果：{{item.resultLabel}}</view>
+      <view wx:if="{{item.status === 'in_review'}}" class="muted">证据：{{item.evidenceLabel}}</view>
+      <view class="actions">
+        <button class="secondary small" data-patient-id="{{item.patientId}}" data-patient-name="{{item.patientName}}" bindtap="viewPatientFromFollowup">查看患者</button>
+        <button wx:if="{{item.canComplete}}" class="secondary small" data-id="{{item.id}}" bindtap="openCompletion">录入结果</button>
+        <button wx:if="{{item.canReview}}" class="secondary small" data-id="{{item.id}}" bindtap="openReview">审阅</button>
+        <button wx:if="{{item.canReevaluate}}" class="secondary small" data-id="{{item.id}}" bindtap="openReevaluate">安排复评</button>
+      </view>
+    </view>
+    <button wx:if="{{overviewHasMore}}" class="secondary more" loading="{{overviewLoading}}" bindtap="loadMoreOverview">加载更多</button>
+    <view wx:if="{{overviewLoading && overviewItems.length}}" class="muted">正在更新…</view>
+  </view>
+
+  <view wx:if="{{!selectedPatientId && viewMode === 'patients'}}" class="card">
+    <view class="section-title">患者目录</view>
+    <view wx:if="{{chooseForSchedule}}" class="notice">先选择患者，再安排随访计划。</view>
+    <input class="input" placeholder="搜索已加载患者姓名或诊断" value="{{patientKeyword}}" bindinput="onPatientSearch" />
+    <view wx:if="{{patientLoading}}" class="muted">正在读取患者目录…</view>
+    <view wx:elif="{{patients.length === 0}}" class="empty">{{error ? '暂时无法读取患者目录，请下拉重试。' : '当前账号没有可访问的患者。'}}</view>
+    <view wx:elif="{{visiblePatients.length === 0}}" class="empty">已加载患者中没有匹配项；可继续加载目录。</view>
+    <view wx:for="{{visiblePatients}}" wx:key="id" class="patient-row" data-id="{{item.id}}" bindtap="selectPatient">
+      <view class="patient-name">{{item.name}}</view>
+      <view wx:if="{{item.diagnosis}}" class="muted">{{item.diagnosis}}</view>
+      <view class="arrow">›</view>
+    </view>
+    <view class="muted">已加载 {{patients.length}} 位患者。{{patientKeyword ? '搜索范围为已加载患者。' : ''}}</view>
+    <button wx:if="{{patientHasMore}}" class="secondary more" loading="{{patientLoading}}" bindtap="loadMorePatients">加载更多患者</button>
+  </view>
+
+  <block wx:if="{{selectedPatientId}}">
+    <view class="toolbar"><button class="secondary small" bindtap="backToPatients">‹ 患者目录</button><view class="patient-name">{{selectedPatientName}}</view></view>
+    <view wx:if="{{detailLoading && !healthRecord}}" class="card muted">正在读取健康档案和随访…</view>
+    <view wx:if="{{healthRecord}}" class="card">
+      <view class="section-title">健康档案</view>
+      <view class="facts">
+        <view>性别：{{healthRecord.gender || '未记录'}}</view><view>年龄：{{healthRecord.age || '未记录'}}</view>
+        <view>身高：{{healthRecord.height || '未记录'}}</view><view>体重：{{healthRecord.weight || '未记录'}}</view>
+        <view>血型：{{healthRecord.bloodType || '未记录'}}</view>
+      </view>
+      <view class="detail-block"><view class="label">过敏史</view><view>{{healthRecord.allergiesLabel || '未记录'}}</view></view>
+      <view class="detail-block"><view class="label">既往病史</view><view wx:if="{{!healthRecord.medicalHistoryRows.length}}" class="muted">未记录</view><view wx:for="{{healthRecord.medicalHistoryRows}}" wx:key="index">{{item.display}}</view></view>
+      <view class="detail-block"><view class="label">康复史</view><view wx:if="{{!healthRecord.rehabHistoryRows.length}}" class="muted">未记录</view><view wx:for="{{healthRecord.rehabHistoryRows}}" wx:key="index">{{item.display}}</view></view>
+      <view class="detail-block"><view class="label">用药</view><view wx:if="{{!healthRecord.medicationRows.length}}" class="muted">未记录</view><view wx:for="{{healthRecord.medicationRows}}" wx:key="index">{{item.display}}</view></view>
+      <view class="detail-block"><view class="label">最近生命体征</view><view wx:if="{{!healthRecord.vitalRows.length}}" class="muted">暂无记录</view><view wx:for="{{healthRecord.vitalRows}}" wx:key="index">{{item.display}}</view></view>
+    </view>
+    <view class="card">
+      <view class="section-heading"><view class="section-title">随访管理</view><button class="primary small" bindtap="openCreate">安排随访</button></view>
+      <view wx:if="{{followups.length === 0 && !detailLoading}}" class="empty">{{error ? '随访加载失败，请刷新重试。' : '该患者暂无随访记录。'}}</view>
+      <view wx:for="{{followups}}" wx:key="id" class="followup">
+        <view class="followup-head"><view class="followup-title">{{item.typeLabel}} · {{item.statusLabel}}</view><view class="muted">{{item.dateLabel}}</view></view>
+        <view class="description">{{item.descriptionLabel}}</view>
+        <view wx:if="{{item.resultLabel}}" class="result">结果：{{item.resultLabel}}</view>
+        <view wx:if="{{item.status === 'in_review'}}" class="muted">证据：{{item.evidenceLabel}}</view>
+        <view wx:if="{{item.followup_summary}}" class="muted">小结：{{item.followup_summary.conclusion}}</view>
+        <view class="actions">
+          <button wx:if="{{item.canComplete}}" class="secondary small" data-id="{{item.id}}" bindtap="openCompletion">录入结果</button>
+          <button wx:if="{{item.canReview}}" class="secondary small" data-id="{{item.id}}" bindtap="openReview">审阅</button>
+          <button wx:if="{{item.canReevaluate}}" class="secondary small" data-id="{{item.id}}" bindtap="openReevaluate">安排复评</button>
+        </view>
+      </view>
+      <button wx:if="{{hasMore}}" class="secondary more" loading="{{detailLoading}}" bindtap="loadMore">加载更多</button>
+      <view wx:if="{{detailLoading && followups.length}}" class="muted">正在更新…</view>
+    </view>
+  </block>
+
+  <view wx:if="{{createOpen}}" class="modal-mask">
+    <view class="modal">
+      <view class="section-title">安排随访</view>
+      <picker range="{{typeOptions}}" range-key="label" value="{{typeIndex}}" bindchange="onTypeChange"><view class="picker">随访方式：{{typeOptions[typeIndex].label}}　›</view></picker>
+      <picker mode="date" value="{{scheduledDate}}" bindchange="onScheduledDate"><view class="picker">计划日期：{{scheduledDate}}　›</view></picker>
+      <picker mode="time" value="{{scheduledTime}}" bindchange="onScheduledTime"><view class="picker">计划时间：{{scheduledTime}}　›</view></picker>
+      <textarea class="textarea" maxlength="2000" placeholder="填写本次随访说明" value="{{description}}" bindinput="onDescriptionInput" />
+      <view class="muted">本小程序安排的是无问卷手工随访节点；如需问卷任务，请在系统工作台创建。</view>
+      <view class="actions"><button class="secondary" bindtap="closeCreate">取消</button><button class="primary" loading="{{busy}}" bindtap="createFollowup">保存计划</button></view>
+    </view>
+  </view>
+  <view wx:if="{{completionTarget}}" class="modal-mask">
+    <view class="modal">
+      <view class="section-title">录入随访结果</view>
+      <view class="muted">提交后记录进入待审阅状态。</view>
+      <view wx:for="{{completionTarget.questions}}" wx:key="question_id" class="answer-row">
+        <view>{{item.question_text}}{{item.required ? '（必填）' : ''}}</view>
+        <input class="input" data-index="{{index}}" placeholder="填写回答" bindinput="onAnswerInput" />
+      </view>
+      <textarea class="textarea" maxlength="2000" placeholder="随访结果（必填）" value="{{completionResult}}" bindinput="onCompletionResult" />
+      <textarea class="textarea" maxlength="2000" placeholder="补充记录（可选）" value="{{completionNotes}}" bindinput="onCompletionNotes" />
+      <view class="actions"><button class="secondary" bindtap="closeCompletion">取消</button><button class="primary" loading="{{busy}}" bindtap="submitCompletion">提交待审阅</button></view>
+    </view>
+  </view>
+  <view wx:if="{{reviewTarget}}" class="modal-mask">
+    <view class="modal">
+      <view class="section-title">审阅随访</view>
+      <view>结果：{{reviewTarget.resultLabel || '未记录'}}</view><view>证据：{{reviewTarget.evidenceLabel}}</view>
+      <view wx:if="{{reviewEvidenceError}}" class="notice">{{reviewEvidenceError}}</view>
+      <view wx:if="{{reviewEvidenceRows.length}}" class="detail-block"><view class="label">已确认的答卷快照</view><view wx:for="{{reviewEvidenceRows}}" wx:key="index"><view>{{item.question}}</view><view>{{item.answer}}</view></view></view>
+      <view wx:if="{{!reviewTarget.canApprove}}" class="notice">当前记录的证据需在完整工作台核验；可填写原因后退回，不能在此批准。</view>
+      <textarea class="textarea" maxlength="2000" placeholder="审阅意见；退回时必填" value="{{reviewComment}}" bindinput="onReviewComment" />
+      <view class="actions"><button class="secondary" bindtap="closeReview">取消</button><button class="danger" loading="{{busy}}" data-decision="returned" bindtap="submitReview">退回</button><button wx:if="{{reviewTarget.canApprove}}" class="primary" loading="{{busy}}" data-decision="approved" bindtap="submitReview">通过</button></view>
+    </view>
+  </view>
+  <view wx:if="{{reevaluateTarget}}" class="modal-mask">
+    <view class="modal">
+      <view class="section-title">安排复评</view>
+      <view class="muted">系统会复制原节点的随访方式、责任人、提醒配置及问卷绑定，并建立复评链。</view>
+      <picker mode="date" value="{{reevaluateDate}}" bindchange="onReevaluateDate"><view class="picker">计划日期：{{reevaluateDate}}　›</view></picker>
+      <textarea class="textarea" maxlength="500" placeholder="复评原因（可选）" value="{{reevaluateReason}}" bindinput="onReevaluateReason" />
+      <view class="actions"><button class="secondary" bindtap="closeReevaluate">取消</button><button class="primary" loading="{{busy}}" bindtap="submitReevaluate">创建复评节点</button></view>
+    </view>
+  </view>
+  <role-nav current="{{viewMode === 'workbench' ? 'home' : (viewMode === 'followups' ? 'followups' : 'patients')}}" />
+</view>
