@@ -18,14 +18,18 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Alert,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
 import apiClient from '../../services/api';
+import { apiErrorMessage } from '../../services/patientErrors';
 
-// 组织机构管理：数据来自 GET /api/admin/organizations
-// 该接口目前为后端占位实现（恒返回 []），创建/编辑/删除接口未持久化，故禁用相关入口
-// 原页面的组织结构树为纯前端假数据，已随本轮改造一并移除
+// 组织机构管理：数据和状态变更来自 /api/admin/organizations。
 interface OrganizationRow {
   id?: string;
   name?: string;
@@ -44,6 +48,11 @@ const OrganizationManagement: React.FC = () => {
   const [reloadKey, setReloadKey] = useState(0);
   const [createOpen, setCreateOpen] = useState(false);
   const [orgName, setOrgName] = useState('');
+  const [orgType, setOrgType] = useState('hospital');
+  const [orgAddress, setOrgAddress] = useState('');
+  const [contactPerson, setContactPerson] = useState('');
+  const [contactPhone, setContactPhone] = useState('');
+  const [actionError, setActionError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -102,7 +111,7 @@ const OrganizationManagement: React.FC = () => {
   };
 
   // 加载中
-  if (isLoading) {
+  if (isLoading && organizations.length === 0) {
     return (
       <Box display="flex" justifyContent="center" alignItems="center" height="300px">
         <CircularProgress />
@@ -114,7 +123,7 @@ const OrganizationManagement: React.FC = () => {
   }
 
   // 加载失败：真实错误状态 + 重试
-  if (error) {
+  if (error && organizations.length === 0) {
     return (
       <Box display="flex" flexDirection="column" justifyContent="center" alignItems="center" height="300px">
         <Typography color="error" variant="body1" gutterBottom>
@@ -141,6 +150,9 @@ const OrganizationManagement: React.FC = () => {
       </Box>
 
       <Box mb={3}>
+        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {actionError && <Alert severity="error" sx={{ mb: 2 }}>{actionError}</Alert>}
+        {isLoading && <CircularProgress size={20} sx={{ mb: 1 }} />}
         <TextField
           fullWidth
           placeholder="搜索机构名称或类型..."
@@ -178,7 +190,7 @@ const OrganizationManagement: React.FC = () => {
                       暂无组织机构数据
                     </Typography>
                     <Typography variant="caption" color="text.disabled" display="block" sx={{ mt: 1 }}>
-                      后端管理接口建设中，暂无数据
+                      {searchTerm ? '没有符合搜索条件的机构' : '添加机构后会显示在这里'}
                     </Typography>
                   </Box>
                 </TableCell>
@@ -194,16 +206,21 @@ const OrganizationManagement: React.FC = () => {
                   <TableCell>
                     {org.status ? (
                       <Chip
-                        label={org.status}
-                        color={org.status === '正常' ? 'success' : 'default'}
+                        label={org.status === 'active' ? '正常' : '停用'}
+                        color={org.status === 'active' ? 'success' : 'default'}
                         size="small"
                       />
                     ) : (
                       '—'
                     )}
                     <Button size="small" onClick={async () => {
-                      await apiClient.put(`/admin/organizations/${org.id}/active`, { active: org.status !== 'active' });
-                      setReloadKey(key => key + 1);
+                      setActionError('');
+                      try {
+                        await apiClient.put(`/admin/organizations/${org.id}/active`, { active: org.status !== 'active' });
+                        setReloadKey(key => key + 1);
+                      } catch (failure: any) {
+                        setActionError(apiErrorMessage(failure, '机构状态更新失败，请重试。'));
+                      }
                     }}>{org.status === 'active' ? '停用' : '恢复'}</Button>
                   </TableCell>
                 </TableRow>
@@ -215,13 +232,33 @@ const OrganizationManagement: React.FC = () => {
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)}>
         <DialogTitle>添加机构</DialogTitle>
         <DialogContent>
-          <TextField fullWidth label="机构名称" value={orgName} onChange={event => setOrgName(event.target.value)} />
+          {actionError && <Alert severity="error" sx={{ mb: 1 }}>{actionError}</Alert>}
+          <TextField autoFocus required fullWidth margin="dense" label="机构名称" value={orgName} onChange={event => setOrgName(event.target.value)} />
+          <FormControl fullWidth margin="dense">
+            <InputLabel id="organization-type-label">机构类型</InputLabel>
+            <Select labelId="organization-type-label" label="机构类型" value={orgType} onChange={event => setOrgType(event.target.value)}>
+              <MenuItem value="hospital">医院</MenuItem><MenuItem value="clinic">诊所</MenuItem><MenuItem value="research">研究机构</MenuItem><MenuItem value="other">其他</MenuItem>
+            </Select>
+          </FormControl>
+          <TextField fullWidth margin="dense" label="地址" value={orgAddress} onChange={event => setOrgAddress(event.target.value)} />
+          <TextField fullWidth margin="dense" label="联系人" value={contactPerson} onChange={event => setContactPerson(event.target.value)} />
+          <TextField fullWidth margin="dense" label="联系电话" value={contactPhone} onChange={event => setContactPhone(event.target.value)} />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCreateOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={async () => {
-            await apiClient.post('/admin/organizations', { name: orgName.trim(), type: 'hospital' });
-            setOrgName(''); setCreateOpen(false); setReloadKey(key => key + 1);
+          <Button variant="contained" disabled={!orgName.trim()} onClick={async () => {
+            setActionError('');
+            try {
+              await apiClient.post('/admin/organizations', {
+                name: orgName.trim(), type: orgType,
+                address: orgAddress.trim() ? { detail: orgAddress.trim() } : {},
+                contact_info: { person: contactPerson.trim(), phone: contactPhone.trim() },
+              });
+              setOrgName(''); setOrgAddress(''); setContactPerson(''); setContactPhone(''); setOrgType('hospital');
+              setCreateOpen(false); setReloadKey(key => key + 1);
+            } catch (failure: any) {
+              setActionError(apiErrorMessage(failure, '机构保存失败，请检查信息后重试。'));
+            }
           }}>保存</Button>
         </DialogActions>
       </Dialog>

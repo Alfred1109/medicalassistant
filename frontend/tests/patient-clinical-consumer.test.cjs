@@ -29,7 +29,10 @@ function loadService() {
   }).outputFiles[0].text;
   const calls = [];
   const transport = {
-    get: async (url, config) => { calls.push(['get', url, config]); return { data: {} }; },
+    get: async (url, config) => {
+      calls.push(['get', url, config]);
+      return { data: url === '/health-records/patient-context' ? { patient_id: 'clinical-patient-1' } : {} };
+    },
     post: async (url, body) => { calls.push(['post', url, body]); return { data: {} }; },
   };
   const service = new Module(path.join(root, 'test-patient-clinical.cjs'));
@@ -47,6 +50,7 @@ test('patient clinical service uses patient self-fetch endpoints only', async ()
   await api.acknowledgeEducation('a'.repeat(24), '已阅读');
   await api.indicators('patient-1', controller.signal);
   await api.alerts('patient-1', 20, 50, controller.signal);
+  assert.equal(await api.selfId(controller.signal), 'clinical-patient-1');
   assert.equal(calls[0][1], '/clinical/education');
   assert.equal(calls[0][2].signal, controller.signal);
   assert.equal(calls[1][1], '/clinical/education/assignments/' + 'a'.repeat(24) + '/read');
@@ -54,9 +58,11 @@ test('patient clinical service uses patient self-fetch endpoints only', async ()
   assert.equal(calls[2][1], '/clinical/patients/patient-1/indicators');
   assert.equal(calls[3][1], '/clinical/patients/patient-1/alerts');
   assert.deepEqual(calls[3][2].params, { skip: 20, limit: 50 });
+  assert.equal(calls[4][1], '/health-records/patient-context');
+  assert.equal(calls[4][2].signal, controller.signal);
   // 患者端服务不提供任何写路径（除本人阅读反馈）
   const endpoints = Object.getOwnPropertyNames(api);
-  assert.deepEqual(endpoints.sort(), ['acknowledgeEducation', 'alerts', 'education', 'indicators'].sort());
+  assert.deepEqual(endpoints.sort(), ['acknowledgeEducation', 'alerts', 'education', 'indicators', 'selfId'].sort());
 });
 
 test('education helpers keep backend status vocabulary and feedback limit', () => {

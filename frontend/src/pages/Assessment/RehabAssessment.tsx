@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
+import { useSelector } from 'react-redux';
 import { useSearchParams } from 'react-router-dom';
 import {
   Box,
@@ -13,10 +14,7 @@ import {
   Button,
   Alert,
   CircularProgress,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
+  Stack,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -25,22 +23,14 @@ import {
 } from '@mui/material';
 import AssessmentIcon from '@mui/icons-material/Assessment';
 import { formatAppDate } from '../../utils/dateTime';
-import api, { apiService } from '../../services/api';
+import api from '../../services/httpClient';
+import { patientClinical } from '../../services/patientClinical';
+import { apiErrorMessage } from '../../services/patientErrors';
+import PatientSelect from '../../components/common/PatientSelect';
+import { useAsyncResource } from '../../hooks/useAsyncResource';
+import { usePatientOptions } from '../../hooks/usePatientOptions';
+import type { RootState } from '../../store';
 
-/**
- * 康复评估报告页面（真实数据版）
- *
- * 数据来源（均为后端真实端点）：
- * - GET /doctors/patients                      医生的患者列表（仅医生角色可用）
- * - GET /rehabilitation/patients/{patient_id}/assessments  患者评估记录列表
- * - GET /rehabilitation/assessments/{id}       单条评估详情
- *
- * 后端不提供评估指标"提升百分比"之类的对比数据（对比端点需单独调用，
- * 且历史记录为空时如实展示），页面不做任何虚构指标。
- */
-
-// 评估记录字段（对应 backend/app/schemas/rehabilitation.py 的 AssessmentBase/Response，
-// 列表端点返回原始 Mongo 文档，字段均为可选）
 interface AssessmentRecord {
   _id?: string;
   id?: string;
@@ -58,12 +48,6 @@ interface AssessmentRecord {
   updated_at?: string;
 }
 
-// 患者下拉项
-interface PatientOption {
-  id: string;
-  name: string;
-}
-
 // 评估类型中文映射（后端枚举：initial, follow_up, discharge）
 const assessmentTypeLabels: Record<string, string> = {
   initial: '初期评估',
@@ -79,172 +63,102 @@ const renderMetricDict = (dict?: Record<string, number> | null): string[] => {
     .map(([k, v]) => `${k}: ${v}`);
 };
 
-const RehabAssessment: React.FC = () => {
+const PAGE_SIZE = 20;
+
+interface ReviewedReport {
+  id: string;
+  filename: string;
+  report_date: string;
+  review_current: boolean;
+  findings: Array<{ label: string; value: string; unit: string }>;
+}
+
+function PatientReports() {
+  const load = useCallback(async (signal: AbortSignal) => {
+    const patientId = await patientClinical.selfId(signal);
+    const { data } = await api.get<{ reports: ReviewedReport[] }>(
+      `/clinical/patients/${encodeURIComponent(patientId)}/reports`, { signal },
+    );
+    if (!Array.isArray(data?.reports)) throw new Error('报告接口返回的数据格式无效');
+    return data.reports.filter(report => report.review_current === true);
+  }, []);
+  const { data, error, loading, reload } = useAsyncResource(load);
+  return <Container maxWidth="lg"><Stack spacing={2}>
+    <Typography variant="h5" component="h1">康复评估报告</Typography>
+    <Typography color="text.secondary">查看当前已通过医护审核的本人报告和确认结果。</Typography>
+    {loading && <CircularProgress size={24} aria-label="正在读取报告" />}
+    {!!error && <Alert severity="error" action={<Button onClick={reload}>重试</Button>}>
+      {apiErrorMessage(error, '无法读取报告')}
+    </Alert>}
+    {data?.length === 0 && <Alert severity="info">目前没有已通过审核的报告。</Alert>}
+    {data?.map(report => <Paper key={report.id} variant="outlined" sx={{ p: 2 }}><Stack spacing={1}>
+      <Typography variant="h6">{report.filename}</Typography>
+      <Typography color="text.secondary">报告日期：{formatAppDate(report.report_date, 'day')}</Typography>
+      {report.findings?.map((finding, index) => <Typography key={`${finding.label}:${index}`}>
+        {finding.label}：{finding.value}{finding.unit ? ` ${finding.unit}` : ''}
+      </Typography>)}
+    </Stack></Paper>)}
+  </Stack></Container>;
+}
+
+function AssessmentWorkspace({ role, accountId }: { role: string; accountId: string }) {
   const [searchParams, setSearchParams] = useSearchParams();
-
-  // 患者选择：URL ?patientId= 优先，其次下拉选择
-  const [patients, setPatients] = useState<PatientOption[]>([]);
-  const [patientsLoading, setPatientsLoading] = useState<boolean>(false);
-  const [patientsError, setPatientsError] = useState<string | null>(null);
-  const [selectedPatientId, setSelectedPatientId] = useState<string>(searchParams.get('patientId') || '');
-
-  // 评估列表
-  const [assessments, setAssessments] = useState<AssessmentRecord[]>([]);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // 详情对话框
-  const [detailOpen, setDetailOpen] = useState<boolean>(false);
-  const [detailLoading, setDetailLoading] = useState<boolean>(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const [detail, setDetail] = useState<AssessmentRecord | null>(null);
-
-  // 加载医生的患者列表（真实接口 GET /doctors/patients；患者角色调用会 403，如实提示）
-  useEffect(() => {
-    let cancelled = false;
-    const loadPatients = async () => {
-      setPatientsLoading(true);
-      setPatientsError(null);
-      try {
-        const response = await apiService.doctor.getPatients();
-        const list: any[] = Array.isArray(response.data) ? response.data : [];
-        if (!cancelled) {
-          setPatients(list.map((p) => ({
-            id: String(p?.id ?? p?._id ?? ''),
-            name: String(p?.name ?? '未知患者'),
-          })).filter((p) => p.id));
-        }
-      } catch (err: any) {
-        if (!cancelled) {
-          // 403 = 当前角色无权访问患者列表（如患者本人），仅提示，不阻塞 URL 指定患者的方式
-          setPatientsError(
-            err?.response?.status === 403
-              ? '当前账号无患者管理权限，请通过链接参数 ?patientId= 指定患者'
-              : err?.response?.data?.detail || err?.message || '获取患者列表失败'
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setPatientsLoading(false);
-        }
-      }
-    };
-    loadPatients();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // 加载选中患者的评估列表（真实接口 GET /rehabilitation/patients/{patient_id}/assessments）
-  const loadAssessments = useCallback(async (patientId: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await api.get<AssessmentRecord[]>(
-        `/rehabilitation/patients/${patientId}/assessments`
-      );
-      setAssessments(Array.isArray(response.data) ? response.data : []);
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || '获取评估记录失败');
-      setAssessments([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // 选中患者变化时拉取评估列表，并同步到 URL 查询参数
-  const handlePatientChange = (patientId: string) => {
-    setSelectedPatientId(patientId);
-    setAssessments([]);
-    setError(null);
+  const patients = usePatientOptions(role, accountId, true);
+  const requested = searchParams.get('patientId') || '';
+  const changePatient = (patientId: string) => {
     setSearchParams(patientId ? { patientId } : {});
-    if (patientId) {
-      loadAssessments(patientId);
-    }
   };
 
-  // URL 直达 ?patientId= 时自动加载
-  useEffect(() => {
-    const pid = searchParams.get('patientId');
-    if (pid) {
-      loadAssessments(pid);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  return <Container maxWidth="lg">
+    <Paper sx={{ p: 3, mb: 3 }}>
+      <Stack direction="row" alignItems="center" spacing={2}>
+        <AssessmentIcon color="primary" />
+        <Typography variant="h5" component="h1">康复评估报告</Typography>
+      </Stack>
+      <Box sx={{ maxWidth: 420, mt: 2 }}>
+        <PatientSelect fullWidth label="选择患者" value={requested} patients={patients.patients}
+          loading={patients.loading} onChange={changePatient} />
+        {!!patients.error && <Alert severity="error" sx={{ mt: 1 }} action={<Button onClick={patients.reload}>重试</Button>}>
+          {apiErrorMessage(patients.error, '获取患者列表失败')}
+        </Alert>}
+        {!patients.loading && !patients.error && !patients.patients.length && !requested &&
+          <Alert severity="info" sx={{ mt: 1 }}>暂无可选患者。</Alert>}
+      </Box>
+    </Paper>
+    {requested && <AssessmentRecords key={requested} patientId={requested} />}
+  </Container>;
+}
 
-  // 打开详情对话框（真实接口 GET /rehabilitation/assessments/{id}）
-  const handleViewDetail = async (assessmentId: string) => {
-    setDetailOpen(true);
-    setDetailLoading(true);
-    setDetailError(null);
-    setDetail(null);
-    try {
-      const response = await api.get<AssessmentRecord>(
-        `/rehabilitation/assessments/${assessmentId}`
-      );
-      setDetail(response.data);
-    } catch (err: any) {
-      setDetailError(err?.response?.data?.detail || err?.message || '获取评估详情失败');
-    } finally {
-      setDetailLoading(false);
+function AssessmentRecords({ patientId }: { patientId: string }) {
+  const [page, setPage] = useState(0);
+  const [assessmentId, setAssessmentId] = useState('');
+  const loadAssessments = useCallback(async (signal: AbortSignal) => {
+    const { data } = await api.get<AssessmentRecord[]>(
+      `/rehabilitation/patients/${encodeURIComponent(patientId)}/assessments`,
+      { params: { skip: page * PAGE_SIZE, limit: PAGE_SIZE + 1 }, signal },
+    );
+    if (!Array.isArray(data)) throw new Error('评估接口返回的数据格式无效');
+    return { records: data.slice(0, PAGE_SIZE), hasNext: data.length > PAGE_SIZE };
+  }, [patientId, page]);
+  const { data, loading, error, reload } = useAsyncResource(loadAssessments);
+  const assessments = data?.records ?? [];
+
+  const loadDetail = useCallback(async (signal: AbortSignal) => {
+    const { data: record } = await api.get<AssessmentRecord>(`/rehabilitation/assessments/${encodeURIComponent(assessmentId)}`, { signal });
+    if (record?.patient_id !== patientId || String(record._id ?? record.id) !== assessmentId) {
+      throw new Error('评估记录与当前选择不一致');
     }
-  };
+    return record;
+  }, [assessmentId, patientId]);
+  const { data: detail, loading: detailLoading, error: detailError, reload: retryDetail } =
+    useAsyncResource(loadDetail, Boolean(assessmentId));
 
   // 格式化时间
   const formatTime = (iso?: string): string =>
     formatAppDate(iso, 'minute', { empty: '未知时间', invalid: iso ? String(iso) : '未知时间' });
 
   return (
-    <Container maxWidth="lg">
-      <Paper sx={{ p: 3, mb: 3 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-          <AssessmentIcon color="primary" sx={{ mr: 2, fontSize: 32 }} />
-          <Typography variant="h5" component="h1">
-            康复评估报告
-          </Typography>
-        </Box>
-        <Typography variant="body1" color="text.secondary" paragraph>
-          查看患者康复评估记录与评估结果
-        </Typography>
-
-        {/* 患者选择器（医生角色可用；患者角色请通过 ?patientId= 指定） */}
-        <Box sx={{ maxWidth: 360 }}>
-          <FormControl fullWidth disabled={patientsLoading}>
-            <InputLabel>选择患者</InputLabel>
-            <Select
-              value={selectedPatientId}
-              label="选择患者"
-              onChange={(e) => handlePatientChange(e.target.value as string)}
-            >
-              {patients.map((p) => (
-                <MenuItem key={p.id} value={p.id}>
-                  {p.name}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          {patientsLoading && (
-            <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-              <CircularProgress size={16} sx={{ mr: 1 }} />
-              <Typography variant="caption" color="text.secondary">
-                正在加载患者列表...
-              </Typography>
-            </Box>
-          )}
-          {patientsError && (
-            <Alert severity="info" sx={{ mt: 1 }}>
-              {patientsError}
-            </Alert>
-          )}
-        </Box>
-      </Paper>
-
-      {/* 未选择患者 */}
-      {!selectedPatientId ? (
-        <Paper sx={{ p: 4, textAlign: 'center' }}>
-          <Typography variant="body1">请先选择患者</Typography>
-        </Paper>
-      ) : (
+    <>
         <Card>
           <CardContent>
             <Typography variant="h6" gutterBottom>
@@ -259,7 +173,9 @@ const RehabAssessment: React.FC = () => {
             )}
 
             {/* 错误状态 */}
-            {!loading && error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+            {!!error && <Alert severity="error" sx={{ mb: 2 }} action={<Button onClick={reload}>重试</Button>}>
+              {apiErrorMessage(error, '获取评估记录失败')}
+            </Alert>}
 
             {/* 空状态 */}
             {!loading && !error && assessments.length === 0 && (
@@ -281,7 +197,7 @@ const RehabAssessment: React.FC = () => {
                         <Button
                           variant="outlined"
                           size="small"
-                          onClick={() => assessmentId && handleViewDetail(assessmentId)}
+                          onClick={() => setAssessmentId(assessmentId)}
                           disabled={!assessmentId}
                         >
                           查看详情
@@ -297,12 +213,16 @@ const RehabAssessment: React.FC = () => {
                 })}
               </List>
             )}
+            {(page > 0 || data?.hasNext) && <Stack direction="row" spacing={2} alignItems="center" justifyContent="center">
+              <Button disabled={loading || page === 0} onClick={() => setPage(page - 1)}>上一页</Button>
+              <Typography variant="body2">第 {page + 1} 页</Typography>
+              <Button disabled={loading || !data?.hasNext} onClick={() => setPage(page + 1)}>下一页</Button>
+            </Stack>}
           </CardContent>
         </Card>
-      )}
 
       {/* 评估详情对话框 */}
-      <Dialog open={detailOpen} onClose={() => setDetailOpen(false)} maxWidth="sm" fullWidth>
+      <Dialog open={Boolean(assessmentId)} onClose={() => setAssessmentId('')} maxWidth="sm" fullWidth>
         <DialogTitle>评估详情</DialogTitle>
         <DialogContent>
           {detailLoading && (
@@ -310,7 +230,9 @@ const RehabAssessment: React.FC = () => {
               <CircularProgress />
             </Box>
           )}
-          {!detailLoading && detailError && <Alert severity="error">{detailError}</Alert>}
+          {!!detailError && <Alert severity="error" action={<Button onClick={retryDetail}>重试</Button>}>
+            {apiErrorMessage(detailError, '获取评估详情失败')}
+          </Alert>}
           {!detailLoading && detail && (
             <List dense>
               <ListItem>
@@ -348,11 +270,15 @@ const RehabAssessment: React.FC = () => {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDetailOpen(false)}>关闭</Button>
+          <Button onClick={() => setAssessmentId('')}>关闭</Button>
         </DialogActions>
       </Dialog>
-    </Container>
+    </>
   );
-};
+}
 
-export default RehabAssessment;
+export default function RehabAssessment() {
+  const actor = useSelector((state: RootState) => state.auth.user);
+  if (actor?.role === 'patient') return <PatientReports key={actor.id} />;
+  return actor ? <AssessmentWorkspace key={`${actor.role}:${actor.id}`} role={actor.role} accountId={actor.id} /> : null;
+}

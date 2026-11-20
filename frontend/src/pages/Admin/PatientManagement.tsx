@@ -18,11 +18,10 @@ import {
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
 import apiClient from '../../services/api';
+import { apiErrorMessage } from '../../services/patientErrors';
 import AccountCreateDialog from '../../components/Admin/AccountCreateDialog';
 
-// 患者管理：数据来自 GET /api/admin/patients
-// 该接口目前为后端占位实现（恒返回 []），创建/编辑/删除接口未持久化，故禁用相关入口
-// 行字段按管理员接口预期结构定义，渲染时逐字段兜底，避免占位/异常数据导致崩溃
+// 患者账号与临床患者档案是不同的实体。此页面管理 users 中的患者账号。
 interface PatientRow {
   id?: string;
   name?: string;
@@ -45,6 +44,7 @@ const PatientManagement: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
   const [createOpen, setCreateOpen] = useState(false);
+  const [actionError, setActionError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -54,9 +54,16 @@ const PatientManagement: React.FC = () => {
       setError(null);
 
       try {
-        const response = await apiClient.get('/admin/patients');
+        const rows: PatientRow[] = [];
+        const limit = 1000;
+        for (let skip = 0; ; skip += limit) {
+          const response = await apiClient.get('/admin/patients', { params: { skip, limit } });
+          if (!Array.isArray(response.data)) throw new Error('患者列表格式无效');
+          rows.push(...response.data);
+          if (response.data.length < limit) break;
+        }
         if (!cancelled) {
-          setPatients(Array.isArray(response.data) ? response.data : []);
+          setPatients(rows);
         }
       } catch (err: any) {
         if (!cancelled) {
@@ -103,7 +110,7 @@ const PatientManagement: React.FC = () => {
   };
 
   // 加载中
-  if (isLoading) {
+  if (isLoading && patients.length === 0) {
     return (
       <Box display="flex" justifyContent="center" alignItems="center" height="300px">
         <CircularProgress />
@@ -115,7 +122,7 @@ const PatientManagement: React.FC = () => {
   }
 
   // 加载失败：真实错误状态 + 重试
-  if (error) {
+  if (error && patients.length === 0) {
     return (
       <Box display="flex" flexDirection="column" justifyContent="center" alignItems="center" height="300px">
         <Typography color="error" variant="body1" gutterBottom>
@@ -142,6 +149,9 @@ const PatientManagement: React.FC = () => {
       </Box>
 
       <Paper sx={{ p: 2, mb: 3 }}>
+        {error && <Typography color="error" role="alert" sx={{ mb: 2 }}>{error}</Typography>}
+        {actionError && <Typography color="error" role="alert" sx={{ mb: 2 }}>{actionError}</Typography>}
+        {isLoading && <CircularProgress size={20} sx={{ mb: 1 }} />}
         <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
           <TextField
             placeholder="搜索患者姓名、ID、诊断或医生..."
@@ -166,7 +176,7 @@ const PatientManagement: React.FC = () => {
               暂无患者数据
             </Typography>
             <Typography variant="caption" color="text.disabled" display="block" sx={{ mt: 1 }}>
-              后端管理接口建设中，暂无数据
+              {searchTerm ? '没有符合搜索条件的患者' : '患者账号会显示在这里'}
             </Typography>
           </Box>
         ) : (
@@ -191,7 +201,7 @@ const PatientManagement: React.FC = () => {
                     <TableCell>{renderText(patient.id)}</TableCell>
                     <TableCell>{renderText(patient.name)}</TableCell>
                     <TableCell>
-                      {patient.age ? `${patient.age}岁` : '—'}/{renderText(patient.gender)}
+                      {patient.age != null ? `${patient.age}岁` : '—'}/{renderText(patient.gender)}
                     </TableCell>
                     <TableCell>{renderText(patient.diagnosis)}</TableCell>
                     <TableCell>{renderText(patient.doctor_assigned)}</TableCell>
@@ -206,8 +216,13 @@ const PatientManagement: React.FC = () => {
                     </TableCell>
                     <TableCell>
                       <Button size="small" onClick={async () => {
-                        await apiClient.put(`/admin/accounts/${patient.id}/active`, { active: patient.status !== '正常' });
-                        setReloadKey(key => key + 1);
+                        setActionError('');
+                        try {
+                          await apiClient.put(`/admin/accounts/${patient.id}/active`, { active: patient.status !== '正常' });
+                          setReloadKey(key => key + 1);
+                        } catch (failure: any) {
+                          setActionError(apiErrorMessage(failure, '账号状态更新失败，请重试。'));
+                        }
                       }}>{patient.status === '正常' ? '停用' : '恢复'}</Button>
                     </TableCell>
                   </TableRow>

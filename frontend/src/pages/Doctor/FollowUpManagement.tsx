@@ -292,11 +292,6 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
     }
   };
 
-  // -------- 删除随访：后端暂无 DELETE /health-records/followups/{id} --------
-  const handleDeleteFollowUp = () => {
-    showSnackbar('后端暂未提供随访删除接口，该功能待随访领域收敛后开放', 'info');
-  };
-
   // 关闭提示消息
   const handleCloseSnackbar = () => {
     setSnackbar(prev => ({ ...prev, open: false }));
@@ -326,7 +321,6 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         查看并管理患者的随访计划。手工录入后进入待审阅，责任医护审阅通过后完成随访。
         系统会按后台规则自动标记逾期并在满足失访判定条件时自动认定失访（阈值口径待临床确认）；
         医护仍可写明原因手工标记逾期、认定失访，或恢复已失访的随访。
-        删除功能待随访领域收敛后开放。
       </Typography>
       {statusCounts && Object.keys(statusCounts).length > 0 && (
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
@@ -381,7 +375,6 @@ const FollowUpWorkspace: React.FC<{ currentUser: RootState['auth']['user'] }> = 
         onMarkOverdue={id => { setDispositionReason(''); setDisposition({ id, kind: 'overdue' }); }}
         onMarkLost={id => { setDispositionReason(''); setDisposition({ id, kind: 'lost' }); }}
         onRestoreLost={id => { setDispositionReason(''); setDisposition({ id, kind: 'restore' }); }}
-        onDelete={handleDeleteFollowUp}
         onFilterChange={applyFilters}
         onRefresh={loadFollowUps}
         currentFilters={filters}

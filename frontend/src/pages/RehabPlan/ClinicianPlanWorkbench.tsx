@@ -230,7 +230,7 @@ function TrainingCycles({ planId, refreshToken }: { planId: string; refreshToken
     {cycles.map(cycle => {
       const ended = cycle.end_date < today;
       const pendingReviews = cycle.pending_reviews_count;
-      const mayAccept = cycle.status === 'open' && ended && pendingReviews === 0;
+      const mayAccept = !loading && !error && cycle.status === 'open' && ended && pendingReviews === 0;
       return <Paper variant="outlined" key={cycle.id} sx={{ p: 1.5 }}><Stack spacing={1}>
         <Stack direction="row" spacing={1} alignItems="center"><Typography fontWeight="medium">{cycle.title}</Typography>
           <Chip size="small" label={cycle.status === 'accepted' ? '已验收' : ended ? '周期已结束' : '进行中'} color={cycle.status === 'accepted' ? 'success' : 'default'} /></Stack>
@@ -259,7 +259,8 @@ function TrainingCycles({ planId, refreshToken }: { planId: string; refreshToken
   </Stack></Paper>;
 }
 
-function FeedbackList({ planId, publication, onReviewChanged }: { planId: string; publication: DraftState['published']; onReviewChanged: () => void }) {  const [rows, setRows] = useState<ClinicalFeedback[]>([]);
+function FeedbackList({ planId, publication, refreshCycles }: { planId: string; publication: DraftState['published']; refreshCycles: () => void }) {
+  const [rows, setRows] = useState<ClinicalFeedback[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [reload, setReload] = useState(0);
@@ -282,6 +283,10 @@ function FeedbackList({ planId, publication, onReviewChanged }: { planId: string
     return () => controller.abort();
   }, [planId, page, reload]);
   const labels = { completed: '已执行', partial: '部分执行', not_done: '未执行' };
+  const refreshFeedback = () => {
+    setReload(value => value + 1);
+    refreshCycles();
+  };
   const review = async (row: ClinicalFeedback, status: 'verified' | 'return_for_supplement') => {
     const note = (reviewNotes[row.id] || '').trim();
     if (!note) { setError('请填写本次视频核验意见。'); return; }
@@ -289,13 +294,14 @@ function FeedbackList({ planId, publication, onReviewChanged }: { planId: string
     try {
       const revision = row.clinical_review?.revision ?? 0;
       await api.reviewFeedback(planId, row.id, { expected_revision: revision, status, note });
-      setReviewNotes(value => ({ ...value, [row.id]: '' })); setReload(value => value + 1); onReviewChanged();
+      setReviewNotes(value => ({ ...value, [row.id]: '' }));
+      refreshFeedback();
     } catch (failure) { setError(workbenchError(failure, '视频核验未保存，请刷新反馈后重试。')); }
     finally { setReviewing(false); }
   };
   return <Stack spacing={1.5}>
     <Stack direction="row" justifyContent="space-between"><Typography variant="h6">患者执行反馈</Typography>
-      <Button onClick={() => setReload(value => value + 1)} disabled={loading}>刷新反馈</Button></Stack>
+      <Button onClick={refreshFeedback} disabled={loading}>刷新反馈</Button></Stack>
     <Typography color="text.secondary" variant="body2">反馈为患者自述，可能对应调整前的方案，不替代医护评估。</Typography>
     {loading && <CircularProgress size={24} aria-label="正在加载患者反馈" />}{error && <Alert severity="error">{error}</Alert>}
     {!loading && !error && rows.length === 0 && <Typography>暂无患者反馈。</Typography>}
@@ -323,12 +329,15 @@ function FeedbackList({ planId, publication, onReviewChanged }: { planId: string
   </Stack>;
 }
 
-function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose: () => void; onChanged: () => void }) {
+function PlanEditor({ plan, onClose, onChanged, progress = false }: {
+  plan: ClinicalPlan; onClose: () => void; onChanged: () => void; progress?: boolean;
+}) {
   const [snapshot, setSnapshot] = useState<DraftState | null>(null);
   const [form, setForm] = useState(emptyContent);
   const [items, setItems] = useState<DraftItem[]>([]);
   const [library, setLibrary] = useState<{ id: string; name: string; video_url: string }[]>([]);
   useEffect(() => {
+    if (progress) return;
     const controller = new AbortController();
     httpClient.post('/rehabilitation/exercises/list', { skip: 0, limit: 100 }, { signal: controller.signal }).then(({ data }) => {
       if (!Array.isArray(data)) return;
@@ -342,7 +351,7 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
       }));
     }).catch(() => { if (!controller.signal.aborted) setLibrary([]); });
     return () => controller.abort();
-  }, []);
+  }, [progress]);
   const [editing, setEditing] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -369,6 +378,7 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
     return attempt.current.id;
   };
   useEffect(() => {
+    if (progress) return;
     const controller = new AbortController();
     api.signatureDeclaration(controller.signal).then(({ data }) => {
       if (!controller.signal.aborted && data && typeof data.declaration === 'string' && data.declaration.trim()) {
@@ -376,7 +386,7 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
       }
     }).catch(() => { if (!controller.signal.aborted) setDeclaration(null); });
     return () => controller.abort();
-  }, []);
+  }, [progress]);
   const apply = (data: DraftState) => {
     if (data.plan_id !== plan._id || !Number.isSafeInteger(data.publication_revision) ||
         (data.draft && (!Array.isArray(data.draft.items) || !Number.isSafeInteger(data.draft.revision)))) {
@@ -435,13 +445,14 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
     attempt.current = null; setReason(''); setMessage('操作已处理，正在刷新方案状态。历史记录仍保留。'); setReload(value => value + 1); onChanged();
   });
   return <Dialog open fullWidth maxWidth="md" onClose={() => { if (!pending) onClose(); }}>
-    <DialogTitle>方案管理 · {plan.name}</DialogTitle>
+    <DialogTitle>{progress ? '训练进度' : '方案管理'} · {plan.name}</DialogTitle>
     <DialogContent dividers><Stack spacing={2.5}>
       {loading && <CircularProgress size={24} aria-label="正在读取方案" />}{error && <Alert severity="error">{error}</Alert>}
       {message && <Alert severity="success">{message}</Alert>}
       <Box><Button disabled={pending || loading} onClick={() => setReload(value => value + 1)}>重新加载方案</Button>
-        <Button disabled={loading} onClick={() => setHistoryOpen(true)}>版本历史</Button></Box>
+        {!progress && <Button disabled={loading} onClick={() => setHistoryOpen(true)}>版本历史</Button>}</Box>
       {snapshot && <>
+        {!progress && <>
         <Stack direction="row" spacing={1} flexWrap="wrap"><Chip label={snapshot.published_version_id ? '已发布 · 患者可见' : '未发布 · 患者不可见'} color={snapshot.published_version_id ? 'success' : 'default'} />
           {snapshot.draft && <Chip label={`草稿第 ${snapshot.draft.version_no} 版`} />}{dirty && <Chip label="有未保存修改" color="warning" />}</Stack>
         {snapshot.draft && <ContraindicationNotice report={snapshot.draft.contraindication_findings} />}
@@ -483,9 +494,10 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
           <TextField label="处理原因" multiline minRows={2} value={reason} disabled={pending || needsReload} inputProps={{ maxLength: 2000 }} onChange={event => setReason(event.target.value)} />
           <Box><Button color="error" disabled={pending || needsReload || !reason.trim()} onClick={withdraw}>确认停止患者查看</Button></Box>
         </>}
+        </>}
         <Divider /><TrainingCycles key={`${plan._id}:training-cycles`} planId={plan._id} refreshToken={cycleRefresh} />
         <FeedbackList key={`${plan._id}:${snapshot.published_version_id}`} planId={plan._id} publication={snapshot.published}
-          onReviewChanged={() => setCycleRefresh(value => value + 1)} />
+          refreshCycles={() => setCycleRefresh(value => value + 1)} />
       </>}
     </Stack></DialogContent>
     <DialogActions><Button disabled={pending} onClick={onClose}>关闭</Button></DialogActions>
@@ -495,7 +507,7 @@ function PlanEditor({ plan, onClose, onChanged }: { plan: ClinicalPlan; onClose:
   </Dialog>;
 }
 
-function PatientWorkspace({ actor, patient }: { actor: Actor; patient: PatientOption }) {
+function PatientWorkspace({ actor, patient, progress }: { actor: Actor; patient: PatientOption; progress: boolean }) {
   const [plans, setPlans] = useState<ClinicalPlan[]>([]);
   const [page, setPage] = useState(0);
   const [reload, setReload] = useState(0);
@@ -543,21 +555,21 @@ function PatientWorkspace({ actor, patient }: { actor: Actor; patient: PatientOp
     <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" spacing={1}>
       <Typography variant="h6">{patient.name}的康复方案</Typography>
       <Stack direction="row" spacing={1}><Button onClick={() => setReload(value => value + 1)} disabled={loading}>刷新列表</Button>
-        <Button variant="contained" onClick={() => { setForm(emptyContent()); setSourceNote(''); setUncertain(false); setCreateError(''); setCreating(true); }}>新建方案草稿</Button></Stack>
+        {!progress && <Button variant="contained" onClick={() => { setForm(emptyContent()); setSourceNote(''); setUncertain(false); setCreateError(''); setCreating(true); }}>新建方案草稿</Button>}</Stack>
     </Stack>
     {loading && <CircularProgress size={24} aria-label="正在加载方案列表" />}{error && <Alert severity="error">{error}</Alert>}
-    {!loading && !error && !plans.length && <Alert severity="info">该患者暂无康复方案，可以从草稿开始填写。</Alert>}
+    {!loading && !error && !plans.length && <Alert severity="info">该患者暂无康复方案。</Alert>}
     {plans.map(plan => <Card variant="outlined" key={plan._id}><CardContent><Stack spacing={1}>
       <Typography variant="h6">{plan.name}</Typography><Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{plan.description}</Typography>
       <Typography variant="body2" color="text.secondary">目标：{plan.goal || '未填写'}；发布情况以管理页核验结果为准。</Typography>
-      <Box><Button onClick={() => setSelected(plan)}>管理内容、发布与患者反馈</Button>
-        <Button onClick={() => setVersionHistoryPlan(plan)}>版本历史</Button></Box>
+      <Box><Button onClick={() => setSelected(plan)}>{progress ? '查看训练反馈与周期' : '管理内容、发布与患者反馈'}</Button>
+        {!progress && <Button onClick={() => setVersionHistoryPlan(plan)}>版本历史</Button>}</Box>
     </Stack></CardContent></Card>)}
     <Stack direction="row" spacing={2} alignItems="center" justifyContent="flex-end">
       <Button disabled={loading || !page} onClick={() => setPage(value => value - 1)}>上一页</Button><Typography>第 {page + 1} 页</Typography>
       <Button disabled={loading || plans.length < LIMIT} onClick={() => setPage(value => value + 1)}>下一页</Button>
     </Stack>
-    {selected && <PlanEditor key={`${actor.id}:${selected._id}`} plan={selected} onClose={() => setSelected(null)} onChanged={() => setReload(value => value + 1)} />}
+    {selected && <PlanEditor key={`${actor.id}:${selected._id}`} plan={selected} progress={progress} onClose={() => setSelected(null)} onChanged={() => setReload(value => value + 1)} />}
     {versionHistoryPlan && (
       <PlanVersionHistoryDialog
         planId={versionHistoryPlan._id}
@@ -582,23 +594,23 @@ function PatientWorkspace({ actor, patient }: { actor: Actor; patient: PatientOp
   </Stack>;
 }
 
-export default function ClinicianPlanWorkbench() {
+export default function ClinicianPlanWorkbench({ progress = false }: { progress?: boolean }) {
   const actor = useSelector((state: RootState) => state.auth.user);
   if (!actor || !['doctor', 'health_manager'].includes(actor.role)) return <Alert severity="error">医护方案工作台需要医生或健康管理师权限。</Alert>;
-  return <Workspace key={`${actor.id}:${actor.role}`} actor={actor} />;
+  return <Workspace key={`${actor.id}:${actor.role}:${progress}`} actor={actor} progress={progress} />;
 }
-function Workspace({ actor }: { actor: Actor }) {
+function Workspace({ actor, progress }: { actor: Actor; progress: boolean }) {
   const [patientId, setPatientId] = useState('');
   const { patients, loading, error: patientFailure, reload } = usePatientOptions(actor.role, actor.id);
   const error = patientFailure ? workbenchError(patientFailure, '患者列表加载失败，请重试。') : '';
   const patient = patients.find(item => item.id === patientId);
   return <Container maxWidth="lg" sx={{ py: 3 }}><Stack spacing={2.5}>
-    <Typography variant="h4" component="h1">康复方案工作台</Typography>
-    <Typography color="text.secondary">选择患者，填写并确认方案内容后发布。患者只能查看已发布内容，草稿调整不会直接改变患者看到的安排。</Typography>
+    <Typography variant="h4" component="h1">{progress ? '康复进度报告' : '康复方案工作台'}</Typography>
+    <Typography color="text.secondary">{progress ? '选择患者和方案，查看训练反馈、视频核验与周期验收。' : '选择患者，填写并确认方案内容后发布。患者只能查看已发布内容，草稿调整不会直接改变患者看到的安排。'}</Typography>
     {loading && <CircularProgress size={24} aria-label="正在加载患者" />}{error && <Alert severity="error" action={<Button onClick={() => { setPatientId(''); reload(); }}>重试</Button>}>{error}</Alert>}
     {!loading && !error && !patients.length && <Alert severity="info">当前没有分配给您的患者。</Alert>}
     <PatientSelect label="选择已授权患者" value={patientId} patients={patients} loading={loading}
       disabled={!patients.length} onChange={setPatientId} sx={{ maxWidth: 450 }} />
-    {patient && <PatientWorkspace key={`${actor.id}:${patient.id}`} actor={actor} patient={patient} />}
+    {patient && <PatientWorkspace key={`${actor.id}:${patient.id}`} actor={actor} patient={patient} progress={progress} />}
   </Stack></Container>;
 }

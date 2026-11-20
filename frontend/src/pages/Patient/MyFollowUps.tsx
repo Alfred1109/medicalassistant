@@ -16,6 +16,10 @@ import type { RootState } from '../../store';
 import { apiService } from '../../services/api';
 import type { FollowUpRecord } from '../../types/followup';
 import { getFollowUpStatusInfo, getFollowUpTypeLabel } from '../../constants/followup';
+import { useAsyncResource } from '../../hooks/useAsyncResource';
+import { patientClinical } from '../../services/patientClinical';
+import { apiErrorMessage } from '../../services/patientErrors';
+import { formatAppDate } from '../../utils/dateTime';
 
 // 与通知中心跳转的 /app/follow-ups/:id 共享详情页同一条只读链路：
 // 详情由该页面经 GET /health-records/followups/{id} 读取，后端做患者 self 授权。
@@ -32,35 +36,19 @@ export function sortFollowUpsByScheduled(records: FollowUpRecord[]): FollowUpRec
   });
 }
 
-const MyFollowUps: React.FC = () => {
-  const user = useSelector((state: RootState) => state.auth.user);
+const PAGE_SIZE = 20;
+
+function FollowUpHistory({ accountId }: { accountId: string }) {
   const navigate = useNavigate();
-  const [records, setRecords] = React.useState<FollowUpRecord[]>([]);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState<string | null>(null);
-
-  const load = React.useCallback(async (signal?: AbortSignal) => {
-    if (!user?.id) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const { data } = await apiService.getFollowUps(user.id);
-      setRecords(sortFollowUpsByScheduled(Array.isArray(data) ? data : []));
-    } catch (err: any) {
-      if (!signal?.aborted) {
-        setRecords([]);
-        setError(err?.response?.data?.detail || err?.message || '随访记录加载失败');
-      }
-    } finally {
-      if (!signal?.aborted) setLoading(false);
-    }
-  }, [user?.id]);
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
+  const [page, setPage] = React.useState(0);
+  const load = React.useCallback(async (signal: AbortSignal) => {
+    const patientId = await patientClinical.selfId(signal);
+    const { data } = await apiService.getFollowUps(patientId, { skip: page * PAGE_SIZE, limit: PAGE_SIZE + 1 }, signal);
+    if (!Array.isArray(data)) throw new Error('随访接口返回的数据格式无效');
+    return { records: sortFollowUpsByScheduled(data.slice(0, PAGE_SIZE)), hasNext: data.length > PAGE_SIZE };
+  }, [page]);
+  const { data, error, loading, reload } = useAsyncResource(load, Boolean(accountId));
+  const records = data?.records ?? [];
 
   return (
     <Paper sx={{ p: { xs: 2, md: 3 }, maxWidth: 850, mx: 'auto' }}>
@@ -70,12 +58,12 @@ const MyFollowUps: React.FC = () => {
           <Typography variant="h5" component="h1">我的随访</Typography>
         </Box>
         <Typography variant="body2" color="text.secondary">
-          这里是医护人员为你安排的随访安排（只读）。如需调整时间或补填信息，请联系负责的医护人员。
+          查看医护为你安排的随访。如需调整时间或补填信息，请联系负责的医护人员。
         </Typography>
         {loading && <Box role="status"><CircularProgress size={24} aria-label="正在加载随访记录" /></Box>}
-        {error && <Alert severity="error">{error}</Alert>}
-        {!loading && !error && records.length === 0 && (
-          <Alert severity="info">目前没有你的随访记录。</Alert>
+        {!!error && <Alert severity="error" action={<Button onClick={reload}>重试</Button>}>{apiErrorMessage(error, '随访记录加载失败')}</Alert>}
+        {data && records.length === 0 && (
+          <Alert severity="info">{page > 0 ? '本页没有随访记录。' : '目前没有你的随访记录。'}</Alert>
         )}
         {records.map(record => {
           const status = getFollowUpStatusInfo(record.status);
@@ -91,7 +79,7 @@ const MyFollowUps: React.FC = () => {
                 )}
               </Stack>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                计划时间：{record.scheduled_date || '待定'}
+                计划时间：{formatAppDate(record.scheduled_date, 'minute', { empty: '待定', invalid: '待定' })}
               </Typography>
               {record.description && (
                 <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', mt: 0.5 }}>
@@ -101,9 +89,17 @@ const MyFollowUps: React.FC = () => {
             </Box>
           );
         })}
+        {(page > 0 || data?.hasNext) && <Stack direction="row" spacing={2} alignItems="center" justifyContent="center">
+          <Button disabled={loading || page === 0} onClick={() => setPage(page - 1)}>上一页</Button>
+          <Typography variant="body2">第 {page + 1} 页</Typography>
+          <Button disabled={loading || !data?.hasNext} onClick={() => setPage(page + 1)}>下一页</Button>
+        </Stack>}
       </Stack>
     </Paper>
   );
-};
+}
 
-export default MyFollowUps;
+export default function MyFollowUps() {
+  const accountId = useSelector((state: RootState) => state.auth.user?.id) || '';
+  return <FollowUpHistory key={accountId} accountId={accountId} />;
+}

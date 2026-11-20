@@ -22,9 +22,9 @@ import {
 import AddIcon from '@mui/icons-material/Add';
 import LocalOfferIcon from '@mui/icons-material/LocalOffer';
 import apiClient from '../../services/api';
+import { apiErrorMessage } from '../../services/patientErrors';
 
-// 标签管理：数据来自 GET /api/admin/tags
-// 该接口目前为后端占位实现（恒返回 []），创建/编辑/删除接口未持久化，故禁用相关入口
+// 标签数据和维护操作均通过管理员接口持久化。
 interface TagRow {
   id?: string | number;
   name?: string;
@@ -41,6 +41,7 @@ const TagManagement: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [tagName, setTagName] = useState('');
   const [tagCategory, setTagCategory] = useState('');
+  const [actionError, setActionError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -94,7 +95,7 @@ const TagManagement: React.FC = () => {
   };
 
   // 加载中
-  if (isLoading) {
+  if (isLoading && tags.length === 0) {
     return (
       <Box display="flex" justifyContent="center" alignItems="center" height="300px">
         <CircularProgress />
@@ -106,7 +107,7 @@ const TagManagement: React.FC = () => {
   }
 
   // 加载失败：真实错误状态 + 重试
-  if (error) {
+  if (error && tags.length === 0) {
     return (
       <Box display="flex" flexDirection="column" justifyContent="center" alignItems="center" height="300px">
         <Typography color="error" variant="body1" gutterBottom>
@@ -133,6 +134,9 @@ const TagManagement: React.FC = () => {
       </Box>
 
       <Paper sx={{ p: 3, mb: 3 }}>
+        {error && <Typography color="error" role="alert" sx={{ mb: 2 }}>{error}</Typography>}
+        {actionError && <Typography color="error" role="alert" sx={{ mb: 2 }}>{actionError}</Typography>}
+        {isLoading && <CircularProgress size={20} sx={{ mb: 1 }} />}
         <Box display="flex" alignItems="center" mb={3}>
           <Typography variant="subtitle1" sx={{ mr: 2 }}>
             按类别筛选:
@@ -159,7 +163,7 @@ const TagManagement: React.FC = () => {
               暂无标签数据
             </Typography>
             <Typography variant="caption" color="text.disabled" display="block" sx={{ mt: 1 }}>
-              后端管理接口建设中，暂无数据
+              {currentCategory === '全部' ? '添加标签后会显示在这里' : '该类别暂时没有标签'}
             </Typography>
           </Box>
         ) : (
@@ -189,7 +193,11 @@ const TagManagement: React.FC = () => {
                   <Typography variant="caption" color="text.secondary" sx={{ ml: 1, mr: 2 }}>
                     {tag.category || '—'}
                   </Typography>
-                  {tag.id !== undefined && <Button size="small" onClick={async () => { await apiClient.delete(`/admin/tags/${tag.id}`); setReloadKey(key => key + 1); }}>删除</Button>}
+                  {tag.id !== undefined && <Button size="small" color="error" onClick={async () => {
+                    setActionError('');
+                    try { await apiClient.delete(`/admin/tags/${tag.id}`); setReloadKey(key => key + 1); }
+                    catch (failure: any) { setActionError(apiErrorMessage(failure, '标签删除失败，请重试。')); }
+                  }}>删除</Button>}
                 </Box>
               </Grid>
             ))}
@@ -199,14 +207,21 @@ const TagManagement: React.FC = () => {
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)}>
         <DialogTitle>添加标签</DialogTitle>
         <DialogContent>
-          <TextField fullWidth margin="dense" label="名称" value={tagName} onChange={event => setTagName(event.target.value)} />
-          <TextField fullWidth margin="dense" label="类别" value={tagCategory} onChange={event => setTagCategory(event.target.value)} />
+          {actionError && <Typography color="error" role="alert" sx={{ mb: 1 }}>{actionError}</Typography>}
+          <TextField required autoFocus inputProps={{ maxLength: 40 }} fullWidth margin="dense" label="名称" value={tagName} onChange={event => setTagName(event.target.value)} />
+          <TextField required inputProps={{ maxLength: 40 }} fullWidth margin="dense" label="类别" value={tagCategory} onChange={event => setTagCategory(event.target.value)} />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCreateOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={async () => {
-            await apiClient.post('/admin/tags', { name: tagName.trim(), category: tagCategory.trim() });
-            setTagName(''); setTagCategory(''); setCreateOpen(false); setReloadKey(key => key + 1);
+          <Button variant="contained" disabled={!tagName.trim() || !tagCategory.trim()} onClick={async () => {
+            setActionError('');
+            try {
+              await apiClient.post('/admin/tags', { name: tagName.trim(), category: tagCategory.trim() });
+              setTagName(''); setTagCategory(''); setCreateOpen(false); setReloadKey(key => key + 1);
+            } catch (failure: any) {
+              const duplicate = failure.response?.data?.detail?.code === 'TAG_EXISTS';
+              setActionError(duplicate ? '该类别下已有同名标签。' : apiErrorMessage(failure, '标签保存失败，请检查名称和类别后重试。'));
+            }
           }}>保存</Button>
         </DialogActions>
       </Dialog>

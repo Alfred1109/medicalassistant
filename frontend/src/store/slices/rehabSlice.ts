@@ -177,7 +177,7 @@ export const getRecommendations = createAsyncThunk<
   ThunkApiConfig
 >(
   'rehab/getRecommendations',
-  async ({ patientId, condition, goal, agentId }: RecommendationRequest, { rejectWithValue }) => {
+  async ({ patientId, condition, goal, agentId }: RecommendationRequest, { rejectWithValue, signal }) => {
     try {
       const response = await httpClient.get(`/rehabilitation/exercises/recommendations`, {
         params: {
@@ -186,6 +186,7 @@ export const getRecommendations = createAsyncThunk<
           goal,
           agent_id: agentId,
         },
+        signal,
       });
       return response.data;
     } catch (error: any) {

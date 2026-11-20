@@ -123,8 +123,8 @@ export const apiService = {
     api.get('/health-records', { params: { patient_id: patientId, ...(params || {}) } }),
 
   // 随访记录
-  getFollowUps: (patientId: string, params?: Record<string, any>): Promise<AxiosResponse<FollowUpRecord[]>> =>
-    api.get('/health-records/followups', { params: { patient_id: patientId, ...(params || {}) } }),
+  getFollowUps: (patientId: string, params?: Record<string, any>, signal?: AbortSignal): Promise<AxiosResponse<FollowUpRecord[]>> =>
+    api.get('/health-records/followups', { params: { patient_id: patientId, ...(params || {}) }, signal }),
 
   getFollowUpWorkbench: (params: FollowUpWorkbenchQuery, signal?: AbortSignal): Promise<AxiosResponse<FollowUpWorkbenchPage>> =>
     api.get('/health-records/followup-workbench', { params, signal }),

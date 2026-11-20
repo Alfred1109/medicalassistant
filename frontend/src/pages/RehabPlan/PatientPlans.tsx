@@ -1,11 +1,12 @@
 import { formatAppDate } from '../../utils/dateTime';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, CircularProgress, Container, Divider, MenuItem, Paper, Stack, TextField, Typography } from '@mui/material';
 import { useSelector } from 'react-redux';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { RootState } from '../../store';
 import { rehabPublications, type PatientRehabAttachment, type PatientRehabFeedback, type PatientTrainingCycle, type PublishedRehabPlan, type RehabInterventionType } from '../../services/rehabPublications';
 import { patientDomainErrorCopy } from '../../services/patientErrors';
+import { useAsyncResource } from '../../hooks/useAsyncResource';
 
 const categories: Record<RehabInterventionType, string> = {
   diet: '饮食', exercise: '运动', medication: '用药', psychology: '心理',
@@ -251,12 +252,37 @@ function PatientCycles({ planId }: { planId: string }) {
   </Stack></Paper>;
 }
 
-export function PatientPlanList() {
-  const actor = useSelector((state: RootState) => state.auth.user);
-  return <PatientPlanListForActor key={`${actor?.id}:${actor?.role}`} />;
+function PatientProgressSummary({ plan, accountId }: { plan: PublishedRehabPlan; accountId: string }) {
+  const load = useCallback(async (signal: AbortSignal) => {
+    const { data } = await rehabPublications.feedback(plan.id, 0, 5, signal);
+    if (!Array.isArray(data.items) || !data.items.every(row => validPatientFeedback(row, plan.id, accountId))
+      || !Number.isSafeInteger(data.total) || data.total < data.items.length) throw new Error('invalid feedback page');
+    return data;
+  }, [plan.id, accountId]);
+  const { data, loading, error, reload } = useAsyncResource(load);
+  return <Stack spacing={1.5}>
+    <PatientCycles planId={plan.id} />
+    <Paper variant="outlined" sx={{ p: 2 }}><Stack spacing={1}>
+      <Typography variant="h6">最近反馈{data ? `（共 ${data.total} 条）` : ''}</Typography>
+      {loading && <CircularProgress size={20} aria-label="正在加载反馈" />}
+      {!!error && <Alert severity="error" action={<Button onClick={reload}>重试</Button>}>
+        {patientDomainErrorCopy(error) ?? '暂时无法读取训练反馈。'}
+      </Alert>}
+      {data?.items.length === 0 && <Typography color="text.secondary">暂无执行反馈。</Typography>}
+      {data?.items.map(row => <Box key={row.id}>
+        <Typography variant="body2" color="text.secondary">{feedbackReference(row, plan)} · {dateText(row.performed_at)}</Typography>
+        <Typography variant="body2">{row.feelings}</Typography>
+      </Box>)}
+    </Stack></Paper>
+  </Stack>;
 }
 
-function PatientPlanListForActor() {
+export function PatientPlanList({ progress = false }: { progress?: boolean }) {
+  const actor = useSelector((state: RootState) => state.auth.user);
+  return <PatientPlanListForActor key={`${actor?.id}:${actor?.role}:${progress}`} progress={progress} accountId={actor?.id || ''} />;
+}
+
+function PatientPlanListForActor({ progress, accountId }: { progress: boolean; accountId: string }) {
   const navigate = useNavigate();
   const [items, setItems] = useState<PublishedRehabPlan[]>([]);
   const [page, setPage] = useState(0);
@@ -264,6 +290,7 @@ function PatientPlanListForActor() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
+  const [expandedPlan, setExpandedPlan] = useState('');
   const limit = 20;
   useEffect(() => {
     const controller = new AbortController();
@@ -280,8 +307,8 @@ function PatientPlanListForActor() {
     return () => controller.abort();
   }, [page, reload]);
   return <Container maxWidth="md"><Stack spacing={2}>
-    <Typography variant="h4">我的康复方案</Typography>
-    <Typography color="text.secondary">这里只展示医护确认发布的方案。方案调整后，发布的新版本会显示在这里。</Typography>
+    <Typography variant="h4">{progress ? '康复进度报告' : '我的康复方案'}</Typography>
+    <Typography color="text.secondary">{progress ? '按方案查看本人执行反馈、训练周期和医护验收记录。' : '这里只展示医护确认发布的方案。方案调整后，发布的新版本会显示在这里。'}</Typography>
     {loading && <CircularProgress size={24} aria-label="正在加载方案" />}
     {error && <Alert severity="error" action={<Button onClick={() => setReload(value => value + 1)}>重试</Button>}>{error}</Alert>}
     {!loading && !error && items.length === 0 && <Alert severity="info">暂无医护发布的康复方案。</Alert>}
@@ -289,7 +316,10 @@ function PatientPlanListForActor() {
       <Typography variant="h6">{plan.content.name || '康复方案'}</Typography>
       <Typography variant="body2" color="text.secondary">发布时间：{dateText(plan.published_at)}</Typography>
       <Typography>目标：{plan.content.goal || '未填写'}</Typography>
-      <Box><Button onClick={() => navigate(`/app/rehab-plans/${plan.id}`)}>查看方案</Button></Box>
+      <Box>{progress && <Button onClick={() => setExpandedPlan(current => current === plan.id ? '' : plan.id)}
+        aria-expanded={expandedPlan === plan.id}>{expandedPlan === plan.id ? '收起进度' : '查看进度'}</Button>}
+        <Button onClick={() => navigate(`/app/rehab-plans/${plan.id}`)}>{progress ? '查看方案和全部反馈' : '查看方案'}</Button></Box>
+      {progress && expandedPlan === plan.id && <PatientProgressSummary key={plan.id} plan={plan} accountId={accountId} />}
     </Stack></CardContent></Card>)}
     {total > limit && <Stack direction="row" spacing={2} alignItems="center"><Button disabled={loading || page === 0} onClick={() => setPage(value => value - 1)}>上一页</Button><Typography>第 {page + 1} 页，共 {total} 项</Typography><Button disabled={loading || (page + 1) * limit >= total} onClick={() => setPage(value => value + 1)}>下一页</Button></Stack>}
   </Stack></Container>;

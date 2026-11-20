@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
@@ -22,8 +22,10 @@ import { getRecommendations } from '../../store/slices/rehabSlice';
 import { Exercise } from '../../types/rehab';
 import PatientSelect from '../../components/common/PatientSelect';
 import { usePatientOptions } from '../../hooks/usePatientOptions';
-import { patientDomainErrorCopy } from '../../services/patientErrors';
+import { useAsyncResource } from '../../hooks/useAsyncResource';
+import { apiErrorMessage } from '../../services/patientErrors';
 import httpClient from '../../services/httpClient';
+import { PatientPlanList } from '../RehabPlan/PatientPlans';
 
 /**
  * 训练推荐页面（真实数据版）
@@ -43,50 +45,42 @@ const difficultyLabels: Record<string, string> = {
   hard: '困难',
 };
 
-const ExerciseRecommendations: React.FC = () => {
+function StaffRecommendations({ role, accountId }: { role: string; accountId: string }) {
   const dispatch = useDispatch<AppDispatch>();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const recommendations = useSelector((state: RootState) => state.rehab?.recommendations || []);
-  const loading = useSelector((state: RootState) => state.rehab?.loading || false);
-  const error = useSelector((state: RootState) => state.rehab?.error);
-
   // URL ?patientId= 优先，医护也可从各自授权的患者目录中选择。
-  const [patientId, setPatientId] = useState<string>(searchParams.get('patientId') || '');
-  const actor = useSelector((state: RootState) => state.auth.user);
-  const role = actor?.role;
-  const { patients, loading: patientsLoading, error: patientFailure } = usePatientOptions(role, actor?.id);
-  const medical = role === 'doctor' || role === 'health_manager';
+  const patientId = searchParams.get('patientId') || '';
+  const { patients, loading: patientsLoading, error: patientFailure } = usePatientOptions(role, accountId, true);
   const patientsError = patientFailure
-    ? patientDomainErrorCopy(patientFailure) || (patientFailure as Error).message || '获取患者列表失败'
-    : !medical ? '当前账号无患者管理权限，请通过链接参数 ?patientId= 指定患者' : null;
+    ? apiErrorMessage(patientFailure, '获取患者列表失败') : null;
   const [draftNotice, setDraftNotice] = useState('');
 
   // 过滤条件（均为可选，后端对应可选查询参数）
   const [condition, setCondition] = useState('');
   const [goal, setGoal] = useState('');
 
-  // 发起真实推荐查询
-  const fetchRecommendations = useCallback((pid: string, cond: string, gol: string) => {
-    if (!pid) return;
-    dispatch(getRecommendations({ patientId: pid, condition: cond.trim(), goal: gol.trim() }));
-  }, [dispatch]);
+  const [criteria, setCriteria] = useState({ condition: '', goal: '' });
+  const load = useCallback(async (signal: AbortSignal) => {
+    const request = dispatch(getRecommendations({ patientId, ...criteria }));
+    const abort = () => request.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    try {
+      const result = await request.unwrap();
+      if (!Array.isArray(result)) throw new Error('推荐接口返回的数据格式无效');
+      return result;
+    } finally { signal.removeEventListener('abort', abort); }
+  }, [dispatch, patientId, criteria]);
+  const { data, loading, error } = useAsyncResource(load, !!patientId);
+  const recommendations = data ?? [];
+  const submitCriteria = () => setCriteria({ condition: condition.trim(), goal: goal.trim() });
 
   // 选中患者即以默认条件发起查询，并同步 URL
   const handlePatientChange = (pid: string) => {
-    setPatientId(pid);
     setSearchParams(pid ? { patientId: pid } : {});
-    fetchRecommendations(pid, condition, goal);
+    setDraftNotice('');
+    submitCriteria();
   };
-
-  // URL 直达 ?patientId= 时自动查询
-  useEffect(() => {
-    const pid = searchParams.get('patientId');
-    if (pid) {
-      fetchRecommendations(pid, condition, goal);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const hasPatient = !!patientId;
 
@@ -107,7 +101,7 @@ const ExerciseRecommendations: React.FC = () => {
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={12} sm={4}>
             <PatientSelect fullWidth label="选择患者" value={patientId} patients={patients}
-              loading={patientsLoading} disabled={!medical} onChange={handlePatientChange} />
+              loading={patientsLoading} onChange={handlePatientChange} />
           </Grid>
           <Grid item xs={12} sm={3}>
             <TextField
@@ -130,7 +124,7 @@ const ExerciseRecommendations: React.FC = () => {
               variant="contained"
               fullWidth
               disabled={!hasPatient || loading}
-              onClick={() => fetchRecommendations(patientId, condition, goal)}
+              onClick={submitCriteria}
             >
               查询推荐
             </Button>
@@ -160,7 +154,7 @@ const ExerciseRecommendations: React.FC = () => {
       ) : (
         <>
           {/* 错误状态 */}
-          {error && <Alert severity="error" sx={{ mb: 3 }}>{error}</Alert>}
+          {!!error && <Alert severity="error" sx={{ mb: 3 }}>{typeof error === 'string' ? error : apiErrorMessage(error, '获取推荐运动失败')}</Alert>}
 
           {/* 加载状态 */}
           {loading && (
@@ -226,7 +220,7 @@ const ExerciseRecommendations: React.FC = () => {
                         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
                           {(role === 'doctor' || role === 'health_manager') && <Button
                             variant="outlined"
-                            disabled={!goal.trim()}
+                            disabled={!criteria.goal || goal.trim() !== criteria.goal || condition.trim() !== criteria.condition}
                             onClick={async () => {
                               setDraftNotice('');
                               try {
@@ -234,7 +228,7 @@ const ExerciseRecommendations: React.FC = () => {
                                   patient_id: patientId,
                                   name: exercise.name || '待核对的训练建议',
                                   description: `模型参考，尚未发布，不能当作已签署处方。${exercise.description || ''}`.slice(0, 5000),
-                                  goal: goal.trim(),
+                                  goal: criteria.goal,
                                   start_date: new Date().toISOString(),
                                   status: 'draft',
                                   exercises: [],
@@ -275,14 +269,15 @@ const ExerciseRecommendations: React.FC = () => {
         </>
       )}
 
-      {/* 诚实说明：推荐历史与训练反馈暂无后端支持 */}
       {draftNotice && <Alert severity="info" sx={{ mt: 2 }}>{draftNotice}</Alert>}
       {!goal.trim() && (role === 'doctor' || role === 'health_manager') && <Alert severity="info" sx={{ mt: 2 }}>填写康复目标后，才能把一条建议存成未发布草稿。</Alert>}
-      <Alert severity="info" sx={{ mt: 3 }}>
-        推荐历史与训练反馈功能暂无后端支持，本页不做展示。
-      </Alert>
+      <Button component={Link} to="/app/rehab-progress" sx={{ mt: 2 }}>查看训练反馈与周期验收</Button>
     </Container>
   );
-};
+}
 
-export default ExerciseRecommendations;
+export default function ExerciseRecommendations() {
+  const actor = useSelector((state: RootState) => state.auth.user);
+  if (actor?.role === 'patient') return <PatientPlanList />;
+  return actor ? <StaffRecommendations key={`${actor.role}:${actor.id}`} role={actor.role} accountId={actor.id} /> : null;
+}

@@ -37,7 +37,6 @@ import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 // 图标
 import AddIcon from '@mui/icons-material/Add';
 import EditIcon from '@mui/icons-material/Edit';
-import DeleteIcon from '@mui/icons-material/Delete';
 import DoneIcon from '@mui/icons-material/Done';
 import CancelIcon from '@mui/icons-material/Cancel';
 import EventIcon from '@mui/icons-material/Event';
@@ -74,7 +73,6 @@ interface FollowUpListProps {
   onMarkOverdue?: (id: string) => void;
   onMarkLost?: (id: string) => void;
   onRestoreLost?: (id: string) => void;
-  onDelete?: (id: string) => void;
   onFilterChange?: (filters: FollowUpFilters) => void;
   onRefresh?: () => void;
   currentFilters?: FollowUpFilters;
@@ -104,7 +102,6 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   onMarkOverdue,
   onMarkLost,
   onRestoreLost,
-  onDelete,
   onFilterChange,
   onRefresh,
   currentFilters = EMPTY_FILTERS
@@ -113,7 +110,6 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState(currentFilters);
   useEffect(() => { setFilters(currentFilters); }, [currentFilters]);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [actionDialogOpen, setActionDialogOpen] = useState(false);
   const [actionType, setActionType] = useState<'complete' | 'cancel' | 'reschedule' | null>(null);
@@ -156,20 +152,6 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
     if (onPageChange) {
       onPageChange(0);
     }
-  };
-  
-  // 删除对话框处理
-  const handleDeleteClick = (id: string) => {
-    setSelectedRecordId(id);
-    setDeleteDialogOpen(true);
-  };
-  
-  const handleDeleteConfirm = () => {
-    if (selectedRecordId && onDelete) {
-      onDelete(selectedRecordId);
-    }
-    setDeleteDialogOpen(false);
-    setSelectedRecordId(null);
   };
   
   // 操作对话框处理
@@ -270,14 +252,6 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
               title="编辑"
             >
               <EditIcon fontSize="small" />
-            </IconButton>
-            <IconButton 
-              size="small" 
-              color="error" 
-              onClick={() => handleDeleteClick(record.id)}
-              title="删除"
-            >
-              <DeleteIcon fontSize="small" />
             </IconButton>
           </Stack>
         );
@@ -513,25 +487,6 @@ const FollowUpList: React.FC<FollowUpListProps> = ({
           </>
         )}
       </Box>
-      
-      {/* 删除确认对话框 */}
-      <Dialog
-        open={deleteDialogOpen}
-        onClose={() => setDeleteDialogOpen(false)}
-      >
-        <DialogTitle>确认删除</DialogTitle>
-        <DialogContent>
-          <Typography>
-            您确定要删除这条随访记录吗？此操作不可撤销。
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeleteDialogOpen(false)}>取消</Button>
-          <Button onClick={handleDeleteConfirm} color="error" autoFocus>
-            删除
-          </Button>
-        </DialogActions>
-      </Dialog>
       
       {/* 操作确认对话框 */}
       <Dialog

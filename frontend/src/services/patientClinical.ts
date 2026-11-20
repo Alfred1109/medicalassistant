@@ -55,6 +55,11 @@ const path = (patientId: string, suffix: string) =>
   `/clinical/patients/${encodeURIComponent(patientId)}${suffix}`;
 
 export const patientClinical = {
+  selfId: async (signal?: AbortSignal): Promise<string> => {
+    const { data } = await api.get<{ patient_id: string }>('/health-records/patient-context', { signal });
+    if (typeof data?.patient_id !== 'string' || !data.patient_id) throw new Error('未能确认当前患者档案');
+    return data.patient_id;
+  },
   education: (signal?: AbortSignal) =>
     api.get<{ materials: PatientEducationMaterial[] }>('/clinical/education', { signal }),
   acknowledgeEducation: (assignmentId: string, feedback: string) =>

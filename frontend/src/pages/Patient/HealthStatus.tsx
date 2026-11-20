@@ -68,10 +68,12 @@ const HealthStatus: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
+      const patientId = await patientClinical.selfId(signal);
       const [indicatorResponse, alertResponse] = await Promise.all([
-        patientClinical.indicators(user.id, signal),
-        patientClinical.alerts(user.id, 0, 100, signal),
+        patientClinical.indicators(patientId, signal),
+        patientClinical.alerts(patientId, 0, 100, signal),
       ]);
+      if (signal?.aborted) return;
       const indicatorData = indicatorResponse.data;
       setIndicators(Array.isArray(indicatorData?.indicators) ? indicatorData.indicators : []);
       setIndicatorMeta({

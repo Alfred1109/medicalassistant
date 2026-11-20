@@ -19,10 +19,10 @@ import {
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
 import apiClient from '../../services/api';
+import { apiErrorMessage } from '../../services/patientErrors';
 import AccountCreateDialog from '../../components/Admin/AccountCreateDialog';
 
-// 健康管理师管理：数据来自 GET /api/admin/health-managers
-// 该接口目前为后端占位实现（恒返回 []），创建/编辑/删除接口未持久化，故禁用相关入口
+// 健康管理师账号来自 users 集合，由管理员接口维护。
 interface HealthManagerRow {
   id?: string;
   name?: string;
@@ -44,6 +44,7 @@ const HealthManagerManagement: React.FC = () => {
   const [filterDepartment, setFilterDepartment] = useState('全部');
   const [reloadKey, setReloadKey] = useState(0);
   const [createOpen, setCreateOpen] = useState(false);
+  const [actionError, setActionError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -119,7 +120,7 @@ const HealthManagerManagement: React.FC = () => {
   };
 
   // 加载中
-  if (isLoading) {
+  if (isLoading && managers.length === 0) {
     return (
       <Box display="flex" justifyContent="center" alignItems="center" height="300px">
         <CircularProgress />
@@ -131,7 +132,7 @@ const HealthManagerManagement: React.FC = () => {
   }
 
   // 加载失败：真实错误状态 + 重试
-  if (error) {
+  if (error && managers.length === 0) {
     return (
       <Box display="flex" flexDirection="column" justifyContent="center" alignItems="center" height="300px">
         <Typography color="error" variant="body1" gutterBottom>
@@ -158,6 +159,9 @@ const HealthManagerManagement: React.FC = () => {
       </Box>
 
       <Box mb={3} display="flex" alignItems="center">
+        {error && <Typography color="error" role="alert">{error}</Typography>}
+        {actionError && <Typography color="error" role="alert">{actionError}</Typography>}
+        {isLoading && <CircularProgress size={20} sx={{ ml: 1 }} />}
         <TextField
           fullWidth
           placeholder="搜索管理师姓名、科室或专长..."
@@ -209,7 +213,7 @@ const HealthManagerManagement: React.FC = () => {
                       暂无健康管理师数据
                     </Typography>
                     <Typography variant="caption" color="text.disabled" display="block" sx={{ mt: 1 }}>
-                      后端管理接口建设中，暂无数据
+                      {searchTerm || filterDepartment !== '全部' ? '没有符合筛选条件的健康管理师' : '添加健康管理师账号后会显示在这里'}
                     </Typography>
                   </Box>
                 </TableCell>
@@ -237,8 +241,13 @@ const HealthManagerManagement: React.FC = () => {
                       '—'
                     )}
                     {manager.id && <Button size="small" onClick={async () => {
-                      await apiClient.put(`/admin/accounts/${manager.id}/active`, { active: manager.status !== '在职' });
-                      setReloadKey(key => key + 1);
+                      setActionError('');
+                      try {
+                        await apiClient.put(`/admin/accounts/${manager.id}/active`, { active: manager.status !== '在职' });
+                        setReloadKey(key => key + 1);
+                      } catch (failure: any) {
+                        setActionError(apiErrorMessage(failure, '账号状态更新失败，请重试。'));
+                      }
                     }}>{manager.status === '在职' ? '停用' : '恢复'}</Button>}
                   </TableCell>
                 </TableRow>
