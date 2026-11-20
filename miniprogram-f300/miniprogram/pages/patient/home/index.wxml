@@ -23,11 +23,10 @@
       <view wx:if="{{todoLoading && !todoLoaded}}" class="mini-state">正在读取待办事项…</view>
       <view wx:elif="{{todoError}}" class="mini-state error">{{todoError}}<button class="retry" data-block="todos" bindtap="retryBlock">重试</button></view>
       <view wx:elif="{{todoLoaded && !todos.length}}" class="mini-state">目前没有待办事项。</view>
-      <view wx:for="{{todos}}" wx:key="id" class="todo-row">
+      <view wx:for="{{todos}}" wx:key="id" class="todo-row" data-id="{{item.id}}" bindtap="openTodo">
         <view class="todo-title">{{item.title || '待办事项'}}</view>
         <view wx:if="{{item.description}}" class="data-meta">{{item.description}}</view>
-        <view wx:if="{{item.due}}" class="data-meta">截止：{{item.due}}</view>
-        <view wx:if="{{item.completed === true}}" class="todo-status">已完成</view>
+        <view class="todo-status">去处理　›</view>
       </view>
     </view>
     <view class="data-section">

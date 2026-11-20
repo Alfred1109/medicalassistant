@@ -148,7 +148,7 @@ async def issue_consent(db, actor, template_id, patient_id):
     return _document(document)
 
 
-async def list_consents(db, actor, patient_id=None):
+async def _consent_scope(db, actor, patient_id):
     if actor.role == "patient":
         context = await patient_domain_context(db)
         resolved_patient_id = await context.ensure_self_patient_access(actor, patient_id)
@@ -164,7 +164,21 @@ async def list_consents(db, actor, patient_id=None):
             query = {"created_by": str(actor.id)}
     else:
         raise HTTPException(403, detail={"code": "ROLE_NOT_ALLOWED"})
+    return query
+
+
+async def list_consents(db, actor, patient_id=None):
+    query = await _consent_scope(db, actor, patient_id)
     return [_document(row) async for row in db.consent_documents.find(query)]
+
+
+async def list_pending_consent_summaries(db, actor):
+    query = await _consent_scope(db, actor, None)
+    return [
+        {"id": str(row["_id"]), "title": row.get("title"), "created_at": row.get("created_at")}
+        async for row in db.consent_documents.find(
+            {**query, "status": "pending"}, {"title": 1, "created_at": 1})
+    ]
 
 
 async def read_consent(db, actor, document_id):

@@ -6,7 +6,12 @@ const stamp = session => session && session.identityConfirmed && session.role ==
   ? `${session.user.id || session.user.actor_id || ''}:${session.sessionId}` : '';
 Page({
   data: { items: [], skip: 0, hasMore: false, loading: false, opening: false, error: '' },
-  onLoad() { this._generation = 0; },
+  onLoad(options = {}) {
+    this._generation = 0;
+    const taskId = String(options.task_id || '');
+    this._taskId = /^[0-9a-f]{24}$/i.test(taskId) ? taskId.toLowerCase() : '';
+    this._invalidTask = !!taskId && !this._taskId;
+  },
   onShow() {
     const current = stamp(getSession());
     if (!current) { this._stamp = ''; this._generation++; this.setData({ items: [], error: '请先登录患者账号。', loading: false }); return; }
@@ -19,9 +24,17 @@ Page({
     if (this.data.loading) return;
     const key = this._stamp, generation = this._generation, skip = reset ? 0 : this.data.skip;
     if (!this.isCurrent(key, generation)) return;
+    if (this._invalidTask) { this.setData({ error: '问卷任务编号无效。' }); return; }
     this.setData({ loading: true, error: '' });
     try {
-      const result = await request(`/integrations/forms/patient-self/tasks?skip=${skip}&limit=${PAGE_SIZE}`);
+      let result;
+      if (this._taskId) {
+        const task = await request(`/integrations/forms/patient-self/tasks/${this._taskId}`);
+        if (!task || task.id !== this._taskId) throw new Error('无法确认该问卷任务。');
+        result = { items: [task], total: 1 };
+      } else {
+        result = await request(`/integrations/forms/patient-self/tasks?skip=${skip}&limit=${PAGE_SIZE}`);
+      }
       if (!this.isCurrent(key, generation)) return;
       if (!result || !Array.isArray(result.items) || typeof result.total !== 'number') throw new Error('问卷任务列表格式异常。');
       const rows = result.items.map(item => ({ ...item, statusLabel: labels[item.status] || item.status || '状态未知', canLaunch: ['assigned', 'active'].includes(item.status) }));
@@ -36,7 +49,7 @@ Page({
     if (!id || !this.isCurrent(key, generation) || this.data.opening) return;
     this.setData({ opening: true, error: '' });
     try {
-      await request(`/integrations/forms/patient-self/tasks/${encodeURIComponent(id)}`);
+      if (!this._taskId) await request(`/integrations/forms/patient-self/tasks/${encodeURIComponent(id)}`);
       if (this.isCurrent(key, generation)) await this.load(true);
     } catch (error) { if (this.isCurrent(key, generation)) this.setData({ error: error.message || '刷新状态失败。' }); }
     finally { if (this.isCurrent(key, generation)) this.setData({ opening: false }); }

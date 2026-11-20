@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import List, Optional, Dict, Any
 from app.schemas.user import UserResponse
 from app.schemas.health_record import HealthRecordResponse
@@ -490,3 +490,16 @@ async def get_todo_items(
         
     user_id = str(current_user.id)
     return await DashboardService.get_todo_items(db, user_id)
+
+
+@router.get("/todo-center", response_model=Dict[str, Any])
+async def get_todo_center(
+    request: Request,
+    db: AsyncIOMotorClient = Depends(get_database),
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Return live actionable tasks plus per-source availability information."""
+    if current_user.role != "patient":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有患者用户才能访问此接口")
+    return await DashboardService.get_todo_center(
+        db, current_user, include_questionnaires=bool(getattr(request.state, "identity_issuer", None)))

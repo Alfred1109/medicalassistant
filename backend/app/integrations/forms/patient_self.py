@@ -526,7 +526,7 @@ async def _resolve_self_task(db, actor, doc):
     return patient_id
 
 
-async def list_tasks(db, actor, *, skip=0, limit=20):
+async def list_tasks(db, actor, *, skip=0, limit=20, actionable_only=False):
     if not 0 <= skip <= 10000 or not 1 <= limit <= PAGE_LIMIT:
         raise FormIntegrationError("分页参数无效", error_code="INVALID_PAGINATION", status_code=422)
     if actor.role == "patient":
@@ -534,8 +534,9 @@ async def list_tasks(db, actor, *, skip=0, limit=20):
             patient_id = await ensure_self_patient_access(db, actor)
         except PatientAccessError as exc:
             raise FormIntegrationError("当前患者账号未绑定有效患者档案", error_code="SELF_PATIENT_UNAVAILABLE", status_code=403) from exc
+        visible = ACTIVE_TASK_STATES if actionable_only else VISIBLE_TASK_STATES
         query = {"task_type": TASK_TYPE, "patient_id": patient_id,
-                 "patient_self.status": {"$in": sorted(VISIBLE_TASK_STATES)}}
+                 "patient_self.status": {"$in": sorted(visible)}}
         include_staff = False
     elif actor.role in PATIENT_ROLES:
         from app.core.patient_access import patient_domain_context
@@ -580,9 +581,12 @@ async def _lock_task(db, session, task):
         raise FormIntegrationError("患者填报任务已变化，请重新读取", error_code="SELF_FILL_TASK_CHANGED", status_code=409)
 
 
-async def _bind_patient_mini_session(db, task, patient_actor, binding, mini, source_record, session_id):
-    """Persist the live browser/Mini identity before source resume invokes callback."""
-    from app.integrations.identity.service import OidcFailure
+async def _bind_patient_session(db, task, patient_actor, binding, session_context, session_id):
+    """Persist the live OneID identity before source resume invokes callback."""
+    transport = session_context["transport"]
+    source_record = session_context["source_record"]
+    mini = session_context.get("mini")
+    source_session_hash = source_record["_id"]
 
     latest = await _task_for_id(db, str(task["_id"]))
     await _verify_live_patient_identity(db, latest, patient_actor, binding["issuer"])
@@ -596,17 +600,18 @@ async def _bind_patient_mini_session(db, task, patient_actor, binding, mini, sou
         await _lock_task(db, session, latest)
         await _lock_patient_self_mapping(db, session, patient_actor, latest["patient_id"])
         await _lock_patient_binding(db, session, binding)
-        mini_result = await db.oidc_mini_sessions.update_one({"_id": mini["_id"],
-            "source_session_id": mini["source_session_id"], "actor_id": _actor_id(patient_actor),
-            "expires_at": {"$gt": datetime.utcnow()}}, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
-        if mini_result.matched_count != 1:
-            raise FormIntegrationError("患者小程序登录已失效", error_code="MINI_SESSION_REQUIRED", status_code=403)
+        if mini:
+            mini_result = await db.oidc_mini_sessions.update_one({"_id": mini["_id"],
+                "source_session_id": source_session_hash, "actor_id": _actor_id(patient_actor),
+                "expires_at": {"$gt": datetime.utcnow()}}, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
+            if mini_result.matched_count != 1:
+                raise FormIntegrationError("患者小程序登录已失效", error_code="MINI_SESSION_REQUIRED", status_code=403)
         source_result = await db.oidc_application_sessions.update_one({
-            "_id": mini["source_session_id"], "issuer": source_record["issuer"],
+            "_id": source_session_hash, "issuer": source_record["issuer"],
             "subject": source_record["subject"], "binding_revision": source_record["binding_revision"],
             "expires_at": {"$gt": datetime.utcnow()}}, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
         if source_result.matched_count != 1:
-            raise FormIntegrationError("OneID 浏览器会话已失效", error_code="MINI_SESSION_REQUIRED", status_code=403)
+            raise FormIntegrationError("OneID 登录已失效", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403)
         current_task = await db[models.COLLECTION_NAME].find_one({"_id": latest["_id"], "task_type": TASK_TYPE,
             "mutation_version": latest.get("mutation_version", 0), "patient_self.status": current.get("status"),
             "patient_self.source_session_id": current.get("source_session_id")}, session=session)
@@ -626,8 +631,9 @@ async def _bind_patient_mini_session(db, task, patient_actor, binding, mini, sou
                 "patient_self.patient_actor_subject": binding["subject"],
                 "patient_self.patient_issuer": binding["issuer"],
                 "patient_self.patient_binding_revision": binding["authorization_revision"],
-                "patient_self.mini_session_id": mini["_id"],
-                "patient_self.source_session_hash": mini["source_session_id"],
+                "patient_self.mini_session_id": mini["_id"] if mini else None,
+                "patient_self.source_session_hash": source_session_hash,
+                "patient_self.identity_transport": transport,
                 "patient_self.updated_at": datetime.utcnow(),
             }, "$inc": {"mutation_version": 1}}, session=session)
         if result.matched_count != 1:
@@ -637,25 +643,28 @@ async def _bind_patient_mini_session(db, task, patient_actor, binding, mini, sou
     await run_followup_transaction(db, persist)
 
 
-async def _finalize_launch_bridge(db, session, task, patient_actor, binding, mini,
-                                 source_record, bridge, expires_at, remote):
+async def _finalize_launch_bridge(db, session, task, patient_actor, binding,
+                                 session_context, bridge, expires_at, remote):
+    mini = session_context.get("mini")
+    source_record = session_context["source_record"]
     await _lock_task(db, session, task)
     await _lock_patient_self_mapping(db, session, patient_actor, task["patient_id"])
     await _lock_patient_binding(db, session, binding)
-    mini_result = await db.oidc_mini_sessions.update_one({"_id": mini["_id"],
-        "source_session_id": mini["source_session_id"], "actor_id": _actor_id(patient_actor),
-        "expires_at": {"$gt": datetime.utcnow()}}, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
+    if mini:
+        mini_result = await db.oidc_mini_sessions.update_one({"_id": mini["_id"],
+            "source_session_id": source_record["_id"], "actor_id": _actor_id(patient_actor),
+            "expires_at": {"$gt": datetime.utcnow()}}, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
     source_result = await db.oidc_application_sessions.update_one({
-        "_id": mini["source_session_id"], "issuer": source_record["issuer"],
+        "_id": source_record["_id"], "issuer": source_record["issuer"],
         "subject": source_record["subject"], "binding_revision": source_record["binding_revision"],
         "expires_at": {"$gt": datetime.utcnow()}}, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
-    if mini_result.matched_count != 1 or source_result.matched_count != 1:
-        raise FormIntegrationError("患者小程序登录已失效", error_code="MINI_SESSION_REQUIRED", status_code=403)
+    if (mini and mini_result.matched_count != 1) or source_result.matched_count != 1:
+        raise FormIntegrationError("患者 OneID 登录已失效", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403)
     current = await db[models.COLLECTION_NAME].find_one({"_id": task["_id"], "task_type": TASK_TYPE,
         "mutation_version": task.get("mutation_version", 0), "patient_self.status": "active",
         "patient_self.source_session_id": bridge["source_session_id"],
-        "patient_self.mini_session_id": mini["_id"],
-        "patient_self.source_session_hash": mini["source_session_id"]}, session=session)
+        "patient_self.mini_session_id": mini["_id"] if mini else None,
+        "patient_self.source_session_hash": source_record["_id"]}, session=session)
     if not current:
         raise FormIntegrationError("任务或患者身份在启动期间已变化", error_code="SELF_FILL_TASK_CHANGED", status_code=409)
     reviewed = current.get("reviewed_context") or {}
@@ -665,7 +674,7 @@ async def _finalize_launch_bridge(db, session, task, patient_actor, binding, min
     result = await db[models.COLLECTION_NAME].update_one({"_id": current["_id"],
         "mutation_version": current.get("mutation_version", 0), "patient_self.status": "active",
         "patient_self.source_session_id": bridge["source_session_id"],
-        "patient_self.mini_session_id": mini["_id"]}, {
+        "patient_self.mini_session_id": mini["_id"] if mini else None}, {
             "$set": {"patient_self.source_status": remote.get("status"),
                      "patient_self.expires_at": expires_at.replace(tzinfo=None),
                      "patient_self.updated_at": datetime.utcnow()},
@@ -674,21 +683,31 @@ async def _finalize_launch_bridge(db, session, task, patient_actor, binding, min
         raise FormIntegrationError("患者填报任务已被其他请求修改", error_code="SELF_FILL_TASK_CHANGED", status_code=409)
 
 
-async def launch_task(db, client, task_id, patient_actor, *, mini_token, oidc_client, settings_obj):
+async def launch_task(db, client, task_id, patient_actor, *, oidc_client, settings_obj,
+                      mini_token=None, browser_sid=None):
     if patient_actor.role != "patient":
         raise FormIntegrationError("患者本人账号登录后才能启动此问卷", error_code="SELF_FILL_ROLE_REQUIRED", status_code=403)
     task = await _task_for_id(db, task_id)
     binding = await _verify_live_patient_identity(db, task, patient_actor, oidc_client.settings.issuer)
     if (task.get("patient_self") or {}).get("status") not in ACTIVE_TASK_STATES:
         raise FormIntegrationError("该患者填报任务当前不可启动", error_code="SELF_FILL_TASK_NOT_ACTIVE", status_code=409)
-    mini, mini_actor = await oidc_client.actor_for_mini_session(mini_token)
-    if (mini is None or mini_actor is None or str(mini_actor["_id"]) != _actor_id(patient_actor)
-            or mini_actor.get("role") != "patient"):
-        raise FormIntegrationError("小程序登录已失效，请重新登录", error_code="MINI_SESSION_REQUIRED", status_code=403)
-    source_record, current_actor = await oidc_client.actor_for_session_hash(mini.get("source_session_id"))
+    if mini_token:
+        mini, mini_actor = await oidc_client.actor_for_mini_session(mini_token)
+        if (mini is None or mini_actor is None or str(mini_actor["_id"]) != _actor_id(patient_actor)
+                or mini_actor.get("role") != "patient"):
+            raise FormIntegrationError("小程序登录已失效，请重新登录", error_code="MINI_SESSION_REQUIRED", status_code=403)
+        source_record, current_actor = await oidc_client.actor_for_session_hash(mini.get("source_session_id"))
+        transport = "mini"
+    elif browser_sid:
+        mini = None
+        source_record, current_actor = await oidc_client.actor_for_session(browser_sid)
+        transport = "browser"
+    else:
+        raise FormIntegrationError("请重新登录后启动患者问卷", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403)
     if (source_record is None or current_actor is None or str(current_actor.get("_id")) != _actor_id(patient_actor)
             or current_actor.get("role") != "patient"):
-        raise FormIntegrationError("OneID 登录已失效，请重新登录", error_code="MINI_SESSION_REQUIRED", status_code=403)
+        raise FormIntegrationError("OneID 登录已失效，请重新登录", error_code="SOURCE_IDENTITY_REQUIRED", status_code=403)
+    session_context = {"transport": transport, "mini": mini, "source_record": source_record}
 
     refs = task.get("remote_refs") or {}
     version = (task.get("reviewed_context") or {}).get("version_ref") or {}
@@ -717,7 +736,7 @@ async def launch_task(db, client, task_id, patient_actor, *, mini_token, oidc_cl
         # Create may be replayed after a lost response/local commit. Bind the
         # known session before resume's source callback validates the patient.
         try:
-            await _bind_patient_mini_session(db, task, patient_actor, binding, mini, source_record, session_id)
+            await _bind_patient_session(db, task, patient_actor, binding, session_context, session_id)
         except Exception:
             latest = await _task_for_id(db, task_id)
             if latest.get("patient_self", {}).get("status") not in ACTIVE_TASK_STATES:
@@ -730,7 +749,7 @@ async def launch_task(db, client, task_id, patient_actor, *, mini_token, oidc_cl
     else:
         # A reopened draft requires a newly signed one-use proof. Rebind the live
         # mini/browser session first because the source calls back before signing.
-        await _bind_patient_mini_session(db, task, patient_actor, binding, mini, source_record, session_id)
+        await _bind_patient_session(db, task, patient_actor, binding, session_context, session_id)
 
     resume_payload = {
         "rehabman_task_ref": self_fill["rehabman_task_ref"],
@@ -769,13 +788,20 @@ async def launch_task(db, client, task_id, patient_actor, *, mini_token, oidc_cl
     # before publishing a bridge; a concurrent logout/revoke invalidates it.
     latest = await _task_for_id(db, task_id)
     latest_binding = await _verify_live_patient_identity(db, latest, patient_actor, oidc_client.settings.issuer)
-    fresh_mini, fresh_actor = await oidc_client.actor_for_mini_session(mini_token)
+    if mini_token:
+        fresh_mini, fresh_actor = await oidc_client.actor_for_mini_session(mini_token)
+        session_still_live = (fresh_mini is not None and fresh_actor is not None
+                              and str(fresh_actor.get("_id")) == _actor_id(patient_actor))
+    else:
+        fresh_record, fresh_actor = await oidc_client.actor_for_session(browser_sid)
+        session_still_live = (fresh_record is not None and fresh_actor is not None
+                              and str(fresh_actor.get("_id")) == _actor_id(patient_actor))
     if (latest.get("patient_self", {}).get("status") != "active"
             or latest.get("patient_self", {}).get("source_session_id") != session_id
-            or latest.get("patient_self", {}).get("mini_session_id") != mini["_id"]
-            or latest.get("patient_self", {}).get("source_session_hash") != mini["source_session_id"]
+            or latest.get("patient_self", {}).get("mini_session_id") != (mini["_id"] if mini else None)
+            or latest.get("patient_self", {}).get("source_session_hash") != source_record["_id"]
             or latest_binding.get("authorization_revision") != binding.get("authorization_revision")
-            or fresh_mini is None or fresh_actor is None or str(fresh_actor.get("_id")) != _actor_id(patient_actor)):
+            or not session_still_live):
         try:
             await client.revoke_patient_self_fill_session(session_id, {
                 "reason": "rehabman_local_authorization_changed", "rehabman_task_ref": self_fill["rehabman_task_ref"]})
@@ -789,7 +815,8 @@ async def launch_task(db, client, task_id, patient_actor, *, mini_token, oidc_cl
         "patient_id": task["patient_id"], "patient_actor_id": _actor_id(patient_actor),
         "patient_actor_subject": binding["subject"], "patient_issuer": binding["issuer"],
         "patient_binding_revision": binding["authorization_revision"],
-        "mini_session_id": mini["_id"], "source_session_hash": mini["source_session_id"],
+        "mini_session_id": mini["_id"] if mini else None, "source_session_hash": source_record["_id"],
+        "identity_transport": transport,
         "source_session_id": session_id, "target": launch_url,
         "launch_token_encrypted": _encrypt(launch_token, settings_obj), "allowed_origin": task["allowed_origin"],
         "expires_at": min(datetime.utcnow() + timedelta(seconds=90), expires_at.replace(tzinfo=None)),
@@ -799,7 +826,7 @@ async def launch_task(db, client, task_id, patient_actor, *, mini_token, oidc_cl
 
     try:
         await run_followup_transaction(db, lambda session: _finalize_launch_bridge(
-            db, session, latest, patient_actor, latest_binding, mini, source_record, bridge, expires_at, remote))
+            db, session, latest, patient_actor, latest_binding, session_context, bridge, expires_at, remote))
     except Exception:
         await db[BRIDGE_COLLECTION].delete_one({"_id": bridge["_id"]})
         raise
@@ -890,7 +917,7 @@ async def consume_launch_bridge(db, ticket, browser_sid, oidc_client, settings_o
             "Cache-Control": "no-store, no-cache, must-revalidate, private", "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff"})
 
-    invalid = response("<!doctype html><meta charset=utf-8><h1>填报入口已失效，请返回小程序重新打开。</h1>", 410)
+    invalid = response("<!doctype html><meta charset=utf-8><h1>填报入口已失效，请返回患者问卷页面重新打开。</h1>", 410)
     if not isinstance(ticket, str) or len(ticket) > 128:
         return invalid
     now = datetime.utcnow()
@@ -899,15 +926,19 @@ async def consume_launch_bridge(db, ticket, browser_sid, oidc_client, settings_o
     if not bridge:
         return invalid
     if not browser_sid or identity_digest(browser_sid) != bridge.get("source_session_hash"):
-        return response("<!doctype html><meta charset=utf-8><h1>请在已登录的微信页面中重新打开问卷。</h1>", 403)
+        return response("<!doctype html><meta charset=utf-8><h1>请在已登录的患者页面中重新打开问卷。</h1>", 403)
     try:
         source_record, source_actor = await oidc_client.actor_for_session(browser_sid)
-        mini = await db.oidc_mini_sessions.find_one({
-            "_id": bridge.get("mini_session_id"), "source_session_id": bridge.get("source_session_hash"),
-            "actor_id": bridge.get("patient_actor_id"), "expires_at": {"$gt": now}})
+        if bridge.get("identity_transport", "mini") == "mini":
+            mini = await db.oidc_mini_sessions.find_one({
+                "_id": bridge.get("mini_session_id"), "source_session_id": bridge.get("source_session_hash"),
+                "actor_id": bridge.get("patient_actor_id"), "expires_at": {"$gt": now}})
+        else:
+            mini = None
     except Exception:
         return response("<!doctype html><meta charset=utf-8><h1>身份服务暂不可用，请稍后重试。</h1>", 503)
-    if (source_record is None or source_actor is None or mini is None
+    if (source_record is None or source_actor is None
+            or (bridge.get("identity_transport", "mini") == "mini" and mini is None)
             or str(source_actor.get("_id")) != bridge.get("patient_actor_id")
             or source_actor.get("role") != "patient"
             or source_record.get("issuer") != bridge.get("patient_issuer")
@@ -920,12 +951,13 @@ async def consume_launch_bridge(db, ticket, browser_sid, oidc_client, settings_o
     try:
         binding = await _verify_live_patient_identity(db, task, actor, bridge["patient_issuer"])
     except FormIntegrationError as exc:
-        return response("<!doctype html><meta charset=utf-8><h1>患者授权或问卷关联已变化，请返回小程序核实。</h1>", 403 if exc.status_code < 500 else 503)
+        return response("<!doctype html><meta charset=utf-8><h1>患者授权或问卷关联已变化，请返回患者问卷页面核实。</h1>", 403 if exc.status_code < 500 else 503)
     if (binding.get("subject") != bridge.get("patient_actor_subject")
             or binding.get("authorization_revision") != bridge.get("patient_binding_revision")
             or task.get("patient_self", {}).get("source_session_id") != bridge.get("source_session_id")
             or task.get("patient_self", {}).get("mini_session_id") != bridge.get("mini_session_id")
             or task.get("patient_self", {}).get("source_session_hash") != bridge.get("source_session_hash")
+            or task.get("patient_self", {}).get("identity_transport", "mini") != bridge.get("identity_transport", "mini")
             or task.get("patient_self", {}).get("patient_actor_id") != bridge.get("patient_actor_id")
             or task.get("patient_self", {}).get("status") != "active"):
         return invalid
@@ -944,15 +976,15 @@ async def consume_launch_bridge(db, ticket, browser_sid, oidc_client, settings_o
     try:
         token = _decrypt(bridge["launch_token_encrypted"], settings_obj)
     except Exception:
-        return response("<!doctype html><meta charset=utf-8><h1>无法恢复一次性启动凭证，请返回小程序重新打开。</h1>", 503)
+        return response("<!doctype html><meta charset=utf-8><h1>无法恢复一次性启动凭证，请返回患者问卷页面重新打开。</h1>", 503)
 
     async def consume(session):
         live_bridge = await db[BRIDGE_COLLECTION].find_one({**query,
             "source_session_hash": identity_digest(browser_sid),
-            "mini_session_id": mini["_id"], "patient_actor_id": str(source_actor["_id"]),
+            "mini_session_id": mini["_id"] if mini else None, "patient_actor_id": str(source_actor["_id"]),
             "patient_binding_revision": bridge["patient_binding_revision"]}, session=session)
         if not live_bridge:
-            raise FormIntegrationError("小程序填报入口已使用或过期", error_code="SELF_FILL_BRIDGE_EXPIRED", status_code=410)
+            raise FormIntegrationError("患者填报入口已使用或过期", error_code="SELF_FILL_BRIDGE_EXPIRED", status_code=410)
         await _lock_task(db, session, task)
         await _lock_patient_self_mapping(db, session, actor, task.get("patient_id"))
         patient_binding = await db.oidc_principal_bindings.find_one({
@@ -962,21 +994,22 @@ async def consume_launch_bridge(db, ticket, browser_sid, oidc_client, settings_o
         if not patient_binding:
             raise FormIntegrationError("患者 OneID 授权已撤销", error_code="SELF_FILL_TASK_FORBIDDEN", status_code=403)
         await _lock_patient_binding(db, session, patient_binding)
-        mini_fence = await db.oidc_mini_sessions.update_one({
-            "_id": mini["_id"], "source_session_id": bridge["source_session_hash"],
-            "actor_id": bridge["patient_actor_id"], "expires_at": {"$gt": datetime.utcnow()}},
-            {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
+        if mini:
+            mini_fence = await db.oidc_mini_sessions.update_one({
+                "_id": mini["_id"], "source_session_id": bridge["source_session_hash"],
+                "actor_id": bridge["patient_actor_id"], "expires_at": {"$gt": datetime.utcnow()}},
+                {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
         source_fence = await db.oidc_application_sessions.update_one({
             "_id": identity_digest(browser_sid), "issuer": source_record["issuer"],
             "subject": source_record["subject"], "binding_revision": source_record["binding_revision"],
             "expires_at": {"$gt": datetime.utcnow()}},
             {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
-        if mini_fence.matched_count != 1 or source_fence.matched_count != 1:
+        if (mini and mini_fence.matched_count != 1) or source_fence.matched_count != 1:
             raise FormIntegrationError("患者 OneID 会话已失效", error_code="SELF_FILL_TASK_FORBIDDEN", status_code=403)
         current = await db[models.COLLECTION_NAME].find_one({"_id": task["_id"], "task_type": TASK_TYPE,
             "mutation_version": task.get("mutation_version", 0), "patient_self.status": "active",
             "patient_self.source_session_id": bridge["source_session_id"],
-            "patient_self.mini_session_id": mini["_id"],
+            "patient_self.mini_session_id": mini["_id"] if mini else None,
             "patient_self.source_session_hash": bridge["source_session_hash"]}, session=session)
         if not current:
             raise FormIntegrationError("患者授权或任务已变化", error_code="SELF_FILL_TASK_CHANGED", status_code=409)
@@ -987,13 +1020,13 @@ async def consume_launch_bridge(db, ticket, browser_sid, oidc_client, settings_o
         deleted = await db[BRIDGE_COLLECTION].delete_one({"_id": live_bridge["_id"],
             "expires_at": {"$gt": datetime.utcnow()}}, session=session)
         if deleted.deleted_count != 1:
-            raise FormIntegrationError("小程序填报入口已使用或过期", error_code="SELF_FILL_BRIDGE_EXPIRED", status_code=410)
+            raise FormIntegrationError("患者填报入口已使用或过期", error_code="SELF_FILL_BRIDGE_EXPIRED", status_code=410)
 
     try:
         await run_followup_transaction(db, consume)
     except FormIntegrationError as exc:
         status = exc.status_code if exc.status_code in {403, 410} else 409
-        return response("<!doctype html><meta charset=utf-8><h1>患者授权或问卷关联已变化，请返回小程序核实。</h1>", status)
+        return response("<!doctype html><meta charset=utf-8><h1>患者授权或问卷关联已变化，请返回患者问卷页面核实。</h1>", status)
     nonce = secrets.token_urlsafe(18)
     import html
     body = ("<!doctype html><html lang='zh'><head><meta charset='utf-8'><meta name='referrer' content='no-referrer'>"
@@ -1038,13 +1071,18 @@ async def callback_authorize(db, payload: Dict[str, Any], supplied_secret: Optio
     await _verify_live_patient_identity(db, task, actor, self_fill.get("patient_issuer"))
     from app.integrations.identity.service import OidcClient, OidcFailure, OidcUnavailable
     from app.integrations.identity.config import oidc_settings
-    # Revalidate the bound OneID mini session online on every source-side action.
-    mini = await db.oidc_mini_sessions.find_one({
-        "_id": self_fill.get("mini_session_id"), "source_session_id": self_fill.get("source_session_hash"),
-        "actor_id": self_fill.get("patient_actor_id"), "expires_at": {"$gt": datetime.utcnow()}})
-    if not mini:
-        raise FormIntegrationError("患者小程序会话已失效", error_code="SELF_FILL_CALLBACK_FORBIDDEN", status_code=403)
-    source_hash = mini.get("source_session_id")
+    # Revalidate the exact bound OneID session on every source-side action.
+    transport = self_fill.get("identity_transport", "mini")
+    mini = None
+    if transport == "mini":
+        mini = await db.oidc_mini_sessions.find_one({
+            "_id": self_fill.get("mini_session_id"), "source_session_id": self_fill.get("source_session_hash"),
+            "actor_id": self_fill.get("patient_actor_id"), "expires_at": {"$gt": datetime.utcnow()}})
+        if not mini:
+            raise FormIntegrationError("患者小程序会话已失效", error_code="SELF_FILL_CALLBACK_FORBIDDEN", status_code=403)
+    elif transport != "browser":
+        raise FormIntegrationError("患者 OneID 会话类型无效", error_code="SELF_FILL_CALLBACK_FORBIDDEN", status_code=403)
+    source_hash = self_fill.get("source_session_hash")
     try:
         source, source_actor = await OidcClient(db, oidc_settings).actor_for_session_hash(source_hash)
     except OidcUnavailable:
@@ -1072,21 +1110,20 @@ async def callback_authorize(db, payload: Dict[str, Any], supplied_secret: Optio
         if not patient_binding:
             raise FormIntegrationError("患者 OneID 授权已撤销", error_code="SELF_FILL_CALLBACK_FORBIDDEN", status_code=403)
         await _lock_patient_binding(db, session, patient_binding)
-        # Fence the exact Mini and source-browser session documents in the same
-        # transaction. A concurrent logout/revocation then conflicts with this
-        # source-action authorization instead of slipping between online checks
-        # and the local authorization write.
-        mini_fence = await db.oidc_mini_sessions.update_one({
-            "_id": mini["_id"], "source_session_id": source_hash,
-            "actor_id": self_fill["patient_actor_id"],
-            "expires_at": {"$gt": datetime.utcnow()},
-        }, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
+        # Fence the exact Mini (when used) and source-browser session documents
+        # in the same transaction so logout/revocation conflicts with authorization.
+        if mini:
+            mini_fence = await db.oidc_mini_sessions.update_one({
+                "_id": mini["_id"], "source_session_id": source_hash,
+                "actor_id": self_fill["patient_actor_id"],
+                "expires_at": {"$gt": datetime.utcnow()},
+            }, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
         source_fence = await db.oidc_application_sessions.update_one({
             "_id": source_hash, "issuer": source["issuer"], "subject": subject,
             "binding_revision": source["binding_revision"],
             "expires_at": {"$gt": datetime.utcnow()},
         }, {"$inc": {"patient_self_fill_use_revision": 1}}, session=session)
-        if mini_fence.matched_count != 1 or source_fence.matched_count != 1:
+        if (mini and mini_fence.matched_count != 1) or source_fence.matched_count != 1:
             raise FormIntegrationError("患者 OneID 会话已失效", error_code="SELF_FILL_CALLBACK_FORBIDDEN", status_code=403)
         link = await db.external_patient_links.find_one({"_id": ObjectId(str(current["reviewed_context"]["patient_link_id"]))}, session=session)
         form = await db.external_form_bindings.find_one({"_id": ObjectId(str(current["reviewed_context"]["form_binding_id"]))}, session=session)

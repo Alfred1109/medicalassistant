@@ -24,6 +24,21 @@ export interface TodoItem {
   timestamp: string;
 }
 
+export interface ActionableTodo {
+  id: string;
+  type: 'questionnaire' | 'consent';
+  title: string;
+  description: string;
+  status: 'pending';
+  created_at?: string | null;
+  href: string;
+}
+
+export interface TodoCenter {
+  items: ActionableTodo[];
+  source_errors: string[];
+}
+
 export interface PublishedRehabPlans {
   items: Array<{ id: string; content: { name: string; goal?: string }; published_at: string }>;
   total: number;
@@ -74,6 +89,10 @@ const dashboardService = {
    */
   getTodoItems: (): Promise<TodoItem[]> => {
     return apiClient.get<TodoItem[]>('/patients/todo-items');
+  },
+
+  getTodoCenter: (signal?: AbortSignal): Promise<TodoCenter> => {
+    return apiClient.get<TodoCenter>('/patients/todo-center', { signal });
   },
   
   /**

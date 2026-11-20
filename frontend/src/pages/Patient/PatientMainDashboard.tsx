@@ -1,6 +1,6 @@
 import React from 'react';
 import { formatAppDate } from '../../utils/dateTime';
-import dashboardService from '../../services/dashboardService';
+import dashboardService, { type ActionableTodo } from '../../services/dashboardService';
 import { deviceService, Device as DeviceInfo } from '../../services/deviceService';
 import { notificationApi, Notification } from '../../services/notificationService';
 import { rehabPublications, PublishedRehabPlan, PatientRehabFeedback } from '../../services/rehabPublications';
@@ -26,14 +26,11 @@ import {
 } from '@mui/material';
 
 // 图标可能需要根据实际项目调整导入方式
-const HeartIcon = () => <span>❤️</span>;
-const DirectionsWalkIcon = () => <span>🚶</span>;
 const DoctorIcon = () => <span>👨‍⚕️</span>;
 const NotificationsIcon = () => <span>🔔</span>;
 const ArrowForwardIcon = () => <span>➡️</span>;
 const CheckCircleIcon = () => <span>✅</span>;
 const DeviceIcon = () => <span>📱</span>;
-const MedicationIcon = () => <span>💊</span>;
 const NoteIcon = () => <span>📝</span>;
 const ChatIcon = () => <span>💬</span>;
 
@@ -50,17 +47,6 @@ interface RawHealthMetric {
   trend?: string;
   timestamp?: string;
   quality_flags?: string[];
-  [key: string]: any;
-}
-
-// 后端 todo_items 文档，字段做可选处理，避免文档缺字段时崩溃
-interface RawTodoItem {
-  id?: string;
-  title?: string;
-  description?: string;
-  due?: string;
-  completed?: boolean;
-  important?: boolean;
   [key: string]: any;
 }
 
@@ -130,8 +116,9 @@ const PatientMainDashboard: React.FC = () => {
   // 主面板各区块的真实数据状态
   const [healthMetrics, setHealthMetrics] = React.useState<RawHealthMetric[]>([]);
   const [healthMetricsError, setHealthMetricsError] = React.useState(false);
-  const [todoItems, setTodoItems] = React.useState<RawTodoItem[]>([]);
+  const [todoItems, setTodoItems] = React.useState<ActionableTodo[]>([]);
   const [todoError, setTodoError] = React.useState(false);
+  const [todoSourceErrors, setTodoSourceErrors] = React.useState<string[]>([]);
   const [rehabPlans, setRehabPlans] = React.useState<PublishedRehabPlan[]>([]);
   const [rehabPlansError, setRehabPlansError] = React.useState(false);
   const [recentFeedback, setRecentFeedback] = React.useState<Array<{ plan: PublishedRehabPlan; feedback: PatientRehabFeedback }>>([]);
@@ -188,7 +175,7 @@ const PatientMainDashboard: React.FC = () => {
     const loadData = async () => {
       const [metricsRes, todosRes, plansRes, devicesRes] = await Promise.allSettled([
         dashboardService.getHealthMetrics() as unknown as Promise<RawHealthMetric[]>,
-        dashboardService.getTodoItems() as unknown as Promise<RawTodoItem[]>,
+        dashboardService.getTodoCenter(),
         rehabPublications.myPlans(0, 5),
         deviceService.getUserDevices(),
       ]);
@@ -205,11 +192,13 @@ const PatientMainDashboard: React.FC = () => {
       }
 
       // 待办事项
-      if (todosRes.status === 'fulfilled' && Array.isArray(todosRes.value)) {
-        setTodoItems(todosRes.value);
+      if (todosRes.status === 'fulfilled' && Array.isArray(todosRes.value.items)) {
+        setTodoItems(todosRes.value.items);
+        setTodoSourceErrors(todosRes.value.source_errors ?? []);
         setTodoError(false);
       } else {
         setTodoItems([]);
+        setTodoSourceErrors([]);
         setTodoError(true);
       }
 
@@ -350,9 +339,9 @@ const PatientMainDashboard: React.FC = () => {
           <Paper sx={{ p: 2, mb: 3, height: '100%' }}>
             <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
               <Typography variant="h6">
-                今日待办
+                待办事项
               </Typography>
-              <IconButton size="small" component={Link} to="/app/patient/daily-records">
+              <IconButton size="small" component={Link} to="/app/patient/todos" aria-label="查看全部待办">
                 <ArrowForwardIcon />
               </IconButton>
             </Box>
@@ -362,39 +351,22 @@ const PatientMainDashboard: React.FC = () => {
             ) : todoError ? (
               <PanelError text="待办事项加载失败，请稍后重试" />
             ) : todoItems.length === 0 ? (
-              <PanelEmpty text="暂无待办事项" />
+              <>
+                {todoSourceErrors.length > 0 && <PanelError text="部分待办来源暂时不可用，当前列表可能不完整。" />}
+                {todoSourceErrors.length === 0 && <PanelEmpty text="暂无待处理事项" />}
+                <Box textAlign="center" mt={2}>
+                  <Button component={Link} to="/app/patient/todos" size="small">查看待办中心</Button>
+                </Box>
+              </>
             ) : (
               <>
+                {todoSourceErrors.length > 0 && <Typography variant="body2" color="warning.main" mb={1}>部分待办来源暂时不可用，当前列表可能不完整。</Typography>}
                 <List sx={{ width: '100%' }}>
                   {todoItems.slice(0, 3).map((item, index) => (
-                    <React.Fragment key={item.id ?? `todo-${index}`}>
-                      <ListItem
-                        secondaryAction={
-                          item.completed ? (
-                            <CheckCircleIcon />
-                          ) : (
-                            item.due && (
-                              <Chip
-                                label={item.due}
-                                size="small"
-                                color={item.important ? "error" : "primary"}
-                                variant={item.important ? "filled" : "outlined"}
-                              />
-                            )
-                          )
-                        }
-                        sx={{
-                          backgroundColor: item.completed ? 'rgba(0, 0, 0, 0.03)' : 'transparent',
-                          borderRadius: 1,
-                          textDecoration: item.completed ? 'line-through' : 'none',
-                          color: item.completed ? 'text.secondary' : 'text.primary',
-                        }}
-                      >
+                    <React.Fragment key={item.id}>
+                      <ListItem component={Link} to={item.href} sx={{ borderRadius: 1, color: 'inherit', textDecoration: 'none' }}>
                         <ListItemIcon>
-                          {(item.title ?? '').includes('血压') && <HeartIcon />}
-                          {(item.title ?? '').includes('服药') && <MedicationIcon />}
-                          {(item.title ?? '').includes('康复') && <DirectionsWalkIcon />}
-                          {(item.title ?? '').includes('睡眠') && <NoteIcon />}
+                          {item.type === 'questionnaire' ? <NoteIcon /> : <CheckCircleIcon />}
                         </ListItemIcon>
                         <ListItemText
                           primary={item.title ?? '未命名待办'}
@@ -411,7 +383,7 @@ const PatientMainDashboard: React.FC = () => {
                     variant="outlined"
                     size="small"
                     component={Link}
-                    to="/app/patient/daily-records"
+                    to="/app/patient/todos"
                   >
                     查看全部待办 ({todoItems.length})
                   </Button>

@@ -41,13 +41,26 @@ Page({
     if (!sameSession(expected)) return this.setData({ todos: [], todoLoaded: true, todoError: '请重新登录后查看。' });
     this.setData({ todoLoading: true, todoError: '' });
     try {
-      const result = await request('/patients/todo-items');
-      if (!sameSession(expected)) return this.setData({ todos: [], todoLoaded: true, todoError: '登录状态已变化，请重新进入患者页面。' });
-      this.setData({ todos: Array.isArray(result) ? result : [], todoLoaded: true, todoError: '' });
+      const result = await request('/patients/todo-center');
+      if (!sameSession(expected)) return;
+      if (!Array.isArray(result?.items) || !Array.isArray(result?.source_errors)) throw new Error('待办接口响应有误。');
+      this.setData({ todos: result.items, todoLoaded: true,
+        todoError: result.source_errors.length ? '部分待办暂时无法读取，当前列表可能不完整。' : '' });
     } catch (error) {
-      if (!sameSession(expected)) return this.setData({ todos: [], todoLoaded: true, todoError: '登录状态已变化，请重新进入患者页面。' });
+      if (!sameSession(expected)) return;
       this.setData({ todos: [], todoLoaded: true, todoError: error.message || '待办事项加载失败。' });
-    } finally { this.setData({ todoLoading: false }); }
+    } finally { if (sameSession(expected)) this.setData({ todoLoading: false }); }
+  },
+  openTodo(event) {
+    const session = getSession();
+    if (!sameSession(session) || sessionKey(session) !== this._sessionKey) return;
+    const item = this.data.todos.find(row => row.id === event.currentTarget.dataset.id);
+    const match = /^(questionnaire|consent):([0-9a-fA-F]{24})$/.exec(item?.id || '');
+    if (!match || item.type !== match[1]) return;
+    const url = match[1] === 'consent'
+      ? `/pages/patient/consent-detail/index?document_id=${match[2]}`
+      : `/pages/patient/questionnaires/index?task_id=${match[2]}`;
+    wx.navigateTo({ url });
   },
   async loadMetrics(expected = getSession() || {}) {
     if (!sameSession(expected)) return this.setData({ metrics: [], metricsLoaded: true, metricsError: '请重新登录后查看。' });

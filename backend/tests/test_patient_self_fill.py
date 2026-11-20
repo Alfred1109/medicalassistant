@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.db.mongodb import get_database
 from app.integrations.forms import models, patient_self, service
 from app.integrations.forms.client import FormPlatformClient, FormPlatformError
-from app.integrations.forms.router import router as forms_router
+from app.integrations.forms.router import _require_patient_session, router as forms_router
 from app.integrations.identity.config import OidcSettings
 from app.integrations.identity.service import digest, ensure_identity_indexes
 from app.models.health_record import FollowUpRecord
@@ -51,6 +51,26 @@ class PatientSelfCallbackHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 401)
         self.assertEqual(raised.exception.error_code, "SELF_FILL_CALLBACK_UNAUTHORIZED")
 
+
+class PatientSelfBrowserSessionTests(unittest.TestCase):
+    def test_patient_reads_and_launch_require_oneid_browser_cookie_or_mini_session(self):
+        patient = SimpleNamespace(role="patient")
+        browser = SimpleNamespace(state=SimpleNamespace(identity_transport=None),
+                                  cookies={"__Host-rehab_session": "opaque-session"})
+        mini = SimpleNamespace(state=SimpleNamespace(identity_transport="mini_bearer"), cookies={})
+        no_session = SimpleNamespace(state=SimpleNamespace(identity_transport=None), cookies={})
+        with patch("app.integrations.identity.access.unified_authentication", return_value=True):
+            _require_patient_session(browser, patient)
+            _require_patient_session(mini, patient)
+            with self.assertRaises(patient_self.FormIntegrationError) as raised:
+                _require_patient_session(no_session, patient)
+        self.assertEqual(raised.exception.error_code, "SOURCE_IDENTITY_REQUIRED")
+
+    def test_staff_cannot_use_patient_self_session_gate(self):
+        request = SimpleNamespace(state=SimpleNamespace(identity_transport=None), cookies={})
+        with self.assertRaises(patient_self.FormIntegrationError) as raised:
+            _require_patient_session(request, SimpleNamespace(role="doctor"))
+        self.assertEqual(raised.exception.error_code, "SELF_FILL_ROLE_REQUIRED")
 
 class PatientSelfClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_source_client_uses_dedicated_session_routes_and_no_patient_bearer(self):
@@ -553,6 +573,34 @@ class PatientSelfMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["sessionId"], second["sessionId"])
         self.assertNotEqual(first["webviewUrl"], second["webviewUrl"])
         self.assertIsNone(await self.db[patient_self.BRIDGE_COLLECTION].find_one({"_id": digest(first_bridge)}))
+
+    async def test_browser_session_opens_its_bridge_once_without_a_mini_session(self):
+        await self._seed_assigned_task()
+        await self.db.oidc_mini_sessions.delete_one({"_id": self.mini_id})
+        actor = SimpleNamespace(id=self.patient_id, role="patient")
+        oidc = SimpleNamespace(settings=SimpleNamespace(issuer=self.issuer),
+            actor_for_session=AsyncMock(return_value=(self.source_record,
+                {"_id": self.actor_id, "role": "patient", "is_active": True})))
+        source, created, resumed, _revoked = self._launch_client()
+        with patch("app.integrations.identity.config.oidc_settings.public_base_url", "https://rehab.example"):
+            launched = await patient_self.launch_task(self.db, source, str(self.task_id), actor,
+                browser_sid=self.session_cookie, oidc_client=oidc, settings_obj=self.config)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(len(resumed), 1)
+        self.assertNotIn("resume-token-1", str(launched))
+        ticket = launched["webviewUrl"].rsplit("/", 1)[-1]
+        bridge = await self.db[patient_self.BRIDGE_COLLECTION].find_one({"_id": digest(ticket)})
+        self.assertEqual(bridge["identity_transport"], "browser")
+        self.assertIsNone(bridge["mini_session_id"])
+        wrong = await patient_self.consume_launch_bridge(self.db, ticket, "another-cookie", oidc, self.config)
+        self.assertEqual(wrong.status_code, 403)
+        accepted = await patient_self.consume_launch_bridge(self.db, ticket, self.session_cookie, oidc, self.config)
+        self.assertEqual(accepted.status_code, 200)
+        self.assertIn(b'method="post" action="https://form.example/self-fill/psf_retry"', accepted.body)
+        self.assertIn(b'name="token" value="resume-token-1"', accepted.body)
+        self.assertIn("no-store", accepted.headers["cache-control"])
+        replayed = await patient_self.consume_launch_bridge(self.db, ticket, self.session_cookie, oidc, self.config)
+        self.assertEqual(replayed.status_code, 410)
 
     async def test_revoke_wins_during_remote_launch_and_compensates_source_session(self):
         await self._seed_assigned_task()

@@ -83,6 +83,8 @@ import PatientMyFollowUps from './pages/Patient/MyFollowUps';
 // 知情同意文档相关页面
 import ConsentDocumentList from './pages/Patient/ConsentDocumentList';
 import ConsentDocumentView from './pages/Patient/ConsentDocumentView';
+import Questionnaires from './pages/Patient/Questionnaires';
+import TodoCenter from './pages/Patient/TodoCenter';
 import ConsentTemplateList from './pages/Patient/ConsentTemplateList';
 
 import AdminDashboard from './pages/Admin/AdminDashboard';
@@ -287,6 +289,9 @@ const ROUTE_ELEMENTS: Record<string, React.ReactNode> = {
   patient: <PatientDashboard />,
   'patient.index': <Navigate to="/app/patient/main-dashboard" replace />,
   'patient.main-dashboard': <PatientMainDashboard />,
+  'patient.todos': <TodoCenter />,
+  'patient.questionnaires': <Questionnaires />,
+  'patient.questionnaires.detail': <Questionnaires />,
   'patient.health-records': <PatientHealthRecords />,
   'patient.clinical': <ClinicalWorkbench />,
   'patient.daily-records': <DailyRecords />,

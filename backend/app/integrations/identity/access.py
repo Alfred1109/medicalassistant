@@ -42,7 +42,7 @@ def mini_bearer_route(method, path):
     if method == "GET" and path in {
             "/api/users/me", "/api/doctors/patients", "/api/health-managers/patients",
             "/api/devices/", "/api/patients/dashboard-data", "/api/patients/health-metrics",
-            "/api/patients/todo-items", "/api/patients/daily-records",
+            "/api/patients/todo-items", "/api/patients/todo-center", "/api/patients/daily-records",
             "/api/health-records/patient-context", "/api/health-records",
             "/api/health-records/followups", "/api/health-records/followup-workbench",
             "/api/rehabilitation/publications/my-plans", "/api/rehabilitation/plans",

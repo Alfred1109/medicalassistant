@@ -202,6 +202,9 @@ export const APP_ROUTES: AppRouteNode[] = [
     children: [
       { id: 'patient.index', index: true, hidden: true },
       { id: 'patient.main-dashboard', path: 'main-dashboard', menu: { name: '主面板', icon: 'dashboard' } },
+      { id: 'patient.todos', path: 'todos', menu: { name: '待办中心', icon: 'assignment' } },
+      { id: 'patient.questionnaires', path: 'questionnaires', menu: { name: '我的问卷', icon: 'assignment' } },
+      { id: 'patient.questionnaires.detail', path: 'questionnaires/:taskId', hidden: true },
       { id: 'patient.health-records', path: 'health-records', menu: { name: '健康档案', icon: 'folder' } },
       { id: 'patient.clinical', path: 'clinical', menu: { name: '我的记录', icon: 'folder' } },
       { id: 'patient.daily-records', path: 'daily-records', menu: { name: '日常记录', icon: 'eventNote' } },
@@ -342,6 +345,8 @@ export const NAV_SECTIONS: NavGroup[] = [
     path: '/app/patient',
     children: [
       { routeId: 'patient.main-dashboard' },
+      { routeId: 'patient.todos' },
+      { routeId: 'patient.questionnaires' },
       { routeId: 'patient.health-records' },
       { routeId: 'patient.clinical' },
       { routeId: 'patient.daily-records' },

@@ -233,10 +233,16 @@ async def cancel_fill_task(
     return service.models.serialize_task(doc)
 
 
-def _require_mini_patient(request: Request, current_user: Any):
-    if current_user.role != "patient" or getattr(request.state, "identity_transport", None) != "mini_bearer":
-        raise FormIntegrationError("患者本人填报仅允许本人 OneID 小程序会话访问",
-                                   error_code="SELF_FILL_MINI_SESSION_REQUIRED", status_code=403)
+def _require_patient_session(request: Request, current_user: Any):
+    from app.integrations.identity.access import SESSION_COOKIE, unified_authentication
+    if current_user.role != "patient":
+        raise FormIntegrationError("仅患者本人可访问本人填报任务",
+                                   error_code="SELF_FILL_ROLE_REQUIRED", status_code=403)
+    if getattr(request.state, "identity_transport", None) == "mini_bearer":
+        return
+    if not unified_authentication() or not request.cookies.get(SESSION_COOKIE):
+        raise FormIntegrationError("患者本人填报需要有效的 OneID 浏览器会话",
+                                   error_code="SOURCE_IDENTITY_REQUIRED", status_code=403)
 
 
 @router.post("/patient-self/tasks")
@@ -271,7 +277,7 @@ async def list_patient_self_tasks(
 ):
     try:
         if current_user.role == "patient":
-            _require_mini_patient(request, current_user)
+            _require_patient_session(request, current_user)
         return await patient_self.list_tasks(db, current_user, skip=skip, limit=limit)
     except FormIntegrationError as exc:
         raise _form_error_response(exc) from exc
@@ -287,7 +293,7 @@ async def get_patient_self_task(
     try:
         task = await patient_self._task_for_id(db, task_id)
         if current_user.role == "patient":
-            _require_mini_patient(request, current_user)
+            _require_patient_session(request, current_user)
             from app.integrations.identity.config import oidc_settings
             await patient_self._verify_live_patient_identity(db, task, current_user, oidc_settings.issuer)
         elif current_user.role in patient_self.PATIENT_ROLES:
@@ -328,14 +334,17 @@ async def launch_patient_self_task(
     client: FormPlatformClient = Depends(get_form_platform_client),
 ):
     try:
-        _require_mini_patient(request, current_user)
+        _require_patient_session(request, current_user)
+        is_mini = getattr(request.state, "identity_transport", None) == "mini_bearer"
         authorization = request.headers.get("authorization", "")
-        mini_token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-        if not mini_token:
+        mini_token = authorization[7:].strip() if is_mini and authorization.lower().startswith("bearer ") else None
+        if is_mini and not mini_token:
             raise FormIntegrationError("小程序登录已失效，请重新登录", error_code="MINI_SESSION_REQUIRED", status_code=403)
         from app.integrations.identity.config import oidc_settings
+        from app.integrations.identity.access import SESSION_COOKIE
         from app.integrations.identity.service import OidcClient
         return await patient_self.launch_task(db, client, task_id, current_user, mini_token=mini_token,
+            browser_sid=None if is_mini else request.cookies.get(SESSION_COOKIE),
             oidc_client=OidcClient(db, oidc_settings), settings_obj=oidc_settings)
     except FormIntegrationError as exc:
         raise _form_error_response(exc) from exc

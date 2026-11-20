@@ -59,6 +59,10 @@ export interface PatientSelfTask {
   patientId: string;
   followupVisitId: string | null;
   remoteRefs: FillTaskRemoteRefs;
+  visitName?: string | null;
+  questionnaireTitle?: string | null;
+  createdAt?: string | null;
+  submittedAt?: string | null;
   session: { sessionId: string | null; status: string | null; expiresAt: string | null };
   verifiedEvidence?: {
     fill_mode: string;
@@ -81,6 +85,20 @@ export interface PatientSelfTask {
     snapshot_sha256: string;
   };
 }
+
+export interface PatientSelfTaskPage {
+  items: PatientSelfTask[];
+  total: number;
+  skip: number;
+  limit: number;
+}
+
+export interface PatientSelfLaunch {
+  taskId: string;
+  allowedOrigin: string;
+  webviewUrl: string;
+}
+
 
 export interface CreateFillTaskPayload {
   patientId: string;
@@ -293,8 +311,16 @@ export const formIntegrationService = {
     return apiClient.get<FillTask>(`/integrations/forms/fill-tasks/${taskId}`);
   },
 
-  async getPatientSelfTask(taskId: string): Promise<PatientSelfTask> {
-    return apiClient.get<PatientSelfTask>(`/integrations/forms/patient-self/tasks/${encodeURIComponent(taskId)}`);
+  async listPatientSelfTasks(skip: number, limit: number, signal?: AbortSignal): Promise<PatientSelfTaskPage> {
+    return apiClient.get<PatientSelfTaskPage>('/integrations/forms/patient-self/tasks', { params: { skip, limit }, signal });
+  },
+
+  async getPatientSelfTask(taskId: string, signal?: AbortSignal): Promise<PatientSelfTask> {
+    return apiClient.get<PatientSelfTask>(`/integrations/forms/patient-self/tasks/${encodeURIComponent(taskId)}`, { signal });
+  },
+
+  async launchPatientSelfTask(taskId: string, signal?: AbortSignal): Promise<PatientSelfLaunch> {
+    return apiClient.post<PatientSelfLaunch>(`/integrations/forms/patient-self/tasks/${encodeURIComponent(taskId)}/launch`, undefined, { signal });
   },
 
   async launchFillTask(taskId: string): Promise<FillTaskLaunch> {
