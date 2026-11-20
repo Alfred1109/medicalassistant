@@ -23,9 +23,6 @@ from tests.device_ingestion_fake import FakeDatabase
 
 from app.api.routers.device_router import router as device_router, \
     get_device_ingestion_service
-from app.core.auth import get_current_active_user
-from app.schemas.user import UserResponse
-from app.db.mongodb import get_database
 
 DEVICE_OID = "64b0f1c2a3b4c5d6e7f80901"
 DEVICE_SN = "JMD-540-A001"
@@ -305,19 +302,10 @@ class GatewayEndpointTests(IngestionServiceTestBase):
         self.assertIsNone(body["active_session_id"])
         self.assertIsNotNone(self.db["devices"].docs[0].get("last_connected"))
 
-    def test_replay_simulated_rejected_for_non_admin(self):
-        # REM02 防线：模拟回放入口仅 admin（演示数据不进非管理员通道）
-        app = FastAPI()
-        app.include_router(device_router, prefix="/api")
-        app.dependency_overrides[get_device_ingestion_service] = lambda: self.service
-        app.dependency_overrides[get_database] = lambda: self.db
-        app.dependency_overrides[get_current_active_user] = lambda: UserResponse(
-            id=PATIENT_ID, email="a@example.com", name="操作者", role="doctor",
-            is_active=True, createdAt=datetime.utcnow(), updatedAt=datetime.utcnow())
-        client = TestClient(app)
-        response = client.post(
+    def test_gateway_has_no_simulated_replay_route(self):
+        response = self.client.post(
             f"/api/devices/{DEVICE_OID}/gateway/replay-simulated")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 404)
 
 
 class VeePooF300IngestionTests(IngestionServiceTestBase):

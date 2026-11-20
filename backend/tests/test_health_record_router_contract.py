@@ -81,7 +81,7 @@ class HealthRecordRouterContractTests(unittest.IsolatedAsyncioTestCase):
         self.service.get_medical_timeline = AsyncMock(return_value=[])
         self.service.get_health_record_stats = AsyncMock(return_value={
             "total_records": 0, "record_type_counts": {}, "upcoming_followups": 0,
-            "recent_activity": [], "completion_percentage": 0.0, "total_attachments": 0,
+            "recent_activity": [], "completion_percentage": None, "total_attachments": 0,
         })
         # FU01 S2：随访端点改经 FollowupService 唯一入口，单独打桩
         self.followup_service = AsyncMock()

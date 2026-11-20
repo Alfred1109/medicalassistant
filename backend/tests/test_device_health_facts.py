@@ -244,6 +244,26 @@ class DeviceFactTransactions(unittest.IsolatedAsyncioTestCase):
         result = await self.gateway.ingest(self.device, [self.frame()])
         self.assertNotIn("out_of_order", result["readings"][0]["quality_flags"])
 
+    async def test_reading_views_filter_simulation_before_limiting_and_include_f300_in_quality(self):
+        sources = [
+            {"source": "automated"}, {"source": "veepoo_wechat"}, {"source": "手工登记"},
+            {"source": "automated_simulated_replay"}, {"source": "automated", "simulated": True},
+        ]
+        device_id = str(self.did)
+        await self.db.device_data.insert_many([
+            {"device_id": device_id, "timestamp": self.now + timedelta(seconds=index),
+             "metadata": metadata, "quality_flags": ["out_of_order"] if index else []}
+            for index, metadata in enumerate(sources)
+        ])
+
+        latest = await self.manual.get_device_data(device_id, limit=1)
+        automated = await self.manual.get_device_data(device_id, limit=2, automated_only=True)
+        report = await self.gateway.quality_report(device_id)
+        self.assertEqual([row["metadata"]["source"] for row in latest], ["手工登记"])
+        self.assertEqual([row["metadata"]["source"] for row in automated], ["veepoo_wechat", "automated"])
+        self.assertEqual((report["total_automated"], report["flagged"], report["pass_rate"]), (2, 1, 0.5))
+        self.assertEqual(await self.db.device_data.count_documents({}), 5)
+
     async def test_stale_heartbeat_and_all_rejected_batch_cannot_refresh_rebound_device(self):
         for change in ({"device_key": "new-key"}, {"patient_id": str(ObjectId())}, {"status": "deleted"}):
             await self.db.devices.replace_one({"_id": self.did}, self.device)

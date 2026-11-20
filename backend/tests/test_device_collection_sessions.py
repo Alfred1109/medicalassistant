@@ -174,10 +174,13 @@ class EndSessionTests(SessionTestBase):
                          StartSessionTests.VERSION_ID)
         self.assertEqual(ended["summary"]["readings_count"], 1)
 
-    async def test_summary_includes_f300_only_for_this_session(self):
+    async def test_summary_includes_real_f300_only_for_this_session(self):
         session = await self._start()
         self._seed_session_reading(session["_id"], source="veepoo_wechat")
         self._seed_session_reading(str(ObjectId()), source="veepoo_wechat")
+        self._seed_session_reading(session["_id"], source="automated_simulated_replay")
+        self._seed_session_reading(session["_id"], source="automated")
+        self.db["device_data"].docs[-1]["metadata"]["simulated"] = True
         ended = await self.service.end_collection_session(self._device(), session["_id"])
         self.assertEqual(ended["summary"]["readings_count"], 1)
 

@@ -12,7 +12,7 @@ health_data 临床事实（模拟回放仅存遥测）→ 触发既有分析/预
 - 去模拟化约定（REM02）继续有效：唯一"造数"入口是模拟回放器
   （device_protocol.jmd540.JMD540SimulatedReplayer），其输出强制携带
   simulated 标记，入库 metadata.source="automated_simulated_replay"，
-  仅用于测试与演示，绝不冒充真实采集；
+  仅供隔离测试调用；
 - 质量分级：
   * 硬拒绝（不入库）：必填缺失、时间戳无法解析/超前/过旧 —— 计入
     响应 rejected 与质量统计；
@@ -30,6 +30,8 @@ from bson import ObjectId
 
 from ..db.mongodb import get_db
 from .device_analysis_service import device_analysis_service
+from .device_health_data import (SOURCE_AUTOMATED, SOURCE_AUTOMATED_SIMULATED,
+                                 SOURCE_VEEPOO_WECHAT, observed_device_filter)
 from .device_protocol import (
     DeviceProtocolAdapter,
     JMD540SimulatedReplayer,
@@ -60,12 +62,6 @@ DEFAULT_METRIC_RANGES: Dict[str, Tuple[float, float]] = {
 FLAG_OUT_OF_RANGE_PREFIX = "out_of_range:"
 FLAG_OUT_OF_ORDER = "out_of_order"
 FLAG_UNREGISTERED_METRIC = "unregistered_metric"
-
-#: 自动采集来源标记（metadata.source）
-SOURCE_AUTOMATED = "automated"
-SOURCE_AUTOMATED_SIMULATED = "automated_simulated_replay"
-SOURCE_VEEPOO_WECHAT = "veepoo_wechat"
-
 
 def _hardware_id_bytes(value: Any) -> Optional[bytes]:
     """Encode a hardware identifier without restricting it to an ASCII format."""
@@ -111,8 +107,7 @@ class DeviceIngestionService:
         if source == SOURCE_AUTOMATED_SIMULATED:
             return {"$or": [{"metadata.source": SOURCE_AUTOMATED_SIMULATED},
                             {"metadata.simulated": True}]}
-        return {"metadata.source": {"$ne": SOURCE_AUTOMATED_SIMULATED},
-                "metadata.simulated": {"$ne": True}}
+        return observed_device_filter()
 
     # ── 设备凭证鉴权 ────────────────────────────────────────────────────
     async def authenticate_device(
@@ -224,32 +219,19 @@ class DeviceIngestionService:
 
     async def ingest(
         self, device: Dict[str, Any], frames: List[Dict[str, Any]],
-        *, simulated: bool = False,
     ) -> Dict[str, Any]:
-        """处理一批上报帧：解析 → 质量校验 → 入库 → 分析链。
-
-        frames：设备原始载荷帧列表（1..500）；simulated=True 时帧数
-        决定模拟回放帧数（仅测试/演示，读数强制打 simulated 标记）。
-        """
+        """解析设备上报的原始载荷帧，校验、入库并触发分析。"""
         if not frames or len(frames) > MAX_FRAMES_PER_BATCH:
             raise DeviceIngestionError(
                 f"上报帧数必须为 1..{MAX_FRAMES_PER_BATCH}", 400)
 
-        if simulated:
-            replayer = JMD540SimulatedReplayer()
-            parsed_frames = replayer.replay(
-                frame_count=len(frames), device_sn=device.get("device_id"))
-            source = SOURCE_AUTOMATED_SIMULATED
-        else:
-            adapter = self._select_adapter(device)
-            if adapter is None:
-                raise DeviceIngestionError(
-                    f"设备型号 {device.get('model')!r} 未登记协议适配器，"
-                    "无法解析上报载荷", 422)
-            parsed_frames = [adapter.parse(f) for f in frames]
-            source = SOURCE_AUTOMATED
-        return await self._process_parsed_frames(device, parsed_frames,
-                                                 source=source)
+        adapter = self._select_adapter(device)
+        if adapter is None:
+            raise DeviceIngestionError(
+                f"设备型号 {device.get('model')!r} 未登记协议适配器，"
+                "无法解析上报载荷", 422)
+        parsed_frames = [adapter.parse(frame) for frame in frames]
+        return await self._process_parsed_frames(device, parsed_frames, source=SOURCE_AUTOMATED)
 
     async def pin_veepoo_hardware_id(
         self, device: Dict[str, Any], hardware_id: str, *, actor,
@@ -594,8 +576,7 @@ class DeviceIngestionService:
         db = await self._database()
         query: Dict[str, Any] = {
             "device_id": device_id,
-            "metadata.source": {"$in": [SOURCE_AUTOMATED,
-                                        SOURCE_AUTOMATED_SIMULATED]},
+            **observed_device_filter(automated_only=True),
         }
         if start or end:
             ts_query: Dict[str, datetime] = {}
@@ -737,9 +718,7 @@ class DeviceIngestionService:
         window_query = {
             "device_id": device_internal_id,
             "metadata.session_id": session_id,
-            "metadata.source": {"$in": [SOURCE_AUTOMATED,
-                                        SOURCE_AUTOMATED_SIMULATED,
-                                        SOURCE_VEEPOO_WECHAT]},
+            **observed_device_filter(automated_only=True),
             "timestamp": {"$gte": session["started_at"], "$lte": ended_at},
         }
         session_docs = await db.device_data.find(window_query).to_list(None)
@@ -781,16 +760,12 @@ class DeviceIngestionService:
             doc["_id"] = str(doc["_id"])
         return docs
 
-    # ── 模拟回放（仅测试/演示）──────────────────────────────────────────
+    # ── 模拟回放（供隔离测试调用）────────────────────────────────────────
     async def replay_simulated(
         self, device: Dict[str, Any], frame_count: int = 4,
         *, base_time: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """端到端演示入口：固定帧 → 完整网关管道（标记 simulated）。
-
-        与真实上报唯一差异是 metadata.source；质量校验、幂等、分析链
-        完全一致，确保演示路径即真实路径。
-        """
+        """将固定帧送入网关管道，用于验证模拟读数来源标记和隔离。"""
         replayer = JMD540SimulatedReplayer()
         parsed_frames = replayer.replay(
             frame_count=frame_count, base_time=base_time,

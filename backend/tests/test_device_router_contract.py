@@ -279,15 +279,24 @@ class DeviceRouterContractTests(unittest.IsolatedAsyncioTestCase):
             health_managers=[OPERATOR_ID]))
         self.device_service.get_device = AsyncMock(return_value=make_device_doc(
             patient_id=OTHER_PATIENT_ID))
-        self.device_service.get_device_data = AsyncMock(return_value=[])
+        stamp = datetime.utcnow()
+        self.device_service.get_device_data = AsyncMock(return_value=[{
+            "_id": str(ObjectId()), "device_id": DEVICE_ID, "timestamp": stamp,
+            "created_at": stamp, "data_type": "heart_rate", "value": 72, "unit": "bpm",
+            "metadata": {"source": "veepoo_wechat"}, "quality_flags": ["out_of_order"],
+        }])
         self.device_service.get_device_status = AsyncMock(return_value={
             "status": "active", "battery_level": 80, "signal_strength": 4,
             "last_sync_time": None})
         data_resp = await self.client.get(
-            f"/api/devices/{DEVICE_ID}/data", headers=self.auth())
+            f"/api/devices/{DEVICE_ID}/data?automated_only=true&limit=1", headers=self.auth())
         status_resp = await self.client.get(
             f"/api/devices/{DEVICE_ID}/status", headers=self.auth())
         self.assertEqual(data_resp.status_code, 200, data_resp.text)
+        self.assertEqual(data_resp.json()[0]["metadata"]["source"], "veepoo_wechat")
+        self.assertEqual(data_resp.json()[0]["quality_flags"], ["out_of_order"])
+        self.device_service.get_device_data.assert_awaited_once_with(
+            DEVICE_ID, start_date=None, end_date=None, data_type=None, limit=1, automated_only=True)
         self.assertEqual(status_resp.status_code, 200, status_resp.text)
 
     async def test_unassigned_doctor_read_forbidden_and_no_business_call(self):

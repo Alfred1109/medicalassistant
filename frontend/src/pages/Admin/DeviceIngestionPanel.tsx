@@ -207,23 +207,6 @@ const DeviceIngestionPanel: React.FC<{
     }
   };
 
-  const handleReplay = async () => {
-    setSessionBusy(true);
-    setActionMessage(null);
-    setActionError(null);
-    try {
-      const result = await deviceGateway.replaySimulated(deviceId, 4);
-      setActionMessage(
-        `模拟回放完成（数据已标记 simulated，非真实采集）：入库 ${result.accepted_count}，重复 ${result.duplicate_count}，拒绝 ${result.rejected_count}`,
-      );
-      await load();
-    } catch (err: any) {
-      setActionError(err.response?.data?.detail ?? `模拟回放失败: ${err.message ?? '未知错误'}`);
-    } finally {
-      setSessionBusy(false);
-    }
-  };
-
   const activeSession = sessions.find((s) => s.status === 'active');
 
   return (
@@ -351,14 +334,6 @@ const DeviceIngestionPanel: React.FC<{
                 >
                   开始采集会话
                 </Button>
-                <Button
-                  variant="outlined"
-                  disabled={sessionBusy}
-                  onClick={handleReplay}
-                  title="演示数据：回放读数全部标记 simulated，不冒充真实采集"
-                >
-                  模拟数据回放（演示）
-                </Button>
               </Stack>
               <Typography variant="caption" color="text.secondary">
                 可选方案和运动项由该设备绑定患者当前发布内容自动加载；采集数据仍作为设备观测保存，不登记为训练完成。
@@ -443,7 +418,7 @@ const DeviceIngestionPanel: React.FC<{
                     {readings.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={6}>
-                          暂无自动采集数据（设备侧尚未通过网关上报；演示可用「模拟数据回放」）
+                          暂无自动采集数据
                         </TableCell>
                       </TableRow>
                     ) : (
@@ -454,7 +429,7 @@ const DeviceIngestionPanel: React.FC<{
                           <TableCell>{String(reading.value)}</TableCell>
                           <TableCell>{reading.unit || '—'}</TableCell>
                           <TableCell>
-                            {reading.metadata?.source === 'automated_simulated_replay' ? '模拟回放' : '自动采集'}
+                            {reading.metadata?.source === 'veepoo_wechat' ? 'F300 小程序' : '设备网关'}
                           </TableCell>
                           <TableCell>
                             {reading.quality_flags && reading.quality_flags.length > 0 ? (

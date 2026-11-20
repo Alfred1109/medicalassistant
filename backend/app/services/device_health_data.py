@@ -10,6 +10,18 @@ from app.core.fences import PatientFenceStore, legacy_document_fence
 from app.core.patient_access import PatientAccessError, patient_domain_context
 
 
+SOURCE_AUTOMATED = "automated"
+SOURCE_AUTOMATED_SIMULATED = "automated_simulated_replay"
+SOURCE_VEEPOO_WECHAT = "veepoo_wechat"
+
+
+def observed_device_filter(*, automated_only=False):
+    sources = {"$in": [SOURCE_AUTOMATED, SOURCE_VEEPOO_WECHAT]} if automated_only else {
+        "$ne": SOURCE_AUTOMATED_SIMULATED,
+    }
+    return {"metadata.source": sources, "metadata.simulated": {"$ne": True}}
+
+
 VITAL_TYPES = {
     "heart_rate": "heart_rate", "pulse": "heart_rate",
     "blood_glucose": "blood_glucose", "body_temperature": "body_temperature",
@@ -44,7 +56,7 @@ async def fence_device_patient(db, patient_id, *, session):
 def device_health_document(reading, patient_id):
     """Preserve accepted values, units, quality flags and immutable provenance."""
     metadata = reading.get("metadata") or {}
-    if metadata.get("source") == "automated_simulated_replay" or metadata.get("simulated") is True:
+    if metadata.get("source") == SOURCE_AUTOMATED_SIMULATED or metadata.get("simulated") is True:
         # Current clinical readers do not filter simulated values universally.
         return None
     data_type = reading["data_type"]

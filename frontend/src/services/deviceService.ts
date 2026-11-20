@@ -192,9 +192,8 @@ export interface AutomatedReading {
   unit: string;
   quality_flags?: string[] | null;
   metadata?: {
-    source?: string; // automated / automated_simulated_replay / 手工登记
+    source?: 'automated' | 'veepoo_wechat';
     session_id?: string | null;
-    simulated?: boolean;
   } | null;
 }
 
@@ -250,34 +249,14 @@ export interface ProtocolAssumptionsResponse {
   assumptions: ProtocolAssumption[];
 }
 
-// 网关上报响应（readings 数组含逐条 written/duplicate/rejected 结果）
-export interface GatewayIngestResult {
-  success: boolean;
-  device: { id: string; device_sn: string };
-  accepted_count: number;
-  duplicate_count: number;
-  rejected_count: number;
-  readings: Array<{
-    action: 'written' | 'duplicate' | 'rejected';
-    frame_index: number;
-    data_type: string;
-    timestamp: string;
-    quality_flags: string[];
-    reason?: string;
-    error?: string;
-  }>;
-}
-
 const deviceGateway = {
-  // 自动采集数据（复用 GET /devices/{id}/data，前端按来源过滤展示）
+  // 后端先按真实自动采集来源过滤，再按时间返回最近读数。
   getAutomatedReadings: async (deviceId: string, limit = 50): Promise<AutomatedReading[]> => {
-    const response = await api.get(`/devices/${deviceId}/data`, {
-      params: { limit },
+    const response = await api.get<AutomatedReading[]>(`/devices/${deviceId}/data`, {
+      params: { limit, automated_only: true },
     });
-    const rows: AutomatedReading[] = Array.isArray(response.data) ? response.data : [];
-    return rows.filter(
-      (row) => row.metadata?.source === 'automated' || row.metadata?.source === 'automated_simulated_replay',
-    );
+    if (!Array.isArray(response.data)) throw new Error('自动采集接口返回的数据格式无效');
+    return response.data;
   },
 
   getQualityReport: async (
@@ -315,16 +294,6 @@ const deviceGateway = {
 
   getProtocolAssumptions: async (deviceId: string): Promise<ProtocolAssumptionsResponse> => {
     const response = await api.get(`/devices/${deviceId}/gateway/protocol-assumptions`);
-    return response.data;
-  },
-
-  // 模拟数据回放（仅 admin，测试/演示；读数带 simulated 标记）
-  replaySimulated: async (deviceId: string, frameCount = 4): Promise<GatewayIngestResult> => {
-    const response = await api.post(
-      `/devices/${deviceId}/gateway/replay-simulated`,
-      null,
-      { params: { frame_count: frameCount } },
-    );
     return response.data;
   },
 };

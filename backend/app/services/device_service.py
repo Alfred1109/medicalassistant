@@ -14,6 +14,7 @@ from ..models.device_data_standard import (
 )
 from .device_adapters import get_device_adapter
 from .device_data_validator_service import device_data_validator_service
+from .device_health_data import observed_device_filter
 from ..db.mongodb import get_db
 from ..core.exceptions import AppBaseException
 from ..core.patient_access import (PatientAccessError, is_domain_state_unavailable,
@@ -216,11 +217,12 @@ class DeviceService:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         data_type: Optional[str] = None,
-        limit: int = 100
+        limit: int = 100,
+        *, automated_only: bool = False,
     ) -> List[Dict]:
         """获取设备数据"""
         db = await self._database()
-        query = {"device_id": device_id}
+        query = {"device_id": device_id, **observed_device_filter(automated_only=automated_only)}
         
         if start_date:
             query["timestamp"] = {"$gte": start_date}

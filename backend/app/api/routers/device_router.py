@@ -130,6 +130,10 @@ class DeviceDataResponse(DeviceDataBase):
         orm_mode = True
 
 
+class DeviceObservationResponse(DeviceDataResponse):
+    quality_flags: Optional[List[str]] = Field(None, description="接入时记录的质量标记")
+
+
 class DeviceSyncResponse(BaseModel):
     success: bool = Field(..., description="同步是否成功")
     message: str = Field(..., description="消息")
@@ -269,18 +273,19 @@ async def unbind_device(
         raise HTTPException(status_code=400, detail="解绑设备失败")
 
 
-@router.get("/{device_id}/data", response_model=List[DeviceDataResponse])
+@router.get("/{device_id}/data", response_model=List[DeviceObservationResponse])
 async def get_device_data(
     device_id: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     data_type: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
+    automated_only: bool = False,
     current_user: Any = Depends(get_current_active_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
     device_api: Any = Depends(get_device_service),
 ):
-    """获取设备数据"""
+    """获取设备观测。自动采集模式包括设备网关和 F300 小程序读数。"""
     # AUTH01：存在性校验（404 先行）+ 对象级归属校验
     device = await _get_device_or_404(device_id, device_api)
     await ensure_device_access(db, device, current_user, DEVICE_READ_ROLES)
@@ -290,7 +295,8 @@ async def get_device_data(
         start_date=start_date,
         end_date=end_date,
         data_type=data_type,
-        limit=limit
+        limit=limit,
+        automated_only=automated_only,
     )
     return [_to_device_response(item) for item in data]
 
@@ -531,31 +537,6 @@ async def get_protocol_assumptions(
         "adapter_id": adapter.adapter_id,
         "assumptions": adapter.describe_assumptions(),
     }
-
-
-@router.post("/{device_id}/gateway/replay-simulated")
-async def replay_simulated_data(
-    device_id: str,
-    frame_count: int = Query(4, ge=1, le=500),
-    current_user: Any = Depends(get_current_active_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-    device_api: Any = Depends(get_device_service),
-    ingestion: Any = Depends(get_device_ingestion_service),
-):
-    """模拟数据回放（仅 admin，测试/演示用）。
-
-    REM02 约定：回放读数强制携带 simulated 标记，metadata.source=
-    "automated_simulated_replay"，绝不冒充真实设备采集；除来源标记外，
-    质量校验/幂等/分析链与真实上报完全一致。
-    """
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="模拟回放仅管理员可用（演示数据隔离）")
-    device = await _get_device_or_404(device_id, device_api)
-    await ensure_device_access(db, device, current_user, DEVICE_MUTATE_ROLES, write=True)
-    try:
-        return await ingestion.replay_simulated(device, frame_count)
-    except DeviceIngestionError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
 
 @router.get("/{device_id}/quality-report")

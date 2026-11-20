@@ -205,7 +205,7 @@ class HealthRecordStats(BaseModel):
     latest_record: Optional[HealthRecordResponse] = None
     upcoming_followups: int
     recent_activity: List[Dict[str, Any]]
-    completion_percentage: float
+    completion_percentage: Optional[float] = None
     total_attachments: int
 
     class Config:

@@ -288,9 +288,6 @@ class HealthRecordService:
                             "date": item.timestamp.isoformat() if item.timestamp else None,
                             "description": item.description} for item in recent_timeline]
 
-        # 计算完成度（简单示例）
-        completion_percentage = 100.0  # 实际应用中可能需要更复杂的计算
-        
         # 计算附件总数
         total_attachments_pipeline = [
             {"$match": {"patient_id": patient_id, "deleted": {"$ne": True}}},
@@ -307,7 +304,6 @@ class HealthRecordService:
             latest_record=latest_record,
             upcoming_followups=upcoming_followups,
             recent_activity=recent_activity,
-            completion_percentage=completion_percentage,
             total_attachments=total_attachments
         )
     
