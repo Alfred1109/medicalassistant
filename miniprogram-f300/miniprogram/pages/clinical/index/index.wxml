@@ -50,6 +50,7 @@
     <view wx:if="{{detailLoading && !healthRecord}}" class="card muted">正在读取健康档案和随访…</view>
     <view wx:if="{{healthRecord}}" class="card">
       <view class="section-title">健康档案</view>
+      <button class="secondary small" bindtap="openTraining">训练计划与视频核验</button>
       <view class="facts">
         <view>性别：{{healthRecord.gender || '未记录'}}</view><view>年龄：{{healthRecord.age || '未记录'}}</view>
         <view>身高：{{healthRecord.height || '未记录'}}</view><view>体重：{{healthRecord.weight || '未记录'}}</view>

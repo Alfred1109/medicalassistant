@@ -1,0 +1,25 @@
+.page { padding: 24rpx; color: #263746; }
+.hero { padding: 24rpx 10rpx 28rpx; }
+.title { font-size: 40rpx; font-weight: 700; }
+.subtitle,.muted,.meta,.hint { color: #74818b; font-size: 24rpx; line-height: 1.6; }
+.card { background: #fff; border-radius: 18rpx; padding: 26rpx; margin-bottom: 22rpx; box-shadow: 0 4rpx 18rpx rgba(29,54,78,.06); }
+.section-title { font-size: 31rpx; font-weight: 650; margin-bottom: 20rpx; }
+.subheading { font-size: 27rpx; font-weight: 600; margin: 28rpx 0 10rpx; }
+.picker,.input,.textarea { box-sizing: border-box; width: 100%; padding: 18rpx; border: 1rpx solid #dfe6ec; border-radius: 10rpx; margin: 12rpx 0; font-size: 25rpx; }
+.textarea { min-height: 120rpx; }
+.textarea.compact { min-height: 90rpx; }
+.record { border-top: 1rpx solid #edf0f2; padding: 20rpx 0; }
+.record-title { font-size: 27rpx; font-weight: 600; margin-bottom: 8rpx; }
+.note { font-size: 25rpx; line-height: 1.6; margin: 10rpx 0; overflow-wrap: anywhere; }
+.hint { padding: 10rpx 0; }
+.empty { color: #83909b; text-align: center; padding: 30rpx 10rpx; font-size: 26rpx; }
+.notice { border-radius: 12rpx; background: #fff8df; color: #805d12; padding: 18rpx; margin: 12rpx 0; font-size: 24rpx; line-height: 1.5; }
+.notice.error { background: #fff0ef; color: #aa332b; }
+.notice.success { background: #eaf8ef; color: #207345; }
+.video { width: 100%; height: 380rpx; margin-top: 8rpx; background: #111; }
+.video-wrap { margin: 12rpx 0; }
+.actions { display: flex; gap: 12rpx; margin-top: 12rpx; }
+button { margin: 8rpx 0 0; font-size: 25rpx; }
+button.primary { background: #1677ff; color: white; }
+button.secondary { background: #eaf2ff; color: #145fc2; }
+button.more { width: 100%; }

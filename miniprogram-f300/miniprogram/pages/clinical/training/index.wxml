@@ -1,0 +1,63 @@
+<view class="page">
+  <view class="hero"><view class="title">训练计划与视频核验</view><view class="subtitle">患者：{{patientName || patientId}}</view></view>
+  <view wx:if="{{error}}" class="notice error">{{error}}</view>
+  <view wx:if="{{message}}" class="notice success">{{message}}</view>
+  <view wx:if="{{loading && !plans.length}}" class="card muted">正在读取康复方案…</view>
+  <view wx:if="{{plans.length}}" class="card">
+    <view class="section-title">康复方案</view>
+    <picker range="{{plans}}" range-key="displayName" value="{{selectedPlanIndex}}" bindchange="onPlanChange"><view class="picker">{{selectedPlanName || '选择方案'}}　›</view></picker>
+    <view wx:if="{{loading}}" class="muted">正在读取周期和患者反馈…</view>
+  </view>
+
+  <view wx:if="{{selectedPlanId}}" class="card">
+    <view class="section-title">训练周期管理</view>
+    <view wx:if="{{!cycles.length && !loading}}" class="empty">尚未创建周期，可在下方设置患者训练时间段。</view>
+    <view wx:for="{{cycles}}" wx:key="id" class="record">
+      <view class="record-title">{{item.title}}</view>
+      <view class="meta">{{item.start_date}} 至 {{item.end_date}} · {{item.status === 'accepted' ? '已验收' : '进行中'}}</view>
+      <view class="meta">执行反馈 {{item.feedback_count || 0}} 条，视频核验通过 {{item.verified_count || 0}} 条，待核验 {{item.pending_reviews_count || 0}} 条</view>
+      <view wx:if="{{item.acceptance}}" class="note">验收意见：{{item.acceptance.note}}</view>
+      <button wx:if="{{item.canEdit}}" class="secondary" disabled="{{saving}}" data-index="{{index}}" bindtap="editCycle">调整未来周期</button>
+      <view wx:if="{{item.status === 'open' && !item.canAccept}}" class="hint">周期结束且所有训练视频核验完成后可验收。</view>
+      <textarea wx:if="{{item.status === 'open'}}" class="textarea compact" placeholder="填写本周期验收记录" value="{{cycleNotes[item.id] || ''}}" data-id="{{item.id}}" bindinput="onCycleNote" />
+      <button wx:if="{{item.status === 'open'}}" class="primary" loading="{{saving}}" disabled="{{saving || !item.canAccept}}" data-index="{{index}}" bindtap="acceptCycle">验收训练周期</button>
+    </view>
+    <view class="subheading">{{editingCycle ? '调整训练周期' : '新建训练周期'}}</view>
+    <input class="input" maxlength="120" placeholder="周期名称" value="{{cycleTitle}}" bindinput="onCycleTitle" />
+    <picker mode="date" value="{{cycleStart}}" bindchange="onCycleStart"><view class="picker">开始日期：{{cycleStart || '请选择'}}　›</view></picker>
+    <picker mode="date" value="{{cycleEnd}}" bindchange="onCycleEnd"><view class="picker">结束日期：{{cycleEnd || '请选择'}}　›</view></picker>
+    <view class="actions"><button wx:if="{{editingCycle}}" class="secondary" disabled="{{saving}}" bindtap="cancelCycleEdit">取消调整</button><button class="primary" loading="{{saving}}" disabled="{{saving}}" bindtap="createCycle">{{editingCycle ? '保存周期调整' : '保存训练周期'}}</button></view>
+  </view>
+
+  <view wx:if="{{selectedPlanId}}" class="card">
+    <view class="section-title">患者训练反馈与视频核验</view>
+    <view wx:if="{{!feedback.length && !loading}}" class="empty">暂无训练反馈。</view>
+    <view wx:for="{{feedback}}" wx:key="id" class="record">
+      <view class="record-title">{{item.executionLabel}} · {{item.performed_at}}</view>
+      <view wx:if="{{item.feelings}}" class="note">患者记录：{{item.feelings}}</view>
+      <view wx:if="{{item.cycle_id}}" class="meta">训练周期：{{item.cycle_id}}</view>
+      <view wx:for="{{item.supplements}}" wx:for-item="supplement" wx:key="id" class="note">患者补充：{{supplement.note}}</view>
+      <view wx:if="{{item.otherAttachmentNames}}" class="meta">其他附件：{{item.otherAttachmentNames}}</view>
+      <view wx:if="{{item.hasVideo}}" class="meta">训练视频（{{item.reviewAttachments.length}}）</view>
+      <button wx:if="{{item.hasVideo && !item.videoReady}}" class="secondary" loading="{{item.videoLoading}}" disabled="{{item.videoLoading || saving}}" data-index="{{index}}" bindtap="loadFeedbackVideos">{{item.videoLoading ? '正在加载视频' : '加载训练视频'}}</button>
+      <view wx:for="{{item.videos}}" wx:for-item="video" wx:key="id" class="video-wrap">
+        <view class="meta">{{video.sourceLabel}} · {{video.name}}</view>
+        <view wx:if="{{video.supplementNote}}" class="note">补充说明：{{video.supplementNote}}</view>
+        <video wx:if="{{video.url}}" class="video" src="{{video.url}}" controls show-center-play-btn="true" />
+      </view>
+      <view wx:if="{{item.videoError}}" class="notice error">{{item.videoError}} 可点击“加载训练视频”重试。</view>
+      <view wx:if="{{item.clinical_review.note}}" class="note">最近核验意见：{{item.clinical_review.note}}</view>
+      <view class="meta">核验状态：{{item.reviewLabel}}</view>
+      <block wx:if="{{item.canReview}}">
+        <textarea class="textarea compact" maxlength="2000" placeholder="核验意见；退回补充时必填" value="{{item.note}}" data-index="{{index}}" bindinput="onReviewNote" />
+        <view class="actions">
+          <button class="secondary" loading="{{saving}}" disabled="{{saving}}" data-index="{{index}}" data-status="return_for_supplement" bindtap="reviewFeedback">退回补充</button>
+          <button class="primary" loading="{{saving}}" disabled="{{saving || !item.videoReady || !item.hasVideo}}" data-index="{{index}}" data-status="verified" bindtap="reviewFeedback">核验通过</button>
+        </view>
+      </block>
+    </view>
+    <button wx:if="{{feedbackHasMore}}" class="secondary more" loading="{{loading}}" disabled="{{loading}}" bindtap="loadMoreFeedback">加载更多反馈</button>
+  </view>
+  <view wx:if="{{!loading && !plans.length && !error}}" class="card empty">该患者暂无可管理的康复方案。</view>
+  <role-nav current="plans" />
+</view>

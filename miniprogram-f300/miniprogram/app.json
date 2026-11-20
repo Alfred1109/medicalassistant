@@ -11,6 +11,7 @@
     "pages/patient/questionnaires/index",
     "pages/patient/questionnaires/webview/index",
     "pages/clinical/index/index",
+    "pages/clinical/training/index",
     "pages/clinical/tasks/index",
     "pages/clinical/tasks/webview/index",
     "pages/messages/index/index",

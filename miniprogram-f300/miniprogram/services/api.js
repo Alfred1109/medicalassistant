@@ -74,6 +74,7 @@ function createClient(baseUrl, getWx = () => wx) {
     uploadFile,
     setMiniToken(value) { miniToken = value || ''; },
     getMiniToken() { return miniToken; },
+    getAccessToken() { return miniToken || getWx().getStorageSync('rehab_access_token') || ''; },
     setSession(user) {
       sessionSequence += 1;
       session = user ? { user, role: user.role, identityConfirmed: true, sessionId: sessionSequence } : null;

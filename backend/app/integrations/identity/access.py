@@ -45,7 +45,7 @@ def mini_bearer_route(method, path):
             "/api/patients/todo-items", "/api/patients/daily-records",
             "/api/health-records/patient-context", "/api/health-records",
             "/api/health-records/followups", "/api/health-records/followup-workbench",
-            "/api/rehabilitation/publications/my-plans",
+            "/api/rehabilitation/publications/my-plans", "/api/rehabilitation/plans",
             "/api/consent/documents",
             "/api/integrations/forms/fill-candidates", "/api/integrations/forms/fill-tasks",
             "/api/integrations/forms/patient-self/tasks",
@@ -72,10 +72,16 @@ def mini_bearer_route(method, path):
             r"/api/rehabilitation/plans/[0-9a-fA-F]{24}/patient-feedback/media/[a-f0-9]{32}", path):
         return True
     if method == "POST" and re.fullmatch(
-            r"/api/rehabilitation/plans/[0-9a-fA-F]{24}/patient-feedback/[0-9a-fA-F]{24}/supplements", path):
+            r"/api/rehabilitation/plans/[0-9a-fA-F]{24}/patient-feedback/[0-9a-fA-F]{24}/(?:supplements|review)", path):
         return True
-    if method == "GET" and re.fullmatch(
+    if method in {"GET", "POST"} and re.fullmatch(
             r"/api/rehabilitation/plans/[0-9a-fA-F]{24}/training-cycles", path):
+        return True
+    if method == "PUT" and re.fullmatch(
+            r"/api/rehabilitation/plans/[0-9a-fA-F]{24}/training-cycles/[0-9a-fA-F]{24}", path):
+        return True
+    if method == "POST" and re.fullmatch(
+            r"/api/rehabilitation/plans/[0-9a-fA-F]{24}/training-cycles/[0-9a-fA-F]{24}/acceptance", path):
         return True
     if method == "GET" and re.fullmatch(r"/api/integrations/forms/fill-tasks/[0-9a-fA-F]{24}", path):
         return True

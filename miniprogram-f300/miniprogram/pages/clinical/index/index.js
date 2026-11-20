@@ -201,6 +201,11 @@ Page({
   },
   choosePatientForNewFollowup() { this.setData({ selectedPatientId: '', viewMode: 'patients', chooseForSchedule: true }); },
   openTasks() { wx.navigateTo({ url: '/pages/clinical/tasks/index' }); },
+  openTraining() {
+    if (!this.reconcileIdentity()) return;
+    if (!this.data.selectedPatientId) return;
+    wx.navigateTo({ url: `/pages/clinical/training/index?patientId=${encodeURIComponent(this.data.selectedPatientId)}&patientName=${encodeURIComponent(this.data.selectedPatientName)}` });
+  },
   async loadPatientDetail(reset) {
     const patientId = this.data.selectedPatientId;
     if (!patientId || this.data.detailLoading) return;
