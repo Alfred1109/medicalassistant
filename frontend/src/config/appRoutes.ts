@@ -90,6 +90,7 @@ export const APP_ROUTES: AppRouteNode[] = [
   { id: 'dashboard', path: 'dashboard', menu: { name: '首页', icon: 'home' } },
   { id: 'notifications', path: 'notifications', hidden: true },
   { id: 'follow-up-detail', path: 'follow-ups/:followUpId', hidden: true },
+  { id: 'report-schedules', path: 'report-schedules', allowedRoles: ['admin', 'doctor'], menu: { name: '定时报表', icon: 'queryStats' } },
   {
     id: 'quality-control',
     path: 'quality-control',
@@ -315,6 +316,7 @@ export const NAV_SECTIONS: NavGroup[] = [
       { routeId: 'admin.tags' },
       { routeId: 'admin.devices' },
       { routeId: 'admin.visualization' },
+      { routeId: 'report-schedules' },
       { routeId: 'quality-control' },
       { routeId: 'admin.audit-logs' },
     ],
@@ -335,6 +337,7 @@ export const NAV_SECTIONS: NavGroup[] = [
       { routeId: 'doctor.monitoring' },
       { routeId: 'doctor.communications' },
       { routeId: 'doctor.statistics' },
+      { routeId: 'report-schedules' },
       { routeId: 'doctor.informed-consent' },
       { routeId: 'doctor.documents' },
     ],

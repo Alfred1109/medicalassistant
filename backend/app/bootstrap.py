@@ -13,6 +13,7 @@ from app.integrations.identity.config import oidc_settings
 from app.integrations.identity.service import ensure_identity_indexes
 from app.operations.runtime import backup_schedule
 from app.services.followup_reminder_service import disposition_runtime, reminder_runtime
+from app.services.report_scheduler_runtime import report_schedule_runtime
 
 
 async def start_background_services(app) -> None:
@@ -31,10 +32,12 @@ async def start_background_services(app) -> None:
     await disposition_runtime.start(
         mongodb_state.db, interval=settings.FOLLOWUP_REMINDERS_POLL_SECONDS)
     await backup_schedule.start(mongodb_state.db)
+    await report_schedule_runtime.start(mongodb_state.db)
 
 
 async def stop_background_services() -> None:
     """按启动的逆序停掉后台循环。数据库连接由调用方关闭。"""
+    await report_schedule_runtime.stop()
     await reminder_runtime.stop()
     await disposition_runtime.stop()
     await backup_schedule.stop()

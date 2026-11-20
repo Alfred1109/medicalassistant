@@ -15,15 +15,15 @@ from app.services.report_scheduler_service import report_scheduler_service
 
 
 class Collection:
-    def __init__(self):
-        self.rows = {}
+    def __init__(self, rows=None):
+        self.rows = rows or {}
 
     async def insert_one(self, document):
         key = ObjectId()
         self.rows[key] = {**deepcopy(document), "_id": key}
         return SimpleNamespace(inserted_id=key)
 
-    async def find_one(self, query):
+    async def find_one(self, query, projection=None):
         return deepcopy(self.rows.get(query["_id"]))
 
     async def update_one(self, query, update):
@@ -40,8 +40,9 @@ class ReportSchedulerDependencyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.app = FastAPI()
         self.app.include_router(router)
-        self.db = SimpleNamespace(report_schedules=Collection())
         self.actor = SimpleNamespace(id=str(ObjectId()), role="doctor")
+        self.db = SimpleNamespace(report_schedules=Collection(),
+                                  users=UsersCollection(self.actor.id))
         self.app.dependency_overrides[get_database] = lambda: self.db
         self.app.dependency_overrides[get_current_user] = lambda: self.actor
         self.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://synthetic")
@@ -53,8 +54,8 @@ class ReportSchedulerDependencyTests(unittest.IsolatedAsyncioTestCase):
         await self.http.aclose()
 
     async def create(self):
-        result = await self.http.post("/report-schedules", json={"name": "test", "reportId": str(ObjectId()),
-            "frequency": "once", "recipients": [], "format": "html", "enabled": False,
+        result = await self.http.post("/report-schedules", json={"name": "test", "reportId": "overview",
+            "frequency": "once", "recipients": [self.actor.id], "format": "html", "enabled": False,
             "nextRunTime": datetime.utcnow().isoformat()})
         self.assertEqual(result.status_code, 200, result.text)
         return result.json()["id"]
@@ -74,11 +75,42 @@ class ReportSchedulerDependencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.http.get("/report-schedules/" + key)).status_code, 404)
         self.assertIsNone(report_scheduler_service.db)
 
+    async def test_catalog_matches_only_real_supported_analytics(self):
+        response = await self.http.get("/report-schedules/catalog")
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()["items"]
+        by_id = {row["id"]: row for row in items}
+        self.assertIn("overview", by_id)
+        self.assertIn("trend:patient", by_id)
+        self.assertEqual(by_id["overview"]["timeRanges"], [])
+        self.assertEqual(by_id["distribution:region"]["timeRanges"], [])
+        self.assertEqual(by_id["trend:patient"]["formats"], ["html"])
+        self.assertNotIn("trend:arbitrary", by_id)
+
     async def test_another_request_database_and_actor_do_not_inherit_state(self):
         key = await self.create()
         self.actor = SimpleNamespace(id=str(ObjectId()), role="doctor")
         self.assertEqual((await self.http.get("/report-schedules/" + key)).status_code, 403)
         original = self.db
-        self.db = SimpleNamespace(report_schedules=Collection())
+        self.db = SimpleNamespace(report_schedules=Collection(), users=UsersCollection(self.actor.id))
         self.assertEqual((await self.http.get("/report-schedules/" + key)).status_code, 404)
         self.assertEqual(len(original.report_schedules.rows), 1)
+
+
+class UsersCollection:
+    def __init__(self, account_id):
+        self.account_id = ObjectId(account_id)
+
+    async def find_one(self, query, projection=None):
+        return {"_id": self.account_id} if query.get("_id") == self.account_id else None
+
+    def find(self, query, projection=None):
+        return UserCursor(self.account_id if self.account_id in query["_id"]["$in"] else None)
+
+
+class UserCursor:
+    def __init__(self, account_id):
+        self.account_id = account_id
+
+    async def to_list(self, length=None):
+        return [{"_id": self.account_id}] if self.account_id else []

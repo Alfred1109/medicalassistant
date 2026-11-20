@@ -297,7 +297,7 @@ class AnalyticsService:
             return []
 
         collection_name, match, field_expr = source
-        if data_type == "patient":
+        if data_type in {"patient", "region"}:
             patient_source = await self._patient_source()
             if patient_source is None:
                 return []

@@ -1,46 +1,23 @@
-"""
-报表调度服务
-处理报表的自动生成和分发
+"""Report schedule CRUD and real analytics snapshot generation.
 
-T53 死代码处置（兼容分析结论，详见 docs/t53-dead-code-disposal-report-scheduler.md）：
-自仓库引入（dac0330，2025-05-10）起 start()/_scheduler_loop()/stop() 就没有任何
-调用方——main.py 不启动它，路由只按请求实例化 ReportSchedulerService 做 CRUD
-（report_scheduler_router.get_report_scheduler_service），部署脚本/文档也无引用，
-属引入即死的调度路径。且 _scheduler_loop 是 fire-then-update：create_task 后立即
-_update_next_run_time，无原子领取，启用即复刻 T34 发现的 D1 缺陷（多进程重复
-执行）。据此删除 start()/stop()/_scheduler_loop() 三件套及其派生状态
-（is_running/_scheduler_task）。
-
-报表生成与发送的执行链（_process_schedule → _generate_report → _export_report /
-_send_report_email）与 nextRunTime 计算保留：它们被领域收敛文档引用
-（患者集合名登记于 PATIENTS_COLLECTION_NAME，见
-docs/patient-domain-cutover-plan.md），且属待业务
-决策的潜在复用件。但它们当前没有任何调度入口（死代码）——未来若要恢复后台
-报表调度，必须先参照 T37 备份调度的 find_one_and_update 原子领取重写扫描领取
-逻辑（filter 含到点条件、领取成功者才执行），再接入应用启动，否则会原样复刻
-D1 重复执行缺陷。禁止单独恢复 _scheduler_loop。
-
-3.4 伪实现下线（docs/business-redundancy-review-2026-11-15.md）：原
-_export_report 把 JSON 写进 .pdf、把 CSV 写进 .excel——文件名承诺的格式与
-内容不符，是「点得进去、拿到的永远是假东西」的空壳实现。现在 PDF/Excel 一律
-如实拒绝（不再产出格式不符的文件），HTML 分支保持真实产出。恢复真报表导出
-前不得改回写假文件的做法。
+The background scanner lives in report_scheduler_runtime and only claims schedules
+explicitly created with executionVersion=1. Legacy records remain CRUD-visible but
+cannot be executed. Artifacts are stored for authenticated in-app download; this
+service performs no email or other external delivery.
 """
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import calendar
+import re
 import logging
 from bson import ObjectId
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
-import tempfile
-import os
+from html import escape
+import hashlib
 
 from ..db.mongodb import get_db
-from ..core.config import settings
 from ..patients.repository import PATIENTS as CANONICAL_PATIENTS_COLLECTION
 from .analytics_service import observe_patient_domain_state
+from .analytics_service import AnalyticsService
 
 # 患者域唯一集合名（legacy 模式：患者统一存于 users 集合，按 role 区分）。
 # T66 域感知：legacy 分支仍读此常量（users + role 过滤，口径逐字不变）；
@@ -64,16 +41,77 @@ _PATIENT_AGGREGATE_SPECS = {
 
 logger = logging.getLogger(__name__)
 
-class ReportSchedulerService:
-    """报表调度服务：按请求实例化承载报表调度计划的 CRUD。
+REPORTS = {
+    "overview",
+    *(f"{kind}:{entity}" for kind, entities in {
+        "trend": ("patient", "doctor", "device", "rehabilitation"),
+        "distribution": ("patient", "doctor", "device", "rehabilitation", "region"),
+        "comparison": ("patient", "doctor", "device", "rehabilitation"),
+    }.items() for entity in entities),
+}
+TIME_RANGES = {"day", "week", "month", "quarter", "year"}
 
-    当前不存在后台调度循环（T53 已删除引入即死的 start/_scheduler_loop/stop，
-    见模块头注释）；本类实例只服务路由层的 CRUD 请求。
-    """
+OVERVIEW_METRICS = {
+    "patientCount": ("患者总数", ""),
+    "weekPatientChange": ("近一周患者变化", "%"),
+    "doctorCount": ("医生总数", ""),
+    "totalDevices": ("设备总数", ""),
+    "activeDeviceRate": ("活跃设备占比", "%"),
+    "avgTrainingTime": ("平均训练时长", " 分钟"),
+    "rehabilitationRate": ("康复有效率", "%"),
+    "patientSatisfaction": ("患者满意度", "%"),
+}
+
+REPORT_TABLES = {
+    "trend": (("timestamp", "统计时间（UTC）"), ("value", "新增数量")),
+    "distribution": (("category", "类别"), ("value", "数量")),
+    "comparison": (("category", "指标"), ("currentValue", "本期新增"), ("compareValue", "上期新增")),
+}
+
+class ReportSchedulerService:
+    """Request-scoped CRUD, analytics generation and in-app artifact access."""
 
     def __init__(self, db=None):
         """初始化报表调度服务"""
         self.db = db
+
+    @staticmethod
+    def occurrence_key(schedule_id, occurrence):
+        return hashlib.sha256(f"{schedule_id}:{occurrence.isoformat()}".encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _next_occurrence(schedule: Dict[str, Any], now: Optional[datetime] = None) -> Optional[datetime]:
+        now = now or datetime.utcnow()
+        frequency = schedule.get("frequency")
+        if frequency == "once":
+            return None
+        time = schedule.get("time", "00:00")
+        if not isinstance(time, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time):
+            raise ValueError("执行时间必须为 HH:MM")
+        hour, minute = map(int, time.split(":"))
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if frequency == "daily":
+            return candidate if candidate > now else candidate + timedelta(days=1)
+        if frequency == "weekly":
+            weekday = schedule.get("weekday", 0)
+            if not isinstance(weekday, int) or not 0 <= weekday <= 6:
+                raise ValueError("weekday 必须介于 0 到 6")
+            days = (weekday - ((now.weekday() + 1) % 7)) % 7
+            candidate += timedelta(days=days)
+            return candidate if candidate > now else candidate + timedelta(days=7)
+        if frequency == "monthly":
+            day = schedule.get("monthDay", 1)
+            if not isinstance(day, int) or not 1 <= day <= 31:
+                raise ValueError("monthDay 必须介于 1 到 31")
+            candidate = candidate.replace(day=min(day, calendar.monthrange(candidate.year, candidate.month)[1]))
+            if candidate <= now:
+                month = candidate.month + 1
+                year = candidate.year + (month - 1) // 12
+                month = (month - 1) % 12 + 1
+                candidate = candidate.replace(year=year, month=month,
+                    day=min(day, calendar.monthrange(year, month)[1]))
+            return candidate
+        raise ValueError("frequency 必须为 once、daily、weekly 或 monthly")
 
     async def _database(self):
         """Use the request database when injected; retain standalone lifecycle support."""
@@ -81,157 +119,129 @@ class ReportSchedulerService:
             self.db = await get_db()
         return self.db
 
-    # 当前无调度入口（T53 死代码处置，见模块头注释）：以下执行链仅在「先按
-    # T37 同款原子领取重写扫描逻辑」之后才允许被调度路径调用。
-    async def _process_schedule(self, schedule: Dict[str, Any]):
-        """处理单个调度任务"""
-        schedule_id = str(schedule["_id"])
-        report_id = schedule.get("reportId")
-        
-        logger.info(f"开始执行调度任务: {schedule_id}, 报表: {report_id}")
-        
-        try:
-            # 获取报表配置
-            report_config = await self.db.reports.find_one({"_id": ObjectId(report_id)})
-            if not report_config:
-                raise ValueError(f"找不到报表配置: {report_id}")
-            
-            # 生成报表数据
-            report_data = await self._generate_report(report_config)
-            
-            # 根据格式导出报表
-            report_format = schedule.get("format", "pdf")
-            report_file = await self._export_report(report_data, report_format, report_config.get("title", "报表"))
-            
-            # 发送邮件
-            if schedule.get("recipients") and len(schedule.get("recipients")) > 0:
-                await self._send_report_email(
-                    recipients=schedule["recipients"],
-                    subject=f"自动报表: {report_config.get('title', '数据分析报表')}",
-                    report_file=report_file,
-                    report_format=report_format,
-                    schedule_name=schedule.get("name", "自动报表"),
-                    report_name=report_config.get("title", "数据分析报表")
-                )
-            
-            # 更新执行状态
-            await self.db.report_schedules.update_one(
-                {"_id": ObjectId(schedule_id)},
-                {"$set": {
-                    "lastRunTime": datetime.utcnow(),
-                    "lastRunStatus": "success"
-                }}
-            )
-            
-            logger.info(f"调度任务执行成功: {schedule_id}")
-        except Exception as e:
-            logger.error(f"调度任务执行失败: {schedule_id}, 错误: {str(e)}")
-            
-            # 更新执行状态为失败
-            await self.db.report_schedules.update_one(
-                {"_id": ObjectId(schedule_id)},
-                {"$set": {
-                    "lastRunTime": datetime.utcnow(),
-                    "lastRunStatus": "error"
-                }}
-            )
-    
-    async def _update_next_run_time(self, schedule: Dict[str, Any]):
-        """更新调度任务的下次执行时间"""
-        schedule_id = schedule["_id"]
-        frequency = schedule.get("frequency")
-        now = datetime.utcnow()
-        
-        if frequency == "once":
-            # 一次性任务执行后禁用
-            await self.db.report_schedules.update_one(
-                {"_id": schedule_id},
-                {"$set": {"enabled": False}}
-            )
-            return
-        
-        # 计算下次执行时间
-        next_run_time = None
-        
-        if frequency == "daily":
-            # 获取配置的小时和分钟
-            time_parts = schedule.get("time", "00:00").split(":")
-            hour = int(time_parts[0])
-            minute = int(time_parts[1])
-            
-            next_run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if next_run_time <= now:
-                next_run_time += timedelta(days=1)
-        
-        elif frequency == "weekly":
-            weekday = schedule.get("weekday", 0)  # 0-6, 周日为0
-            time_parts = schedule.get("time", "00:00").split(":")
-            hour = int(time_parts[0])
-            minute = int(time_parts[1])
-            
-            # 计算当前周几
-            current_weekday = now.weekday()
-            # 调整为周日为0的系统
-            current_weekday = (current_weekday + 1) % 7
-            
-            # 计算距离下次执行的天数
-            days_until_next = (weekday - current_weekday) % 7
-            if days_until_next == 0:
-                # 如果是同一天，但时间已过，则设为下周
-                next_run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if next_run_time <= now:
-                    days_until_next = 7
-            
-            next_run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            next_run_time += timedelta(days=days_until_next)
-        
-        elif frequency == "monthly":
-            month_day = schedule.get("monthDay", 1)  # 每月几号
-            time_parts = schedule.get("time", "00:00").split(":")
-            hour = int(time_parts[0])
-            minute = int(time_parts[1])
-            
-            # 设置为本月指定日期
-            next_run_time = now.replace(day=min(month_day, 28), hour=hour, minute=minute, second=0, microsecond=0)
-            
-            # 如果已过，则设为下月
-            if next_run_time <= now:
-                if now.month == 12:
-                    next_run_time = next_run_time.replace(year=now.year+1, month=1)
-                else:
-                    next_run_time = next_run_time.replace(month=now.month+1)
-        
-        if next_run_time:
-            await self.db.report_schedules.update_one(
-                {"_id": schedule_id},
-                {"$set": {"nextRunTime": next_run_time}}
-            )
-    
-    async def _generate_report(self, report_config: Dict[str, Any]) -> Dict[str, Any]:
-        """根据报表配置生成报表数据"""
-        charts = report_config.get("charts", [])
-        report_data = {
-            "title": report_config.get("title", "数据分析报表"),
-            "description": report_config.get("description", ""),
-            "generated_at": datetime.utcnow(),
-            "charts_data": []
+    async def _validate_operational_schedule(self, schedule):
+        if not (schedule.get("name") or "").strip() or len(schedule["name"]) > 120:
+            raise ValueError("计划名称须为 1 至 120 个字符")
+        if not isinstance(schedule.get("enabled", True), bool):
+            raise ValueError("请指定有效的启用状态")
+        if schedule.get("reportId") not in REPORTS:
+            raise ValueError("不支持该报表类型")
+        if schedule.get("format") != "html":
+            raise ValueError("目前仅支持 HTML 报表")
+        if schedule.get("timeRange", "month") not in TIME_RANGES:
+            raise ValueError("不支持该统计周期")
+        recipients = schedule.get("recipients") or []
+        if (not recipients or len(set(recipients)) != len(recipients)
+                or any(not ObjectId.is_valid(item) for item in recipients)):
+            raise ValueError("收件人必须是至少一个有效的系统账号 ID")
+        schedule["recipients"] = list(dict.fromkeys(str(ObjectId(item)) for item in recipients))
+        creator_id = schedule.get("createdBy", "")
+        if not ObjectId.is_valid(creator_id):
+            raise ValueError("当前账号无权创建全局分析报表")
+        account_ids = [ObjectId(item) for item in recipients]
+        users = await self.db.users.find(
+            {"_id": {"$in": account_ids}, "role": {"$in": ["admin", "doctor"]},
+             "is_active": {"$ne": False}}, {"_id": 1}).to_list(length=None)
+        if {str(row["_id"]) for row in users} != {str(item) for item in account_ids}:
+            raise ValueError("报表收件人必须是有效的管理员或医生账号")
+        creator = await self.db.users.find_one({"_id": ObjectId(creator_id),
+            "role": {"$in": ["admin", "doctor"]}, "is_active": {"$ne": False}}, {"_id": 1})
+        if not creator:
+            raise ValueError("当前账号无权创建全局分析报表")
+        if schedule.get("frequency") == "once":
+            if not isinstance(schedule.get("nextRunTime"), datetime):
+                raise ValueError("一次性计划必须提供 nextRunTime")
+        else:
+            self._next_occurrence(schedule)
+
+    async def execute_claimed_schedule(self, schedule: Dict[str, Any], occurrence: datetime):
+        """Generate and persist one in-app report, idempotently per scheduled occurrence."""
+        report_id = schedule.get("reportId", "")
+        report_name = schedule.get("reportName") or schedule.get("name") or report_id
+        report_data = await self._generate_supported_report(
+            report_id, schedule.get("timeRange", "month"))
+        generated_at = datetime.now(timezone.utc)
+        html = self._render_html(report_name, report_data, generated_at)
+        occurrence_key = self.occurrence_key(schedule["_id"], occurrence)
+        document = {
+            "_id": occurrence_key,
+            "scheduleId": str(schedule["_id"]),
+            "createdBy": str(schedule.get("createdBy", "")),
+            "recipientIds": list(schedule.get("recipients", [])),
+            "reportId": report_id,
+            "reportName": report_name,
+            "generatedAt": generated_at,
+            "scheduledFor": occurrence,
+            "status": "success",
+            "format": "html",
+            "html": html,
+            "data": report_data,
         }
-        
-        for chart in charts:
-            chart_type = chart.get("type")
-            data_type = chart.get("dataType")
-            time_range = chart.get("timeRange")
-            
-            # 根据图表类型和数据类型获取数据
-            chart_data = await self._get_chart_data(chart_type, data_type, time_range)
-            
-            report_data["charts_data"].append({
-                "title": chart.get("title", "图表"),
-                "type": chart_type,
-                "data": chart_data
-            })
-        
-        return report_data
+        try:
+            await self.db.report_schedule_runs.insert_one(document)
+        except Exception as exc:
+            # Duplicate-key means a previous lease holder already committed the artifact.
+            if getattr(exc, "code", None) != 11000:
+                raise
+        return occurrence_key
+
+    async def _generate_supported_report(self, report_id: str, time_range: str) -> Dict[str, Any]:
+        if report_id not in REPORTS:
+            raise ValueError("不支持该报表类型")
+        if time_range not in TIME_RANGES:
+            raise ValueError("不支持该统计周期")
+        analytics = AnalyticsService(self.db)
+        if report_id == "overview":
+            metrics = await analytics.get_stats_overview()
+            unavailable = {field: None for field, available in metrics.get("dataAvailable", {}).items()
+                           if available is False}
+            return {"kind": "overview", "data": {**metrics, **unavailable}}
+        kind, data_type = report_id.split(":", 1)
+        if kind == "trend":
+            rows = await analytics.get_trend_data(data_type, time_range)
+        elif kind == "distribution":
+            rows = await analytics.get_distribution_data(data_type, time_range)
+        else:
+            rows = await analytics.get_comparison_data(data_type, time_range, "lastPeriod")
+        result = {"kind": kind, "dataType": data_type, "data": rows}
+        if kind != "distribution":
+            result["timeRange"] = time_range
+        return result
+
+    @staticmethod
+    def _render_html(title: str, report_data: Dict[str, Any], generated_at: datetime) -> str:
+        """Render a self-contained HTML artifact from the real analytics response."""
+        kind, data = report_data["kind"], report_data["data"]
+        if kind == "overview":
+            headings = ("指标", "数值")
+            rows = [(label, f"{data[key]}{unit}" if data.get(key) is not None else "暂无可用数据")
+                    for key, (label, unit) in OVERVIEW_METRICS.items()]
+        else:
+            columns = REPORT_TABLES[kind]
+            headings = tuple(label for _, label in columns)
+            rows = [tuple(row.get(key) for key, _ in columns) for row in data]
+        table = "<p>暂无可用数据。</p>"
+        if rows:
+            header = "".join(f"<th scope='col'>{escape(label)}</th>" for label in headings)
+            body = "".join(
+                "<tr>" + "".join(f"<td>{escape(str(cell) if cell is not None else '暂无可用数据')}</td>"
+                                 for cell in row) + "</tr>" for row in rows)
+            table = f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
+        ranges = {"day": "近 1 天", "week": "近 7 天", "month": "近一月",
+                  "quarter": "近一季", "year": "近一年"}
+        period = ranges.get(report_data.get("timeRange"), "生成时的业务概况")
+        generated = generated_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        safe_title = escape(title)
+        return (
+            "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<title>{safe_title}</title>"
+            "<style>body{margin:2rem auto;padding:0 1rem;max-width:56rem;"
+            "font:1rem/1.55 system-ui,sans-serif;color:#152238}table{width:100%;border-collapse:collapse}"
+            "th,td{padding:.5rem .7rem;text-align:left;border-bottom:1px solid #dbe2ec}"
+            "th{background:#eef3f9}tbody tr:nth-child(even){background:#f8fafd}</style></head>"
+            f"<body><h1>{safe_title}</h1><p>生成时间 {generated} · {period}</p>{table}</body></html>"
+        )
     
     async def _get_chart_data(self, chart_type: str, data_type: str, time_range: str) -> List[Dict[str, Any]]:
         """获取图表数据"""
@@ -329,249 +339,119 @@ class ReportSchedulerService:
         
         return result
     
-    async def _export_report(self, report_data: Dict[str, Any], format: str, title: str) -> str:
-        """导出报表为指定格式的文件。
-
-        PDF/Excel 导出**未实现**（3.4 伪实现下线，见
-        docs/business-redundancy-review-2026-11-15.md）：原实现把 JSON 写进
-        .pdf、把 CSV 写进 .excel——文件名承诺的格式与内容不符，一旦被当成
-        真报表消费就是坏文件。此处如实拒绝，不再产出格式不符的文件；待接入
-        真正的 PDF/Excel 生成库后再放开。HTML 分支是真实产出，保持不变。
-
-        本方法当前不可达（T53 已删除调度入口，见模块头注释）；恢复调度前须
-        先满足模块头登记的原子领取前置条件。
-        """
-        if format in {"pdf", "excel"}:
-            raise ValueError(f"报表格式 {format} 尚未实现，拒绝产出格式不符的文件")
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{format}") as temp:
-            # 生成简单的HTML报表
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <title>{title}</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                    h1 {{ color: #333; }}
-                    table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
-                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-                    th {{ background-color: #f2f2f2; }}
-                    .chart-container {{ margin-bottom: 30px; }}
-                </style>
-            </head>
-            <body>
-                <h1>{title}</h1>
-                <p>生成时间: {report_data['generated_at']}</p>
-                <p>{report_data.get('description', '')}</p>
-            """
-
-            for chart in report_data["charts_data"]:
-                html += f"""
-                <div class="chart-container">
-                    <h2>{chart['title']}</h2>
-                    <table>
-                        <thead>
-                            <tr>
-                """
-
-                # 获取所有可能的列
-                columns = set()
-                for item in chart["data"]:
-                    columns.update(item.keys())
-
-                # 写入列头
-                for col in columns:
-                    html += f"<th>{col}</th>"
-                html += "</tr></thead><tbody>"
-
-                # 写入数据行
-                for item in chart["data"]:
-                    html += "<tr>"
-                    for col in columns:
-                        html += f"<td>{item.get(col, '')}</td>"
-                    html += "</tr>"
-
-                html += "</tbody></table></div>"
-
-            html += "</body></html>"
-            temp.write(html.encode('utf-8'))
-
-            return temp.name
-    
-    async def _send_report_email(self, recipients: List[str], subject: str, report_file: str, 
-                                report_format: str, schedule_name: str, report_name: str):
-        """发送报表邮件"""
-        if not settings.SMTP_HOST or not settings.SMTP_PORT:
-            logger.error("SMTP配置缺失，无法发送邮件")
-            return
-        
-        try:
-            # 创建多部分邮件
-            msg = MIMEMultipart()
-            msg['From'] = settings.SMTP_SENDER
-            msg['To'] = ", ".join(recipients)
-            msg['Subject'] = subject
-            
-            # 添加邮件正文
-            body = f"""
-            <html>
-            <body>
-                <h2>自动报表: {report_name}</h2>
-                <p>您订阅的自动报表 "{schedule_name}" 已生成，请查看附件。</p>
-                <p>报表生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
-                <p>此邮件由系统自动发送，请勿回复。</p>
-            </body>
-            </html>
-            """
-            msg.attach(MIMEText(body, 'html'))
-            
-            # 添加附件
-            with open(report_file, "rb") as file:
-                attachment = MIMEApplication(file.read())
-                file_extension = report_format.lower()
-                attachment.add_header(
-                    "Content-Disposition", 
-                    f"attachment; filename={report_name}_{datetime.now().strftime('%Y%m%d')}.{file_extension}"
-                )
-                msg.attach(attachment)
-            
-            # 连接SMTP服务器并发送
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-                if settings.SMTP_USE_TLS:
-                    server.starttls()
-                
-                if settings.SMTP_USERNAME and settings.SMTP_PASSWORD:
-                    server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-                
-                server.send_message(msg)
-            
-            logger.info(f"已成功发送报表邮件至 {len(recipients)} 位接收者")
-        except Exception as e:
-            logger.error(f"发送邮件失败: {str(e)}")
-        finally:
-            # 删除临时文件
-            try:
-                os.unlink(report_file)
-            except:
-                pass
-    
     async def create_schedule(self, schedule_data: Dict[str, Any]) -> str:
         """创建新的报表调度计划"""
         await self._database()
-        
+        schedule_data["timeRange"] = schedule_data.get("timeRange", "month")
+        await self._validate_operational_schedule(schedule_data)
         # 设置创建时间
         schedule_data["createdAt"] = datetime.utcnow()
-        
-        # 设置下次运行时间
-        if schedule_data.get("frequency") == "once":
-            schedule_data["nextRunTime"] = schedule_data.get("nextRunTime", datetime.utcnow())
-        else:
-            # 根据频率设置下次运行时间
-            time_parts = schedule_data.get("time", "00:00").split(":")
-            hour = int(time_parts[0])
-            minute = int(time_parts[1])
-            
-            next_run = datetime.utcnow().replace(hour=hour, minute=minute, second=0, microsecond=0)
-            
-            if schedule_data.get("frequency") == "daily":
-                if next_run <= datetime.utcnow():
-                    next_run += timedelta(days=1)
-            elif schedule_data.get("frequency") == "weekly":
-                weekday = schedule_data.get("weekday", 0)
-                days_until = (weekday - next_run.weekday() - 1) % 7
-                if days_until == 0 and next_run <= datetime.utcnow():
-                    days_until = 7
-                next_run += timedelta(days=days_until)
-            elif schedule_data.get("frequency") == "monthly":
-                month_day = schedule_data.get("monthDay", 1)
-                next_run = next_run.replace(day=min(month_day, 28))
-                if next_run <= datetime.utcnow():
-                    if next_run.month == 12:
-                        next_run = next_run.replace(year=next_run.year+1, month=1)
-                    else:
-                        next_run = next_run.replace(month=next_run.month+1)
-            
-            schedule_data["nextRunTime"] = next_run
-        
+        schedule_data["executionVersion"] = 1
+        schedule_data["retryCount"] = 0
+        schedule_data["nextRunTime"] = (schedule_data["nextRunTime"] if schedule_data.get("frequency") == "once"
+                                         else self._next_occurrence(schedule_data))
         # 插入记录
         result = await self.db.report_schedules.insert_one(schedule_data)
         return str(result.inserted_id)
+
+    async def get_runs(self, user_id: str, limit: int = 20, skip: int = 0):
+        await self._database()
+        query = {"$or": [{"createdBy": user_id}, {"recipientIds": user_id}]}
+        rows = await self.db.report_schedule_runs.find(query, {
+            "html": 0, "data": 0,
+        }).sort("generatedAt", -1).skip(skip).limit(limit).to_list(length=limit)
+        return {"items": [self._public_run(row) for row in rows],
+                "total": await self.db.report_schedule_runs.count_documents(query)}
+
+    async def get_run(self, run_id: str, user_id: str):
+        await self._database()
+        row = await self.db.report_schedule_runs.find_one({
+            "_id": run_id, "$or": [{"createdBy": user_id}, {"recipientIds": user_id}],
+        })
+        return self._public_run(row, include_artifact=True) if row else None
+
+    @staticmethod
+    def _public_run(row, include_artifact=False):
+        if not row:
+            return None
+        def utc(value):
+            if not isinstance(value, datetime):
+                return value
+            return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        result = {
+            "id": str(row["_id"]), "scheduleId": row.get("scheduleId"),
+            "reportId": row.get("reportId"), "reportName": row.get("reportName"),
+            "generatedAt": utc(row.get("generatedAt")), "scheduledFor": utc(row.get("scheduledFor")),
+            "status": row.get("status"), "format": row.get("format"),
+        }
+        if include_artifact:
+            result.update(html=row.get("html", ""), data=row.get("data", {}))
+        return result
     
     async def update_schedule(self, schedule_id: str, schedule_data: Dict[str, Any]) -> bool:
         """更新报表调度计划"""
         await self._database()
-        
-        # 移除不允许更新的字段
-        for field in ["_id", "createdAt", "lastRunTime", "lastRunStatus"]:
-            if field in schedule_data:
-                del schedule_data[field]
-        
-        # 如果修改了频率相关设置，更新下次运行时间
+        if not ObjectId.is_valid(schedule_id):
+            return False
+        for field in ["_id", "createdAt", "createdBy", "lastRunTime", "lastRunStatus",
+                      "executionVersion", "retryCount", "claimId", "leaseUntil"]:
+            schedule_data.pop(field, None)
+        current_schedule = await self.db.report_schedules.find_one({"_id": ObjectId(schedule_id)})
+        if not current_schedule:
+            return False
+        updated_schedule = {**current_schedule, **schedule_data}
+        operational = current_schedule.get("executionVersion") == 1
+        if operational:
+            await self._validate_operational_schedule(updated_schedule)
+            if "recipients" in schedule_data:
+                schedule_data["recipients"] = updated_schedule["recipients"]
+
         frequency_fields = ["frequency", "weekday", "monthDay", "time", "nextRunTime"]
         needs_update_next_run = any(field in schedule_data for field in frequency_fields)
-        
-        if needs_update_next_run:
-            # 获取完整的计划数据
-            current_schedule = await self.db.report_schedules.find_one({"_id": ObjectId(schedule_id)})
-            if not current_schedule:
-                return False
-            
-            # 合并新的数据
-            updated_schedule = {**current_schedule, **schedule_data}
-            
-            # 根据新的频率设置计算下次运行时间
+        if operational and needs_update_next_run:
             if updated_schedule.get("frequency") == "once":
-                if "nextRunTime" in schedule_data:
-                    updated_schedule["nextRunTime"] = schedule_data["nextRunTime"]
-                else:
-                    updated_schedule["nextRunTime"] = datetime.utcnow()
+                if not isinstance(updated_schedule.get("nextRunTime"), datetime):
+                    raise ValueError("一次性计划必须提供 nextRunTime")
+                schedule_data["nextRunTime"] = updated_schedule["nextRunTime"]
             else:
-                # 根据频率设置下次运行时间
-                time_parts = updated_schedule.get("time", "00:00").split(":")
-                hour = int(time_parts[0])
-                minute = int(time_parts[1])
-                
-                next_run = datetime.utcnow().replace(hour=hour, minute=minute, second=0, microsecond=0)
-                
-                if updated_schedule.get("frequency") == "daily":
-                    if next_run <= datetime.utcnow():
-                        next_run += timedelta(days=1)
-                elif updated_schedule.get("frequency") == "weekly":
-                    weekday = updated_schedule.get("weekday", 0)
-                    days_until = (weekday - next_run.weekday() - 1) % 7
-                    if days_until == 0 and next_run <= datetime.utcnow():
-                        days_until = 7
-                    next_run += timedelta(days=days_until)
-                elif updated_schedule.get("frequency") == "monthly":
-                    month_day = updated_schedule.get("monthDay", 1)
-                    next_run = next_run.replace(day=min(month_day, 28))
-                    if next_run <= datetime.utcnow():
-                        if next_run.month == 12:
-                            next_run = next_run.replace(year=next_run.year+1, month=1)
-                        else:
-                            next_run = next_run.replace(month=next_run.month+1)
-                
-                schedule_data["nextRunTime"] = next_run
-        
-        # 更新记录
+                schedule_data["nextRunTime"] = self._next_occurrence(updated_schedule)
+            schedule_data["retryCount"] = 0
+        elif not operational and needs_update_next_run:
+            # Preserve legacy record behavior without making it executable.
+            if updated_schedule.get("frequency") == "once":
+                schedule_data.setdefault("nextRunTime", datetime.utcnow())
+            else:
+                schedule_data["nextRunTime"] = self._next_occurrence(updated_schedule)
+        schedule_data["updatedAt"] = datetime.utcnow()
+        query = {"_id": ObjectId(schedule_id)}
+        if operational:
+            # The worker and editor race on one document: whichever writes first wins.
+            # Editing a claimed row fails; an edit committed first changes its due
+            # fields before the worker's atomic due filter can claim it.
+            query.update(executionVersion=1, claimId={"$exists": False})
+        update = {"$set": schedule_data}
+        if operational and needs_update_next_run:
+            update["$unset"] = {"nextAttemptAt": "", "lastRunError": ""}
         result = await self.db.report_schedules.update_one(
-            {"_id": ObjectId(schedule_id)},
-            {"$set": schedule_data}
+            query, update
         )
-        
         return result.modified_count > 0
     
     async def delete_schedule(self, schedule_id: str) -> bool:
         """删除报表调度计划"""
         await self._database()
-        result = await self.db.report_schedules.delete_one({"_id": ObjectId(schedule_id)})
+        query = {"_id": ObjectId(schedule_id)}
+        row = await self.db.report_schedules.find_one(query, {"executionVersion": 1})
+        if row and row.get("executionVersion") == 1:
+            query["claimId"] = {"$exists": False}
+        result = await self.db.report_schedules.delete_one(query)
         return result.deleted_count > 0
     
     async def get_schedule(self, schedule_id: str) -> Optional[Dict[str, Any]]:
         """获取单个报表调度计划"""
         await self._database()
+        if not ObjectId.is_valid(schedule_id):
+            return None
         schedule = await self.db.report_schedules.find_one({"_id": ObjectId(schedule_id)})
         if schedule:
             schedule["_id"] = str(schedule["_id"])
@@ -597,11 +477,19 @@ class ReportSchedulerService:
     async def toggle_schedule(self, schedule_id: str, enabled: bool) -> bool:
         """启用或禁用报表调度计划"""
         await self._database()
+        query = {"_id": ObjectId(schedule_id)}
+        row = await self.db.report_schedules.find_one(query, {"executionVersion": 1, "frequency": 1, "nextRunTime": 1})
+        if row and row.get("executionVersion") == 1:
+            query["claimId"] = {"$exists": False}
+            if enabled and row.get("frequency") == "once":
+                if not isinstance(row.get("nextRunTime"), datetime):
+                    raise ValueError("请先编辑一次性计划并设定新的执行时间")
+                query["nextRunTime"] = {"$type": "date"}
         result = await self.db.report_schedules.update_one(
-            {"_id": ObjectId(schedule_id)},
+            query,
             {"$set": {"enabled": enabled}}
         )
-        return result.modified_count > 0
+        return result.matched_count > 0
 
 
 # 创建服务实例

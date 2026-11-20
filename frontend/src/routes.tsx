@@ -85,6 +85,7 @@ import ConsentDocumentList from './pages/Patient/ConsentDocumentList';
 import ConsentDocumentView from './pages/Patient/ConsentDocumentView';
 import Questionnaires from './pages/Patient/Questionnaires';
 import TodoCenter from './pages/Patient/TodoCenter';
+import ReportSchedules from './pages/Admin/ReportSchedules';
 import ConsentTemplateList from './pages/Patient/ConsentTemplateList';
 
 import AdminDashboard from './pages/Admin/AdminDashboard';
@@ -232,6 +233,7 @@ const ROUTE_ELEMENTS: Record<string, React.ReactNode> = {
   dashboard: <Dashboard />,
   notifications: <NotificationsPage />,
   'follow-up-detail': <FollowUpDetailPage />,
+  'report-schedules': <ReportSchedules />,
   'quality-control': <QualityControlWorkbench />,
   'rehab-plans.new': <RehabPlanForm />,
   'rehab-plans.edit': <RehabPlanForm />,
